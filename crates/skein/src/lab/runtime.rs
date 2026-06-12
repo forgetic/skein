@@ -30,10 +30,10 @@ use crate::trace::scoring::seed_fingerprint;
 use crate::trace::{TraceData, TraceEvent};
 use crate::trace::{canonicalize::trace_fingerprint, certificate::TraceCertificate};
 use crate::types::Time;
-use crate::types::{ObligationId, RegionId, TaskId};
+use crate::types::{Budget, ObligationId, RegionId, TaskId};
 use crate::util::{DetEntropy, DetRng};
 use parking_lot::Mutex;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
@@ -599,6 +599,65 @@ impl SporkHarnessReport {
     }
 }
 
+/// A queued task factory awaiting deterministic admission into the lab.
+type PendingSpawnFactory = Box<
+    dyn FnOnce(crate::cx::Cx) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send,
+>;
+
+/// FIFO queue of task factories shared between [`LabSpawner`] handles and the
+/// [`LabRuntime`] that admits them.
+struct PendingSpawns {
+    queue: Mutex<VecDeque<PendingSpawnFactory>>,
+}
+
+impl PendingSpawns {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue.lock().is_empty()
+    }
+}
+
+impl fmt::Debug for PendingSpawns {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingSpawns")
+            .field("len", &self.queue.lock().len())
+            .finish()
+    }
+}
+
+/// Clonable handle for spawning tasks into a [`LabRuntime`] — including from
+/// inside running lab tasks.
+///
+/// Spawns are queued and admitted by the lab loop at deterministic points
+/// (the start of every step and before idle/quiescence checks), in FIFO
+/// order, as root-region tasks with an infinite budget. The factory receives
+/// the new task's own [`Cx`](crate::cx::Cx) by value — no ambient context is
+/// involved.
+#[derive(Clone, Debug)]
+pub struct LabSpawner {
+    pending: Arc<PendingSpawns>,
+}
+
+impl LabSpawner {
+    /// Queues a task for admission; the factory receives the task's own `Cx`.
+    pub fn spawn_with_cx<F, Fut>(&self, f: F)
+    where
+        F: FnOnce(crate::cx::Cx) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.pending
+            .queue
+            .lock()
+            .push_back(Box::new(move |cx| Box::pin(f(cx))));
+    }
+}
+
 /// The deterministic lab runtime.
 ///
 /// This runtime is designed for testing and provides:
@@ -638,6 +697,8 @@ pub struct LabRuntime {
     pub oracles: OracleSuite,
     /// Schedule certificate for determinism verification.
     certificate: ScheduleCertificate,
+    /// Tasks queued by [`LabSpawner`] handles, admitted at step boundaries.
+    pending_spawns: Arc<PendingSpawns>,
 }
 
 impl LabRuntime {
@@ -692,6 +753,7 @@ impl LabRuntime {
             deadline_monitor: None,
             oracles: OracleSuite::new(),
             certificate: ScheduleCertificate::new(),
+            pending_spawns: Arc::new(PendingSpawns::new()),
         }
     }
 
@@ -723,6 +785,51 @@ impl LabRuntime {
     #[must_use]
     pub fn lab_reactor(&self) -> &Arc<LabReactor> {
         &self.lab_reactor
+    }
+
+    /// Returns a clonable handle for spawning tasks into this runtime.
+    ///
+    /// Unlike direct [`RuntimeState::create_task`] access, the handle works
+    /// from inside running lab tasks: spawns queue up and are admitted by the
+    /// lab loop at deterministic points, in FIFO order.
+    #[must_use]
+    pub fn spawner(&self) -> LabSpawner {
+        LabSpawner {
+            pending: self.pending_spawns.clone(),
+        }
+    }
+
+    /// True when [`LabSpawner`] spawns are queued but not yet admitted.
+    /// External drive loops must treat this as runnable work — advancing
+    /// virtual time past a pending spawn would reorder it after timers.
+    #[must_use]
+    pub fn has_pending_spawns(&self) -> bool {
+        !self.pending_spawns.is_empty()
+    }
+
+    /// Admits queued [`LabSpawner`] spawns as root-region tasks, FIFO.
+    fn drain_pending_spawns(&mut self) {
+        loop {
+            let factory = self.pending_spawns.queue.lock().pop_front();
+            let Some(factory) = factory else { break };
+            let region = match self.state.root_region {
+                Some(region) => region,
+                None => self.state.create_root_region(Budget::INFINITE),
+            };
+            match self
+                .state
+                .create_task_with_cx(region, Budget::INFINITE, factory)
+            {
+                Ok((task_id, _handle)) => {
+                    self.scheduler
+                        .lock()
+                        .schedule(task_id, Budget::INFINITE.priority);
+                }
+                Err(_err) => {
+                    crate::tracing_compat::error!("lab spawner: failed to admit task: {_err:?}");
+                }
+            }
+        }
     }
 
     /// Returns a reference to the trace buffer handle.
@@ -784,9 +891,12 @@ impl LabRuntime {
     }
 
     /// Returns true if the runtime is quiescent.
+    ///
+    /// Tasks queued via [`LabSpawner`] but not yet admitted count as work, so
+    /// a runtime with pending spawns is never quiescent.
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
-        self.state.is_quiescent()
+        self.pending_spawns.is_empty() && self.state.is_quiescent()
     }
 
     /// Advances virtual time by the given number of nanoseconds.
@@ -926,6 +1036,7 @@ impl LabRuntime {
             }
 
             // Run until the scheduler is empty
+            self.drain_pending_spawns();
             let is_empty = self.scheduler.lock().is_empty();
             if !is_empty {
                 self.step();
@@ -1057,6 +1168,7 @@ impl LabRuntime {
                 }
             }
 
+            self.drain_pending_spawns();
             let is_empty = self.scheduler.lock().is_empty();
             if is_empty {
                 break;
@@ -1306,6 +1418,7 @@ impl LabRuntime {
     /// Executes a single step.
     #[allow(clippy::too_many_lines)]
     fn step(&mut self) {
+        self.drain_pending_spawns();
         self.steps += 1;
         // Consume RNG state so schedule tie-breaking is deterministic once we
         // start making scheduler decisions here.
@@ -2526,6 +2639,53 @@ mod tests {
         );
 
         crate::test_complete!("lab_scheduler_steal_for_worker_only_steals_ready_tasks");
+    }
+
+    #[test]
+    fn lab_spawner_admits_tasks_from_running_tasks() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        init_test("lab_spawner_admits_tasks_from_running_tasks");
+
+        fn run(seed: u64) -> (u64, LabRunReport) {
+            let config = LabConfig::new(seed).worker_count(2).max_steps(10_000);
+            let mut runtime = LabRuntime::new(config);
+            let counter = Arc::new(AtomicU64::new(0));
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+            let spawner = runtime.spawner();
+            let counter_task = counter.clone();
+            let (task_id, _handle) = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    for _ in 0..3 {
+                        let grandchild_spawner = spawner.clone();
+                        let counter_child = counter_task.clone();
+                        spawner.spawn_with_cx(move |_cx| async move {
+                            counter_child.fetch_add(1, Ordering::SeqCst);
+                            let counter_grandchild = counter_child.clone();
+                            grandchild_spawner.spawn_with_cx(move |_cx| async move {
+                                counter_grandchild.fetch_add(10, Ordering::SeqCst);
+                            });
+                        });
+                        crate::runtime::yield_now::yield_now().await;
+                    }
+                })
+                .expect("create task");
+            runtime.scheduler.lock().schedule(task_id, 0);
+            let report = runtime.run_until_quiescent_with_report();
+            (counter.load(Ordering::SeqCst), report)
+        }
+
+        let (count1, rep1) = run(11);
+        let (count2, rep2) = run(11);
+
+        crate::assert_with_log!(count1 == 33, "all spawned tasks ran", 33, count1);
+        crate::assert_with_log!(count2 == 33, "all spawned tasks ran (run 2)", 33, count2);
+        crate::assert_with_log!(rep1.quiescent, "quiescent", true, rep1.quiescent);
+        assert_eq!(rep1.trace_fingerprint, rep2.trace_fingerprint);
+        assert_eq!(rep1.trace_certificate, rep2.trace_certificate);
+
+        crate::test_complete!("lab_spawner_admits_tasks_from_running_tasks");
     }
 
     #[test]

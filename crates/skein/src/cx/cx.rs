@@ -250,10 +250,14 @@ impl Drop for CurrentCxGuard {
 impl FullCx {
     /// Returns the current task context, if one is set.
     ///
-    /// This is set by the runtime while polling a task.
+    /// This is set by the runtime while polling a task. Crate-internal only:
+    /// consumers must take a `Cx` explicitly (spawn factories hand the task
+    /// its own context) — there is deliberately no ambient way to recover one
+    /// from the public API.
     #[inline]
     #[must_use]
-    pub fn current() -> Option<Self> {
+    #[cfg_attr(feature = "test-internals", visibility::make(pub))]
+    pub(crate) fn current() -> Option<Self> {
         CURRENT_CX.with(|slot| slot.borrow().clone())
     }
 

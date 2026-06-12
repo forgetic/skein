@@ -146,39 +146,12 @@ use crate::time::TimerDriverHandle;
 use crate::trace::distributed::LogicalClockMode;
 use crate::types::{Budget, CancelAttributionConfig};
 use parking_lot::{Mutex, MutexGuard};
-use std::cell::RefCell;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
-
-thread_local! {
-    /// Ambient runtime handle for the current thread, exposed via
-    /// [`Runtime::current_handle`]. Holds a shared, write-once slot rather than
-    /// the handle itself so worker threads (spawned before the runtime's `Arc`
-    /// exists) can install it eagerly; the slot is filled with a [`Weak`]
-    /// once the `Arc` is constructed, which also avoids a reference cycle that
-    /// would keep the runtime alive forever.
-    static CURRENT_HANDLE_SLOT: RefCell<Option<Arc<OnceLock<Weak<RuntimeInner>>>>> =
-        const { RefCell::new(None) };
-}
-
-/// RAII guard that installs an ambient runtime-handle slot for the current
-/// thread and restores the previous one on drop.
-struct HandleSlotGuard(Option<Arc<OnceLock<Weak<RuntimeInner>>>>);
-
-impl Drop for HandleSlotGuard {
-    fn drop(&mut self) {
-        CURRENT_HANDLE_SLOT.with(|cell| *cell.borrow_mut() = self.0.take());
-    }
-}
-
-fn install_handle_slot(slot: Arc<OnceLock<Weak<RuntimeInner>>>) -> HandleSlotGuard {
-    let prev = CURRENT_HANDLE_SLOT.with(|cell| cell.borrow_mut().replace(slot));
-    HandleSlotGuard(prev)
-}
 
 /// Builder for constructing an Skein [`Runtime`] with custom configuration.
 ///
@@ -784,12 +757,6 @@ impl Runtime {
                     .with_message(format!("runtime init: {e}"))
             })?),
         };
-        // Publish a Weak self-reference so worker threads and `block_on` can
-        // serve `Runtime::current_handle()`. Weak avoids a reference cycle.
-        let _ = runtime
-            .inner
-            .handle_slot
-            .set(Arc::downgrade(&runtime.inner));
         Ok(runtime)
     }
 
@@ -801,28 +768,8 @@ impl Runtime {
         }
     }
 
-    /// Returns the runtime handle ambient to the current thread, if any.
-    ///
-    /// Inside a task polled by a worker thread, or inside the future driven by
-    /// [`block_on`](Self::block_on), this yields a handle to the running
-    /// runtime so code can spawn further tasks without threading a handle
-    /// through. Returns `None` on threads not driven by a runtime (and after
-    /// the runtime has been dropped, since the slot holds only a [`Weak`]).
-    #[must_use]
-    pub fn current_handle() -> Option<RuntimeHandle> {
-        CURRENT_HANDLE_SLOT
-            .with(|cell| {
-                cell.borrow()
-                    .as_ref()
-                    .and_then(|slot| slot.get().and_then(Weak::upgrade))
-            })
-            .map(|inner| RuntimeHandle { inner })
-    }
-
     /// Run a future to completion on the current thread.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
-        // Make `Runtime::current_handle()` available to the driven future.
-        let _handle_guard = install_handle_slot(Arc::clone(&self.inner.handle_slot));
         if let Some(callback) = self.inner.config.on_thread_start.as_ref() {
             callback();
         }
@@ -1041,9 +988,6 @@ struct RuntimeInner {
     deadline_monitor_shutdown: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Deadline monitor background thread handle.
     deadline_monitor_thread: Option<std::thread::JoinHandle<()>>,
-    /// Write-once slot holding a `Weak` self-reference, used to serve
-    /// [`Runtime::current_handle`] on worker threads and `block_on`.
-    handle_slot: Arc<OnceLock<Weak<RuntimeInner>>>,
 }
 
 impl RuntimeInner {
@@ -1092,8 +1036,6 @@ impl RuntimeInner {
         scheduler.set_enable_parking(config.enable_parking);
         scheduler.set_global_queue_limit(config.global_queue_limit);
 
-        let handle_slot: Arc<OnceLock<Weak<RuntimeInner>>> = Arc::new(OnceLock::new());
-
         let mut worker_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
         if config.worker_threads > 0 {
             let workers = scheduler.take_workers();
@@ -1104,15 +1046,12 @@ impl RuntimeInner {
                 };
                 let on_start = config.on_thread_start.clone();
                 let on_stop = config.on_thread_stop.clone();
-                let worker_handle_slot = Arc::clone(&handle_slot);
                 let mut builder = std::thread::Builder::new().name(name);
                 if config.thread_stack_size > 0 {
                     builder = builder.stack_size(config.thread_stack_size);
                 }
                 let handle = builder
                     .spawn(move || {
-                        // Serve `Runtime::current_handle()` to tasks polled here.
-                        let _handle_guard = install_handle_slot(worker_handle_slot);
                         if let Some(callback) = on_start.as_ref() {
                             callback();
                         }
@@ -1153,7 +1092,6 @@ impl RuntimeInner {
             blocking_pool,
             deadline_monitor_shutdown,
             deadline_monitor_thread,
-            handle_slot,
         })
     }
 

@@ -119,7 +119,7 @@ pub use replay::{
 };
 pub use runtime::{
     HarnessAttachmentKind, HarnessAttachmentRef, LabConfigSummary, LabRunReport, LabRuntime,
-    LabTraceCertificateSummary, SporkHarnessReport, VirtualTimeReport,
+    LabSpawner, LabTraceCertificateSummary, SporkHarnessReport, VirtualTimeReport,
 };
 pub use scenario::{
     CancellationSection, CancellationStrategy, ChaosSection, FaultAction, FaultEvent, IncludeRef,
