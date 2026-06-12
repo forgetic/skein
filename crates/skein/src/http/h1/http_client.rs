@@ -588,7 +588,12 @@ impl HttpClient {
                 {
                     let domain = parsed.host.trim_start_matches('[').trim_end_matches(']');
 
-                    let builder = TlsConnectorBuilder::new().alpn_http();
+                    // This is an HTTP/1.1-only client: it must not offer h2
+                    // via ALPN, or servers negotiate HTTP/2 and abort on the
+                    // h1 request text ("connection closed before response
+                    // headers" against real-world endpoints).
+                    let builder =
+                        TlsConnectorBuilder::new().alpn_protocols(vec![b"http/1.1".to_vec()]);
 
                     #[cfg(feature = "tls-native-roots")]
                     let builder = builder
