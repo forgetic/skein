@@ -505,12 +505,13 @@ impl<T: PartialEq> PartialEq for OnceCell<T> {
 
 impl<T: Eq> Eq for OnceCell<T> {}
 
-impl<T> From<T> for OnceCell<T> {
-    #[inline]
-    fn from(value: T) -> Self {
-        Self::with_value(value)
-    }
-}
+// Deliberately no `impl<T> From<T> for OnceCell<T>`: that blanket impl makes
+// rustc's coherence check report a spurious E0119 conflict against impls in
+// `time` >= 0.3.48 (see time-rs/time — the same collision forced downstreams
+// of asupersync 0.3.x to pin time =0.3.47), so any crate graph containing
+// both skein and a recent `time` fails to build. Use
+// `OnceCell::with_value(value)` instead; nothing in skein or its consumers
+// used the conversion.
 
 /// Guard that resets state to UNINIT and wakes waiters if initialization is
 /// cancelled (i.e. the initializing future is dropped before completion).
