@@ -1,20 +1,25 @@
-# Temper fork of asupersync
+# skein fork notes
 
-This is a hard fork of **asupersync 0.2.4**, the last release published under a
-plain MIT license (the OpenAI/Anthropic license rider was added in 0.2.5; 0.3.3+
-additionally require a nightly toolchain). It is vendored here so temper has a
-maintainable, OSI-licensed async runtime that builds on stable Rust.
+`skein` is a hard fork of **asupersync 0.2.4**, the last release published under
+a plain MIT license (the OpenAI/Anthropic license rider was added in 0.2.5;
+0.3.3+ additionally require a nightly toolchain). It is a standalone,
+maintainable, OSI-licensed async runtime that builds on stable Rust, shared
+across our projects (temper, smith, …).
+
+The crate was renamed `asupersync` → `skein` and `asupersync-macros` →
+`skein-macros`; the public module layout is otherwise unchanged, so consumer
+code ports by renaming the import root (`asupersync::…` → `skein::…`).
 
 Upstream source: `Dicklesworthstone/asupersync` @ 0.2.4 (crates.io, yanked but
-MIT). Sibling crates `franken-decision`, `franken-evidence`, `franken-kernel`,
-and `asupersync-macros` are vendored at their MIT 0.2.0 versions under
-`../`.
+MIT). Sibling crates `franken-decision`, `franken-evidence`, `franken-kernel`
+are kept at their MIT 0.2.0 versions under `../` (sibling members of this
+workspace).
 
 ## License boundary (important)
 
 Post-0.2.4 upstream code carries the OpenAI/Anthropic rider and **must not** be
 copied into this tree. All fixes and additions below were written clean-room
-against the 0.2.4 codebase, RFCs, and temper's needs — not ported from 0.3.x.
+against the 0.2.4 codebase, RFCs, and consumer needs — not ported from 0.3.x.
 
 ## Changes vs stock 0.2.4
 
@@ -62,9 +67,11 @@ parsers were too lax and are now strict:
 - **Content-Length** (`parse_content_length`): was `.trim().parse()`, which
   accepted whitespace and a `+` sign. Now requires `1*DIGIT` exactly (§6.2).
 
-Black-box batteries in `crates/temper-io-engine/tests/h1_security.rs` (RFC 9112
-cases) and `h1_fuzz_lite.rs` (seeded random + byte-at-a-time vs whole-buffer
-agreement; decoder must never panic) lock this in.
+Black-box batteries that lock this in currently live in the temper consumer
+(`temper-io-engine/tests/h1_security.rs` — RFC 9112 cases — and `h1_fuzz_lite.rs`
+— seeded random + byte-at-a-time vs whole-buffer agreement, decoder must never
+panic). They drive only skein's public `Http1Codec` API and could move into this
+repo as integration tests.
 
 ## Stock 0.2.4 bugs inherited from upstream (re-verified vs the 0.3.4 review)
 
@@ -94,8 +101,16 @@ The 0.3.4 review found several defects. Their status in this 0.2.4 base:
   the `Child` intact for that drop-kill.
 
 ## Re-verification checklist on any future change
-- `cargo test -p temper-io-engine --test timer_pump --test engine_loop` (engine
-  canaries: timer lost-wakeup + http-with-timers).
-- `cargo test --workspace --exclude-nothing` over temper (the 5 vendored crates
-  are workspace-excluded; they are not run here).
-- Build on stable (temper CI uses system rustc), not just nightly.
+- Build the whole workspace on **stable** rustc (`cargo check --workspace`); the
+  fork must never require nightly.
+- Run a consumer's behavioural canaries — for temper:
+  `cargo test -p temper-io-engine --test timer_pump --test engine_loop`
+  (timer lost-wakeup + http-with-timers) and the h1 batteries
+  (`--test h1_security --test h1_fuzz_lite`).
+- Run the consumer's full suite (temper: 1155 tests at last port).
+
+Note: this crate's own in-tree `#[cfg(test)]` suite does not currently build as
+`cargo test` — several `include_str!`/`include_bytes!` golden/artifact files
+were excluded from the upstream 0.2.4 package. Restoring those (from the
+upstream tag, pre-rider) is the path to running skein's own tests; until then,
+verification rides on `cargo check` + consumer suites.
