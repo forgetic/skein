@@ -1,0 +1,27 @@
+# skein — a cancel-correct, capability-secure async runtime for Rust.
+#
+# Maintained MIT fork of asupersync 0.2.4 (the last plain-MIT upstream release).
+# See README.md and crates/skein/FORK_NOTES.md for the lineage and the
+# clean-room changes made here.
+[workspace]
+resolver = "2"
+members = [
+    "crates/skein",
+    "crates/skein-macros",
+    "crates/franken-decision",
+    "crates/franken-evidence",
+    "crates/franken-kernel",
+]
+
+# Profiles live at the workspace root so they actually apply (Cargo ignores
+# profile tables in non-root member manifests).
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

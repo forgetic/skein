@@ -1,0 +1,1579 @@
+#![allow(unsafe_code)]
+//! Async child process management.
+//!
+//! This module uses unsafe code for Unix process spawning (fork/exec) and
+//! signal handling (waitpid).
+//!
+//! This module provides async equivalents of `std::process` types for spawning
+//! and managing child processes. It enables non-blocking process spawning,
+//! I/O piping, and wait operations.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use asupersync::process::Command;
+//!
+//! async fn run_command() -> std::io::Result<()> {
+//!     let output = Command::new("echo")
+//!         .arg("hello")
+//!         .output()
+//!         .await?;
+//!
+//!     println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Cancel-Safety
+//!
+//! - Process spawning itself is synchronous (the syscall).
+//! - `wait()` can be cancelled; the process continues running.
+//! - Use `kill_on_drop(true)` for automatic cleanup on cancellation.
+//! - I/O operations are cancel-safe (partial reads/writes are fine).
+
+use crate::cx::Cx;
+use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::runtime::io_driver::IoRegistration;
+use crate::runtime::reactor::Interest;
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
+use std::io::{self, Read, Write};
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::process as std_process;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn drain_nonblocking<R: Read>(reader: &mut R, out: &mut Vec<u8>) -> io::Result<(bool, bool)> {
+    let mut any = false;
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => return Ok((true, any)),
+            Ok(n) => {
+                any = true;
+                out.extend_from_slice(&buf[..n]);
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok((false, any)),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn register_interest(
+    registration: &mut Option<IoRegistration>,
+    source: &dyn crate::runtime::reactor::Source,
+    cx: &Context<'_>,
+    interest: Interest,
+) -> io::Result<()> {
+    if let Some(reg) = registration {
+        let combined = reg.interest() | interest;
+        // Re-arm reactor interest and conditionally update the waker in a
+        // single lock acquisition (will_wake guard skips the clone).
+        match reg.rearm(combined, cx.waker()) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                *registration = None;
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotConnected => {
+                *registration = None;
+                cx.waker().wake_by_ref();
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    let Some(current) = Cx::current() else {
+        cx.waker().wake_by_ref();
+        return Ok(());
+    };
+    let Some(driver) = current.io_driver_handle() else {
+        cx.waker().wake_by_ref();
+        return Ok(());
+    };
+
+    match driver.register(source, interest, cx.waker().clone()) {
+        Ok(reg) => {
+            *registration = Some(reg);
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            cx.waker().wake_by_ref();
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Error type for process operations.
+#[derive(Debug, thiserror::Error)]
+pub enum ProcessError {
+    /// An I/O error occurred.
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+
+    /// The process was not found (ENOENT).
+    #[error("process not found: {0}")]
+    NotFound(String),
+
+    /// Permission denied (EACCES).
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
+    /// The process was terminated by a signal.
+    #[error("process terminated by signal {0}")]
+    Signaled(i32),
+}
+
+/// Standard I/O configuration for child processes.
+///
+/// Configures how the child's stdin, stdout, and stderr are handled.
+#[derive(Debug, Clone)]
+pub enum Stdio {
+    /// Inherit from the parent process.
+    ///
+    /// The child will share the same stdin/stdout/stderr as the parent.
+    Inherit,
+
+    /// Create a pipe to/from the child process.
+    ///
+    /// For stdin, the parent can write to the child.
+    /// For stdout/stderr, the parent can read from the child.
+    Pipe,
+
+    /// Discard (redirect to /dev/null).
+    ///
+    /// For stdin, the child will read EOF immediately.
+    /// For stdout/stderr, the output is discarded.
+    Null,
+}
+
+impl Stdio {
+    /// Creates an `Inherit` configuration.
+    #[must_use]
+    pub fn inherit() -> Self {
+        Self::Inherit
+    }
+
+    /// Creates a `Pipe` configuration.
+    #[must_use]
+    pub fn piped() -> Self {
+        Self::Pipe
+    }
+
+    /// Creates a `Null` configuration.
+    #[must_use]
+    pub fn null() -> Self {
+        Self::Null
+    }
+
+    /// Converts to std::process::Stdio.
+    fn to_std(&self) -> std_process::Stdio {
+        match self {
+            Self::Inherit => std_process::Stdio::inherit(),
+            Self::Pipe => std_process::Stdio::piped(),
+            Self::Null => std_process::Stdio::null(),
+        }
+    }
+}
+
+impl Default for Stdio {
+    /// Default is `Inherit` to match typical command-line tool behavior.
+    fn default() -> Self {
+        Self::Inherit
+    }
+}
+
+impl From<Stdio> for std_process::Stdio {
+    fn from(stdio: Stdio) -> Self {
+        stdio.to_std()
+    }
+}
+
+/// Builder for spawning child processes.
+///
+/// Provides a fluent API for configuring and spawning processes.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::process::Command;
+///
+/// let child = Command::new("ls")
+///     .arg("-la")
+///     .current_dir("/tmp")
+///     .env("LANG", "C")
+///     .spawn()?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct Command {
+    program: OsString,
+    args: Vec<OsString>,
+    env: BTreeMap<OsString, OsString>,
+    env_clear: bool,
+    current_dir: Option<PathBuf>,
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio,
+    kill_on_drop: bool,
+}
+
+impl Command {
+    /// Creates a new command for the given program.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The program to execute. This can be:
+    ///   - An absolute path (`/usr/bin/ls`)
+    ///   - A relative path (`./script.sh`)
+    ///   - A program name to be found in PATH (`ls`)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let cmd = Command::new("echo");
+    /// ```
+    #[must_use]
+    pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
+        Self {
+            program: program.as_ref().to_os_string(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            env_clear: false,
+            current_dir: None,
+            stdin: Stdio::default(),
+            stdout: Stdio::default(),
+            stderr: Stdio::default(),
+            kill_on_drop: false,
+        }
+    }
+
+    /// Adds an argument to the command.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// Command::new("echo")
+    ///     .arg("hello")
+    ///     .arg("world");
+    /// ```
+    pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Self {
+        self.args.push(arg.as_ref().to_os_string());
+        self
+    }
+
+    /// Adds multiple arguments to the command.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// Command::new("echo")
+    ///     .args(["hello", "world"]);
+    /// ```
+    pub fn args<I, S>(&mut self, args: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        for arg in args {
+            self.args.push(arg.as_ref().to_os_string());
+        }
+        self
+    }
+
+    /// Sets an environment variable for the child process.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// Command::new("printenv")
+    ///     .env("MY_VAR", "my_value");
+    /// ```
+    pub fn env<K, V>(&mut self, key: K, val: V) -> &mut Self
+    where
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        self.env
+            .insert(key.as_ref().to_os_string(), val.as_ref().to_os_string());
+        self
+    }
+
+    /// Sets multiple environment variables for the child process.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// Command::new("env")
+    ///     .envs([("VAR1", "val1"), ("VAR2", "val2")]);
+    /// ```
+    pub fn envs<I, K, V>(&mut self, vars: I) -> &mut Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<OsStr>,
+        V: AsRef<OsStr>,
+    {
+        for (key, val) in vars {
+            self.env
+                .insert(key.as_ref().to_os_string(), val.as_ref().to_os_string());
+        }
+        self
+    }
+
+    /// Removes an environment variable from the child process.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// Command::new("env")
+    ///     .env_remove("PATH");
+    /// ```
+    pub fn env_remove<K: AsRef<OsStr>>(&mut self, key: K) -> &mut Self {
+        self.env.remove(key.as_ref());
+        self
+    }
+
+    /// Clears the entire environment for the child process.
+    ///
+    /// After calling this, only variables set with `env()` will be present.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// Command::new("env")
+    ///     .env_clear()
+    ///     .env("PATH", "/usr/bin");
+    /// ```
+    pub fn env_clear(&mut self) -> &mut Self {
+        self.env_clear = true;
+        self
+    }
+
+    /// Sets the working directory for the child process.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// Command::new("ls")
+    ///     .current_dir("/tmp");
+    /// ```
+    pub fn current_dir<P: AsRef<Path>>(&mut self, dir: P) -> &mut Self {
+        self.current_dir = Some(dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// Configures stdin for the child process.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// Command::new("cat")
+    ///     .stdin(Stdio::piped());
+    /// ```
+    pub fn stdin(&mut self, cfg: Stdio) -> &mut Self {
+        self.stdin = cfg;
+        self
+    }
+
+    /// Configures stdout for the child process.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// Command::new("ls")
+    ///     .stdout(Stdio::piped());
+    /// ```
+    pub fn stdout(&mut self, cfg: Stdio) -> &mut Self {
+        self.stdout = cfg;
+        self
+    }
+
+    /// Configures stderr for the child process.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// Command::new("ls")
+    ///     .stderr(Stdio::null());
+    /// ```
+    pub fn stderr(&mut self, cfg: Stdio) -> &mut Self {
+        self.stderr = cfg;
+        self
+    }
+
+    /// Configures whether to kill the process when the `Child` is dropped.
+    ///
+    /// When set to `true`, dropping the `Child` handle will send SIGKILL
+    /// to the process. This is useful for ensuring cleanup on cancellation.
+    ///
+    /// Default: `false`
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let child = Command::new("sleep")
+    ///     .arg("100")
+    ///     .kill_on_drop(true)
+    ///     .spawn()?;
+    ///
+    /// // If we drop `child` here, the sleep process will be killed
+    /// ```
+    pub fn kill_on_drop(&mut self, kill: bool) -> &mut Self {
+        self.kill_on_drop = kill;
+        self
+    }
+
+    /// Spawns the command as a child process.
+    ///
+    /// Returns a `Child` handle that can be used to interact with the process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The program doesn't exist
+    /// - Permission is denied
+    /// - Another I/O error occurs
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut child = Command::new("ls")
+    ///     .stdout(Stdio::piped())
+    ///     .spawn()?;
+    ///
+    /// let status = child.wait().await?;
+    /// ```
+    pub fn spawn(&mut self) -> Result<Child, ProcessError> {
+        let mut cmd = std_process::Command::new(&self.program);
+
+        cmd.args(&self.args);
+
+        if self.env_clear {
+            cmd.env_clear();
+        }
+
+        for (key, val) in &self.env {
+            cmd.env(key, val);
+        }
+
+        if let Some(ref dir) = self.current_dir {
+            cmd.current_dir(dir);
+        }
+
+        cmd.stdin(self.stdin.to_std());
+        cmd.stdout(self.stdout.to_std());
+        cmd.stderr(self.stderr.to_std());
+
+        let mut child = cmd.spawn().map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => {
+                ProcessError::NotFound(self.program.to_string_lossy().into_owned())
+            }
+            io::ErrorKind::PermissionDenied => {
+                ProcessError::PermissionDenied(self.program.to_string_lossy().into_owned())
+            }
+            _ => ProcessError::Io(e),
+        })?;
+
+        // Extract the I/O handles before wrapping (use take() to avoid partial move)
+        let stdin = child.stdin.take().map(ChildStdin::from_std).transpose()?;
+        let stdout = child.stdout.take().map(ChildStdout::from_std).transpose()?;
+        let stderr = child.stderr.take().map(ChildStderr::from_std).transpose()?;
+
+        Ok(Child {
+            inner: Some(child),
+            stdin,
+            stdout,
+            stderr,
+            kill_on_drop: self.kill_on_drop,
+        })
+    }
+
+    /// Spawns the command and waits for it to complete, collecting output.
+    ///
+    /// Stdout and stderr are captured; stdin is set to null.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if spawning or waiting fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let output = Command::new("echo")
+    ///     .arg("hello")
+    ///     .output()?;
+    ///
+    /// println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+    /// ```
+    pub fn output(&mut self) -> Result<Output, ProcessError> {
+        self.stdin(Stdio::Null);
+        self.stdout(Stdio::Pipe);
+        self.stderr(Stdio::Pipe);
+
+        let child = self.spawn()?;
+        child.wait_with_output()
+    }
+
+    /// Spawns the command and waits for it to complete asynchronously,
+    /// collecting output.
+    ///
+    /// The async counterpart of [`output`](Self::output): stdout and stderr are
+    /// captured and drained through the reactor, stdin is set to null, and the
+    /// child is reaped without blocking the runtime thread. Cancelling the
+    /// returned future drops the child; combine with
+    /// [`kill_on_drop(true)`](Self::kill_on_drop) to terminate it on cancel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if spawning, draining, or waiting fails.
+    pub async fn output_async(&mut self, cx: &Cx) -> Result<Output, ProcessError> {
+        self.stdin(Stdio::Null);
+        self.stdout(Stdio::Pipe);
+        self.stderr(Stdio::Pipe);
+
+        let mut child = self.spawn()?;
+        child.wait_with_output_async(cx).await.map_err(ProcessError::Io)
+    }
+
+    /// Spawns the command and waits for it to complete, returning status.
+    ///
+    /// Stdin, stdout, and stderr are inherited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if spawning or waiting fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let status = Command::new("ls")
+    ///     .status()?;
+    ///
+    /// if status.success() {
+    ///     println!("Command succeeded");
+    /// }
+    /// ```
+    pub fn status(&mut self) -> Result<ExitStatus, ProcessError> {
+        let mut child = self.spawn()?;
+        child.wait()
+    }
+}
+
+/// Handle to a spawned child process.
+///
+/// This handle can be used to:
+/// - Access stdin/stdout/stderr pipes
+/// - Wait for the process to exit
+/// - Kill the process
+/// - Check exit status
+///
+/// # Drop Behavior
+///
+/// By default, dropping a `Child` does *not* kill the process. Set
+/// `kill_on_drop(true)` on the `Command` to enable automatic cleanup.
+#[derive(Debug)]
+pub struct Child {
+    inner: Option<std_process::Child>,
+    stdin: Option<ChildStdin>,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    kill_on_drop: bool,
+}
+
+impl Child {
+    /// Returns the process ID of the child.
+    ///
+    /// Returns `None` if the process has already been waited on.
+    #[must_use]
+    pub fn id(&self) -> Option<u32> {
+        self.inner.as_ref().map(std::process::Child::id)
+    }
+
+    /// Takes ownership of the child's stdin handle.
+    ///
+    /// This can only be called once; subsequent calls return `None`.
+    pub fn stdin(&mut self) -> Option<ChildStdin> {
+        self.stdin.take()
+    }
+
+    /// Takes ownership of the child's stdout handle.
+    ///
+    /// This can only be called once; subsequent calls return `None`.
+    pub fn stdout(&mut self) -> Option<ChildStdout> {
+        self.stdout.take()
+    }
+
+    /// Takes ownership of the child's stderr handle.
+    ///
+    /// This can only be called once; subsequent calls return `None`.
+    pub fn stderr(&mut self) -> Option<ChildStderr> {
+        self.stderr.take()
+    }
+
+    /// Waits for the child process to exit.
+    ///
+    /// This is cancel-safe: if cancelled, the process continues running.
+    /// Use `kill_on_drop(true)` for automatic cleanup on cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if waiting fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut child = Command::new("sleep").arg("1").spawn()?;
+    /// let status = child.wait()?;
+    /// println!("Exit code: {:?}", status.code());
+    /// ```
+    pub fn wait(&mut self) -> Result<ExitStatus, ProcessError> {
+        // For now, use blocking wait
+        // TODO: Use non-blocking waitpid with reactor when available
+        let mut child = self.inner.take().ok_or_else(|| {
+            ProcessError::Io(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "process already consumed",
+            ))
+        })?;
+
+        let status = child.wait().map_err(ProcessError::Io)?;
+
+        // self.code = status.code(); // Child doesn't have these fields
+        // #[cfg(unix)]
+        // {
+        //     use std::os::unix::process::ExitStatusExt;
+        //     self.signal = status.signal();
+        // }
+
+        Ok(ExitStatus::from_std(status))
+    }
+
+    /// Waits for the child and collects all output.
+    ///
+    /// This consumes the `Child` and returns the collected stdout/stderr.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if waiting or reading fails.
+    pub fn wait_with_output(mut self) -> Result<Output, ProcessError> {
+        // Take the handles before waiting
+        let mut stdout_handle = self.stdout.take();
+        let mut stderr_handle = self.stderr.take();
+        drop(self.stdin.take()); // Close stdin
+
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+
+        // Avoid deadlocks: interleave drain attempts with `try_wait`.
+        let mut status = None;
+        let mut stdout_done = stdout_handle.is_none();
+        let mut stderr_done = stderr_handle.is_none();
+
+        while status.is_none() || !stdout_done || !stderr_done {
+            let mut progressed = false;
+
+            if status.is_none() {
+                match self.try_wait() {
+                    Ok(Some(s)) => {
+                        status = Some(s);
+                        progressed = true;
+                    }
+                    Ok(None) => {}
+                    // Some environments can surface EAGAIN for non-blocking waitpid
+                    // style checks. Treat it as "still running" and keep draining.
+                    Err(ProcessError::Io(ref e)) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(e),
+                }
+            }
+
+            if let Some(handle) = stdout_handle.as_mut() {
+                let (done, any) = drain_nonblocking(&mut handle.inner, &mut stdout_buf)?;
+                if done {
+                    stdout_handle = None;
+                    stdout_done = true;
+                }
+                progressed |= any || done;
+            }
+
+            if let Some(handle) = stderr_handle.as_mut() {
+                let (done, any) = drain_nonblocking(&mut handle.inner, &mut stderr_buf)?;
+                if done {
+                    stderr_handle = None;
+                    stderr_done = true;
+                }
+                progressed |= any || done;
+            }
+
+            if status.is_some() && stdout_done && stderr_done {
+                break;
+            }
+
+            if !progressed {
+                std::thread::yield_now();
+            }
+        }
+
+        let status = match status {
+            Some(s) => s,
+            None => self.wait()?,
+        };
+
+        Ok(Output {
+            status,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+        })
+    }
+
+    /// Waits for the child and collects all output, asynchronously.
+    ///
+    /// The async counterpart of [`wait_with_output`](Self::wait_with_output):
+    /// it drains stdout and stderr concurrently through the reactor (so a child
+    /// that fills one pipe while the parent waits on the other cannot deadlock)
+    /// and reaps the child without ever blocking the runtime thread. stdin is
+    /// closed up front so the child can finish.
+    ///
+    /// Cancel-safe: if the returned future is dropped (e.g. a [`timeout`] loser),
+    /// the borrowed `Child` is left intact, so a `kill_on_drop(true)` command
+    /// still terminates the child when the `Child` itself is dropped.
+    ///
+    /// The `cx` argument is accepted for forward-compatibility with a
+    /// cancellation-aware reaping path; the current implementation drives
+    /// wakeups through the ambient task context.
+    ///
+    /// [`timeout`]: crate::time::timeout
+    pub fn wait_with_output_async<'a>(&'a mut self, cx: &Cx) -> WaitWithOutput<'a> {
+        let _ = cx;
+        let stdout = self.stdout.take();
+        let stderr = self.stderr.take();
+        // Close stdin so the child observes EOF and can exit.
+        drop(self.stdin.take());
+        WaitWithOutput {
+            child: self,
+            stdout,
+            stderr,
+            stdout_buf: Vec::new(),
+            stderr_buf: Vec::new(),
+            status: None,
+            reap_timer: None,
+            reap_backoff: REAP_POLL_MIN,
+        }
+    }
+
+    /// Sends SIGKILL to the child process.
+    ///
+    /// This does not wait for the process to exit. Call `wait()` after
+    /// to clean up the zombie process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signal cannot be sent (e.g., process already exited).
+    pub fn kill(&mut self) -> Result<(), ProcessError> {
+        let child = self.inner.as_mut().ok_or_else(|| {
+            ProcessError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "child already waited",
+            ))
+        })?;
+
+        child.kill()?;
+        Ok(())
+    }
+
+    /// Attempts to check exit status without blocking.
+    ///
+    /// Returns `Ok(None)` if the process is still running.
+    /// Returns `Ok(Some(status))` if the process has exited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if checking status fails.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, ProcessError> {
+        let child = self.inner.as_mut().ok_or_else(|| {
+            ProcessError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "child already waited",
+            ))
+        })?;
+
+        match child.try_wait()? {
+            Some(status) => {
+                self.inner = None;
+                Ok(Some(ExitStatus::from_std(status)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Starts killing the process without waiting.
+    ///
+    /// Alias for `kill()` for API compatibility.
+    pub fn start_kill(&mut self) -> Result<(), ProcessError> {
+        self.kill()
+    }
+}
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        if self.kill_on_drop {
+            if let Some(ref mut child) = self.inner {
+                let _ = child.kill();
+            }
+        }
+    }
+}
+
+/// Async handle to the child's standard input.
+///
+/// Implements `AsyncWrite` for sending data to the child.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::io::AsyncWriteExt;
+///
+/// let mut child = Command::new("cat")
+///     .stdin(Stdio::piped())
+///     .stdout(Stdio::piped())
+///     .spawn()?;
+///
+/// if let Some(mut stdin) = child.stdin() {
+///     stdin.write_all(b"hello\n").await?;
+/// }
+/// ```
+#[derive(Debug)]
+pub struct ChildStdin {
+    inner: std_process::ChildStdin,
+    registration: Option<IoRegistration>,
+}
+
+impl ChildStdin {
+    fn from_std(stdin: std_process::ChildStdin) -> io::Result<Self> {
+        set_nonblocking(stdin.as_raw_fd())?;
+        Ok(Self {
+            inner: stdin,
+            registration: None,
+        })
+    }
+
+    /// Returns the raw file descriptor.
+    #[must_use]
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+impl AsyncWrite for ChildStdin {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        match this.inner.write(buf) {
+            Ok(n) => Poll::Ready(Ok(n)),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) =
+                    register_interest(&mut this.registration, &this.inner, cx, Interest::WRITABLE)
+                {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        match this.inner.flush() {
+            Ok(()) => Poll::Ready(Ok(())),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) =
+                    register_interest(&mut this.registration, &this.inner, cx, Interest::WRITABLE)
+                {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        // Closing stdin just means dropping it
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Async handle to the child's standard output.
+///
+/// Implements `AsyncRead` for receiving data from the child.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::io::AsyncReadExt;
+///
+/// let mut child = Command::new("echo")
+///     .arg("hello")
+///     .stdout(Stdio::piped())
+///     .spawn()?;
+///
+/// let mut output = String::new();
+/// if let Some(mut stdout) = child.stdout() {
+///     stdout.read_to_string(&mut output).await?;
+/// }
+/// ```
+#[derive(Debug)]
+pub struct ChildStdout {
+    inner: std_process::ChildStdout,
+    registration: Option<IoRegistration>,
+}
+
+impl ChildStdout {
+    fn from_std(stdout: std_process::ChildStdout) -> io::Result<Self> {
+        set_nonblocking(stdout.as_raw_fd())?;
+        Ok(Self {
+            inner: stdout,
+            registration: None,
+        })
+    }
+
+    /// Returns the raw file descriptor.
+    #[must_use]
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+impl AsyncRead for ChildStdout {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let unfilled = buf.unfilled();
+        match this.inner.read(unfilled) {
+            Ok(n) => {
+                buf.advance(n);
+                Poll::Ready(Ok(()))
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) =
+                    register_interest(&mut this.registration, &this.inner, cx, Interest::READABLE)
+                {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+/// Async handle to the child's standard error.
+///
+/// Implements `AsyncRead` for receiving error output from the child.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::io::AsyncReadExt;
+///
+/// let mut child = Command::new("ls")
+///     .arg("/nonexistent")
+///     .stderr(Stdio::piped())
+///     .spawn()?;
+///
+/// let mut errors = String::new();
+/// if let Some(mut stderr) = child.stderr() {
+///     stderr.read_to_string(&mut errors).await?;
+/// }
+/// ```
+#[derive(Debug)]
+pub struct ChildStderr {
+    inner: std_process::ChildStderr,
+    registration: Option<IoRegistration>,
+}
+
+impl ChildStderr {
+    fn from_std(stderr: std_process::ChildStderr) -> io::Result<Self> {
+        set_nonblocking(stderr.as_raw_fd())?;
+        Ok(Self {
+            inner: stderr,
+            registration: None,
+        })
+    }
+
+    /// Returns the raw file descriptor.
+    #[must_use]
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+impl AsyncRead for ChildStderr {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let unfilled = buf.unfilled();
+        match this.inner.read(unfilled) {
+            Ok(n) => {
+                buf.advance(n);
+                Poll::Ready(Ok(()))
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if let Err(err) =
+                    register_interest(&mut this.registration, &this.inner, cx, Interest::READABLE)
+                {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+/// Collected output from a child process.
+///
+/// Contains the exit status and captured stdout/stderr.
+#[derive(Debug, Clone)]
+pub struct Output {
+    /// The exit status of the process.
+    pub status: ExitStatus,
+    /// Captured standard output bytes.
+    pub stdout: Vec<u8>,
+    /// Captured standard error bytes.
+    pub stderr: Vec<u8>,
+}
+
+/// Smallest backstop interval between non-blocking reap checks.
+const REAP_POLL_MIN: Duration = Duration::from_millis(1);
+/// Largest backstop interval between non-blocking reap checks.
+const REAP_POLL_MAX: Duration = Duration::from_millis(20);
+
+/// Future returned by [`Child::wait_with_output_async`].
+///
+/// Drains stdout/stderr concurrently via the reactor and reaps the child with
+/// non-blocking `try_wait`, never blocking the runtime thread. While either
+/// pipe is open, reactor readiness drives wakeups; once both reach EOF but the
+/// child has not yet been reaped (a brief, transient race), a short backstop
+/// timer re-polls `try_wait` with capped exponential backoff.
+#[must_use = "futures do nothing unless awaited"]
+pub struct WaitWithOutput<'a> {
+    child: &'a mut Child,
+    stdout: Option<ChildStdout>,
+    stderr: Option<ChildStderr>,
+    stdout_buf: Vec<u8>,
+    stderr_buf: Vec<u8>,
+    status: Option<ExitStatus>,
+    reap_timer: Option<crate::time::Sleep>,
+    reap_backoff: Duration,
+}
+
+impl WaitWithOutput<'_> {
+    /// Drains a reader fully into `buf`. Returns `Ready(Ok(()))` once EOF is
+    /// reached (and clears the slot), `Pending` when it would block (interest
+    /// re-armed), or the I/O error.
+    fn drain<R: AsyncRead + Unpin>(
+        reader: &mut Option<R>,
+        buf: &mut Vec<u8>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        let Some(handle) = reader.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        loop {
+            let mut scratch = [0u8; 8192];
+            let mut read_buf = ReadBuf::new(&mut scratch);
+            match Pin::new(&mut *handle).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => {
+                    let filled = read_buf.filled();
+                    if filled.is_empty() {
+                        *reader = None;
+                        return Poll::Ready(Ok(()));
+                    }
+                    buf.extend_from_slice(filled);
+                }
+                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl std::future::Future for WaitWithOutput<'_> {
+    type Output = io::Result<Output>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        loop {
+            if this.stdout.is_some() {
+                if let Poll::Ready(Err(err)) =
+                    Self::drain(&mut this.stdout, &mut this.stdout_buf, cx)
+                {
+                    return Poll::Ready(Err(err));
+                }
+            }
+            if this.stderr.is_some() {
+                if let Poll::Ready(Err(err)) =
+                    Self::drain(&mut this.stderr, &mut this.stderr_buf, cx)
+                {
+                    return Poll::Ready(Err(err));
+                }
+            }
+
+            if this.status.is_none() {
+                match this.child.try_wait() {
+                    Ok(Some(status)) => this.status = Some(status),
+                    Ok(None) => {}
+                    // Non-blocking waitpid can surface EAGAIN; treat as "still running".
+                    Err(ProcessError::Io(ref err)) if err.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(ProcessError::Io(err)) => return Poll::Ready(Err(err)),
+                    Err(err) => {
+                        return Poll::Ready(Err(io::Error::other(err.to_string())));
+                    }
+                }
+            }
+
+            // Done when the child is reaped and both pipes have hit EOF.
+            // `ExitStatus` is `Copy`, so the pattern reads the status without
+            // disturbing the slot.
+            if let (Some(status), None, None) = (this.status, &this.stdout, &this.stderr) {
+                return Poll::Ready(Ok(Output {
+                    status,
+                    stdout: std::mem::take(&mut this.stdout_buf),
+                    stderr: std::mem::take(&mut this.stderr_buf),
+                }));
+            }
+
+            // If a pipe is still open it drives the wakeup via reactor interest
+            // re-armed by `drain`; no backstop timer needed.
+            if this.stdout.is_some() || this.stderr.is_some() {
+                this.reap_timer = None;
+                return Poll::Pending;
+            }
+
+            // Both pipes at EOF but the child is not yet reaped: arm/advance a
+            // short backstop timer and re-poll `try_wait` when it fires.
+            match this.reap_timer.as_mut() {
+                Some(timer) => match Pin::new(timer).poll(cx) {
+                    Poll::Ready(()) => {
+                        this.reap_timer = None;
+                        this.reap_backoff = this
+                            .reap_backoff
+                            .checked_mul(2)
+                            .unwrap_or(REAP_POLL_MAX)
+                            .min(REAP_POLL_MAX);
+                        continue;
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                None => {
+                    let now = Cx::current()
+                        .and_then(|current| current.timer_driver())
+                        .map_or_else(crate::time::wall_now, |driver| driver.now());
+                    this.reap_timer = Some(crate::time::sleep(now, this.reap_backoff));
+                    continue;
+                }
+            }
+        }
+    }
+}
+
+/// Exit status of a process.
+///
+/// Contains the exit code or signal information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExitStatus {
+    code: Option<i32>,
+    #[cfg(unix)]
+    signal: Option<i32>,
+}
+
+impl ExitStatus {
+    fn from_std(status: std_process::ExitStatus) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            Self {
+                code: status.code(),
+                signal: status.signal(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {
+                code: status.code(),
+            }
+        }
+    }
+
+    /// Returns `true` if the process exited successfully.
+    ///
+    /// A successful exit typically means exit code 0.
+    #[must_use]
+    pub fn success(&self) -> bool {
+        self.code == Some(0)
+    }
+
+    /// Returns the exit code of the process, if available.
+    ///
+    /// Returns `None` if the process was terminated by a signal.
+    #[must_use]
+    pub fn code(&self) -> Option<i32> {
+        self.code
+    }
+
+    /// Returns the signal that terminated the process, if any.
+    ///
+    /// Returns `None` if the process exited normally.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn signal(&self) -> Option<i32> {
+        self.signal
+    }
+}
+
+impl std::fmt::Display for ExitStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(code) = self.code {
+            write!(f, "exit code: {code}")
+        } else {
+            #[cfg(unix)]
+            if let Some(sig) = self.signal {
+                return write!(f, "signal: {sig}");
+            }
+            write!(f, "unknown exit status")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::init_test_logging;
+
+    fn init_test(name: &str) {
+        init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    #[test]
+    fn test_command_echo() {
+        init_test("test_command_echo");
+
+        let child = Command::new("echo")
+            .arg("hello")
+            .stdout(Stdio::Pipe)
+            .spawn()
+            .expect("spawn failed");
+
+        let result = child.wait_with_output().expect("output failed");
+
+        crate::assert_with_log!(
+            result.status.success(),
+            "success",
+            true,
+            result.status.success()
+        );
+        crate::assert_with_log!(
+            result.stdout == b"hello\n",
+            "stdout",
+            "hello\\n",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        crate::test_complete!("test_command_echo");
+    }
+
+    #[test]
+    fn test_command_exit_code() {
+        init_test("test_command_exit_code");
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 42")
+            .spawn()
+            .expect("spawn failed");
+
+        let result = child.wait().expect("wait failed");
+
+        crate::assert_with_log!(!result.success(), "not success", false, result.success());
+        crate::assert_with_log!(
+            result.code() == Some(42),
+            "exit code",
+            Some(42),
+            result.code()
+        );
+        crate::test_complete!("test_command_exit_code");
+    }
+
+    #[test]
+    fn test_command_env() {
+        init_test("test_command_env");
+
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("echo $MY_VAR")
+            .env("MY_VAR", "test_value")
+            .stdout(Stdio::Pipe)
+            .spawn()
+            .expect("spawn failed");
+
+        let result = child.wait_with_output().expect("output failed");
+
+        crate::assert_with_log!(
+            result.stdout == b"test_value\n",
+            "env value",
+            "test_value\\n",
+            String::from_utf8_lossy(&result.stdout)
+        );
+        crate::test_complete!("test_command_env");
+    }
+
+    #[test]
+    fn test_command_current_dir() {
+        init_test("test_command_current_dir");
+
+        let child = Command::new("pwd")
+            .current_dir("/tmp")
+            .stdout(Stdio::Pipe)
+            .spawn()
+            .expect("spawn failed");
+
+        let result = child.wait_with_output().expect("output failed");
+
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        crate::assert_with_log!(
+            stdout.trim() == "/tmp",
+            "current dir",
+            "/tmp",
+            stdout.trim()
+        );
+        crate::test_complete!("test_command_current_dir");
+    }
+
+    #[test]
+    fn test_command_stdin_pipe() {
+        init_test("test_command_stdin_pipe");
+
+        let mut child = Command::new("cat")
+            .stdin(Stdio::Pipe)
+            .stdout(Stdio::Pipe)
+            .spawn()
+            .expect("spawn failed");
+
+        // Write to stdin
+        if let Some(mut stdin) = child.stdin() {
+            stdin
+                .inner
+                .write_all(b"hello from stdin")
+                .expect("write failed");
+        }
+        // stdin is automatically closed when dropped after the if block
+
+        let output = child.wait_with_output().expect("output failed");
+
+        crate::assert_with_log!(
+            output.stdout == b"hello from stdin",
+            "stdin echo",
+            "hello from stdin",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        crate::test_complete!("test_command_stdin_pipe");
+    }
+
+    #[test]
+    fn test_command_stderr_capture() {
+        init_test("test_command_stderr_capture");
+
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("echo error message >&2")
+            .stdout(Stdio::Null)
+            .stderr(Stdio::Pipe)
+            .spawn()
+            .expect("spawn failed");
+
+        let result = child.wait_with_output().expect("output failed");
+
+        crate::assert_with_log!(
+            result.stderr == b"error message\n",
+            "stderr",
+            "error message\\n",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        crate::test_complete!("test_command_stderr_capture");
+    }
+
+    #[test]
+    fn test_command_try_wait() {
+        init_test("test_command_try_wait");
+
+        // Start a quick command
+        let mut child = Command::new("true").spawn().expect("spawn failed");
+
+        // Give it time to complete
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Should be done by now
+        let status = child.try_wait().expect("try_wait failed");
+        crate::assert_with_log!(status.is_some(), "completed", true, status.is_some());
+        crate::test_complete!("test_command_try_wait");
+    }
+
+    #[test]
+    fn test_command_kill() {
+        init_test("test_command_kill");
+
+        let mut child = Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("spawn failed");
+
+        // Kill the process
+        child.kill().expect("kill failed");
+
+        // Wait for it
+        let status = child.wait().expect("wait failed");
+
+        // Should have been killed by signal
+        #[cfg(unix)]
+        {
+            crate::assert_with_log!(
+                status.signal().is_some(),
+                "killed by signal",
+                true,
+                status.signal().is_some()
+            );
+        }
+        crate::test_complete!("test_command_kill");
+    }
+
+    #[test]
+    fn test_command_kill_on_drop() {
+        init_test("test_command_kill_on_drop");
+
+        let child = Command::new("sleep")
+            .arg("100")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn failed");
+
+        let _pid = child.id().expect("no pid");
+
+        // Drop the child - should kill it
+        drop(child);
+
+        // Give it time to be killed
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Process should no longer exist (we can't easily check this portably,
+        // but we can verify the test runs to completion)
+        crate::test_complete!("test_command_kill_on_drop");
+    }
+
+    #[test]
+    fn test_command_not_found() {
+        init_test("test_command_not_found");
+
+        let result = Command::new("nonexistent_command_that_does_not_exist_12345").spawn();
+
+        crate::assert_with_log!(
+            matches!(result, Err(ProcessError::NotFound(_))),
+            "not found error",
+            true,
+            result.is_err()
+        );
+        crate::test_complete!("test_command_not_found");
+    }
+
+    #[test]
+    fn test_stdio_null() {
+        init_test("test_stdio_null");
+
+        let mut cmd = Command::new("echo");
+        cmd.arg("should not appear")
+            .stdout(Stdio::Null)
+            .stderr(Stdio::Null);
+
+        let child = cmd.spawn().expect("spawn failed");
+        let result = child.wait_with_output().expect("output failed");
+
+        // stdout/stderr should be empty because they were null (not piped)
+        crate::assert_with_log!(
+            result.stdout.is_empty(),
+            "stdout empty",
+            true,
+            result.stdout.is_empty()
+        );
+        crate::test_complete!("test_stdio_null");
+    }
+
+    #[test]
+    fn test_exit_status_display() {
+        init_test("test_exit_status_display");
+
+        let status_success = ExitStatus {
+            code: Some(0),
+            #[cfg(unix)]
+            signal: None,
+        };
+
+        let status_failure = ExitStatus {
+            code: Some(1),
+            #[cfg(unix)]
+            signal: None,
+        };
+
+        #[cfg(unix)]
+        let status_signal = ExitStatus {
+            code: None,
+            signal: Some(9),
+        };
+
+        crate::assert_with_log!(
+            status_success.to_string() == "exit code: 0",
+            "success display",
+            "exit code: 0",
+            status_success.to_string()
+        );
+
+        crate::assert_with_log!(
+            status_failure.to_string() == "exit code: 1",
+            "failure display",
+            "exit code: 1",
+            status_failure.to_string()
+        );
+
+        #[cfg(unix)]
+        crate::assert_with_log!(
+            status_signal.to_string() == "signal: 9",
+            "signal display",
+            "signal: 9",
+            status_signal.to_string()
+        );
+
+        crate::test_complete!("test_exit_status_display");
+    }
+}
