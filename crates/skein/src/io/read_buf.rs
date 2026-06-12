@@ -1,6 +1,6 @@
 //! Read buffer for async reads.
 //!
-//! This is a safe subset of `std::io::ReadBuf`, tailored for Asupersync.
+//! This is a safe subset of `std::io::ReadBuf`, tailored for Skein.
 //! It assumes the provided buffer is fully initialized.
 
 /// Buffer for reading data.

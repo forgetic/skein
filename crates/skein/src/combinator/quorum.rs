@@ -248,8 +248,8 @@ impl<T, E> QuorumResult<T, E> {
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::quorum::quorum_outcomes;
-/// use asupersync::types::Outcome;
+/// use skein::combinator::quorum::quorum_outcomes;
+/// use skein::types::Outcome;
 ///
 /// // 2-of-3 quorum
 /// let outcomes: Vec<Outcome<i32, &str>> = vec![
@@ -352,8 +352,8 @@ pub const fn quorum_achieved(required: usize, successes: usize) -> bool {
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::quorum::{quorum_outcomes, quorum_to_result};
-/// use asupersync::types::Outcome;
+/// use skein::combinator::quorum::{quorum_outcomes, quorum_to_result};
+/// use skein::types::Outcome;
 ///
 /// let outcomes: Vec<Outcome<i32, &str>> = vec![
 ///     Outcome::Ok(1),

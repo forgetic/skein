@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::util::CachePadded;
+//! use skein::util::CachePadded;
 //!
 //! struct PerWorker {
 //!     counter: CachePadded<u64>,

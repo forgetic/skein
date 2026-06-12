@@ -52,7 +52,7 @@
 //! # Examples
 //!
 //! ```ignore
-//! use asupersync::stream::{iter, StreamExt};
+//! use skein::stream::{iter, StreamExt};
 //!
 //! async fn example() {
 //!     let sum = iter(vec![1, 2, 3, 4, 5])

@@ -7,8 +7,8 @@
 //! # Usage
 //!
 //! ```rust
-//! use asupersync::trace::distributed::vclock::{VectorClock, CausalOrder};
-//! use asupersync::remote::NodeId;
+//! use skein::trace::distributed::vclock::{VectorClock, CausalOrder};
+//! use skein::remote::NodeId;
 //!
 //! let mut vc_a = VectorClock::new();
 //! let node_a = NodeId::new("node-a");

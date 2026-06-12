@@ -11,7 +11,7 @@
 //! # Basic Usage
 //!
 //! ```ignore
-//! use asupersync::lab::{LabConfig, LabRuntime};
+//! use skein::lab::{LabConfig, LabRuntime};
 //!
 //! // Default configuration (seed=42)
 //! let config = LabConfig::default();
@@ -28,8 +28,8 @@
 //! Enable chaos injection to stress-test error handling paths:
 //!
 //! ```ignore
-//! use asupersync::lab::{LabConfig, LabRuntime};
-//! use asupersync::lab::chaos::ChaosConfig;
+//! use skein::lab::{LabConfig, LabRuntime};
+//! use skein::lab::chaos::ChaosConfig;
 //!
 //! // Quick: use presets
 //! let config = LabConfig::new(42).with_light_chaos();  // CI-friendly
@@ -65,7 +65,7 @@
 //! ## Deterministic Multi-Worker Simulation
 //!
 //! ```ignore
-//! use asupersync::lab::{LabConfig, LabRuntime};
+//! use skein::lab::{LabConfig, LabRuntime};
 //!
 //! let config = LabConfig::new(7)
 //!     .worker_count(4)
@@ -77,7 +77,7 @@
 //! ## Replay Capture for Debugging
 //!
 //! ```ignore
-//! use asupersync::lab::{LabConfig, LabRuntime};
+//! use skein::lab::{LabConfig, LabRuntime};
 //!
 //! let config = LabConfig::new(42).with_default_replay_recording();
 //! let mut lab = LabRuntime::new(config);
@@ -87,7 +87,7 @@
 //! ## Entropy Decoupling
 //!
 //! ```ignore
-//! use asupersync::lab::LabConfig;
+//! use skein::lab::LabConfig;
 //!
 //! // Keep scheduling deterministic but vary entropy-derived behavior.
 //! let config = LabConfig::new(42).entropy_seed(7);
@@ -96,7 +96,7 @@
 //! # Migration Guide (Struct Updates → Builder Style)
 //!
 //! ```ignore
-//! use asupersync::lab::LabConfig;
+//! use skein::lab::LabConfig;
 //!
 //! // Old style: struct update
 //! let config = LabConfig {

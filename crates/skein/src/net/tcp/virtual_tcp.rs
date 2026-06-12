@@ -7,7 +7,7 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use asupersync::net::tcp::virtual_tcp::{VirtualTcpListener, VirtualTcpStream};
+//! use skein::net::tcp::virtual_tcp::{VirtualTcpListener, VirtualTcpStream};
 //!
 //! // Create a listener
 //! let listener = VirtualTcpListener::new("127.0.0.1:8080".parse().unwrap());

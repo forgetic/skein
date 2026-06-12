@@ -5,7 +5,7 @@
 #![allow(clippy::return_self_not_must_use)]
 //!
 //! This module provides TLS client and server support built on rustls.
-//! It integrates with the asupersync async runtime's I/O traits.
+//! It integrates with the skein async runtime's I/O traits.
 //!
 //! # Features
 //!
@@ -16,7 +16,7 @@
 //! # Client Example
 //!
 //! ```ignore
-//! use asupersync::tls::{TlsConnector, TlsConnectorBuilder};
+//! use skein::tls::{TlsConnector, TlsConnectorBuilder};
 //!
 //! // Create a connector with webpki roots
 //! let connector = TlsConnectorBuilder::new()

@@ -19,8 +19,8 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use asupersync::net::tcp::{TcpListenerApi, TcpStreamApi};
-//! use asupersync::cx::Cx;
+//! use skein::net::tcp::{TcpListenerApi, TcpStreamApi};
+//! use skein::cx::Cx;
 //!
 //! async fn run_server<L: TcpListenerApi>(cx: &Cx, addr: &str) -> std::io::Result<()> {
 //!     let listener = L::bind(addr).await?;
@@ -148,7 +148,7 @@ pub trait TcpStreamApi: AsyncRead + AsyncWrite + Sized + Send + Unpin {
 /// # Example
 ///
 /// ```rust,ignore
-/// use asupersync::net::tcp::TcpListenerBuilder;
+/// use skein::net::tcp::TcpListenerBuilder;
 ///
 /// let listener = TcpListenerBuilder::new("0.0.0.0:8080")
 ///     .backlog(128)

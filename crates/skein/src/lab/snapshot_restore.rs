@@ -40,7 +40,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use asupersync::lab::{LabRuntime, LabConfig, SnapshotRestore};
+//! use skein::lab::{LabRuntime, LabConfig, SnapshotRestore};
 //!
 //! // Create and run a runtime
 //! let mut runtime = LabRuntime::new(LabConfig::new(42));

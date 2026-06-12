@@ -349,7 +349,7 @@ fn dual_policy() -> &'static DualKernelPolicy {
 }
 
 fn detect_dual_policy() -> DualKernelPolicy {
-    let mode = match std::env::var("ASUPERSYNC_GF256_DUAL_POLICY")
+    let mode = match std::env::var("SKEIN_GF256_DUAL_POLICY")
         .ok()
         .as_deref()
     {
@@ -393,19 +393,19 @@ fn detect_dual_policy() -> DualKernelPolicy {
         },
     };
 
-    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MUL_MIN_TOTAL") {
+    if let Some(v) = parse_usize_env("SKEIN_GF256_DUAL_MUL_MIN_TOTAL") {
         policy.mul_min_total = v;
     }
-    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MUL_MAX_TOTAL") {
+    if let Some(v) = parse_usize_env("SKEIN_GF256_DUAL_MUL_MAX_TOTAL") {
         policy.mul_max_total = v;
     }
-    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_ADDMUL_MIN_TOTAL") {
+    if let Some(v) = parse_usize_env("SKEIN_GF256_DUAL_ADDMUL_MIN_TOTAL") {
         policy.addmul_min_total = v;
     }
-    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_ADDMUL_MAX_TOTAL") {
+    if let Some(v) = parse_usize_env("SKEIN_GF256_DUAL_ADDMUL_MAX_TOTAL") {
         policy.addmul_max_total = v;
     }
-    if let Some(v) = parse_usize_env("ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO") {
+    if let Some(v) = parse_usize_env("SKEIN_GF256_DUAL_MAX_LANE_RATIO") {
         policy.max_lane_ratio = v.max(1);
     }
 

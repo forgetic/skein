@@ -1,8 +1,8 @@
-//! Asupersync: Spec-first, cancel-correct, capability-secure async runtime for Rust.
+//! Skein: Spec-first, cancel-correct, capability-secure async runtime for Rust.
 //!
 //! # Overview
 //!
-//! Asupersync is an async runtime built on the principle that correctness should be
+//! Skein is an async runtime built on the principle that correctness should be
 //! structural, not conventional. Every task is owned by a region that closes to
 //! quiescence. Cancellation is a first-class protocol, not a silent drop. Effects
 //! require explicit capabilities.
@@ -40,7 +40,7 @@
 //!
 //! # API Stability
 //!
-//! Asupersync is currently in the 0.x series. Unless explicitly noted in
+//! Skein is currently in the 0.x series. Unless explicitly noted in
 //! `docs/api_audit.md`, public items should be treated as **unstable** and
 //! subject to change. Core types like [`Cx`], [`Outcome`], and [`Budget`] are
 //! intended to stabilize first.
@@ -171,7 +171,7 @@ pub use types::{
 // Re-export proc macros when the proc-macros feature is enabled
 // Note: join! and race! are not re-exported because they conflict with the
 // existing macro_rules! definitions in combinator/. The proc macro versions
-// will replace those in future tasks (asupersync-mwff, asupersync-hcpl).
+// will replace those in future tasks (bead-mwff, bead-hcpl).
 #[cfg(feature = "proc-macros")]
 pub use skein_macros::{join_all, scope, spawn};
 

@@ -26,9 +26,9 @@
 //!
 //! ```compile_fail
 //! # // E0382: use of moved value
-//! use asupersync::channel::session::*;
-//! use asupersync::channel::mpsc;
-//! use asupersync::cx::Cx;
+//! use skein::channel::session::*;
+//! use skein::channel::mpsc;
+//! use skein::cx::Cx;
 //!
 //! fn double_send(permit: TrackedPermit<'_, i32>) {
 //!     permit.send(42);
@@ -40,7 +40,7 @@
 //!
 //! ```compile_fail
 //! # // E0451: field `_kind` of struct `CommittedProof` is private
-//! use asupersync::obligation::graded::{CommittedProof, SendPermit};
+//! use skein::obligation::graded::{CommittedProof, SendPermit};
 //! use std::marker::PhantomData;
 //!
 //! let fake: CommittedProof<SendPermit> = CommittedProof { _kind: PhantomData };

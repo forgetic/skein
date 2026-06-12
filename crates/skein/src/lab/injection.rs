@@ -7,8 +7,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::lab::injection::{LabInjectionRunner, LabInjectionConfig};
-//! use asupersync::lab::{InjectionStrategy, OracleSuite};
+//! use skein::lab::injection::{LabInjectionRunner, LabInjectionConfig};
+//! use skein::lab::{InjectionStrategy, OracleSuite};
 //!
 //! let config = LabInjectionConfig::new(42)
 //!     .with_strategy(InjectionStrategy::AllPoints)
@@ -670,7 +670,7 @@ impl LabInjectionRunner {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::lab::{lab, InjectionStrategy, InstrumentedFuture};
+/// use skein::lab::{lab, InjectionStrategy, InstrumentedFuture};
 ///
 /// let report = lab(42)
 ///     .with_cancellation_injection(InjectionStrategy::AllPoints)

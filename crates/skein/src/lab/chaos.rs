@@ -43,7 +43,7 @@
 //! The easiest way to enable chaos testing:
 //!
 //! ```ignore
-//! use asupersync::lab::{LabConfig, LabRuntime};
+//! use skein::lab::{LabConfig, LabRuntime};
 //!
 //! // Light chaos for CI (low-probability, fast)
 //! let config = LabConfig::new(42).with_light_chaos();
@@ -59,8 +59,8 @@
 //! For fine-grained control:
 //!
 //! ```ignore
-//! use asupersync::lab::{LabConfig, LabRuntime};
-//! use asupersync::lab::chaos::ChaosConfig;
+//! use skein::lab::{LabConfig, LabRuntime};
+//! use skein::lab::chaos::ChaosConfig;
 //! use std::time::Duration;
 //!
 //! // Delay-only configuration (no cancellations)

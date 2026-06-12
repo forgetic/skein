@@ -1,0 +1,36 @@
+[package]
+edition = "2021"
+name = "skein-conformance"
+version = "0.2.0"
+description = "Conformance test suite for async runtime specifications"
+readme = "README.md"
+keywords = [
+    "async",
+    "conformance",
+    "runtime",
+    "testing",
+]
+categories = [
+    "asynchronous",
+    "development-tools::testing",
+]
+license = "MIT"
+repository = "https://github.com/free-ekanayaka/skein"
+
+[lib]
+name = "skein_conformance"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lean_frontier_extract"
+path = "src/bin/lean_frontier_extract.rs"
+
+[dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[dependencies.serde_json]
+version = "1"
+
+[dependencies.tempfile]
+version = "3"

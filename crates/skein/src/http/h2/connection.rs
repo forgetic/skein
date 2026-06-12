@@ -3071,7 +3071,7 @@ mod tests {
     }
 
     // =========================================================================
-    // last_stream_id Pollution Tests (asupersync-32jl1)
+    // last_stream_id Pollution Tests (bead-32jl1)
     // =========================================================================
 
     /// Regression: HEADERS on a stream with invalid parity must NOT bump

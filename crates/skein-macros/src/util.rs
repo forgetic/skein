@@ -1,10 +1,10 @@
-//! Shared utilities for asupersync proc macros.
+//! Shared utilities for skein proc macros.
 //!
 //! This module provides common parsing utilities, error handling helpers,
 //! and shared code generation patterns used across all macros.
 //!
 //! Note: These utilities are provided for the full macro implementations in
-//! dependent tasks (asupersync-86gw, asupersync-5tic, asupersync-mwff, asupersync-hcpl).
+//! dependent tasks (bead-86gw, bead-5tic, bead-mwff, bead-hcpl).
 //! They are currently unused but will be utilized when the placeholder
 //! implementations are replaced with full versions.
 

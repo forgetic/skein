@@ -22,9 +22,9 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::channel::clock_skew::*;
-//! use asupersync::time::{VirtualClock, TimeSource};
-//! use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
+//! use skein::channel::clock_skew::*;
+//! use skein::time::{VirtualClock, TimeSource};
+//! use skein::evidence_sink::{CollectorSink, EvidenceSink};
 //! use std::sync::Arc;
 //!
 //! let base_clock = Arc::new(VirtualClock::new());

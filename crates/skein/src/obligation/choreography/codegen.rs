@@ -499,14 +499,14 @@ fn render_handler(
     writeln!(code).ok();
 
     // Imports
-    writeln!(code, "use asupersync::obligation::session_types::{{").ok();
+    writeln!(code, "use skein::obligation::session_types::{{").ok();
     writeln!(
         code,
         "    Chan, End, Send, Recv, Select, Offer, Initiator, Responder,"
     )
     .ok();
     writeln!(code, "}};").ok();
-    writeln!(code, "use asupersync::record::ObligationKind;").ok();
+    writeln!(code, "use skein::record::ObligationKind;").ok();
     if include_tracing {
         writeln!(code).ok();
         writeln!(code, "// Tracing spans (bd-1f8jn.2 spec):").ok();
@@ -1195,7 +1195,7 @@ mod tests {
         let protocol = example_two_phase_commit();
         let output = c.compile(&protocol, "coordinator").unwrap();
         let code = output.render();
-        assert!(code.contains("use asupersync::obligation::session_types::"));
+        assert!(code.contains("use skein::obligation::session_types::"));
         assert!(code.contains("Chan, End, Send, Recv"));
     }
 

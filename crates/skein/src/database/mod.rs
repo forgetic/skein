@@ -1,7 +1,7 @@
 //! Database clients with async wrappers and Cx integration.
 //!
 //! This module provides async wrappers for database clients, integrating with
-//! asupersync's cancel-correct semantics and blocking pool.
+//! skein's cancel-correct semantics and blocking pool.
 //!
 //! # Available Clients
 //!

@@ -30,8 +30,8 @@
 //! from the Rust parser/type system.
 //!
 //! ```
-//! use asupersync::obligation::{Body, Instruction, LeakChecker, ObligationVar};
-//! use asupersync::record::ObligationKind;
+//! use skein::obligation::{Body, Instruction, LeakChecker, ObligationVar};
+//! use skein::record::ObligationKind;
 //!
 //! let body = Body::new("send_message", vec![
 //!     Instruction::Reserve { var: ObligationVar(0), kind: ObligationKind::SendPermit },
@@ -49,8 +49,8 @@
 //! The graded surface makes obligation leaks a type-level concern:
 //!
 //! ```
-//! use asupersync::obligation::graded::{GradedObligation, Resolution};
-//! use asupersync::record::ObligationKind;
+//! use skein::obligation::graded::{GradedObligation, Resolution};
+//! use skein::record::ObligationKind;
 //!
 //! let ob = GradedObligation::reserve(ObligationKind::SendPermit, "test");
 //! ob.resolve(Resolution::Commit); // Must resolve before scope exit

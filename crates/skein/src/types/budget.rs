@@ -21,8 +21,8 @@
 //! requirements:
 //!
 //! ```
-//! # use asupersync::Budget;
-//! # use asupersync::types::id::Time;
+//! # use skein::Budget;
+//! # use skein::types::id::Time;
 //! let outer = Budget::new().with_deadline(Time::from_secs(30));
 //! let inner = Budget::new().with_deadline(Time::from_secs(10));
 //!
@@ -43,7 +43,7 @@
 //! ## Example: Request Timeout Middleware
 //!
 //! ```ignore
-//! use asupersync::{Budget, Cx, Outcome, Time};
+//! use skein::{Budget, Cx, Outcome, Time};
 //! use std::time::Duration;
 //!
 //! // Server configuration
@@ -111,8 +111,8 @@
 //! # Creating Budgets
 //!
 //! ```
-//! # use asupersync::Budget;
-//! # use asupersync::types::id::Time;
+//! # use skein::Budget;
+//! # use skein::types::id::Time;
 //! // Unlimited budget (default)
 //! let unlimited = Budget::unlimited();
 //!
@@ -191,7 +191,7 @@ impl Budget {
     /// # Example
     ///
     /// ```
-    /// # use asupersync::Budget;
+    /// # use skein::Budget;
     /// let budget = Budget::unlimited();
     /// assert!(!budget.is_exhausted());
     /// ```
@@ -207,8 +207,8 @@ impl Budget {
     /// # Example
     ///
     /// ```
-    /// # use asupersync::Budget;
-    /// # use asupersync::types::id::Time;
+    /// # use skein::Budget;
+    /// # use skein::types::id::Time;
     /// let budget = Budget::with_deadline_secs(30);
     /// assert_eq!(budget.deadline, Some(Time::from_secs(30)));
     /// ```
@@ -227,8 +227,8 @@ impl Budget {
     /// # Example
     ///
     /// ```
-    /// # use asupersync::Budget;
-    /// # use asupersync::types::id::Time;
+    /// # use skein::Budget;
+    /// # use skein::types::id::Time;
     /// let budget = Budget::with_deadline_ns(30_000_000_000); // 30 seconds
     /// assert_eq!(budget.deadline, Some(Time::from_nanos(30_000_000_000)));
     /// ```
@@ -326,8 +326,8 @@ impl Budget {
     /// # Example
     ///
     /// ```
-    /// # use asupersync::Budget;
-    /// # use asupersync::types::id::Time;
+    /// # use skein::Budget;
+    /// # use skein::types::id::Time;
     /// let outer = Budget::new()
     ///     .with_deadline(Time::from_secs(30))
     ///     .with_poll_quota(1000);
@@ -410,8 +410,8 @@ impl Budget {
     /// # Example
     ///
     /// ```
-    /// # use asupersync::Budget;
-    /// # use asupersync::types::id::Time;
+    /// # use skein::Budget;
+    /// # use skein::types::id::Time;
     /// let parent = Budget::with_deadline_secs(30);
     /// let child = Budget::with_deadline_secs(10);
     ///
@@ -432,7 +432,7 @@ impl Budget {
     /// # Example
     ///
     /// ```
-    /// # use asupersync::Budget;
+    /// # use skein::Budget;
     /// let mut budget = Budget::new().with_cost_quota(100);
     ///
     /// assert!(budget.consume_cost(30));   // 70 remaining
@@ -486,8 +486,8 @@ impl Budget {
     /// # Example
     ///
     /// ```
-    /// # use asupersync::Budget;
-    /// # use asupersync::types::id::Time;
+    /// # use skein::Budget;
+    /// # use skein::types::id::Time;
     /// # use std::time::Duration;
     /// let budget = Budget::with_deadline_secs(30);
     /// let now = Time::from_secs(10);
@@ -516,7 +516,7 @@ impl Budget {
     /// # Example
     ///
     /// ```
-    /// # use asupersync::Budget;
+    /// # use skein::Budget;
     /// let budget = Budget::new().with_poll_quota(100);
     /// assert_eq!(budget.remaining_polls(), 100);
     /// ```
@@ -532,7 +532,7 @@ impl Budget {
     /// # Example
     ///
     /// ```
-    /// # use asupersync::Budget;
+    /// # use skein::Budget;
     /// let budget = Budget::new().with_cost_quota(1000);
     /// assert_eq!(budget.remaining_cost(), Some(1000));
     ///
@@ -552,8 +552,8 @@ impl Budget {
     /// # Example
     ///
     /// ```
-    /// # use asupersync::Budget;
-    /// # use asupersync::types::id::Time;
+    /// # use skein::Budget;
+    /// # use skein::types::id::Time;
     /// # use std::time::Duration;
     /// let budget = Budget::with_deadline_secs(30);
     /// let now = Time::from_secs(5);

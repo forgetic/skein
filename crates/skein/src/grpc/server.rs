@@ -285,12 +285,12 @@ impl Default for CallContext {
 /// `Cx` through gRPC handlers while retaining the base call metadata.
 ///
 /// ```ignore
-/// use asupersync::cx::cap::CapSet;
-/// use asupersync::grpc::CallContext;
+/// use skein::cx::cap::CapSet;
+/// use skein::grpc::CallContext;
 ///
 /// type GrpcCaps = CapSet<true, true, false, false, false>;
 ///
-/// fn handle(ctx: &CallContext, cx: &asupersync::Cx) {
+/// fn handle(ctx: &CallContext, cx: &skein::Cx) {
 ///     let ctx = ctx.with_cx(cx);
 ///     let limited = ctx.cx_narrow::<GrpcCaps>();
 ///     limited.checkpoint().ok();

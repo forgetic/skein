@@ -18,7 +18,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::net::dns::{Resolver, ResolverConfig};
+//! use skein::net::dns::{Resolver, ResolverConfig};
 //!
 //! let resolver = Resolver::new();
 //!

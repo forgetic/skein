@@ -1,7 +1,7 @@
 //! Supervision policies for actor failure handling.
 //!
 //! This module implements Erlang/OTP-style supervision semantics that are compatible
-//! with asupersync's region ownership and cancellation model:
+//! with skein's region ownership and cancellation model:
 //!
 //! - **Region-owned restarts**: Restarts happen within the same region scope
 //! - **Budget-aware**: Restart loops consume budget and respect deadlines
@@ -17,7 +17,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::supervision::{SupervisionStrategy, RestartConfig};
+//! use skein::supervision::{SupervisionStrategy, RestartConfig};
 //! use std::time::Duration;
 //!
 //! // Stop on any error
@@ -1923,7 +1923,7 @@ impl Default for StormMonitorConfig {
 /// # Usage
 ///
 /// ```
-/// use asupersync::supervision::{RestartStormMonitor, StormMonitorConfig};
+/// use skein::supervision::{RestartStormMonitor, StormMonitorConfig};
 ///
 /// let config = StormMonitorConfig {
 ///     alpha: 0.01,          // 1% false-positive bound

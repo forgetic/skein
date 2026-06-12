@@ -1,7 +1,7 @@
 //! Guarded Recursion Lens: Time-Indexed Behavior for Actors and Leases.
 //!
 //! This module captures the guarded recursion / "later" modality lens as a
-//! concrete design note tied to actor and lease APIs in asupersync.
+//! concrete design note tied to actor and lease APIs in skein.
 //!
 //! # Background: What is Guarded Recursion?
 //!
@@ -13,9 +13,9 @@
 //! For example, an infinite stream `Stream A = A × ▸(Stream A)` is well-defined
 //! because the recursive reference `Stream A` appears only under `▸`.
 //!
-//! # How This Maps to Asupersync
+//! # How This Maps to Skein
 //!
-//! Asupersync's runtime is inherently step-indexed via its deterministic lab
+//! Skein's runtime is inherently step-indexed via its deterministic lab
 //! runtime (virtual time advances in discrete steps) and its explicit state
 //! machines. The "later" modality is realized concretely:
 //!

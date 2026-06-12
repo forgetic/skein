@@ -8,7 +8,7 @@
 //!
 //! Every test event can be serialized as one JSON line for CI parsing, log
 //! aggregation, and failure triage. Enable streaming output via
-//! `ASUPERSYNC_TEST_NDJSON=1`.
+//! `SKEIN_TEST_NDJSON=1`.
 //!
 //! ## Standard Fields
 //!
@@ -37,7 +37,7 @@
 //! ## Artifact Bundle Layout
 //!
 //! ```text
-//! $ASUPERSYNC_TEST_ARTIFACTS_DIR/{test_id}/{seed:016x}/
+//! $SKEIN_TEST_ARTIFACTS_DIR/{test_id}/{seed:016x}/
 //!   manifest.json        — ReproManifest with full reproducibility info
 //!   events.ndjson        — Structured event log in NDJSON format
 //!   summary.json         — TestSummary from the harness
@@ -49,8 +49,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::test_ndjson::{NdjsonLogger, write_artifact_bundle};
-//! use asupersync::test_logging::{TestLogLevel, TestEvent, TestContext, ReproManifest};
+//! use skein::test_ndjson::{NdjsonLogger, write_artifact_bundle};
+//! use skein::test_logging::{TestLogLevel, TestEvent, TestContext, ReproManifest};
 //!
 //! let ctx = TestContext::new("my_test", 0xDEAD_BEEF).with_subsystem("scheduler");
 //! let logger = NdjsonLogger::enabled(TestLogLevel::Info, Some(ctx.clone()));
@@ -324,7 +324,7 @@ fn thread_id_u64() -> u64 {
 /// An NDJSON log writer that wraps [`TestLogger`] and optionally streams
 /// structured JSON lines to stderr for CI log parsing.
 ///
-/// Enable with `ASUPERSYNC_TEST_NDJSON=1` or by constructing with
+/// Enable with `SKEIN_TEST_NDJSON=1` or by constructing with
 /// [`NdjsonLogger::enabled`].
 pub struct NdjsonLogger {
     inner: TestLogger,
@@ -333,10 +333,10 @@ pub struct NdjsonLogger {
 }
 
 impl NdjsonLogger {
-    /// Create a new NDJSON logger. Checks `ASUPERSYNC_TEST_NDJSON` env var.
+    /// Create a new NDJSON logger. Checks `SKEIN_TEST_NDJSON` env var.
     #[must_use]
     pub fn new(level: TestLogLevel, ctx: Option<TestContext>) -> Self {
-        let ndjson_enabled = std::env::var("ASUPERSYNC_TEST_NDJSON")
+        let ndjson_enabled = std::env::var("SKEIN_TEST_NDJSON")
             .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
         Self {
             inner: TestLogger::new(level),
@@ -404,7 +404,7 @@ impl NdjsonLogger {
 /// # Examples
 ///
 /// ```
-/// # use asupersync::test_ndjson::trace_file_name;
+/// # use skein::test_ndjson::trace_file_name;
 /// assert_eq!(
 ///     trace_file_name("scheduler", "cancel_drain", 0xDEAD_BEEF),
 ///     "scheduler_cancel_drain_00000000deadbeef.trace"
@@ -443,10 +443,10 @@ pub fn artifact_bundle_dir(
 
 /// Resolve the artifact base directory from the environment.
 ///
-/// Checks `ASUPERSYNC_TEST_ARTIFACTS_DIR`, falling back to `target/test-artifacts`.
+/// Checks `SKEIN_TEST_ARTIFACTS_DIR`, falling back to `target/test-artifacts`.
 #[must_use]
 pub fn artifact_base_dir() -> std::path::PathBuf {
-    std::env::var("ASUPERSYNC_TEST_ARTIFACTS_DIR").map_or_else(
+    std::env::var("SKEIN_TEST_ARTIFACTS_DIR").map_or_else(
         |_| std::path::PathBuf::from("target/test-artifacts"),
         std::path::PathBuf::from,
     )
@@ -643,7 +643,7 @@ mod tests {
 
         let tmp = tempfile::TempDir::new().expect("create temp dir");
         // SAFETY: tests serialize env access with test_utils::env_lock.
-        unsafe { std::env::set_var("ASUPERSYNC_TEST_ARTIFACTS_DIR", tmp.path()) };
+        unsafe { std::env::set_var("SKEIN_TEST_ARTIFACTS_DIR", tmp.path()) };
 
         let ctx = TestContext::new("bundle_test", 0xBEEF)
             .with_subsystem("scheduler")
@@ -685,7 +685,7 @@ mod tests {
         assert_eq!(first["event"], "TaskSpawn");
 
         // SAFETY: tests serialize env access with test_utils::env_lock.
-        unsafe { std::env::remove_var("ASUPERSYNC_TEST_ARTIFACTS_DIR") };
+        unsafe { std::env::remove_var("SKEIN_TEST_ARTIFACTS_DIR") };
         crate::test_complete!("test_write_artifact_bundle_roundtrip");
     }
 

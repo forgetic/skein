@@ -18,7 +18,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::channel::mpsc;
+//! use skein::channel::mpsc;
 //!
 //! // Create a bounded channel
 //! let (tx, rx) = mpsc::channel::<i32>(10);

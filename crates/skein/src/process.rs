@@ -11,7 +11,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::process::Command;
+//! use skein::process::Command;
 //!
 //! async fn run_command() -> std::io::Result<()> {
 //!     let output = Command::new("echo")
@@ -211,7 +211,7 @@ impl From<Stdio> for std_process::Stdio {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::process::Command;
+/// use skein::process::Command;
 ///
 /// let child = Command::new("ls")
 ///     .arg("-la")
@@ -844,7 +844,7 @@ impl Drop for Child {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::io::AsyncWriteExt;
+/// use skein::io::AsyncWriteExt;
 ///
 /// let mut child = Command::new("cat")
 ///     .stdin(Stdio::piped())
@@ -857,8 +857,10 @@ impl Drop for Child {
 /// ```
 #[derive(Debug)]
 pub struct ChildStdin {
-    inner: std_process::ChildStdin,
+    /// Reactor registration; declared before `inner` so it drops first —
+    /// the fd must be deregistered from the reactor before `inner` closes it.
     registration: Option<IoRegistration>,
+    inner: std_process::ChildStdin,
 }
 
 impl ChildStdin {
@@ -927,7 +929,7 @@ impl AsyncWrite for ChildStdin {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::io::AsyncReadExt;
+/// use skein::io::AsyncReadExt;
 ///
 /// let mut child = Command::new("echo")
 ///     .arg("hello")
@@ -941,8 +943,10 @@ impl AsyncWrite for ChildStdin {
 /// ```
 #[derive(Debug)]
 pub struct ChildStdout {
-    inner: std_process::ChildStdout,
+    /// Reactor registration; declared before `inner` so it drops first —
+    /// the fd must be deregistered from the reactor before `inner` closes it.
     registration: Option<IoRegistration>,
+    inner: std_process::ChildStdout,
 }
 
 impl ChildStdout {
@@ -994,7 +998,7 @@ impl AsyncRead for ChildStdout {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::io::AsyncReadExt;
+/// use skein::io::AsyncReadExt;
 ///
 /// let mut child = Command::new("ls")
 ///     .arg("/nonexistent")
@@ -1008,8 +1012,10 @@ impl AsyncRead for ChildStdout {
 /// ```
 #[derive(Debug)]
 pub struct ChildStderr {
-    inner: std_process::ChildStderr,
+    /// Reactor registration; declared before `inner` so it drops first —
+    /// the fd must be deregistered from the reactor before `inner` closes it.
     registration: Option<IoRegistration>,
+    inner: std_process::ChildStderr,
 }
 
 impl ChildStderr {

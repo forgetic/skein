@@ -11,7 +11,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::database::MySqlConnection;
+//! use skein::database::MySqlConnection;
 //!
 //! async fn example(cx: &Cx) -> Result<(), MySqlError> {
 //!     let conn = MySqlConnection::connect(cx, "mysql://user:pass@localhost/db").await?;

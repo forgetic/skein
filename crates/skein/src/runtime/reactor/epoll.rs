@@ -38,7 +38,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::runtime::reactor::{EpollReactor, Reactor, Interest, Events};
+//! use skein::runtime::reactor::{EpollReactor, Reactor, Interest, Events};
 //! use std::net::TcpListener;
 //!
 //! let reactor = EpollReactor::new()?;

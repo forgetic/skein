@@ -26,7 +26,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::signal::{ShutdownController, with_graceful_shutdown, GracefulOutcome};
+//! use skein::signal::{ShutdownController, with_graceful_shutdown, GracefulOutcome};
 //!
 //! async fn run_server() {
 //!     let controller = ShutdownController::new();

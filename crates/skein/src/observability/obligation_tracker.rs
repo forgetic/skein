@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::observability::{ObligationTracker, ObligationTrackerConfig};
+//! use skein::observability::{ObligationTracker, ObligationTrackerConfig};
 //! use std::time::Duration;
 //!
 //! let tracker = ObligationTracker::new(state.clone(), console);

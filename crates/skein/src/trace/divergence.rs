@@ -12,8 +12,8 @@
 //! # Usage
 //!
 //! ```ignore
-//! use asupersync::trace::divergence::{DivergenceReport, diagnose_divergence};
-//! use asupersync::trace::replayer::DivergenceError;
+//! use skein::trace::divergence::{DivergenceReport, diagnose_divergence};
+//! use skein::trace::replayer::DivergenceError;
 //!
 //! // After catching a divergence error during replay:
 //! let report = diagnose_divergence(&trace, &divergence_error, DiagnosticConfig::default());

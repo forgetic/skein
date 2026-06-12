@@ -498,7 +498,7 @@ mod tests {
             "scenario_id={} seed={} k={} symbol_size={} loss_pattern={} outcome={} \
              artifact_path=artifacts/raptorq_b2_tuple_scenarios_v1.json \
              fixture_ref=RQ-B2-TUPLE-V1 \
-             repro_cmd='rch exec -- cargo test -p asupersync --lib \
+             repro_cmd='rch exec -- cargo test -p skein --lib \
              rfc6330::tests::tuple_scenario_matrix_deterministic_replay -- --nocapture'",
             scenario.scenario_id,
             scenario.seed,

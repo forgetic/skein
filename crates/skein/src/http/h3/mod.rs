@@ -1,6 +1,6 @@
 //! HTTP/3 client support over QUIC.
 //!
-//! This module wraps the `h3` and `h3-quinn` crates with Asupersync `Cx`
+//! This module wraps the `h3` and `h3-quinn` crates with Skein `Cx`
 //! cancellation semantics. It is gated behind the `http3` feature.
 //!
 //! # Driver Model

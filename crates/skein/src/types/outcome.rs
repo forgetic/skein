@@ -53,7 +53,7 @@
 //! ## Basic Usage
 //!
 //! ```
-//! use asupersync::{Outcome, CancelReason};
+//! use skein::{Outcome, CancelReason};
 //!
 //! // Construction using static methods
 //! let success: Outcome<i32, &str> = Outcome::ok(42);
@@ -71,7 +71,7 @@
 //! ## Aggregation (Join Semantics)
 //!
 //! ```
-//! use asupersync::{Outcome, join_outcomes, CancelReason};
+//! use skein::{Outcome, join_outcomes, CancelReason};
 //!
 //! // When joining outcomes, the worst wins
 //! let ok: Outcome<(), ()> = Outcome::ok(());
@@ -90,7 +90,7 @@
 //! ## Conversion to Result
 //!
 //! ```
-//! use asupersync::{Outcome, OutcomeError};
+//! use skein::{Outcome, OutcomeError};
 //!
 //! let outcome: Outcome<i32, &str> = Outcome::ok(42);
 //! let result: Result<i32, OutcomeError<&str>> = outcome.into_result();
@@ -141,7 +141,7 @@ impl fmt::Display for PanicPayload {
 /// # Examples
 ///
 /// ```
-/// use asupersync::{Outcome, Severity, CancelReason};
+/// use skein::{Outcome, Severity, CancelReason};
 ///
 /// let ok: Outcome<(), ()> = Outcome::ok(());
 /// let err: Outcome<(), ()> = Outcome::err(());
@@ -248,7 +248,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::Outcome;
+    /// use skein::Outcome;
     ///
     /// let outcome: Outcome<i32, &str> = Outcome::ok(42);
     /// assert!(outcome.is_ok());
@@ -264,7 +264,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::Outcome;
+    /// use skein::Outcome;
     ///
     /// let outcome: Outcome<i32, &str> = Outcome::err("not found");
     /// assert!(outcome.is_err());
@@ -279,7 +279,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::{Outcome, CancelReason};
+    /// use skein::{Outcome, CancelReason};
     ///
     /// let outcome: Outcome<i32, &str> = Outcome::cancelled(CancelReason::timeout());
     /// assert!(outcome.is_cancelled());
@@ -294,7 +294,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::{Outcome, PanicPayload};
+    /// use skein::{Outcome, PanicPayload};
     ///
     /// let outcome: Outcome<i32, &str> = Outcome::panicked(PanicPayload::new("oops"));
     /// assert!(outcome.is_panicked());
@@ -316,7 +316,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::{Outcome, Severity, CancelReason};
+    /// use skein::{Outcome, Severity, CancelReason};
     ///
     /// let ok: Outcome<i32, &str> = Outcome::ok(42);
     /// let err: Outcome<i32, &str> = Outcome::err("oops");
@@ -358,7 +358,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::Outcome;
+    /// use skein::Outcome;
     ///
     /// let ok: Outcome<i32, &str> = Outcome::ok(42);
     /// let err: Outcome<i32, &str> = Outcome::err("oops");
@@ -376,7 +376,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::Outcome;
+    /// use skein::Outcome;
     ///
     /// let err: Outcome<i32, &str> = Outcome::err("oops");
     /// assert!(err.is_err());
@@ -391,7 +391,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::{Outcome, CancelReason};
+    /// use skein::{Outcome, CancelReason};
     ///
     /// let cancelled: Outcome<i32, &str> = Outcome::cancelled(CancelReason::timeout());
     /// assert!(cancelled.is_cancelled());
@@ -406,7 +406,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::{Outcome, PanicPayload};
+    /// use skein::{Outcome, PanicPayload};
     ///
     /// let panicked: Outcome<i32, &str> = Outcome::panicked(PanicPayload::new("oops"));
     /// assert!(panicked.is_panicked());
@@ -443,7 +443,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::Outcome;
+    /// use skein::Outcome;
     ///
     /// let err: Outcome<i32, &str> = Outcome::err("short");
     /// let mapped = err.map_err(str::len);
@@ -466,7 +466,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::Outcome;
+    /// use skein::Outcome;
     ///
     /// fn parse_int(s: &str) -> Outcome<i32, &'static str> {
     ///     s.parse::<i32>().map_err(|_| "parse error").into()
@@ -499,7 +499,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::{Outcome, CancelReason};
+    /// use skein::{Outcome, CancelReason};
     ///
     /// let ok: Outcome<i32, &str> = Outcome::ok(42);
     /// let result: Result<i32, &str> = ok.ok_or_else(|| "default error");
@@ -529,7 +529,7 @@ impl<T, E> Outcome<T, E> {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::{Outcome, CancelReason};
+    /// use skein::{Outcome, CancelReason};
     ///
     /// let ok1: Outcome<i32, &str> = Outcome::ok(1);
     /// let ok2: Outcome<i32, &str> = Outcome::ok(2);

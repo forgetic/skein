@@ -8,7 +8,7 @@
 //!
 //! # Capability Model
 //!
-//! All effectful operations in Asupersync flow through explicit `Cx` tokens.
+//! All effectful operations in Skein flow through explicit `Cx` tokens.
 //! This design prevents ambient authority and enables:
 //!
 //! - **Effect interception**: Production vs lab runtime can interpret effects differently
@@ -119,7 +119,7 @@ struct CxHandles {
 
 /// The capability context for a task.
 ///
-/// `Cx` provides access to runtime capabilities within Asupersync. All effectful
+/// `Cx` provides access to runtime capabilities within Skein. All effectful
 /// operations flow through `Cx`, ensuring explicit capability security with no
 /// ambient authority.
 ///
@@ -837,7 +837,7 @@ impl<Caps> Cx<Caps> {
     ///
     /// # Capability Model
     ///
-    /// Asupersync uses explicit capability-based I/O:
+    /// Skein uses explicit capability-based I/O:
     /// - Production runtime configures real I/O capability (via reactor)
     /// - Lab runtime can configure virtual I/O for deterministic testing
     /// - Code that needs I/O must explicitly check for and use this capability
@@ -1664,7 +1664,7 @@ impl<Caps> Cx<Caps> {
     /// # Example
     ///
     /// ```
-    /// use asupersync::Cx;
+    /// use skein::Cx;
     ///
     /// let cx = Cx::for_testing();
     /// assert!(cx.checkpoint().is_ok());
@@ -1705,7 +1705,7 @@ impl<Caps> Cx<Caps> {
     /// # Example
     ///
     /// ```
-    /// use asupersync::{Cx, types::CancelKind};
+    /// use skein::{Cx, types::CancelKind};
     ///
     /// let cx = Cx::for_testing();
     /// cx.cancel_with(CancelKind::User, Some("User pressed Ctrl+C"));
@@ -1764,7 +1764,7 @@ impl<Caps> Cx<Caps> {
     /// # Example
     ///
     /// ```
-    /// use asupersync::{Cx, types::CancelKind};
+    /// use skein::{Cx, types::CancelKind};
     ///
     /// let cx = Cx::for_testing();
     ///
@@ -1802,7 +1802,7 @@ impl<Caps> Cx<Caps> {
     /// # Example
     ///
     /// ```
-    /// use asupersync::{Cx, types::CancelKind};
+    /// use skein::{Cx, types::CancelKind};
     ///
     /// let cx = Cx::for_testing();
     /// assert!(cx.cancel_reason().is_none());
@@ -1830,7 +1830,7 @@ impl<Caps> Cx<Caps> {
     /// # Example
     ///
     /// ```
-    /// use asupersync::{Cx, types::{CancelKind, CancelReason}};
+    /// use skein::{Cx, types::{CancelKind, CancelReason}};
     ///
     /// let cx = Cx::for_testing();
     ///
@@ -1867,7 +1867,7 @@ impl<Caps> Cx<Caps> {
     /// # Example
     ///
     /// ```
-    /// use asupersync::{Cx, types::{CancelKind, CancelReason}};
+    /// use skein::{Cx, types::{CancelKind, CancelReason}};
     ///
     /// let cx = Cx::for_testing();
     ///
@@ -1901,7 +1901,7 @@ impl<Caps> Cx<Caps> {
     /// # Example
     ///
     /// ```
-    /// use asupersync::{Cx, types::CancelKind};
+    /// use skein::{Cx, types::CancelKind};
     ///
     /// let cx = Cx::for_testing();
     /// cx.cancel_with(CancelKind::User, Some("manual cancel"));
@@ -1924,7 +1924,7 @@ impl<Caps> Cx<Caps> {
     /// # Example
     ///
     /// ```
-    /// use asupersync::{Cx, types::{CancelKind, CancelReason}};
+    /// use skein::{Cx, types::{CancelKind, CancelReason}};
     ///
     /// let cx = Cx::for_testing();
     ///
@@ -1958,7 +1958,7 @@ impl<Caps> Cx<Caps> {
     /// # Example
     ///
     /// ```
-    /// use asupersync::{Cx, types::{CancelKind, CancelReason}};
+    /// use skein::{Cx, types::{CancelKind, CancelReason}};
     ///
     /// let cx = Cx::for_testing();
     ///
@@ -2165,7 +2165,7 @@ impl Cx<cap::All> {
     /// # Example
     ///
     /// ```
-    /// use asupersync::Cx;
+    /// use skein::Cx;
     ///
     /// let cx = Cx::for_testing();
     /// assert!(!cx.is_cancel_requested());
@@ -2193,7 +2193,7 @@ impl Cx<cap::All> {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::{Cx, Budget, Time};
+    /// use skein::{Cx, Budget, Time};
     ///
     /// // Create a context with a 30-second deadline
     /// let cx = Cx::for_testing_with_budget(
@@ -2222,7 +2222,7 @@ impl Cx<cap::All> {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::Cx;
+    /// use skein::Cx;
     ///
     /// let cx = Cx::for_testing_with_io();
     /// assert!(cx.has_io());

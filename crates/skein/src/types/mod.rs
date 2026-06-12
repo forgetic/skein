@@ -1,4 +1,4 @@
-//! Core types for the Asupersync runtime.
+//! Core types for the Skein runtime.
 //!
 //! This module contains the fundamental types used throughout the runtime:
 //!

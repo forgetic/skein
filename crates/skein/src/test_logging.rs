@@ -1,4 +1,4 @@
-//! Comprehensive test logging infrastructure for Asupersync.
+//! Comprehensive test logging infrastructure for Skein.
 //!
 //! This module provides detailed logging for tests that captures all I/O events,
 //! reactor operations, waker dispatches, and timing information to enable thorough
@@ -15,7 +15,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::test_logging::{TestLogger, TestLogLevel, TestEvent};
+//! use skein::test_logging::{TestLogger, TestLogLevel, TestEvent};
 //!
 //! let logger = TestLogger::new(TestLogLevel::Debug);
 //! logger.log(TestEvent::TaskSpawn { task_id: 1, name: Some("worker".into()) });
@@ -1081,7 +1081,7 @@ pub struct PhaseNode {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::test_logging::TestContext;
+/// use skein::test_logging::TestContext;
 ///
 /// let ctx = TestContext::new("cancel_drain_001", 0xDEAD_BEEF)
 ///     .with_subsystem("cancellation")
@@ -1262,7 +1262,7 @@ pub const ARTIFACT_SCHEMA_VERSION: u32 = 1;
 ///
 /// # Artifact Layouts
 ///
-/// - **Harness failures**: `$ASUPERSYNC_TEST_ARTIFACTS_DIR/<scenario_id>/repro_manifest.json`
+/// - **Harness failures**: `$SKEIN_TEST_ARTIFACTS_DIR/<scenario_id>/repro_manifest.json`
 ///   alongside `event_log.txt` and `failed_assertions.json`.
 /// - **Explicit dumps**: `<base>/<scenario_id>/<seed>/manifest.json` via
 ///   [`ReproManifest::write_to_dir`].
@@ -1457,7 +1457,7 @@ impl ReproManifest {
     /// Write this manifest to `<base>/<scenario_id>/<seed>/manifest.json`.
     ///
     /// Note: the test harness writes `repro_manifest.json` under
-    /// `$ASUPERSYNC_TEST_ARTIFACTS_DIR/<scenario_id>/`.
+    /// `$SKEIN_TEST_ARTIFACTS_DIR/<scenario_id>/`.
     pub fn write_to_dir(&self, base_dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
         let dir = base_dir
             .join(&self.scenario_id)
@@ -1487,12 +1487,12 @@ pub fn load_repro_manifest(path: &std::path::Path) -> Result<ReproManifest, std:
 
 /// Capture a snapshot of test-relevant environment variables.
 ///
-/// Only includes `ASUPERSYNC_*` and `RUST_LOG` variables.
+/// Only includes `SKEIN_*` and `RUST_LOG` variables.
 /// Sorted by key for deterministic output.
 #[must_use]
 pub fn capture_test_env() -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k.starts_with("ASUPERSYNC_") || k == "RUST_LOG")
+        .filter(|(k, _)| k.starts_with("SKEIN_") || k == "RUST_LOG")
         .collect();
     env.sort_by(|a, b| a.0.cmp(&b.0));
     env
@@ -1975,7 +1975,7 @@ impl DockerFixtureService {
     /// ID to avoid collisions between parallel test runs.
     #[must_use]
     pub fn new(service_name: &str, image: &str) -> Self {
-        let container_name = format!("asupersync-test-{}-{}", service_name, std::process::id());
+        let container_name = format!("skein-test-{}-{}", service_name, std::process::id());
         Self {
             service_name: service_name.to_string(),
             image: image.to_string(),
@@ -2143,12 +2143,12 @@ impl TempDirFixture {
     pub fn new(service_name: &str) -> Self {
         Self {
             service_name: service_name.to_string(),
-            prefix: format!("asupersync-{service_name}-"),
+            prefix: format!("skein-{service_name}-"),
             dir: None,
         }
     }
 
-    /// Override the directory-name prefix (default: `asupersync-<name>-`).
+    /// Override the directory-name prefix (default: `skein-<name>-`).
     #[must_use]
     pub fn with_prefix(mut self, prefix: &str) -> Self {
         self.prefix = prefix.to_string();
@@ -2332,7 +2332,7 @@ pub struct EventStats {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::test_logging::TestHarness;
+/// use skein::test_logging::TestHarness;
 ///
 /// let mut harness = TestHarness::new("my_e2e_test");
 /// harness.enter_phase("setup");
@@ -2785,7 +2785,7 @@ impl TestHarness {
 
 /// Read the artifact directory from the environment.
 fn artifact_dir_from_env() -> Option<std::path::PathBuf> {
-    std::env::var("ASUPERSYNC_TEST_ARTIFACTS_DIR")
+    std::env::var("SKEIN_TEST_ARTIFACTS_DIR")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .map(std::path::PathBuf::from)
@@ -3693,9 +3693,9 @@ mod tests {
         let env = capture_test_env();
         for (key, _) in &env {
             crate::assert_with_log!(
-                key.starts_with("ASUPERSYNC_") || key == "RUST_LOG",
+                key.starts_with("SKEIN_") || key == "RUST_LOG",
                 "env key filtered",
-                "ASUPERSYNC_* or RUST_LOG",
+                "SKEIN_* or RUST_LOG",
                 key
             );
         }
@@ -3820,11 +3820,11 @@ mod tests {
     #[test]
     fn test_harness_finish_auto_generates_manifest_on_failure() {
         init_test("test_harness_finish_auto_generates_manifest_on_failure");
-        let tmp = std::env::temp_dir().join("asupersync_harness_manifest_test");
+        let tmp = std::env::temp_dir().join("skein_harness_manifest_test");
         let _ = std::fs::remove_dir_all(&tmp);
 
         // SAFETY: tests serialize env access with test_utils::env_lock.
-        unsafe { std::env::set_var("ASUPERSYNC_TEST_ARTIFACTS_DIR", tmp.display().to_string()) };
+        unsafe { std::env::set_var("SKEIN_TEST_ARTIFACTS_DIR", tmp.display().to_string()) };
         let ctx = TestContext::new("auto_manifest", 0xCAFE).with_subsystem("time");
         let mut harness = TestHarness::with_context("auto_manifest", ctx);
 
@@ -3875,7 +3875,7 @@ mod tests {
         }
 
         // SAFETY: tests serialize env access with test_utils::env_lock.
-        unsafe { std::env::remove_var("ASUPERSYNC_TEST_ARTIFACTS_DIR") };
+        unsafe { std::env::remove_var("SKEIN_TEST_ARTIFACTS_DIR") };
         let _ = std::fs::remove_dir_all(&tmp);
         crate::test_complete!("test_harness_finish_auto_generates_manifest_on_failure");
     }
@@ -3897,7 +3897,7 @@ mod tests {
 
         let manifest = harness.repro_manifest(false);
 
-        let tmp = std::env::temp_dir().join("asupersync_replay_roundtrip");
+        let tmp = std::env::temp_dir().join("skein_replay_roundtrip");
         let path = manifest.write_to_dir(&tmp).expect("write manifest");
 
         let loaded = load_repro_manifest(&path).expect("load manifest");
@@ -4086,7 +4086,7 @@ mod tests {
         init_test("test_environment_metadata_write_artifact");
         let mut env = TestEnvironment::new(TestContext::new("artifact_write", 0xABCD));
         let _ = env.allocate_port("tcp").expect("allocate");
-        let tmp = std::env::temp_dir().join("asupersync_env_meta_test");
+        let tmp = std::env::temp_dir().join("skein_env_meta_test");
         let meta = env.metadata();
         let path = meta.write_to_dir(&tmp).expect("write metadata");
         let content = std::fs::read_to_string(&path).expect("read");
@@ -4138,7 +4138,7 @@ mod tests {
         let path = fixture.path().expect("path exists").to_owned();
         assert!(path.is_dir());
         assert!(
-            path.to_string_lossy().contains("asupersync-scratch-"),
+            path.to_string_lossy().contains("skein-scratch-"),
             "prefix should match: {path:?}"
         );
 
@@ -4204,7 +4204,7 @@ mod tests {
 
         assert_eq!(svc.name(), "redis");
         assert!(
-            svc.container_name().starts_with("asupersync-test-redis-"),
+            svc.container_name().starts_with("skein-test-redis-"),
             "container name format: {}",
             svc.container_name()
         );

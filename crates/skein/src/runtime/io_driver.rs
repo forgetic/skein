@@ -526,6 +526,16 @@ impl IoDriverHandle {
 ///
 /// Dropping this handle will automatically deregister the source and
 /// remove its waker from the driver.
+///
+/// # Drop-order invariant
+///
+/// Holders must drop this registration **before** the file descriptor it
+/// tracks is closed. The reactor keys its bookkeeping by raw fd number; if
+/// the fd is closed first, the kernel can reuse that number for a new socket
+/// while the stale entry is still present, making the new socket's
+/// `register()` fail with `AlreadyExists` ("fd already registered"). In
+/// structs that own both, declare the registration field before the
+/// fd-owning field — Rust drops fields in declaration order.
 #[derive(Debug)]
 pub struct IoRegistration {
     token: Token,

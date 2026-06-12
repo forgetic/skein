@@ -31,7 +31,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::lab::instrumented_future::{InstrumentedFuture, CancellationInjector};
+//! use skein::lab::instrumented_future::{InstrumentedFuture, CancellationInjector};
 //!
 //! // Create an injector that will cancel at await point 3
 //! let injector = CancellationInjector::inject_at(3);
@@ -589,7 +589,7 @@ fn escape_xml(s: &str) -> String {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::lab::instrumented_future::{InjectionRunner, InjectionStrategy};
+/// use skein::lab::instrumented_future::{InjectionRunner, InjectionStrategy};
 ///
 /// let runner = InjectionRunner::new(42); // seed for determinism
 /// let report = runner.run_with_injection(

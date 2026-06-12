@@ -5,7 +5,7 @@
 //!
 //! # Execution Tiers and Soundness Rules
 //!
-//! Asupersync defines two execution tiers with different constraints:
+//! Skein defines two execution tiers with different constraints:
 //!
 //! ## Fiber Tier (Phase 0)
 //!
@@ -68,7 +68,7 @@
 //!
 //! ```compile_fail
 //! use std::rc::Rc;
-//! use asupersync::cx::Scope;
+//! use skein::cx::Scope;
 //!
 //! fn try_capture_rc(scope: &Scope, state: &mut RuntimeState, cx: &Cx) {
 //!     let rc = Rc::new(42); // Rc is !Send
@@ -79,7 +79,7 @@
 //! ```
 //!
 //! ```compile_fail
-//! use asupersync::cx::Scope;
+//! use skein::cx::Scope;
 //!
 //! fn try_capture_borrow(scope: &Scope, state: &mut RuntimeState, cx: &Cx) {
 //!     let local = 42;
@@ -253,10 +253,10 @@ impl<P: Policy> Scope<'_, P> {
     /// # // This test demonstrates that Rc cannot be captured
     /// use std::rc::Rc;
     /// fn require_send<T: Send>(_: &T) {}
-    /// fn test_rc_rejected<'r, P: asupersync::types::Policy>(
-    ///     scope: &asupersync::cx::Scope<'r, P>,
-    ///     state: &mut asupersync::runtime::RuntimeState,
-    ///     cx: &asupersync::cx::Cx,
+    /// fn test_rc_rejected<'r, P: skein::types::Policy>(
+    ///     scope: &skein::cx::Scope<'r, P>,
+    ///     state: &mut skein::runtime::RuntimeState,
+    ///     cx: &skein::cx::Cx,
     /// ) {
     ///     let rc = Rc::new(42);
     ///     require_send(&rc);
@@ -271,10 +271,10 @@ impl<P: Policy> Scope<'_, P> {
     /// ```compile_fail,E0597
     /// # // This test demonstrates that borrowed data cannot be captured
     /// fn require_static<T: 'static>(_: T) {}
-    /// fn test_borrow_rejected<'r, P: asupersync::types::Policy>(
-    ///     scope: &asupersync::cx::Scope<'r, P>,
-    ///     state: &mut asupersync::runtime::RuntimeState,
-    ///     cx: &asupersync::cx::Cx,
+    /// fn test_borrow_rejected<'r, P: skein::types::Policy>(
+    ///     scope: &skein::cx::Scope<'r, P>,
+    ///     state: &mut skein::runtime::RuntimeState,
+    ///     cx: &skein::cx::Cx,
     /// ) {
     ///     let local = 42;
     ///     let borrow = &local;

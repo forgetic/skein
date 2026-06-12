@@ -5,7 +5,7 @@
 //!
 //! # Notes
 //!
-//! - This API is intentionally small: Asupersync currently exposes `SCM_RIGHTS` for FD passing.
+//! - This API is intentionally small: Skein currently exposes `SCM_RIGHTS` for FD passing.
 //! - When receiving, the ancillary buffer capacity determines how many control messages can be
 //!   captured. If it is too small, truncation is reported via [`SocketAncillary::is_truncated`].
 

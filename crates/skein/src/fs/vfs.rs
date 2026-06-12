@@ -159,7 +159,7 @@ pub trait Vfs: Send + Sync {
 // UnixVfs — real filesystem implementation
 // ---------------------------------------------------------------------------
 
-/// A [`Vfs`] backed by the real Unix filesystem via asupersync's async `fs` module.
+/// A [`Vfs`] backed by the real Unix filesystem via skein's async `fs` module.
 ///
 /// All operations delegate to [`crate::fs`] functions, which use
 /// `spawn_blocking_io` or `io_uring` (on Linux with the `io-uring` feature).

@@ -6,9 +6,9 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::lab::{LabConfig, SporkAppHarness};
-//! use asupersync::app::AppSpec;
-//! use asupersync::types::Budget;
+//! use skein::lab::{LabConfig, SporkAppHarness};
+//! use skein::app::AppSpec;
+//! use skein::types::Budget;
 //!
 //! let app = AppSpec::new("my_app")
 //!     .with_budget(Budget::new().with_poll_quota(50_000));
@@ -704,7 +704,7 @@ mod tests {
     // -----------------------------------------------------------------------
     // Conformance suite (bd-2yffk)
     //
-    // App-level scenarios validating OTP expectations + asupersync invariants:
+    // App-level scenarios validating OTP expectations + skein invariants:
     // - no orphan servers (task/actor leak oracles)
     // - restarts drain (quiescence, loser drain oracles)
     // - names released (registry lease oracle)

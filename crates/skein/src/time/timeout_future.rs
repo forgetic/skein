@@ -29,7 +29,7 @@ use std::time::Duration;
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::time::timeout;
+/// use skein::time::timeout;
 /// use std::time::Duration;
 ///
 /// async fn slow_operation() -> u32 {
@@ -62,8 +62,8 @@ impl<F> TimeoutFuture<F> {
     /// # Example
     ///
     /// ```
-    /// use asupersync::time::TimeoutFuture;
-    /// use asupersync::types::Time;
+    /// use skein::time::TimeoutFuture;
+    /// use skein::types::Time;
     /// use std::future::ready;
     ///
     /// let future = ready(42);
@@ -220,8 +220,8 @@ impl<F: Clone> Clone for TimeoutFuture<F> {
 /// # Example
 ///
 /// ```
-/// use asupersync::time::timeout;
-/// use asupersync::types::Time;
+/// use skein::time::timeout;
+/// use skein::types::Time;
 /// use std::time::Duration;
 /// use std::future::ready;
 ///
@@ -243,8 +243,8 @@ pub fn timeout<F>(now: Time, duration: Duration, future: F) -> TimeoutFuture<F> 
 /// # Example
 ///
 /// ```
-/// use asupersync::time::timeout_at;
-/// use asupersync::types::Time;
+/// use skein::time::timeout_at;
+/// use skein::types::Time;
 /// use std::future::ready;
 ///
 /// let future = timeout_at(Time::from_secs(10), ready(42));

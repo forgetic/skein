@@ -121,7 +121,7 @@ fn parse_accept_encoding(header: &str) -> Vec<QualityValue> {
 /// # Examples
 ///
 /// ```
-/// # use asupersync::http::compress::{ContentEncoding, negotiate_encoding};
+/// # use skein::http::compress::{ContentEncoding, negotiate_encoding};
 /// let supported = &[ContentEncoding::Gzip, ContentEncoding::Deflate, ContentEncoding::Identity];
 /// let best = negotiate_encoding("gzip;q=1.0, deflate;q=0.5", supported);
 /// assert_eq!(best, Some(ContentEncoding::Gzip));

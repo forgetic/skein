@@ -1,6 +1,6 @@
 //! Runtime builder, handles, and configuration.
 //!
-//! This module provides [`RuntimeBuilder`] for constructing an Asupersync runtime
+//! This module provides [`RuntimeBuilder`] for constructing an Skein runtime
 //! with customizable threading, scheduling, and deadline monitoring. The builder
 //! follows a move-based fluent pattern where each method consumes `self` and
 //! returns `Self`, enabling natural chaining.
@@ -8,13 +8,13 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use asupersync::runtime::RuntimeBuilder;
+//! use skein::runtime::RuntimeBuilder;
 //!
 //! // Minimal — uses all defaults (available parallelism, 128 poll budget, etc.)
 //! let runtime = RuntimeBuilder::new().build()?;
 //!
 //! runtime.block_on(async {
-//!     println!("Hello from asupersync!");
+//!     println!("Hello from skein!");
 //! });
 //! ```
 //!
@@ -64,7 +64,7 @@
 //! programmatic settings applied after the call:
 //!
 //! ```ignore
-//! // ASUPERSYNC_WORKER_THREADS=8 in environment
+//! // SKEIN_WORKER_THREADS=8 in environment
 //! let runtime = RuntimeBuilder::new()
 //!     .with_env_overrides()?     // reads env vars
 //!     .steal_batch_size(32)      // programmatic override (highest priority)
@@ -90,7 +90,7 @@
 //! When multiple sources set the same field, the highest-priority source wins:
 //!
 //! 1. **Programmatic** — `builder.worker_threads(4)` (highest)
-//! 2. **Environment** — `ASUPERSYNC_WORKER_THREADS=8`
+//! 2. **Environment** — `SKEIN_WORKER_THREADS=8`
 //! 3. **Config file** — `worker_threads = 16` in TOML
 //! 4. **Defaults** — `RuntimeConfig::default()` (lowest)
 //!
@@ -100,7 +100,7 @@
 //! |--------|---------|-------------|
 //! | [`worker_threads`](RuntimeBuilder::worker_threads) | available parallelism | Number of async worker threads |
 //! | [`thread_stack_size`](RuntimeBuilder::thread_stack_size) | 2 MiB | Stack size per worker |
-//! | [`thread_name_prefix`](RuntimeBuilder::thread_name_prefix) | `"asupersync-worker"` | Thread name prefix |
+//! | [`thread_name_prefix`](RuntimeBuilder::thread_name_prefix) | `"skein-worker"` | Thread name prefix |
 //! | [`global_queue_limit`](RuntimeBuilder::global_queue_limit) | 0 (unbounded) | Global queue depth |
 //! | [`steal_batch_size`](RuntimeBuilder::steal_batch_size) | 16 | Work-stealing batch size |
 //! | [`blocking_threads`](RuntimeBuilder::blocking_threads) | 0, 0 | Blocking pool min/max |
@@ -126,7 +126,7 @@
 //! Environment variable and config file errors are returned eagerly:
 //!
 //! ```ignore
-//! // Returns Err immediately if ASUPERSYNC_WORKER_THREADS contains "abc"
+//! // Returns Err immediately if SKEIN_WORKER_THREADS contains "abc"
 //! let builder = RuntimeBuilder::new().with_env_overrides()?;
 //! ```
 
@@ -180,7 +180,7 @@ fn install_handle_slot(slot: Arc<OnceLock<Weak<RuntimeInner>>>) -> HandleSlotGua
     HandleSlotGuard(prev)
 }
 
-/// Builder for constructing an Asupersync [`Runtime`] with custom configuration.
+/// Builder for constructing an Skein [`Runtime`] with custom configuration.
 ///
 /// Use the fluent API to set fields, then call [`build()`](Self::build) to
 /// produce a [`Runtime`]. Each setter takes `self` by value and returns `Self`,
@@ -189,7 +189,7 @@ fn install_handle_slot(slot: Arc<OnceLock<Weak<RuntimeInner>>>) -> HandleSlotGua
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::runtime::RuntimeBuilder;
+/// use skein::runtime::RuntimeBuilder;
 /// use std::time::Duration;
 ///
 /// let runtime = RuntimeBuilder::new()
@@ -370,11 +370,11 @@ impl RuntimeBuilder {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::runtime::RuntimeBuilder;
-    /// use asupersync::observability::OtelMetrics;
+    /// use skein::runtime::RuntimeBuilder;
+    /// use skein::observability::OtelMetrics;
     /// use opentelemetry::global;
     ///
-    /// let meter = global::meter("asupersync");
+    /// let meter = global::meter("skein");
     /// let metrics = OtelMetrics::new(meter);
     ///
     /// let runtime = RuntimeBuilder::new()
@@ -402,7 +402,7 @@ impl RuntimeBuilder {
     /// The provided closure can customize thresholds and warning handlers.
     ///
     /// ```ignore
-    /// use asupersync::runtime::RuntimeBuilder;
+    /// use skein::runtime::RuntimeBuilder;
     /// use std::time::Duration;
     ///
     /// let runtime = RuntimeBuilder::new()
@@ -411,7 +411,7 @@ impl RuntimeBuilder {
     ///             .warning_threshold_fraction(0.2)
     ///             .checkpoint_timeout(Duration::from_secs(30))
     ///             .on_warning(|w| {
-    ///                 asupersync::tracing_compat::warn!(?w, "deadline warning");
+    ///                 skein::tracing_compat::warn!(?w, "deadline warning");
     ///             })
     ///     })
     ///     .build();
@@ -460,7 +460,7 @@ impl RuntimeBuilder {
     /// # Errors
     ///
     /// Returns an error if an environment variable is set but contains an
-    /// unparseable value (e.g., `ASUPERSYNC_WORKER_THREADS=abc`).
+    /// unparseable value (e.g., `SKEIN_WORKER_THREADS=abc`).
     ///
     /// See [`env_config`](super::env_config) for the full list of supported variables.
     #[allow(clippy::result_large_err)]
@@ -740,7 +740,7 @@ impl Default for RuntimeBuilder {
     }
 }
 
-/// A configured Asupersync runtime.
+/// A configured Skein runtime.
 ///
 /// Created via [`RuntimeBuilder`]. The runtime owns worker threads and a
 /// three-lane priority scheduler. Clone is cheap (shared `Arc`).

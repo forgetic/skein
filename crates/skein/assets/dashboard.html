@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Asupersync Debug Dashboard</title>
+<title>Skein Debug Dashboard</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 16px; }
@@ -105,7 +105,7 @@
 </style>
 </head>
 <body>
-<h1>Asupersync Debug Dashboard <span id="mode-badge" class="mode-badge">detecting...</span></h1>
+<h1>Skein Debug Dashboard <span id="mode-badge" class="mode-badge">detecting...</span></h1>
 <div class="meta">
   <span id="refresh-info"></span> | <span id="last-update">loading...</span>
   <button class="export-btn" id="export-btn" title="Export current snapshot as JSON">Export JSON</button>
@@ -536,7 +536,7 @@ document.getElementById('export-btn').addEventListener('click', function() {
   var url = URL.createObjectURL(blob);
   var a = document.createElement('a');
   a.href = url;
-  a.download = 'asupersync-snapshot-' + prevSnap.timestamp + '.json';
+  a.download = 'skein-snapshot-' + prevSnap.timestamp + '.json';
   a.click();
   URL.revokeObjectURL(url);
 });

@@ -1871,7 +1871,7 @@ mod tests {
              loss_pattern={loss_pattern} outcome={outcome} \
              artifact_path=artifacts/raptorq_b2_tuple_scenarios_v1.json \
              fixture_ref=RQ-B2-TUPLE-V1 \
-             repro_cmd='rch exec -- cargo test -p asupersync --lib \
+             repro_cmd='rch exec -- cargo test -p skein --lib \
              repair_equation_rfc6330 -- --nocapture'"
         )
     }
@@ -2206,7 +2206,7 @@ mod tests {
             seed,
             &parameter_set,
             "decode_failure",
-            "rch exec -- cargo test -p asupersync --lib raptorq::decoder::tests::decode_insufficient_symbols_fails -- --nocapture",
+            "rch exec -- cargo test -p skein --lib raptorq::decoder::tests::decode_insufficient_symbols_fails -- --nocapture",
             None,
         );
         assert!(
@@ -2436,7 +2436,7 @@ mod tests {
             seed,
             &parameter_set,
             "ok",
-            "rch exec -- cargo test -p asupersync --lib raptorq::decoder::tests::decode_deterministic -- --nocapture",
+            "rch exec -- cargo test -p skein --lib raptorq::decoder::tests::decode_deterministic -- --nocapture",
             Some(to_unit_decode_stats(k, 0, &result1.stats)),
         );
         assert!(

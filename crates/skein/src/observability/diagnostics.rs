@@ -11,7 +11,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::observability::Diagnostics;
+//! use skein::observability::Diagnostics;
 //!
 //! let d = Diagnostics::new(state.clone());
 //! let e = d.explain_region_open(region_id);

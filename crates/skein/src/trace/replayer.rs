@@ -10,8 +10,8 @@
 //! # Usage
 //!
 //! ```ignore
-//! use asupersync::trace::replayer::{TraceReplayer, ReplayMode};
-//! use asupersync::trace::file::TraceReader;
+//! use skein::trace::replayer::{TraceReplayer, ReplayMode};
+//! use skein::trace::file::TraceReader;
 //!
 //! // Load a trace file
 //! let reader = TraceReader::open("trace.bin")?;

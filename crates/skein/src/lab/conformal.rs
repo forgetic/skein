@@ -669,7 +669,7 @@ impl MetricCalibration {
 /// # Example
 ///
 /// ```
-/// use asupersync::lab::conformal::{
+/// use skein::lab::conformal::{
 ///     HealthThresholdCalibrator, HealthThresholdConfig, ThresholdMode,
 /// };
 ///

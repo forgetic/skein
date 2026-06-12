@@ -4,7 +4,7 @@ This directory contains the canonical machine-readable artifacts for Lean proof 
 
 - `lean_coverage_matrix.schema.json` - JSON Schema (`schema_version = 1.0.0`)
 - `lean_coverage_matrix.sample.json` - deterministic sample matrix instance
-- `theorem_surface_inventory.json` - complete theorem declaration inventory from `Asupersync.lean`
+- `theorem_surface_inventory.json` - complete theorem declaration inventory from `Skein.lean`
 - `step_constructor_coverage.json` - constructor-by-constructor coverage status and theorem mappings
 - `theorem_rule_traceability_ledger.json` - theorem-to-rule traceability ledger for stale-link detection
 - `runtime_state_refinement_map.json` - explicit RuntimeState + scheduler/combinator operation map to Lean Step labels/theorem obligations
@@ -47,7 +47,7 @@ and Rust conformance tests:
 - `inv.obligation.no_leaks`: No obligation leaks
 - `inv.authority.no_ambient`: No ambient authority
 
-## Lemma Canonicalization and Layering Rules (Track-3 / asupersync-3qo95)
+## Lemma Canonicalization and Layering Rules (Track-3 / bead-3qo95)
 
 Theorem-family canonicalization is recorded in
 `theorem_surface_inventory.json` under `lemma_canonicalization`.
@@ -208,7 +208,7 @@ invariant:
 - explicit gaps with owner and dependency-bead blockers
 
 It also carries the cross-entity liveness composition contract
-`lean.track3.cross_entity_liveness.v1` (source bead `asupersync-24rak`), which
+`lean.track3.cross_entity_liveness.v1` (source bead `bead-24rak`), which
 binds cancel-ladder, race-loser-drain, and close-quiescence theorem segments to
 end-to-end conformance consumers and required harness artifacts.
 
@@ -286,29 +286,29 @@ optimization envelope map for Track-6 performance work. It defines:
 Validation is enforced in:
 - `tests/lean_proof_guided_performance_opportunity_map.rs`
 
-## Closed-Loop Impact Report (Track-6 / asupersync-3gf4i)
+## Closed-Loop Impact Report (Track-6 / bead-3gf4i)
 
 `proof_impact_closed_loop_report_v1.json` is the canonical machine-readable
 closed-loop report contract for Track-6 measurement work. It defines:
 - deterministic periodicity and reproducibility rules (`weekly` cadence, UTC windows,
   explicit `rch` command recording);
 - measurement framework contracts for:
-  - performance (`asupersync-228pu`)
-  - reliability (`asupersync-2ue65`)
-  - correctness (`asupersync-3o1ga`);
+  - performance (`bead-228pu`)
+  - reliability (`bead-2ue65`)
+  - correctness (`bead-3o1ga`);
 - required before/after/delta fields, confidence notes, and attribution metadata
   (`coverage_change_beads` + `source_field_path`);
 - explicit performance workload definitions and reproducible commands for
-  `asupersync-228pu` measurement cycles;
+  `bead-228pu` measurement cycles;
 - explicit reliability milestone snapshots and delta summaries for
-  `asupersync-2ue65` (diagnostic-time, incident-frequency, and severity-index trends);
+  `bead-2ue65` (diagnostic-time, incident-frequency, and severity-index trends);
 - reliability attribution method contract (`method_id`, required `rch` commands,
   assumptions) plus mandatory caveats for confidence scoping;
 - explicit correctness maturity snapshots and delta summaries for
-  `asupersync-3o1ga` (regression-rate, rework burden, and time-to-diagnosis trends);
+  `bead-3o1ga` (regression-rate, rework burden, and time-to-diagnosis trends);
 - reproducible correctness query contract (`repro_queries`) and governance-adjustment
   hooks for workflow/policy feedback;
-- playbook handoff contract feeding the final case-study bead (`asupersync-3gfir`),
+- playbook handoff contract feeding the final case-study bead (`bead-3gfir`),
   including:
   - repeatable workflow template (steps/checklists/failure modes/templates)
   - three canonical case studies (performance/reliability/correctness) with

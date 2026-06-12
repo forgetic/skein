@@ -1,7 +1,7 @@
 //! Remote task execution via named computations.
 //!
 //! This module provides the API for spawning tasks on remote nodes within
-//! Asupersync's distributed structured concurrency model. Key design principles:
+//! Skein's distributed structured concurrency model. Key design principles:
 //!
 //! - **No closure shipping**: Remote execution uses *named computations*, not closures.
 //!   The caller specifies a computation name (string) and serialized inputs.
@@ -112,7 +112,7 @@ impl fmt::Display for RemoteTaskId {
 /// # Example
 ///
 /// ```
-/// use asupersync::remote::ComputationName;
+/// use skein::remote::ComputationName;
 ///
 /// let name = ComputationName::new("encode_block");
 /// assert_eq!(name.as_str(), "encode_block");
@@ -252,7 +252,7 @@ pub trait RemoteRuntime: Send + Sync + fmt::Debug {
 /// # Example
 ///
 /// ```
-/// use asupersync::remote::RemoteCap;
+/// use skein::remote::RemoteCap;
 ///
 /// let cap = RemoteCap::new();
 /// assert_eq!(cap.default_lease().as_secs(), 30);
@@ -602,7 +602,7 @@ impl RemoteHandle {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::remote::{spawn_remote, NodeId, ComputationName, RemoteInput};
+/// use skein::remote::{spawn_remote, NodeId, ComputationName, RemoteInput};
 ///
 /// let handle = spawn_remote(
 ///     &cx,
@@ -737,7 +737,7 @@ impl std::error::Error for LeaseError {}
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::remote::{Lease, LeaseId};
+/// use skein::remote::{Lease, LeaseId};
 /// use std::time::Duration;
 ///
 /// let lease = Lease::new(obligation_id, region, task, Duration::from_secs(30), now);
@@ -1217,7 +1217,7 @@ pub struct CompensationResult {
 /// returns a value for the caller to use in subsequent steps.
 ///
 /// ```ignore
-/// use asupersync::remote::Saga;
+/// use skein::remote::Saga;
 ///
 /// let mut saga = Saga::new();
 ///

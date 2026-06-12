@@ -12,7 +12,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::sync::Semaphore;
+//! use skein::sync::Semaphore;
 //!
 //! // Create semaphore with 10 permits
 //! let sem = Semaphore::new(10);
@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Audit regression tests (asupersync-10x0x.50)
+    // Audit regression tests (bead-10x0x.50)
     // =========================================================================
 
     #[test]

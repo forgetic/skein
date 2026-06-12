@@ -21,10 +21,10 @@ use super::server::VirtualServer;
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::lab::http::TestHarness;
-/// use asupersync::lab::LabConfig;
-/// use asupersync::web::{Router, get};
-/// use asupersync::web::handler::FnHandler;
+/// use skein::lab::http::TestHarness;
+/// use skein::lab::LabConfig;
+/// use skein::web::{Router, get};
+/// use skein::web::handler::FnHandler;
 ///
 /// let router = Router::new()
 ///     .route("/health", get(FnHandler::new(|| "ok")));

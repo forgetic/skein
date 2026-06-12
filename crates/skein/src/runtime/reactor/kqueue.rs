@@ -44,7 +44,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::runtime::reactor::{KqueueReactor, Reactor, Interest, Events};
+//! use skein::runtime::reactor::{KqueueReactor, Reactor, Interest, Events};
 //! use std::net::TcpListener;
 //!
 //! let reactor = KqueueReactor::new()?;

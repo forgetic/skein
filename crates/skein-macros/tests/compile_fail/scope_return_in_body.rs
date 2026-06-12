@@ -1,6 +1,6 @@
-use asupersync_macros::scope;
+use skein_macros::scope;
 
-async fn example(cx: &asupersync::Cx) {
+async fn example(cx: &()) {
     // return is forbidden inside scope! body
     scope!(cx, { return 42; });
 }

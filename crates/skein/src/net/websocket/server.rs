@@ -5,7 +5,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::net::websocket::{WebSocketAcceptor, WebSocket, Message};
+//! use skein::net::websocket::{WebSocketAcceptor, WebSocket, Message};
 //!
 //! // Create acceptor with configuration
 //! let acceptor = WebSocketAcceptor::new()

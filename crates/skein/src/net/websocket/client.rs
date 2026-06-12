@@ -5,7 +5,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::net::websocket::WebSocket;
+//! use skein::net::websocket::WebSocket;
 //!
 //! let ws = WebSocket::connect(&cx, "ws://example.com/chat").await?;
 //!

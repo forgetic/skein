@@ -1,6 +1,6 @@
 //! Cancellation reason and kind types.
 //!
-//! Cancellation in Asupersync is a first-class protocol, not a silent drop.
+//! Cancellation in Skein is a first-class protocol, not a silent drop.
 //! This module defines the types that describe why and how cancellation occurred.
 //!
 //! # Cleanup Budget Policy
@@ -50,7 +50,7 @@
 //!   polls (e.g., flushing large buffers), increase the User/Timeout
 //!   quotas proportionally but keep Shutdown ≤ 100.
 //! - **Lab/Testing**: Use `Budget::MINIMAL` (100 polls) for fast
-//!   deterministic runs. Set `ASUPERSYNC_CLEANUP_BUDGET_OVERRIDE` env
+//!   deterministic runs. Set `SKEIN_CLEANUP_BUDGET_OVERRIDE` env
 //!   var to override all cleanup quotas for calibration experiments.
 //! - **Backpressure**: Priority elevation (200–255) ensures cancelled
 //!   tasks get scheduled promptly even under load, preventing
@@ -101,7 +101,7 @@ use core::fmt;
 /// # Example
 ///
 /// ```rust,ignore
-/// use asupersync::types::CancelAttributionConfig;
+/// use skein::types::CancelAttributionConfig;
 ///
 /// let config = CancelAttributionConfig::default();
 /// assert_eq!(config.max_chain_depth, 16);

@@ -57,7 +57,7 @@ impl<T> GracefulOutcome<T> {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::signal::{ShutdownController, with_graceful_shutdown, GracefulOutcome};
+/// use skein::signal::{ShutdownController, with_graceful_shutdown, GracefulOutcome};
 ///
 /// async fn long_running_task() -> i32 {
 ///     // ... do work ...

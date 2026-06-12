@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::grpc::interceptor::{InterceptorLayer, trace_interceptor, auth_bearer_interceptor};
+//! use skein::grpc::interceptor::{InterceptorLayer, trace_interceptor, auth_bearer_interceptor};
 //!
 //! // Create a layered interceptor chain
 //! let interceptor = InterceptorLayer::new()

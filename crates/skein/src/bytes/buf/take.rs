@@ -9,7 +9,7 @@ use super::Buf;
 /// # Examples
 ///
 /// ```
-/// use asupersync::bytes::Buf;
+/// use skein::bytes::Buf;
 ///
 /// let buf: &[u8] = &[1, 2, 3, 4, 5];
 /// let mut take = buf.take(3);

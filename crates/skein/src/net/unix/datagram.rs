@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::net::unix::UnixDatagram;
+//! use skein::net::unix::UnixDatagram;
 //!
 //! async fn example() -> std::io::Result<()> {
 //!     // Create a pair of connected datagrams
@@ -61,13 +61,15 @@ use std::task::{Context, Poll};
 /// the single reactor registration/waker slot.
 #[derive(Debug)]
 pub struct UnixDatagram {
+    /// Reactor registration for async I/O wakeup; declared before `inner`
+    /// so it drops first — the fd must be deregistered from the reactor
+    /// before `inner` closes it.
+    registration: Option<IoRegistration>,
     /// The underlying standard library datagram socket.
     inner: net::UnixDatagram,
     /// Path to the socket file (for cleanup on drop).
     /// None for abstract namespace sockets, unbound sockets, or from_std().
     path: Option<PathBuf>,
-    /// Reactor registration for async I/O wakeup.
-    registration: Option<IoRegistration>,
 }
 
 impl UnixDatagram {
@@ -1045,7 +1047,7 @@ mod tests {
     fn test_abstract_socket() {
         init_test("test_datagram_abstract_socket");
         futures_lite::future::block_on(async {
-            let server_name = b"asupersync_test_datagram_abstract";
+            let server_name = b"skein_test_datagram_abstract";
             let mut server = UnixDatagram::bind_abstract(server_name).expect("bind failed");
 
             let mut client = UnixDatagram::unbound().expect("unbound failed");

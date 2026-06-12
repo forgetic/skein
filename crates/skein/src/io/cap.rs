@@ -5,7 +5,7 @@
 //!
 //! # Design Rationale
 //!
-//! Asupersync uses explicit capability security - no ambient authority. I/O operations
+//! Skein uses explicit capability security - no ambient authority. I/O operations
 //! are only available when the runtime provides an `IoCap` implementation:
 //!
 //! - Production runtime provides a real I/O capability backed by the reactor
@@ -14,7 +14,7 @@
 //!
 //! # Two-Phase I/O Model
 //!
-//! I/O operations in Asupersync follow a two-phase commit model:
+//! I/O operations in Skein follow a two-phase commit model:
 //!
 //! 1. **Submit**: Create an I/O operation (returns a handle/obligation)
 //! 2. **Complete**: Wait for completion or cancel

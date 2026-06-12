@@ -23,8 +23,12 @@ use std::time::Duration;
 /// A TCP stream.
 #[derive(Debug)]
 pub struct TcpStream {
-    inner: Arc<net::TcpStream>,
+    /// Reactor registration; declared before `inner` so it drops first.
+    /// The fd must be deregistered from the reactor before `inner` closes
+    /// it: a stale reactor entry for a reused fd number makes the next
+    /// `register()` fail with `AlreadyExists` ("fd already registered").
     registration: Option<IoRegistration>,
+    inner: Arc<net::TcpStream>,
     shutdown_on_drop: bool,
 }
 
@@ -829,5 +833,190 @@ mod tests {
             registration.is_none(),
             "stale connect registration should be cleared when driver is gone"
         );
+    }
+
+    /// Reactor that records, at deregister time, whether the stream owning
+    /// the fd was still alive. Detects the close-before-deregister hazard: a
+    /// stale reactor entry for an already-closed fd makes registering a
+    /// reused fd number fail with `AlreadyExists` ("fd already registered").
+    struct DeregisterOrderReactor {
+        inner: LabReactor,
+        stream: parking_lot::Mutex<Option<std::sync::Weak<net::TcpStream>>>,
+        stream_alive_at_deregister: parking_lot::Mutex<Option<bool>>,
+    }
+
+    impl DeregisterOrderReactor {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: LabReactor::new(),
+                stream: parking_lot::Mutex::new(None),
+                stream_alive_at_deregister: parking_lot::Mutex::new(None),
+            })
+        }
+    }
+
+    impl Reactor for DeregisterOrderReactor {
+        fn register(
+            &self,
+            source: &dyn crate::runtime::reactor::Source,
+            token: Token,
+            interest: Interest,
+        ) -> io::Result<()> {
+            self.inner.register(source, token, interest)
+        }
+
+        fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
+            self.inner.modify(token, interest)
+        }
+
+        fn deregister(&self, token: Token) -> io::Result<()> {
+            if let Some(weak) = self.stream.lock().as_ref() {
+                *self.stream_alive_at_deregister.lock() = Some(weak.upgrade().is_some());
+            }
+            self.inner.deregister(token)
+        }
+
+        fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
+            self.inner.poll(events, timeout)
+        }
+
+        fn wake(&self) -> io::Result<()> {
+            self.inner.wake()
+        }
+
+        fn registration_count(&self) -> usize {
+            self.inner.registration_count()
+        }
+    }
+
+    #[test]
+    fn drop_deregisters_before_fd_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let client = net::TcpStream::connect(addr).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let reactor = DeregisterOrderReactor::new();
+        let driver = IoDriverHandle::new(reactor.clone());
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 0),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut stream = TcpStream::from_std(client).expect("wrap stream");
+        *reactor.stream.lock() = Some(Arc::downgrade(&stream.inner));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut buf = [0u8; 8];
+        let mut read_buf = ReadBuf::new(&mut buf);
+        let poll = Pin::new(&mut stream).poll_read(&mut cx, &mut read_buf);
+        assert!(matches!(poll, Poll::Pending));
+        assert!(stream.registration.is_some());
+
+        drop(stream);
+
+        assert_eq!(
+            *reactor.stream_alive_at_deregister.lock(),
+            Some(true),
+            "the stream (and its fd) must still be alive when the reactor \
+             deregisters it; closing the fd first leaves a stale entry that \
+             breaks fd-number reuse"
+        );
+    }
+
+    /// End-to-end regression test for the fd-reuse registration race: worker
+    /// threads in a tight loop creating and dropping connected `TcpStream`s
+    /// must never observe `AlreadyExists` ("fd already registered") from a
+    /// stale reactor entry left by a stream whose fd closed before its
+    /// registration was dropped.
+    #[test]
+    fn fd_reuse_never_fails_registration() {
+        use std::sync::atomic::AtomicBool;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let server_stop = stop.clone();
+        let server = std::thread::spawn(move || {
+            // Hold a small ring of accepted sockets so client-side fds churn
+            // while connections stay established long enough to register.
+            let mut held = std::collections::VecDeque::new();
+            while !server_stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((sock, _)) => {
+                        held.push_back(sock);
+                        if held.len() > 64 {
+                            held.pop_front();
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let runtime = crate::runtime::RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("build runtime");
+        let handle = runtime.handle();
+
+        const TASKS: usize = 4;
+        const ITERS: usize = 250;
+        let mut joins = Vec::new();
+        for _ in 0..TASKS {
+            joins.push(handle.spawn(async move {
+                for _ in 0..ITERS {
+                    match TcpStream::connect(addr).await {
+                        Ok(mut stream) => {
+                            // Poll a read once to force a READABLE
+                            // registration, then drop the stream.
+                            let mut buf = [0u8; 8];
+                            let mut read_buf = ReadBuf::new(&mut buf);
+                            let result = poll_fn(|cx| {
+                                match Pin::new(&mut stream).poll_read(cx, &mut read_buf) {
+                                    Poll::Ready(result) => Poll::Ready(Some(result)),
+                                    Poll::Pending => Poll::Ready(None),
+                                }
+                            })
+                            .await;
+                            if let Some(Err(err)) = result
+                                && err.kind() == io::ErrorKind::AlreadyExists
+                            {
+                                return Some(format!("read registration failed: {err}"));
+                            }
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                            return Some(format!("connect failed: {err}"));
+                        }
+                        Err(_) => {}
+                    }
+                }
+                None
+            }));
+        }
+
+        let failures = runtime.block_on(async {
+            let mut failures = Vec::new();
+            for join in joins {
+                if let Some(failure) = join.await {
+                    failures.push(failure);
+                }
+            }
+            failures
+        });
+        assert!(failures.is_empty(), "fd-reuse race: {failures:?}");
+
+        stop.store(true, Ordering::SeqCst);
+        // Unblock the accept loop.
+        let _ = net::TcpStream::connect(addr);
+        server.join().expect("server thread");
     }
 }

@@ -21,7 +21,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use asupersync::time::intrusive_wheel::{TimerWheel, TimerNode};
+//! use skein::time::intrusive_wheel::{TimerWheel, TimerNode};
 //! use std::time::Duration;
 //! use std::pin::Pin;
 //!

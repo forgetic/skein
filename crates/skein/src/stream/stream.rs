@@ -19,7 +19,7 @@ use std::task::{Context, Poll};
 /// # Examples
 ///
 /// ```ignore
-/// use asupersync::stream::{Stream, StreamExt};
+/// use skein::stream::{Stream, StreamExt};
 ///
 /// async fn process<S: Stream<Item = i32> + Unpin>(mut stream: S) {
 ///     while let Some(item) = stream.next().await {

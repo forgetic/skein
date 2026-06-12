@@ -6,7 +6,7 @@
 //!
 //! # Invariant
 //!
-//! From asupersync_v4_formal_semantics.md §5:
+//! From skein_v4_formal_semantics.md §5:
 //! ```text
 //! ∀r ∈ dom(R):
 //!   r = root ∨ (R[r].parent ∈ dom(R) ∧ r ∈ R[R[r].parent].subregions)

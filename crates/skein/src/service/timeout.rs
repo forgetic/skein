@@ -27,8 +27,8 @@ fn duration_to_nanos(duration: Duration) -> u64 {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::service::{ServiceBuilder, ServiceExt};
-/// use asupersync::service::timeout::TimeoutLayer;
+/// use skein::service::{ServiceBuilder, ServiceExt};
+/// use skein::service::timeout::TimeoutLayer;
 /// use std::time::Duration;
 ///
 /// let svc = ServiceBuilder::new()

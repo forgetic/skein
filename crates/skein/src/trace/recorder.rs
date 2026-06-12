@@ -8,8 +8,8 @@
 //! The recorder is designed to be opt-in and low-overhead:
 //!
 //! ```ignore
-//! use asupersync::trace::recorder::TraceRecorder;
-//! use asupersync::trace::replay::TraceMetadata;
+//! use skein::trace::recorder::TraceRecorder;
+//! use skein::trace::replay::TraceMetadata;
 //!
 //! // Create a recorder
 //! let mut recorder = TraceRecorder::new(TraceMetadata::new(42));

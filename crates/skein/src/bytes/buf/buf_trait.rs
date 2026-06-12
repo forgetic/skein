@@ -21,7 +21,7 @@ use super::{Chain, Take};
 /// # Examples
 ///
 /// ```
-/// use asupersync::bytes::Buf;
+/// use skein::bytes::Buf;
 ///
 /// let mut buf: &[u8] = &[0x12, 0x34, 0x56, 0x78];
 /// assert_eq!(buf.get_u16(), 0x1234);

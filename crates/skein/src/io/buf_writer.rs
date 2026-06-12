@@ -28,7 +28,7 @@ const DEFAULT_BUF_CAPACITY: usize = 8192;
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::io::BufWriter;
+/// use skein::io::BufWriter;
 ///
 /// let writer = Vec::new();
 /// let mut buf_writer = BufWriter::new(writer);

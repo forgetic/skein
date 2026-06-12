@@ -1,9 +1,9 @@
 # Formal Semantics Mechanization
 
-This folder hosts proof-assistant artifacts for the Asupersync small-step semantics.
+This folder hosts proof-assistant artifacts for the Skein small-step semantics.
 The source of truth for the rules is:
 
-- `asupersync_v4_formal_semantics.md`
+- `skein_v4_formal_semantics.md` (the upstream semantics document; not included in this repository)
 
 The Lean scaffold lives in `formal/lean/` and is intentionally minimal at first:
 - Core domains and state skeletons

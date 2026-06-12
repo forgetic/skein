@@ -20,7 +20,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::channel::watch;
+//! use skein::channel::watch;
 //!
 //! // Create a watch channel with initial value
 //! let (tx, mut rx) = watch::channel(Config::default());

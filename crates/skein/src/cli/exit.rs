@@ -1,4 +1,4 @@
-//! Semantic exit codes for Asupersync CLI tools.
+//! Semantic exit codes for Skein CLI tools.
 //!
 //! Exit codes follow common conventions and are in the valid range (0-125).
 //! Codes 126-255 are reserved by shells for special purposes.

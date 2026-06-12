@@ -36,7 +36,7 @@
 //! # Compile-time rejection of widening
 //!
 //! ```compile_fail
-//! use asupersync::cx::cap::{CapSet, SubsetOf};
+//! use skein::cx::cap::{CapSet, SubsetOf};
 //!
 //! // WebCaps (no spawn) cannot widen to GrpcCaps (has spawn):
 //! fn widen<Sub: SubsetOf<Super>, Super>() {}
@@ -46,7 +46,7 @@
 //! ```
 //!
 //! ```compile_fail
-//! use asupersync::cx::cap::{CapSet, None, SubsetOf};
+//! use skein::cx::cap::{CapSet, None, SubsetOf};
 //!
 //! // Cannot widen from None to any capability:
 //! fn widen<Sub: SubsetOf<Super>, Super>() {}
@@ -104,7 +104,7 @@ pub type None = CapSet<false, false, false, false, false>;
 /// Marker: spawn capability.
 ///
 /// ```compile_fail
-/// use asupersync::cx::HasSpawn;
+/// use skein::cx::HasSpawn;
 ///
 /// struct FakeCaps;
 /// impl HasSpawn for FakeCaps {}
@@ -166,7 +166,7 @@ impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool> Ha
 /// - **Antisymmetric**: `A: SubsetOf<B>` and `B: SubsetOf<A>` implies A = B
 ///
 /// ```compile_fail
-/// use asupersync::cx::SubsetOf;
+/// use skein::cx::SubsetOf;
 ///
 /// struct FakeCaps;
 /// impl SubsetOf<FakeCaps> for FakeCaps {}

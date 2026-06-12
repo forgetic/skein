@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::runtime::reactor::{Source, SourceWrapper};
+//! use skein::runtime::reactor::{Source, SourceWrapper};
 //! use std::net::TcpStream;
 //!
 //! // Any AsRawFd type automatically implements Source
@@ -101,7 +101,7 @@ mod platform {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::runtime::reactor::{SourceWrapper, SourceId};
+    /// use skein::runtime::reactor::{SourceWrapper, SourceId};
     /// use std::net::TcpListener;
     ///
     /// let listener = TcpListener::bind("127.0.0.1:0")?;

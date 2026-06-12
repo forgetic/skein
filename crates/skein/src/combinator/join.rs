@@ -278,8 +278,8 @@ pub type Join2Result<T1, T2, E> = (Outcome<(T1, T2), E>, Option<T1>, Option<T2>)
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::join::join2_outcomes;
-/// use asupersync::types::Outcome;
+/// use skein::combinator::join::join2_outcomes;
+/// use skein::types::Outcome;
 ///
 /// let o1: Outcome<i32, &str> = Outcome::Ok(1);
 /// let o2: Outcome<i32, &str> = Outcome::Ok(2);
@@ -435,8 +435,8 @@ pub fn join_all_outcomes<T, E: Clone>(
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::join::{make_join_all_result, JoinAllResult};
-/// use asupersync::types::Outcome;
+/// use skein::combinator::join::{make_join_all_result, JoinAllResult};
+/// use skein::types::Outcome;
 ///
 /// let outcomes: Vec<Outcome<i32, &str>> = vec![
 ///     Outcome::Ok(1),
@@ -461,8 +461,8 @@ pub fn make_join_all_result<T, E: Clone>(outcomes: Vec<Outcome<T, E>>) -> JoinAl
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::join::{make_join_all_result, join_all_to_result};
-/// use asupersync::types::Outcome;
+/// use skein::combinator::join::{make_join_all_result, join_all_to_result};
+/// use skein::types::Outcome;
 ///
 /// let outcomes: Vec<Outcome<i32, &str>> = vec![
 ///     Outcome::Ok(1),

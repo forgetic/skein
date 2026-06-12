@@ -5,7 +5,7 @@
 //!
 //! # Invariant
 //!
-//! From asupersync_v4_formal_semantics.md §5:
+//! From skein_v4_formal_semantics.md §5:
 //! ```text
 //! ∀r ∈ dom(R), ∀r' ∈ R[r].subregions:
 //!   deadline(R[r']) ≤ deadline(R[r])    // Tighter or equal

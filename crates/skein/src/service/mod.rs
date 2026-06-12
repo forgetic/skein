@@ -2,7 +2,7 @@
 //!
 //! This module provides the core service traits used for composable middleware
 //! pipelines. It mirrors the conceptual structure of Tower-style services while
-//! remaining runtime-agnostic and cancel-correct when used with Asupersync.
+//! remaining runtime-agnostic and cancel-correct when used with Skein.
 //!
 //! # Middleware Layers
 //!
@@ -34,9 +34,9 @@ pub use service::{
     AdapterConfig, CancellationMode, DefaultErrorAdapter, ErrorAdapter, TowerAdapterError,
 };
 #[cfg(feature = "tower")]
-pub use service::{AsupersyncAdapter, FixedCxProvider, TowerAdapter, TowerAdapterWithProvider};
+pub use service::{SkeinAdapter, FixedCxProvider, TowerAdapter, TowerAdapterWithProvider};
 pub use service::{
-    AsupersyncService, AsupersyncServiceExt, MapErr, MapResponse, Oneshot, Ready, Service,
+    SkeinService, SkeinServiceExt, MapErr, MapResponse, Oneshot, Ready, Service,
     ServiceExt,
 };
 pub use timeout::{Timeout, TimeoutError, TimeoutLayer};

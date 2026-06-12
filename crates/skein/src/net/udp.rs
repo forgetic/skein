@@ -22,8 +22,10 @@ use std::task::{Context, Poll};
 /// A UDP socket.
 #[derive(Debug)]
 pub struct UdpSocket {
-    inner: Arc<StdUdpSocket>,
+    /// Reactor registration; declared before `inner` so it drops first —
+    /// the fd must be deregistered from the reactor before `inner` closes it.
     registration: Option<IoRegistration>,
+    inner: Arc<StdUdpSocket>,
 }
 
 impl UdpSocket {

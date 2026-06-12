@@ -47,8 +47,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::security::{AuthKey, SecurityContext, AuthenticatedSymbol};
-//! use asupersync::types::Symbol;
+//! use skein::security::{AuthKey, SecurityContext, AuthenticatedSymbol};
+//! use skein::types::Symbol;
 //!
 //! // Create a security context with a derived key
 //! let key = AuthKey::from_seed(42);

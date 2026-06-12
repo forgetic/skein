@@ -1,4 +1,4 @@
-use asupersync_macros::conformance;
+use skein_macros::conformance;
 
 // conformance attribute requires both spec and requirement
 #[conformance(requirement = "test")]

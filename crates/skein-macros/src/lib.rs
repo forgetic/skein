@@ -1,6 +1,6 @@
-//! Proc macros for asupersync structured concurrency runtime.
+//! Proc macros for skein structured concurrency runtime.
 //!
-//! This crate provides procedural macros that simplify working with the asupersync
+//! This crate provides procedural macros that simplify working with the skein
 //! async runtime's structured concurrency primitives. The macros handle the boilerplate
 //! for creating scopes, spawning tasks, joining results, and racing computations.
 //!
@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync_macros::{scope, spawn, join, race};
+//! use skein_macros::{scope, spawn, join, race};
 //!
 //! async fn example(cx: &mut Cx) {
 //!     scope!(cx, {

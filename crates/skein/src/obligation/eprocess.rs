@@ -33,7 +33,7 @@
 //! # Usage
 //!
 //! ```
-//! use asupersync::obligation::eprocess::{LeakMonitor, MonitorConfig};
+//! use skein::obligation::eprocess::{LeakMonitor, MonitorConfig};
 //!
 //! let config = MonitorConfig {
 //!     alpha: 0.01,              // 1% false-positive rate

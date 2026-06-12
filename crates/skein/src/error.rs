@@ -1,4 +1,4 @@
-//! Error types and error handling strategy for Asupersync.
+//! Error types and error handling strategy for Skein.
 //!
 //! This module defines the core error types used throughout the runtime.
 //! Error handling follows these principles:
@@ -434,7 +434,7 @@ pub struct ErrorContext {
     pub symbol_id: Option<SymbolId>,
 }
 
-/// The main error type for Asupersync operations.
+/// The main error type for Skein operations.
 #[derive(Debug, Clone)]
 pub struct Error {
     kind: ErrorKind,
@@ -736,7 +736,7 @@ impl<T, E: Into<Error>> ResultExt<T> for core::result::Result<T, E> {
     }
 }
 
-/// A specialized Result type for Asupersync operations.
+/// A specialized Result type for Skein operations.
 #[allow(clippy::result_large_err)]
 pub type Result<T> = core::result::Result<T, Error>;
 

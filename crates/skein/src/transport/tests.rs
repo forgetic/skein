@@ -327,7 +327,7 @@ mod tests {
     }
 
     // ============================================================================
-    // Comprehensive Transport Layer Tests (bead: asupersync-6bp)
+    // Comprehensive Transport Layer Tests (bead: skein-6bp)
     // ============================================================================
 
     mod comprehensive_tests {

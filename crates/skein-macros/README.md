@@ -1,7 +1,6 @@
-# asupersync-macros
+# skein-macros
 
-`asupersync-macros` provides proc macros used by the
-[`asupersync`](https://github.com/Dicklesworthstone/asupersync) runtime.
+`skein-macros` provides proc macros used by the `skein` runtime.
 
 ## Purpose
 

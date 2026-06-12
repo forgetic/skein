@@ -177,8 +177,11 @@ struct SplitIoState {
 /// combined waker that dispatches to both, preventing lost wakeups when
 /// halves are polled from different tasks.
 pub(crate) struct UnixStreamInner {
-    stream: Arc<net::UnixStream>,
+    /// Per-direction wakers and shared reactor registration; declared before
+    /// `stream` so the registration drops first — the fd must be
+    /// deregistered from the reactor before `stream` closes it.
     state: Mutex<SplitIoState>,
+    stream: Arc<net::UnixStream>,
 }
 
 impl std::fmt::Debug for UnixStreamInner {

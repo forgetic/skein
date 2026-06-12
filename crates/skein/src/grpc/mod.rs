@@ -17,7 +17,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::grpc::{Channel, Request, Response, Status};
+//! use skein::grpc::{Channel, Request, Response, Status};
 //!
 //! // Connect to a server
 //! let channel = Channel::connect("http://localhost:50051").await?;

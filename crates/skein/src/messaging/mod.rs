@@ -1,7 +1,7 @@
 //! Messaging clients for external services (Redis, NATS, Kafka).
 //!
 //! This module provides cancel-correct clients for common messaging systems,
-//! all integrated with the Asupersync `Cx` context for proper cancellation handling.
+//! all integrated with the Skein `Cx` context for proper cancellation handling.
 
 pub mod jetstream;
 pub mod kafka;

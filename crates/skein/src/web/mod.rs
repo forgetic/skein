@@ -1,13 +1,13 @@
 //! Web application framework (axum-like).
 //!
-//! Built on top of Asupersync's HTTP and Service layers, this module provides
+//! Built on top of Skein's HTTP and Service layers, this module provides
 //! a high-level API for building web applications with type-safe routing,
 //! request extraction, and response conversion.
 //!
 //! # Quick Start
 //!
 //! ```ignore
-//! use asupersync::web::{Router, Json, State, get, post};
+//! use skein::web::{Router, Json, State, get, post};
 //!
 //! async fn list_users(State(db): State<Db>) -> Json<Vec<User>> {
 //!     Json(db.list_users().await)

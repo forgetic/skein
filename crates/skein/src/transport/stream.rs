@@ -501,7 +501,7 @@ impl SymbolStream for VecStream {
 // ---- Timeout ----
 
 // Implementation of TimeoutStream requires a timer facility.
-// Asupersync has `time::sleep`.
+// Skein has `time::sleep`.
 // But that returns a Future. `poll_next` is synchronous-ish (returns Poll).
 // To implement timeout in `poll_next`, we need to poll a Sleep future stored in the struct.
 
@@ -1191,7 +1191,7 @@ mod tests {
         crate::test_complete!("test_channel_stream_no_lost_wakeup_concurrent");
     }
 
-    // ── Audit regression tests (asupersync-10x0x.82) ─────────────────────
+    // ── Audit regression tests (bead-10x0x.82) ─────────────────────
 
     #[test]
     fn merged_stream_removal_adjusts_current_when_removing_before() {

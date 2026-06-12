@@ -1,7 +1,7 @@
 //! Kafka producer with Cx integration for cancel-correct message publishing.
 //!
 //! This module provides a Kafka producer with exactly-once semantics and
-//! transactional support, integrated with the Asupersync `Cx` context for
+//! transactional support, integrated with the Skein `Cx` context for
 //! proper cancellation handling.
 //!
 //! # Design

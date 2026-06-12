@@ -15,7 +15,7 @@ use super::{PlanDag, PlanId, PlanNode};
 /// # Example
 ///
 /// ```
-/// use asupersync::plan::{RewritePolicy, RewriteRule};
+/// use skein::plan::{RewritePolicy, RewriteRule};
 ///
 /// // Conservative: associativity + restricted distributivity + timeout simplification
 /// let conservative = RewritePolicy::conservative();

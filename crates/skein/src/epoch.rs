@@ -2292,7 +2292,7 @@ mod tests {
     }
 
     // ============================================================================
-    // Additional Epoch Tests (asupersync-ups)
+    // Additional Epoch Tests (skein-ups)
     // ============================================================================
 
     // Test 21: EpochId overflow handling (saturating at MAX)

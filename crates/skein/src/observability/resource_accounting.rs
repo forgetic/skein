@@ -20,9 +20,9 @@
 //! # Usage
 //!
 //! ```
-//! use asupersync::observability::resource_accounting::ResourceAccounting;
-//! use asupersync::record::ObligationKind;
-//! use asupersync::record::region::AdmissionKind;
+//! use skein::observability::resource_accounting::ResourceAccounting;
+//! use skein::record::ObligationKind;
+//! use skein::record::region::AdmissionKind;
 //!
 //! let accounting = ResourceAccounting::new();
 //!

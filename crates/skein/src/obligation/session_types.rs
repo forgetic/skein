@@ -7,7 +7,7 @@
 
 //! Session type encoding for obligation protocols (bd-3u5d3.1).
 //!
-//! Maps Asupersync's obligation protocols to binary session types, providing
+//! Maps Skein's obligation protocols to binary session types, providing
 //! compile-time guarantees that protocol participants follow the correct
 //! message exchange sequence. Each protocol is defined as a global type,
 //! projected to local types, and encoded as Rust typestate.

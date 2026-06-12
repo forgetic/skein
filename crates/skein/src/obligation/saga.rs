@@ -29,7 +29,7 @@
 //! The [`Lattice`] trait generalizes join-semilattice operations:
 //!
 //! ```
-//! use asupersync::obligation::saga::Lattice;
+//! use skein::obligation::saga::Lattice;
 //!
 //! // MaxU64 forms a join-semilattice with max as join
 //! #[derive(Clone, PartialEq, Eq, Debug)]

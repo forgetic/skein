@@ -16,7 +16,7 @@ use std::path::Path;
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::fs::OpenOptions;
+/// use skein::fs::OpenOptions;
 ///
 /// let file = OpenOptions::new()
 ///     .read(true)

@@ -12,7 +12,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::database::SqliteConnection;
+//! use skein::database::SqliteConnection;
 //!
 //! async fn example(cx: &Cx) -> Result<(), SqliteError> {
 //!     let conn = SqliteConnection::open_in_memory(cx).await?;

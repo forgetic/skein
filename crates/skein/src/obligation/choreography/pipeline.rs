@@ -5,7 +5,7 @@
 //! End-to-end saga pipeline: choreography → runnable participant code (bd-1f8jn.3).
 //!
 //! Bridges the choreographic projection compiler (bd-1f8jn.2) with the CALM-optimized
-//! saga executor (bd-2wrsc.2) to generate complete, runnable Asupersync participant
+//! saga executor (bd-2wrsc.2) to generate complete, runnable Skein participant
 //! code from a single global protocol specification.
 //!
 //! # Pipeline
@@ -34,7 +34,7 @@
 //! # Example
 //!
 //! ```
-//! use asupersync::obligation::choreography::{example_two_phase_commit, pipeline::SagaPipeline};
+//! use skein::obligation::choreography::{example_two_phase_commit, pipeline::SagaPipeline};
 //!
 //! let pipeline = SagaPipeline::new();
 //! let output = pipeline.generate(&example_two_phase_commit()).expect("pipeline failed");
@@ -569,15 +569,15 @@ fn render_saga_module_with_local(
     writeln!(code).ok();
 
     // Imports
-    writeln!(code, "use asupersync::cx::Cx;").ok();
-    writeln!(code, "use asupersync::obligation::session_types::{{").ok();
+    writeln!(code, "use skein::cx::Cx;").ok();
+    writeln!(code, "use skein::obligation::session_types::{{").ok();
     writeln!(
         code,
         "    Chan, End, Send, Recv, Select, Offer, Initiator, Responder,"
     )
     .ok();
     writeln!(code, "}};").ok();
-    writeln!(code, "use asupersync::obligation::saga::{{").ok();
+    writeln!(code, "use skein::obligation::saga::{{").ok();
     writeln!(
         code,
         "    SagaPlan, SagaStep, SagaOpKind, SagaExecutionPlan,"
@@ -585,8 +585,8 @@ fn render_saga_module_with_local(
     .ok();
     writeln!(code, "    MonotoneSagaExecutor,").ok();
     writeln!(code, "}};").ok();
-    writeln!(code, "use asupersync::obligation::calm::Monotonicity;").ok();
-    writeln!(code, "use asupersync::record::ObligationKind;").ok();
+    writeln!(code, "use skein::obligation::calm::Monotonicity;").ok();
+    writeln!(code, "use skein::record::ObligationKind;").ok();
     writeln!(code, "use franken_evidence::EvidenceLedgerBuilder;").ok();
     writeln!(code).ok();
 
@@ -722,9 +722,9 @@ fn render_lab_test(protocol: &str, participants: &BTreeMap<String, SagaParticipa
     // Imports
     writeln!(code, "#[cfg(test)]").ok();
     writeln!(code, "mod tests {{").ok();
-    writeln!(code, "    use asupersync::cx::Cx;").ok();
-    writeln!(code, "    use asupersync::obligation::session_types::*;").ok();
-    writeln!(code, "    use asupersync::obligation::saga::*;").ok();
+    writeln!(code, "    use skein::cx::Cx;").ok();
+    writeln!(code, "    use skein::obligation::session_types::*;").ok();
+    writeln!(code, "    use skein::obligation::saga::*;").ok();
     writeln!(code).ok();
 
     // Test function
@@ -732,7 +732,7 @@ fn render_lab_test(protocol: &str, participants: &BTreeMap<String, SagaParticipa
     writeln!(code, "    fn test_{protocol}_choreography() {{").ok();
     writeln!(
         code,
-        "        let lab = asupersync::LabRuntime::new(asupersync::LabConfig::default());"
+        "        let lab = skein::LabRuntime::new(skein::LabConfig::default());"
     )
     .ok();
     writeln!(
@@ -1298,7 +1298,7 @@ mod tests {
         assert!(
             output
                 .lab_test_code
-                .contains("LabRuntime::new(asupersync::LabConfig::default())")
+                .contains("LabRuntime::new(skein::LabConfig::default())")
         );
         assert!(!output.lab_test_code.contains("tokio::spawn"));
     }
@@ -1688,7 +1688,7 @@ mod tests {
                     protocol.name
                 );
                 assert!(
-                    p.source_code.contains("use asupersync::cx::Cx;"),
+                    p.source_code.contains("use skein::cx::Cx;"),
                     "{name} in {}: missing Cx import",
                     protocol.name
                 );
@@ -1719,7 +1719,7 @@ mod tests {
             assert!(
                 output
                     .lab_test_code
-                    .contains("LabRuntime::new(asupersync::LabConfig::default())"),
+                    .contains("LabRuntime::new(skein::LabConfig::default())"),
                 "{}: lab test missing LabRuntime scaffold",
                 protocol.name
             );

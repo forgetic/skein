@@ -15,7 +15,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::trace::integrity::{verify_trace, VerificationOptions};
+//! use skein::trace::integrity::{verify_trace, VerificationOptions};
 //!
 //! // Verify a trace file
 //! let result = verify_trace("trace.bin", &VerificationOptions::default())?;

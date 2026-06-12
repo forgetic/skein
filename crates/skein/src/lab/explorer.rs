@@ -498,8 +498,8 @@ impl ScheduleExplorer {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::lab::explorer::{ExplorerConfig, ScheduleExplorer};
-    /// use asupersync::types::Budget;
+    /// use skein::lab::explorer::{ExplorerConfig, ScheduleExplorer};
+    /// use skein::types::Budget;
     ///
     /// let mut explorer = ScheduleExplorer::new(ExplorerConfig::new(42, 50));
     /// let report = explorer.explore(|runtime| {

@@ -6,7 +6,7 @@
 //! Traditional (NOT cancel-safe):
 //!   tx.send(message).await?;  // If cancelled here, message may be lost!
 //!
-//! Asupersync (cancel-safe):
+//! Skein (cancel-safe):
 //!   let permit = tx.reserve(cx).await?;  // Phase 1: reserve slot
 //!   permit.send(message);                 // Phase 2: commit (cannot fail)
 //! ```

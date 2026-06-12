@@ -88,7 +88,7 @@ struct SignalState {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::server::ShutdownSignal;
+/// use skein::server::ShutdownSignal;
 /// use std::time::Duration;
 ///
 /// let signal = ShutdownSignal::new();

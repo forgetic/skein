@@ -20,8 +20,10 @@ use std::task::{Context, Poll};
 /// A TCP listener.
 #[derive(Debug)]
 pub struct TcpListener {
-    pub(crate) inner: net::TcpListener,
+    /// Reactor registration; declared before `inner` so it drops first —
+    /// the fd must be deregistered from the reactor before `inner` closes it.
     registration: Mutex<Option<IoRegistration>>,
+    pub(crate) inner: net::TcpListener,
 }
 
 impl TcpListener {

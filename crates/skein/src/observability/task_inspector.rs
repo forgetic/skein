@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::observability::{TaskInspector, TaskInspectorConfig};
+//! use skein::observability::{TaskInspector, TaskInspectorConfig};
 //! use std::time::Duration;
 //!
 //! let inspector = TaskInspector::new(state.clone(), console);

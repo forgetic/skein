@@ -1,7 +1,7 @@
 //! Symbol types for the RaptorQ-based distributed layer.
 //!
 //! This module provides the core symbol primitives used for erasure coding
-//! in Asupersync's distributed structured concurrency layer. RaptorQ (RFC 6330)
+//! in Skein's distributed structured concurrency layer. RaptorQ (RFC 6330)
 //! is a fountain code that enables reliable data transmission with loss tolerance.
 //!
 //! # Core Types

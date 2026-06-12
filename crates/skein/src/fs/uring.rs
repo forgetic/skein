@@ -89,7 +89,7 @@ impl std::fmt::Debug for IoUringFileInner {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::fs::uring::IoUringFile;
+/// use skein::fs::uring::IoUringFile;
 ///
 /// async fn example() -> std::io::Result<()> {
 ///     let mut file = IoUringFile::open("/tmp/test.txt").await?;

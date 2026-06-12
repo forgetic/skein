@@ -1,4 +1,4 @@
-//! SPORK: OTP-grade supervision, registry, and actor layer for Asupersync.
+//! SPORK: OTP-grade supervision, registry, and actor layer for Skein.
 //!
 //! This module provides a unified entry point for all Spork functionality.
 //! The module layout mirrors the OTP mental model:
@@ -15,7 +15,7 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use asupersync::spork::prelude::*;
+//! use skein::spork::prelude::*;
 //!
 //! // Build an application with a supervisor and children
 //! let app = AppSpec::new("my_app")
@@ -68,20 +68,20 @@
 //! 4. If needed, diff against a known-good trace.
 //!
 //! ```bash
-//! ASUPERSYNC_SEED=<seed> ASUPERSYNC_TEST_ARTIFACTS_DIR=target/test-artifacts \
+//! SKEIN_SEED=<seed> SKEIN_TEST_ARTIFACTS_DIR=target/test-artifacts \
 //!   cargo test <test_id> -- --nocapture
 //!
-//! cargo run --features cli --bin asupersync -- trace info target/test-artifacts/trace.async
-//! cargo run --features cli --bin asupersync -- trace verify --strict \
+//! cargo run --features cli --bin skein -- trace info target/test-artifacts/trace.async
+//! cargo run --features cli --bin skein -- trace verify --strict \
 //!   target/test-artifacts/trace.async
-//! cargo run --features cli --bin asupersync -- trace diff <trace_a> <trace_b>
+//! cargo run --features cli --bin skein -- trace diff <trace_a> <trace_b>
 //! ```
 //!
 //! # Minimal Compile-Time Example
 //!
 //! ```
-//! use asupersync::spork::error::{SporkError, SporkSeverity};
-//! use asupersync::spork::prelude::{CastError, RestartConfig, RestartPolicy, SupervisionStrategy};
+//! use skein::spork::error::{SporkError, SporkSeverity};
+//! use skein::spork::prelude::{CastError, RestartConfig, RestartPolicy, SupervisionStrategy};
 //!
 //! let strategy = SupervisionStrategy::Restart(RestartConfig::default());
 //! let policy = RestartPolicy::OneForOne;
@@ -95,7 +95,7 @@
 //! # Prelude
 //!
 //! The [`prelude`] re-exports the most commonly needed types so that a
-//! single `use asupersync::spork::prelude::*` is sufficient for typical
+//! single `use skein::spork::prelude::*` is sufficient for typical
 //! supervised application development.
 //!
 //! # Bead
@@ -188,7 +188,7 @@ pub mod crash {
 /// The SPORK prelude: import this for typical supervised application development.
 ///
 /// ```ignore
-/// use asupersync::spork::prelude::*;
+/// use skein::spork::prelude::*;
 /// ```
 ///
 /// This exports the minimal set of types needed to build, run, and debug
@@ -269,7 +269,7 @@ pub mod prelude {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::spork::prelude::*;
+/// use skein::spork::prelude::*;
 ///
 /// let result: Result<(), SporkError> = app.start(&mut cx).await.map_err(SporkError::from);
 /// match result {

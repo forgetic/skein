@@ -27,7 +27,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::server::{ConnectionManager, ShutdownSignal};
+//! use skein::server::{ConnectionManager, ShutdownSignal};
 //! use std::time::Duration;
 //! use std::net::SocketAddr;
 //!

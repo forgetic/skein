@@ -1,6 +1,6 @@
 //! Comprehensive observability and logging infrastructure.
 //!
-//! This module provides structured observability primitives for the Asupersync
+//! This module provides structured observability primitives for the Skein
 //! runtime and RaptorQ distributed layer. Unlike the low-level `trace` module
 //! (which is optimized for deterministic replay), this module provides:
 //!
@@ -20,7 +20,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::observability::{LogEntry, LogLevel, Metrics, ObservabilityConfig};
+//! use skein::observability::{LogEntry, LogLevel, Metrics, ObservabilityConfig};
 //!
 //! let config = ObservabilityConfig::default()
 //!     .with_log_level(LogLevel::Info)
@@ -83,7 +83,7 @@ pub use task_inspector::{
 /// # Example
 ///
 /// ```
-/// use asupersync::observability::{LogLevel, ObservabilityConfig};
+/// use skein::observability::{LogLevel, ObservabilityConfig};
 ///
 /// // Development config: verbose logging
 /// let dev_config = ObservabilityConfig::default()

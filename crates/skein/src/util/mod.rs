@@ -1,4 +1,4 @@
-//! Internal utilities for the Asupersync runtime.
+//! Internal utilities for the Skein runtime.
 //!
 //! These utilities are intentionally minimal and dependency-free to maintain
 //! determinism in the lab runtime.

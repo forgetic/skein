@@ -47,7 +47,7 @@
 //! # Usage Pattern
 //!
 //! ```ignore
-//! use asupersync::runtime::reactor::{Reactor, Interest, Events, Token};
+//! use skein::runtime::reactor::{Reactor, Interest, Events, Token};
 //!
 //! // 1. Register a source
 //! let token = Token::new(42);
@@ -167,7 +167,7 @@ impl Token {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::runtime::reactor::{Event, Interest, Token};
+/// use skein::runtime::reactor::{Event, Interest, Token};
 ///
 /// let event = Event::new(Token::new(1), Interest::READABLE | Interest::WRITABLE);
 /// assert!(event.is_readable());
@@ -256,7 +256,7 @@ impl Event {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::runtime::reactor::Events;
+/// use skein::runtime::reactor::Events;
 ///
 /// let mut events = Events::with_capacity(64);
 /// // ... poll ...
@@ -385,7 +385,7 @@ impl IntoIterator for Events {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::runtime::reactor::{Reactor, Interest, Events};
+/// use skein::runtime::reactor::{Reactor, Interest, Events};
 /// use std::time::Duration;
 ///
 /// fn poll_loop(reactor: &dyn Reactor) -> io::Result<()> {

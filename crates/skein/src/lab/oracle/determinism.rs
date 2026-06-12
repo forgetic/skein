@@ -7,8 +7,8 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use asupersync::lab::{LabConfig, LabRuntime};
-//! use asupersync::lab::oracle::determinism::DeterminismOracle;
+//! use skein::lab::{LabConfig, LabRuntime};
+//! use skein::lab::oracle::determinism::DeterminismOracle;
 //!
 //! let config = LabConfig::new(42);
 //!
@@ -376,8 +376,8 @@ impl DeterminismOracle {
 /// This is the easiest way to check if a program is deterministic:
 ///
 /// ```rust,ignore
-/// use asupersync::lab::oracle::determinism::assert_deterministic;
-/// use asupersync::lab::LabConfig;
+/// use skein::lab::oracle::determinism::assert_deterministic;
+/// use skein::lab::LabConfig;
 ///
 /// assert_deterministic(LabConfig::new(42), |runtime| {
 ///     // Your test scenario

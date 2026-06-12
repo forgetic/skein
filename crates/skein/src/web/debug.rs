@@ -17,8 +17,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::web::debug::{DebugServer, DebugServerConfig};
-//! use asupersync::runtime::RuntimeSnapshot;
+//! use skein::web::debug::{DebugServer, DebugServerConfig};
+//! use skein::runtime::RuntimeSnapshot;
 //! use std::sync::{Arc, Mutex};
 //!
 //! let state = Arc::new(Mutex::new(runtime_state));
@@ -146,7 +146,7 @@ impl DebugServer {
         let running = Arc::clone(&self.running);
 
         thread::Builder::new()
-            .name("asupersync-debug-server".to_string())
+            .name("skein-debug-server".to_string())
             .spawn(move || {
                 serve_loop(&listener, &snapshot_fn, &running);
             })?;
@@ -389,7 +389,7 @@ mod tests {
         }
 
         assert!(response.contains("200 OK"));
-        assert!(response.contains("Asupersync Debug Dashboard"));
+        assert!(response.contains("Skein Debug Dashboard"));
 
         server.stop();
     }
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn dashboard_html_content() {
-        assert!(DASHBOARD_HTML.contains("Asupersync Debug Dashboard"));
+        assert!(DASHBOARD_HTML.contains("Skein Debug Dashboard"));
         assert!(DASHBOARD_HTML.contains("/debug/snapshot"));
         assert!(DASHBOARD_HTML.contains("CONFIG"));
     }

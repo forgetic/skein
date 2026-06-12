@@ -12,7 +12,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::net::unix::{UnixListener, UnixStream, UnixDatagram};
+//! use skein::net::unix::{UnixListener, UnixStream, UnixDatagram};
 //!
 //! async fn server() -> std::io::Result<()> {
 //!     let listener = UnixListener::bind("/tmp/my_socket.sock").await?;

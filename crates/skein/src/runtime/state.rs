@@ -422,7 +422,7 @@ impl RuntimeState {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::runtime::{RuntimeState, EpollReactor};
+    /// use skein::runtime::{RuntimeState, EpollReactor};
     /// use std::sync::Arc;
     ///
     /// let reactor = Arc::new(EpollReactor::new()?);
@@ -6929,7 +6929,7 @@ mod tests {
         crate::test_complete!("mixed_obligation_resolution_during_cancel_cascade");
     }
 
-    // ── asupersync-sipro: Regression tests for audit findings ────────────
+    // ── bead-sipro: Regression tests for audit findings ────────────
 
     /// Test metrics that tracks region_closed calls.
     #[derive(Default)]

@@ -18,7 +18,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::runtime::reactor::Interest;
+//! use skein::runtime::reactor::Interest;
 //!
 //! let interest = Interest::READABLE | Interest::WRITABLE;
 //! assert!(interest.contains(Interest::READABLE));

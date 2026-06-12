@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::trace::streaming::{StreamingReplayer, ReplayProgress};
+//! use skein::trace::streaming::{StreamingReplayer, ReplayProgress};
 //! use std::path::Path;
 //!
 //! // Open a large trace file for streaming replay

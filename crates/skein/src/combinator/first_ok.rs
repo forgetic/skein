@@ -249,8 +249,8 @@ impl<T, E> FirstOkResult<T, E> {
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::first_ok::first_ok_outcomes;
-/// use asupersync::types::Outcome;
+/// use skein::combinator::first_ok::first_ok_outcomes;
+/// use skein::types::Outcome;
 ///
 /// // Second operation succeeds
 /// let outcomes: Vec<Outcome<i32, &str>> = vec![
@@ -306,8 +306,8 @@ pub fn first_ok_outcomes<T, E: Clone>(outcomes: Vec<Outcome<T, E>>) -> FirstOkRe
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::first_ok::{first_ok_outcomes, first_ok_to_result};
-/// use asupersync::types::Outcome;
+/// use skein::combinator::first_ok::{first_ok_outcomes, first_ok_to_result};
+/// use skein::types::Outcome;
 ///
 /// let outcomes: Vec<Outcome<i32, &str>> = vec![
 ///     Outcome::Err("first failed"),

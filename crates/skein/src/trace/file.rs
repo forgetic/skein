@@ -39,8 +39,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::trace::file::{TraceWriter, TraceReader, CompressionMode};
-//! use asupersync::trace::replay::{ReplayEvent, TraceMetadata};
+//! use skein::trace::file::{TraceWriter, TraceReader, CompressionMode};
+//! use skein::trace::replay::{ReplayEvent, TraceMetadata};
 //!
 //! // Writing a compressed trace
 //! let config = TraceFileConfig::default().with_compression(CompressionMode::Lz4 { level: 1 });

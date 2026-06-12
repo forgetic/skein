@@ -11,8 +11,8 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use asupersync::lab::scenario_runner::{ScenarioRunner, ScenarioRunResult};
-//! use asupersync::lab::scenario::Scenario;
+//! use skein::lab::scenario_runner::{ScenarioRunner, ScenarioRunResult};
+//! use skein::lab::scenario::Scenario;
 //!
 //! let yaml = std::fs::read_to_string("examples/scenarios/smoke_happy_path.yaml")?;
 //! let scenario: Scenario = serde_yaml::from_str(&yaml)?;

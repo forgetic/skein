@@ -26,7 +26,7 @@ struct ShutdownState {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::signal::ShutdownController;
+/// use skein::signal::ShutdownController;
 ///
 /// async fn run_server() {
 ///     let controller = ShutdownController::new();

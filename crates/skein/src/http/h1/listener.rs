@@ -71,9 +71,9 @@ impl Http1ListenerConfig {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
-/// use asupersync::http::h1::types::Response;
-/// use asupersync::runtime::RuntimeBuilder;
+/// use skein::http::h1::listener::{Http1Listener, Http1ListenerConfig};
+/// use skein::http::h1::types::Response;
+/// use skein::runtime::RuntimeBuilder;
 ///
 /// let runtime = RuntimeBuilder::current_thread().build()?;
 /// let handle = runtime.handle();

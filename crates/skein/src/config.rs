@@ -74,14 +74,14 @@ impl RaptorQConfig {
 
 /// Unified server configuration combining runtime, HTTP, and protocol settings.
 ///
-/// Provides a single entry point for configuring an asupersync server with
+/// Provides a single entry point for configuring an skein server with
 /// validation and sensible defaults. Supports profiles for common deployment
 /// scenarios and lab overrides for deterministic testing.
 ///
 /// # Example
 ///
 /// ```
-/// # use asupersync::config::{ServerConfig, ServerProfile};
+/// # use skein::config::{ServerConfig, ServerProfile};
 /// let config = ServerConfig::from_profile(ServerProfile::Development);
 /// assert!(config.validate().is_ok());
 /// ```

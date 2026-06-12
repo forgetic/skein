@@ -6,7 +6,7 @@
 
 //! Choreographic programming for saga protocol generation (bd-1f8jn.1).
 //!
-//! Defines a choreography DSL for specifying Asupersync saga protocols as
+//! Defines a choreography DSL for specifying Skein saga protocols as
 //! global interaction descriptions. A choreography is a single source of
 //! truth describing the interactions between multiple participants. The
 //! projection compiler (bd-1f8jn.2) will later generate per-participant
@@ -19,7 +19,7 @@
 //! writing each participant's code and hoping they match, you write a single
 //! global protocol and *project* it to per-participant local types.
 //!
-//! # DSL Grammar (Asupersync Choreography Language)
+//! # DSL Grammar (Skein Choreography Language)
 //!
 //! ```text
 //! protocol     ::= 'protocol' IDENT '{' participant+ interaction '}'
@@ -38,7 +38,7 @@
 //! # Example
 //!
 //! ```
-//! use asupersync::obligation::choreography::*;
+//! use skein::obligation::choreography::*;
 //!
 //! let protocol = GlobalProtocol::builder("two_phase_commit")
 //!     .participant("coordinator", "saga-coordinator")
@@ -190,7 +190,7 @@ pub enum Interaction {
     ///
     /// The forward interaction runs first. If a failure occurs, the
     /// compensating interaction runs to undo the effects. This integrates
-    /// with Asupersync's saga rollback mechanism.
+    /// with Skein's saga rollback mechanism.
     Compensate {
         /// The forward (happy-path) interaction.
         forward: Box<Self>,

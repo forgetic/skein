@@ -2531,7 +2531,7 @@ mod tests {
         assert!(!sched.scheduled.overflow.contains(&g0));
     }
 
-    // ── Audit regression tests (asupersync-10x0x.78) ─────────────────────
+    // ── Audit regression tests (bead-10x0x.78) ─────────────────────
 
     #[test]
     fn schedule_timed_does_not_move_existing_ready_task() {

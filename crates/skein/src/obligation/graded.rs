@@ -44,8 +44,8 @@
 //! # Example
 //!
 //! ```
-//! use asupersync::obligation::graded::{GradedObligation, Resolution};
-//! use asupersync::record::ObligationKind;
+//! use skein::obligation::graded::{GradedObligation, Resolution};
+//! use skein::record::ObligationKind;
 //!
 //! // Correct usage: obligation is resolved before scope exit.
 //! let ob = GradedObligation::reserve(ObligationKind::SendPermit, "test permit");

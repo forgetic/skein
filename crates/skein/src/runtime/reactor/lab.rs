@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::runtime::reactor::{LabReactor, Interest, Event, Token};
+//! use skein::runtime::reactor::{LabReactor, Interest, Event, Token};
 //! use std::time::Duration;
 //!
 //! let reactor = LabReactor::new();
@@ -91,7 +91,7 @@ impl Ord for TimedEvent {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::runtime::reactor::{LabReactor, FaultConfig, Token, Interest};
+/// use skein::runtime::reactor::{LabReactor, FaultConfig, Token, Interest};
 /// use std::io;
 ///
 /// let reactor = LabReactor::new();
@@ -422,7 +422,7 @@ impl LabReactor {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::runtime::reactor::{LabReactor, FaultConfig, Token};
+    /// use skein::runtime::reactor::{LabReactor, FaultConfig, Token};
     /// use std::io;
     ///
     /// let reactor = LabReactor::new();
@@ -487,7 +487,7 @@ impl LabReactor {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::runtime::reactor::{LabReactor, Token};
+    /// use skein::runtime::reactor::{LabReactor, Token};
     /// use std::io;
     ///
     /// let reactor = LabReactor::new();
@@ -533,7 +533,7 @@ impl LabReactor {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::runtime::reactor::{LabReactor, Token};
+    /// use skein::runtime::reactor::{LabReactor, Token};
     ///
     /// let reactor = LabReactor::new();
     /// let token = Token::new(1);
@@ -607,7 +607,7 @@ impl LabReactor {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::runtime::reactor::{LabReactor, Token, Interest, Event};
+    /// use skein::runtime::reactor::{LabReactor, Token, Interest, Event};
     /// use std::time::Duration;
     ///
     /// let reactor = LabReactor::new();

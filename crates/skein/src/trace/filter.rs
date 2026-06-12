@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::trace::filter::{TraceFilter, EventCategory};
+//! use skein::trace::filter::{TraceFilter, EventCategory};
 //!
 //! // Create a filter for scheduling and time events only
 //! let filter = TraceFilter::default()

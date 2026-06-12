@@ -11,7 +11,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::lab::VirtualTimerWheel;
+//! use skein::lab::VirtualTimerWheel;
 //! use std::task::Waker;
 //!
 //! let mut wheel = VirtualTimerWheel::new();

@@ -163,7 +163,7 @@ pub const COMMON_ARGS_HELP: &str = r"Common Options:
   --config <PATH>          Configuration file path
 
 Environment Variables:
-  ASUPERSYNC_OUTPUT_FORMAT  Default output format
+  SKEIN_OUTPUT_FORMAT  Default output format
   NO_COLOR                  Disable colors (https://no-color.org/)
   CLICOLOR_FORCE            Force colors even when not a TTY
   CI                        Automatically use JSON output in CI environments
@@ -368,7 +368,7 @@ mod tests {
         crate::assert_with_log!(has_verbose, "contains --verbose", true, has_verbose);
         let has_no_color = COMMON_ARGS_HELP.contains("NO_COLOR");
         crate::assert_with_log!(has_no_color, "contains NO_COLOR", true, has_no_color);
-        let has_env = COMMON_ARGS_HELP.contains("ASUPERSYNC_OUTPUT_FORMAT");
+        let has_env = COMMON_ARGS_HELP.contains("SKEIN_OUTPUT_FORMAT");
         crate::assert_with_log!(has_env, "contains env var", true, has_env);
         crate::test_complete!("common_args_help_contains_essentials");
     }

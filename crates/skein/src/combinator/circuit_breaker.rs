@@ -14,8 +14,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::combinator::circuit_breaker::*;
-//! use asupersync::types::Time;
+//! use skein::combinator::circuit_breaker::*;
+//! use skein::types::Time;
 //! use std::time::Duration;
 //!
 //! let policy = CircuitBreakerPolicy {

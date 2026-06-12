@@ -21,7 +21,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::time::{sleep, timeout, interval};
+//! use skein::time::{sleep, timeout, interval};
 //! use std::time::Duration;
 //!
 //! // Sleep for 100 milliseconds

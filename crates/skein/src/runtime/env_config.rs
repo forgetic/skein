@@ -5,7 +5,7 @@
 //! Settings are resolved in this order (highest priority first):
 //!
 //! 1. **Programmatic** — values set via builder methods (`worker_threads(4)`)
-//! 2. **Environment variables** — values from `ASUPERSYNC_*` env vars
+//! 2. **Environment variables** — values from `SKEIN_*` env vars
 //! 3. **Config file** — values loaded from a TOML file (requires `config-file` feature)
 //! 4. **Defaults** — built-in defaults from [`RuntimeConfig::default()`]
 //!
@@ -13,46 +13,46 @@
 //!
 //! | Variable | Type | Maps to |
 //! |----------|------|---------|
-//! | `ASUPERSYNC_WORKER_THREADS` | `usize` | `worker_threads` |
-//! | `ASUPERSYNC_TASK_QUEUE_DEPTH` | `usize` | `global_queue_limit` |
-//! | `ASUPERSYNC_THREAD_STACK_SIZE` | `usize` | `thread_stack_size` |
-//! | `ASUPERSYNC_THREAD_NAME_PREFIX` | `String` | `thread_name_prefix` |
-//! | `ASUPERSYNC_STEAL_BATCH_SIZE` | `usize` | `steal_batch_size` |
-//! | `ASUPERSYNC_BLOCKING_MIN_THREADS` | `usize` | `blocking.min_threads` |
-//! | `ASUPERSYNC_BLOCKING_MAX_THREADS` | `usize` | `blocking.max_threads` |
-//! | `ASUPERSYNC_ENABLE_PARKING` | `bool` | `enable_parking` |
-//! | `ASUPERSYNC_POLL_BUDGET` | `u32` | `poll_budget` |
-//! | `ASUPERSYNC_CANCEL_LANE_MAX_STREAK` | `usize` | `cancel_lane_max_streak` |
-//! | `ASUPERSYNC_ENABLE_GOVERNOR` | `bool` | `enable_governor` |
-//! | `ASUPERSYNC_GOVERNOR_INTERVAL` | `u32` | `governor_interval` |
+//! | `SKEIN_WORKER_THREADS` | `usize` | `worker_threads` |
+//! | `SKEIN_TASK_QUEUE_DEPTH` | `usize` | `global_queue_limit` |
+//! | `SKEIN_THREAD_STACK_SIZE` | `usize` | `thread_stack_size` |
+//! | `SKEIN_THREAD_NAME_PREFIX` | `String` | `thread_name_prefix` |
+//! | `SKEIN_STEAL_BATCH_SIZE` | `usize` | `steal_batch_size` |
+//! | `SKEIN_BLOCKING_MIN_THREADS` | `usize` | `blocking.min_threads` |
+//! | `SKEIN_BLOCKING_MAX_THREADS` | `usize` | `blocking.max_threads` |
+//! | `SKEIN_ENABLE_PARKING` | `bool` | `enable_parking` |
+//! | `SKEIN_POLL_BUDGET` | `u32` | `poll_budget` |
+//! | `SKEIN_CANCEL_LANE_MAX_STREAK` | `usize` | `cancel_lane_max_streak` |
+//! | `SKEIN_ENABLE_GOVERNOR` | `bool` | `enable_governor` |
+//! | `SKEIN_GOVERNOR_INTERVAL` | `u32` | `governor_interval` |
 
 use crate::runtime::config::RuntimeConfig;
 use crate::types::builder::BuildError;
 
 /// Environment variable name for worker thread count.
-pub const ENV_WORKER_THREADS: &str = "ASUPERSYNC_WORKER_THREADS";
+pub const ENV_WORKER_THREADS: &str = "SKEIN_WORKER_THREADS";
 /// Environment variable name for task queue depth (global queue limit).
-pub const ENV_TASK_QUEUE_DEPTH: &str = "ASUPERSYNC_TASK_QUEUE_DEPTH";
+pub const ENV_TASK_QUEUE_DEPTH: &str = "SKEIN_TASK_QUEUE_DEPTH";
 /// Environment variable name for thread stack size.
-pub const ENV_THREAD_STACK_SIZE: &str = "ASUPERSYNC_THREAD_STACK_SIZE";
+pub const ENV_THREAD_STACK_SIZE: &str = "SKEIN_THREAD_STACK_SIZE";
 /// Environment variable name for thread name prefix.
-pub const ENV_THREAD_NAME_PREFIX: &str = "ASUPERSYNC_THREAD_NAME_PREFIX";
+pub const ENV_THREAD_NAME_PREFIX: &str = "SKEIN_THREAD_NAME_PREFIX";
 /// Environment variable name for work-stealing batch size.
-pub const ENV_STEAL_BATCH_SIZE: &str = "ASUPERSYNC_STEAL_BATCH_SIZE";
+pub const ENV_STEAL_BATCH_SIZE: &str = "SKEIN_STEAL_BATCH_SIZE";
 /// Environment variable name for blocking pool minimum threads.
-pub const ENV_BLOCKING_MIN_THREADS: &str = "ASUPERSYNC_BLOCKING_MIN_THREADS";
+pub const ENV_BLOCKING_MIN_THREADS: &str = "SKEIN_BLOCKING_MIN_THREADS";
 /// Environment variable name for blocking pool maximum threads.
-pub const ENV_BLOCKING_MAX_THREADS: &str = "ASUPERSYNC_BLOCKING_MAX_THREADS";
+pub const ENV_BLOCKING_MAX_THREADS: &str = "SKEIN_BLOCKING_MAX_THREADS";
 /// Environment variable name for idle-worker parking toggle.
-pub const ENV_ENABLE_PARKING: &str = "ASUPERSYNC_ENABLE_PARKING";
+pub const ENV_ENABLE_PARKING: &str = "SKEIN_ENABLE_PARKING";
 /// Environment variable name for cooperative poll budget.
-pub const ENV_POLL_BUDGET: &str = "ASUPERSYNC_POLL_BUDGET";
+pub const ENV_POLL_BUDGET: &str = "SKEIN_POLL_BUDGET";
 /// Environment variable name for max consecutive cancel dispatches.
-pub const ENV_CANCEL_LANE_MAX_STREAK: &str = "ASUPERSYNC_CANCEL_LANE_MAX_STREAK";
+pub const ENV_CANCEL_LANE_MAX_STREAK: &str = "SKEIN_CANCEL_LANE_MAX_STREAK";
 /// Environment variable name for enabling the Lyapunov governor.
-pub const ENV_ENABLE_GOVERNOR: &str = "ASUPERSYNC_ENABLE_GOVERNOR";
+pub const ENV_ENABLE_GOVERNOR: &str = "SKEIN_ENABLE_GOVERNOR";
 /// Environment variable name for governor snapshot interval (scheduling steps).
-pub const ENV_GOVERNOR_INTERVAL: &str = "ASUPERSYNC_GOVERNOR_INTERVAL";
+pub const ENV_GOVERNOR_INTERVAL: &str = "SKEIN_GOVERNOR_INTERVAL";
 
 /// Apply environment variable overrides to a [`RuntimeConfig`].
 ///

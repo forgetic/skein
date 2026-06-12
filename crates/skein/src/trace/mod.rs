@@ -10,7 +10,7 @@
 //! # Quick Start: Trace Normalization
 //!
 //! ```ignore
-//! use asupersync::trace::{normalize_trace_default, trace_switch_cost};
+//! use skein::trace::{normalize_trace_default, trace_switch_cost};
 //!
 //! // Record a trace...
 //! let events: Vec<TraceEvent> = /* captured trace */;
@@ -175,7 +175,7 @@ pub use tla_export::{TlaExporter, TlaModule, TlaStateSnapshot};
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::trace::{normalize_trace, GeodesicConfig};
+/// use skein::trace::{normalize_trace, GeodesicConfig};
 ///
 /// let (normalized, result) = normalize_trace(&events, &GeodesicConfig::default());
 /// println!("Switch count: {} (using {:?})", result.switch_count, result.algorithm);

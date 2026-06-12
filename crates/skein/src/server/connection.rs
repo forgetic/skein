@@ -52,7 +52,7 @@ pub struct ConnectionInfo {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::server::{ConnectionManager, ShutdownSignal};
+/// use skein::server::{ConnectionManager, ShutdownSignal};
 /// use std::net::SocketAddr;
 ///
 /// let signal = ShutdownSignal::new();

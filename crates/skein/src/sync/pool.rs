@@ -1,7 +1,7 @@
 //! Cancel-safe resource pooling with obligation-based return semantics.
 //!
 //! This module provides a generic resource pooling framework that integrates with
-//! asupersync's cancel-safety guarantees. Resources are managed through an
+//! skein's cancel-safety guarantees. Resources are managed through an
 //! obligation-based contract: when a [`PooledResource`] is dropped (or explicitly
 //! returned), the underlying resource is automatically sent back to the pool.
 //!
@@ -12,7 +12,7 @@
 //! The easiest way to create a pool is with [`GenericPool`] and a factory function:
 //!
 //! ```ignore
-//! use asupersync::sync::{GenericPool, Pool, PoolConfig};
+//! use skein::sync::{GenericPool, Pool, PoolConfig};
 //!
 //! // Create a factory that produces resources
 //! let factory = || Box::pin(async {
@@ -35,8 +35,8 @@
 //! For custom pool implementations, implement the [`Pool`] trait:
 //!
 //! ```ignore
-//! use asupersync::sync::{Pool, PooledResource, PoolStats, PoolFuture, PoolReturnSender};
-//! use asupersync::Cx;
+//! use skein::sync::{Pool, PooledResource, PoolStats, PoolFuture, PoolReturnSender};
+//! use skein::Cx;
 //! use std::sync::mpsc;
 //!
 //! struct MyPool {
@@ -287,7 +287,7 @@ pub trait Pool: Send + Sync {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::sync::AsyncResourceFactory;
+/// use skein::sync::AsyncResourceFactory;
 ///
 /// struct PgFactory { url: String }
 ///
@@ -1024,7 +1024,7 @@ where
     ///
     /// ```ignore
     /// use opentelemetry::global;
-    /// use asupersync::sync::{GenericPool, PoolConfig, PoolMetrics};
+    /// use skein::sync::{GenericPool, PoolConfig, PoolMetrics};
     ///
     /// let meter = global::meter("myapp");
     /// let metrics = PoolMetrics::new(&meter);
@@ -1650,7 +1650,7 @@ mod pool_metrics {
     ///
     /// ```ignore
     /// use opentelemetry::global;
-    /// use asupersync::sync::{GenericPool, PoolConfig, PoolMetrics};
+    /// use skein::sync::{GenericPool, PoolConfig, PoolMetrics};
     ///
     /// let meter = global::meter("myapp");
     /// let metrics = PoolMetrics::new(&meter);
@@ -1697,7 +1697,7 @@ mod pool_metrics {
             let state = Arc::new(PoolMetricsState::new());
 
             let size = meter
-                .u64_observable_gauge("asupersync.pool.size")
+                .u64_observable_gauge("skein.pool.size")
                 .with_description("Current pool size (active + idle)")
                 .with_callback({
                     let state = Arc::clone(&state);
@@ -1708,7 +1708,7 @@ mod pool_metrics {
                 .build();
 
             let active = meter
-                .u64_observable_gauge("asupersync.pool.active")
+                .u64_observable_gauge("skein.pool.active")
                 .with_description("Currently checked-out resources")
                 .with_callback({
                     let state = Arc::clone(&state);
@@ -1719,7 +1719,7 @@ mod pool_metrics {
                 .build();
 
             let idle = meter
-                .u64_observable_gauge("asupersync.pool.idle")
+                .u64_observable_gauge("skein.pool.idle")
                 .with_description("Available idle resources")
                 .with_callback({
                     let state = Arc::clone(&state);
@@ -1730,7 +1730,7 @@ mod pool_metrics {
                 .build();
 
             let pending = meter
-                .u64_observable_gauge("asupersync.pool.pending")
+                .u64_observable_gauge("skein.pool.pending")
                 .with_description("Waiters in queue")
                 .with_callback({
                     let state = Arc::clone(&state);
@@ -1741,42 +1741,42 @@ mod pool_metrics {
                 .build();
 
             let acquired_total = meter
-                .u64_counter("asupersync.pool.acquired_total")
+                .u64_counter("skein.pool.acquired_total")
                 .with_description("Total successful acquires")
                 .build();
 
             let released_total = meter
-                .u64_counter("asupersync.pool.released_total")
+                .u64_counter("skein.pool.released_total")
                 .with_description("Total returns to pool")
                 .build();
 
             let created_total = meter
-                .u64_counter("asupersync.pool.created_total")
+                .u64_counter("skein.pool.created_total")
                 .with_description("Resources created")
                 .build();
 
             let destroyed_total = meter
-                .u64_counter("asupersync.pool.destroyed_total")
+                .u64_counter("skein.pool.destroyed_total")
                 .with_description("Resources destroyed")
                 .build();
 
             let timeouts_total = meter
-                .u64_counter("asupersync.pool.timeouts_total")
+                .u64_counter("skein.pool.timeouts_total")
                 .with_description("Acquire timeouts")
                 .build();
 
             let acquire_duration = meter
-                .f64_histogram("asupersync.pool.acquire_duration_seconds")
+                .f64_histogram("skein.pool.acquire_duration_seconds")
                 .with_description("Time to acquire a resource")
                 .build();
 
             let hold_duration = meter
-                .f64_histogram("asupersync.pool.hold_duration_seconds")
+                .f64_histogram("skein.pool.hold_duration_seconds")
                 .with_description("Time resource is held")
                 .build();
 
             let wait_duration = meter
-                .f64_histogram("asupersync.pool.wait_duration_seconds")
+                .f64_histogram("skein.pool.wait_duration_seconds")
                 .with_description("Time waiting in queue")
                 .build();
 
@@ -2669,7 +2669,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Health check tests (asupersync-cl94)
+    // Health check tests (bead-cl94)
     // ========================================================================
 
     #[test]
@@ -2812,7 +2812,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Warmup tests (asupersync-cl94)
+    // Warmup tests (bead-cl94)
     // ========================================================================
 
     #[test]
@@ -2980,7 +2980,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Audit regression tests (asupersync-10x0x.44)
+    // Audit regression tests (bead-10x0x.44)
     // ========================================================================
 
     #[test]
@@ -3215,7 +3215,7 @@ mod tests {
     }
 
     // ========================================================================
-    // PoolConfig health/warmup builder tests (asupersync-cl94)
+    // PoolConfig health/warmup builder tests (bead-cl94)
     // ========================================================================
 
     #[test]

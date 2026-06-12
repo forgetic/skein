@@ -1,7 +1,7 @@
 //! Stream adapters for channel receivers.
 //!
 //! These adapters provide a `Stream` view over channel receivers while
-//! preserving Asupersync's explicit-capability model. A `Cx` is required
+//! preserving Skein's explicit-capability model. A `Cx` is required
 //! to perform receive operations.
 //!
 //! Phase 0 note: channel receive operations are currently blocking. These

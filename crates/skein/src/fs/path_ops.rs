@@ -234,7 +234,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos();
-            path.push(format!("asupersync_{prefix}_{nanos}"));
+            path.push(format!("skein_{prefix}_{nanos}"));
             fs::create_dir_all(&path)?;
             Ok(Self { path })
         }

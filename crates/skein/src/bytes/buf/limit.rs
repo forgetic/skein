@@ -9,7 +9,7 @@ use super::BufMut;
 /// # Examples
 ///
 /// ```
-/// use asupersync::bytes::BufMut;
+/// use skein::bytes::BufMut;
 ///
 /// let mut limit = Vec::new().limit(3);
 ///

@@ -3,7 +3,7 @@
 //! # Overview
 //!
 //! This module defines formal Separation Logic (SL) specifications for every
-//! obligation type in Asupersync. The framework follows Iris-style concurrent
+//! obligation type in Skein. The framework follows Iris-style concurrent
 //! separation logic, encoding:
 //!
 //! - **Resource predicates**: what heap state each obligation exclusively owns
@@ -68,13 +68,13 @@
 //! # Usage
 //!
 //! ```
-//! use asupersync::obligation::separation_logic::{
+//! use skein::obligation::separation_logic::{
 //!     SeparationLogicVerifier, ResourcePredicate, Judgment,
 //!     FrameCondition, SeparationProperty,
 //! };
-//! use asupersync::obligation::marking::{MarkingEvent, MarkingEventKind};
-//! use asupersync::record::ObligationKind;
-//! use asupersync::types::{ObligationId, RegionId, TaskId, Time};
+//! use skein::obligation::marking::{MarkingEvent, MarkingEventKind};
+//! use skein::record::ObligationKind;
+//! use skein::types::{ObligationId, RegionId, TaskId, Time};
 //!
 //! let r0 = RegionId::new_for_test(0, 0);
 //! let t0 = TaskId::new_for_test(0, 0);

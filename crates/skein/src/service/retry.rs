@@ -39,8 +39,8 @@ pub trait Policy<Req, Res, E>: Clone {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::service::{ServiceBuilder, ServiceExt};
-/// use asupersync::service::retry::{RetryLayer, Policy};
+/// use skein::service::{ServiceBuilder, ServiceExt};
+/// use skein::service::retry::{RetryLayer, Policy};
 /// use std::time::Duration;
 ///
 /// let policy = MyRetryPolicy::new(3, Duration::from_millis(100));

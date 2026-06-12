@@ -6,8 +6,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::net::unix::UnixStream;
-//! use asupersync::io::AsyncWriteExt;
+//! use skein::net::unix::UnixStream;
+//! use skein::io::AsyncWriteExt;
 //!
 //! async fn client() -> std::io::Result<()> {
 //!     let mut stream = UnixStream::connect("/tmp/my_socket.sock").await?;
@@ -79,10 +79,12 @@ pub struct UCred {
 /// guaranteed delivery, use higher-level protocols.
 #[derive(Debug)]
 pub struct UnixStream {
+    /// Reactor registration for I/O events (lazily initialized); declared
+    /// before `inner` so it drops first — the fd must be deregistered from
+    /// the reactor before `inner` closes it.
+    registration: Mutex<Option<IoRegistration>>,
     /// The underlying standard library stream.
     pub(crate) inner: Arc<net::UnixStream>,
-    /// Reactor registration for I/O events (lazily initialized).
-    registration: Mutex<Option<IoRegistration>>,
 }
 
 impl UnixStream {
@@ -350,7 +352,7 @@ impl UnixStream {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::net::unix::{UnixStream, SocketAncillary};
+    /// use skein::net::unix::{UnixStream, SocketAncillary};
     /// use std::os::unix::io::AsRawFd;
     ///
     /// let (tx, rx) = UnixStream::pair()?;
@@ -410,7 +412,7 @@ impl UnixStream {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::net::unix::{UnixStream, SocketAncillary, AncillaryMessage};
+    /// use skein::net::unix::{UnixStream, SocketAncillary, AncillaryMessage};
     /// use nix::unistd;
     ///
     /// let mut buf = [0u8; 64];

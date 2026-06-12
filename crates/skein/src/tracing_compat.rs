@@ -9,7 +9,7 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use asupersync::tracing_compat::{info, debug, trace, span, Level};
+//! use skein::tracing_compat::{info, debug, trace, span, Level};
 //!
 //! // These compile to no-ops when tracing-integration is disabled
 //! info!("Starting operation");
@@ -23,7 +23,7 @@
 //! Enable tracing by adding the feature to your `Cargo.toml`:
 //!
 //! ```toml
-//! asupersync = { version = "0.1", features = ["tracing-integration"] }
+//! skein = { version = "0.1", features = ["tracing-integration"] }
 //! ```
 
 #[cfg(feature = "tracing-integration")]

@@ -11,7 +11,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::conformance::{ConformanceTarget, TestConfig, conformance_test};
+//! use skein::conformance::{ConformanceTarget, TestConfig, conformance_test};
 //!
 //! // Define a conformance test
 //! conformance_test!(test_basic_spawn, |target, config| {
@@ -384,11 +384,11 @@ pub fn run_conformance_tests(tests: &[ConformanceTestFn], config: &TestConfig) -
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::conformance::{conformance_test, TestConfig};
+/// use skein::conformance::{conformance_test, TestConfig};
 ///
 /// conformance_test!(test_spawn_completes, |config: &TestConfig| {
-///     use asupersync::conformance::ConformanceTarget;
-///     use asupersync::lab::LabRuntime;
+///     use skein::conformance::ConformanceTarget;
+///     use skein::lab::LabRuntime;
 ///
 ///     // Create runtime and run test
 ///     let mut runtime = LabRuntimeTarget::create_runtime(config.clone());

@@ -7,7 +7,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use asupersync::sync::ContendedMutex;
+//! use skein::sync::ContendedMutex;
 //!
 //! let m = ContendedMutex::new("tasks", 42);
 //! {

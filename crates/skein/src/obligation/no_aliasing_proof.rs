@@ -95,12 +95,12 @@
 //! # Usage
 //!
 //! ```
-//! use asupersync::obligation::no_aliasing_proof::{
+//! use skein::obligation::no_aliasing_proof::{
 //!     NoAliasingProver, ProofResult,
 //! };
-//! use asupersync::obligation::marking::{MarkingEvent, MarkingEventKind};
-//! use asupersync::record::ObligationKind;
-//! use asupersync::types::{ObligationId, RegionId, TaskId, Time};
+//! use skein::obligation::marking::{MarkingEvent, MarkingEventKind};
+//! use skein::record::ObligationKind;
+//! use skein::types::{ObligationId, RegionId, TaskId, Time};
 //!
 //! let r0 = RegionId::new_for_test(0, 0);
 //! let t0 = TaskId::new_for_test(0, 0);

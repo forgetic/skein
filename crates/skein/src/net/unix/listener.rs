@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::net::unix::UnixListener;
+//! use skein::net::unix::UnixListener;
 //!
 //! async fn server() -> std::io::Result<()> {
 //!     let listener = UnixListener::bind("/tmp/my_socket.sock").await?;
@@ -73,13 +73,15 @@ pub(crate) fn remove_stale_socket_file(path: &Path) -> io::Result<()> {
 /// namespace socket).
 #[derive(Debug)]
 pub struct UnixListener {
+    /// Reactor registration for I/O events (lazily initialized); declared
+    /// before `inner` so it drops first — the fd must be deregistered from
+    /// the reactor before `inner` closes it.
+    registration: Mutex<Option<IoRegistration>>,
     /// The underlying standard library listener.
     inner: net::UnixListener,
     /// Path to the socket file (for cleanup on drop).
     /// None for abstract namespace sockets or from_std().
     path: Option<PathBuf>,
-    /// Reactor registration for I/O events (lazily initialized).
-    registration: Mutex<Option<IoRegistration>>,
 }
 
 impl UnixListener {
@@ -660,7 +662,7 @@ mod tests {
     fn test_abstract_socket() {
         init_test("test_abstract_socket");
         futures_lite::future::block_on(async {
-            let name = b"asupersync_test_abstract_socket";
+            let name = b"skein_test_abstract_socket";
             let listener = UnixListener::bind_abstract(name)
                 .await
                 .expect("bind failed");

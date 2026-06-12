@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::combinator::rate_limit::*;
+//! use skein::combinator::rate_limit::*;
 //! use std::time::Duration;
 //!
 //! let policy = RateLimitPolicy {

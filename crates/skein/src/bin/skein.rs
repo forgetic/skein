@@ -1,12 +1,12 @@
-//! Asupersync CLI tools (feature-gated).
+//! Skein CLI tools (feature-gated).
 #![allow(clippy::result_large_err)]
 
-use asupersync::Time;
-use asupersync::cli::{
+use skein::Time;
+use skein::cli::{
     CliError, ColorChoice, CommonArgs, ExitCode, Output, OutputFormat, Outputtable,
     parse_color_choice, parse_output_format,
 };
-use asupersync::trace::{
+use skein::trace::{
     CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
     TraceReader, VerificationOptions, verify_trace,
 };
@@ -21,7 +21,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
-#[command(name = "asupersync", version, about = "Asupersync CLI tools")]
+#[command(name = "skein", version, about = "Skein CLI tools")]
 struct Cli {
     #[command(flatten)]
     common: CommonArgsCli,
@@ -539,7 +539,7 @@ fn run_lab(args: LabArgs, output: &mut Output) -> Result<(), CliError> {
     }
 }
 
-fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, CliError> {
+fn load_scenario(path: &Path) -> Result<skein::lab::scenario::Scenario, CliError> {
     let yaml = fs::read_to_string(path).map_err(|err| io_error(path, &err))?;
     serde_yaml::from_str(&yaml).map_err(|err| {
         CliError::new("scenario_parse_error", "Failed to parse scenario YAML")
@@ -549,9 +549,9 @@ fn load_scenario(path: &Path) -> Result<asupersync::lab::scenario::Scenario, Cli
     })
 }
 
-fn scenario_runner_error(err: asupersync::lab::scenario_runner::ScenarioRunnerError) -> CliError {
+fn scenario_runner_error(err: skein::lab::scenario_runner::ScenarioRunnerError) -> CliError {
     match err {
-        asupersync::lab::scenario_runner::ScenarioRunnerError::Validation(errors) => {
+        skein::lab::scenario_runner::ScenarioRunnerError::Validation(errors) => {
             let detail = errors
                 .iter()
                 .map(|e| format!("- {e}"))
@@ -561,15 +561,15 @@ fn scenario_runner_error(err: asupersync::lab::scenario_runner::ScenarioRunnerEr
                 .detail(detail)
                 .exit_code(ExitCode::RUNTIME_ERROR)
         }
-        asupersync::lab::scenario_runner::ScenarioRunnerError::UnknownOracle(name) => {
+        skein::lab::scenario_runner::ScenarioRunnerError::UnknownOracle(name) => {
             CliError::new("unknown_oracle", "Unknown oracle name in scenario")
                 .detail(format!(
                     "Oracle '{name}' not found. Available: {}",
-                    asupersync::lab::meta::mutation::ALL_ORACLE_INVARIANTS.join(", ")
+                    skein::lab::meta::mutation::ALL_ORACLE_INVARIANTS.join(", ")
                 ))
                 .exit_code(ExitCode::RUNTIME_ERROR)
         }
-        asupersync::lab::scenario_runner::ScenarioRunnerError::ReplayDivergence {
+        skein::lab::scenario_runner::ScenarioRunnerError::ReplayDivergence {
             seed,
             first,
             second,
@@ -588,7 +588,7 @@ fn scenario_runner_error(err: asupersync::lab::scenario_runner::ScenarioRunnerEr
 fn lab_run(args: LabRunArgs, output: &mut Output) -> Result<(), CliError> {
     let scenario = load_scenario(&args.scenario)?;
     let result =
-        asupersync::lab::scenario_runner::ScenarioRunner::run_with_seed(&scenario, args.seed)
+        skein::lab::scenario_runner::ScenarioRunner::run_with_seed(&scenario, args.seed)
             .map_err(scenario_runner_error)?;
 
     let passed = result.passed();
@@ -647,7 +647,7 @@ fn lab_validate(args: LabValidateArgs, output: &mut Output) -> Result<(), CliErr
 
 fn lab_replay(args: LabReplayArgs, output: &mut Output) -> Result<(), CliError> {
     let scenario = load_scenario(&args.scenario)?;
-    let result = asupersync::lab::scenario_runner::ScenarioRunner::validate_replay(&scenario)
+    let result = skein::lab::scenario_runner::ScenarioRunner::validate_replay(&scenario)
         .map_err(scenario_runner_error)?;
 
     let report = LabReplayOutput {
@@ -675,7 +675,7 @@ fn lab_replay(args: LabReplayArgs, output: &mut Output) -> Result<(), CliError> 
 #[allow(clippy::cast_possible_truncation)]
 fn lab_explore(args: LabExploreArgs, output: &mut Output) -> Result<(), CliError> {
     let scenario = load_scenario(&args.scenario)?;
-    let result = asupersync::lab::scenario_runner::ScenarioRunner::explore_seeds(
+    let result = skein::lab::scenario_runner::ScenarioRunner::explore_seeds(
         &scenario,
         args.start_seed,
         args.seeds as usize,
@@ -729,7 +729,7 @@ struct LabRunOutput {
 }
 
 impl LabRunOutput {
-    fn from_result(result: &asupersync::lab::scenario_runner::ScenarioRunResult) -> Self {
+    fn from_result(result: &skein::lab::scenario_runner::ScenarioRunResult) -> Self {
         Self {
             scenario_id: result.scenario_id.clone(),
             seed: result.seed,
@@ -825,7 +825,7 @@ struct LabExploreOutput {
 }
 
 impl LabExploreOutput {
-    fn from_result(result: &asupersync::lab::scenario_runner::ScenarioExplorationResult) -> Self {
+    fn from_result(result: &skein::lab::scenario_runner::ScenarioExplorationResult) -> Self {
         Self {
             scenario_id: result.scenario_id.clone(),
             seeds_explored: result.seeds_explored,
@@ -1174,7 +1174,7 @@ fn read_trace_version(path: &Path) -> Result<u16, CliError> {
         .map_err(|err| io_error(path, &err))?;
     if magic != *TRACE_MAGIC {
         return Err(CliError::new("invalid_trace", "Invalid trace file magic")
-            .detail("File does not appear to be a valid Asupersync trace"));
+            .detail("File does not appear to be a valid Skein trace"));
     }
 
     let mut version_bytes = [0u8; 2];
@@ -1420,7 +1420,7 @@ fn format_scaled(bytes: u64, unit: u64, label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use asupersync::trace::{TraceMetadata, TraceWriter};
+    use skein::trace::{TraceMetadata, TraceWriter};
     use tempfile::NamedTempFile;
 
     fn make_sample_trace() -> NamedTempFile {

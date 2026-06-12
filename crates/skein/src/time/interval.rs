@@ -20,8 +20,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::time::{interval, MissedTickBehavior};
-//! use asupersync::types::Time;
+//! use skein::time::{interval, MissedTickBehavior};
+//! use skein::types::Time;
 //! use std::time::Duration;
 //!
 //! let now = Time::ZERO;
@@ -58,7 +58,7 @@ fn duration_as_nanos_u64_saturating(duration: Duration) -> u64 {
 /// # Example
 ///
 /// ```
-/// use asupersync::time::MissedTickBehavior;
+/// use skein::time::MissedTickBehavior;
 ///
 /// // Default is Burst (catch up)
 /// let behavior = MissedTickBehavior::default();
@@ -142,8 +142,8 @@ impl std::fmt::Display for MissedTickBehavior {
 /// # Example
 ///
 /// ```
-/// use asupersync::time::{Interval, MissedTickBehavior};
-/// use asupersync::types::Time;
+/// use skein::time::{Interval, MissedTickBehavior};
+/// use skein::types::Time;
 /// use std::time::Duration;
 ///
 /// let mut interval = Interval::new(Time::ZERO, Duration::from_millis(100));
@@ -180,8 +180,8 @@ impl Interval {
     /// # Example
     ///
     /// ```
-    /// use asupersync::time::Interval;
-    /// use asupersync::types::Time;
+    /// use skein::time::Interval;
+    /// use skein::types::Time;
     /// use std::time::Duration;
     ///
     /// let interval = Interval::new(Time::from_secs(5), Duration::from_millis(100));
@@ -221,8 +221,8 @@ impl Interval {
     /// # Example
     ///
     /// ```
-    /// use asupersync::time::{Interval, MissedTickBehavior};
-    /// use asupersync::types::Time;
+    /// use skein::time::{Interval, MissedTickBehavior};
+    /// use skein::types::Time;
     /// use std::time::Duration;
     ///
     /// let mut interval = Interval::new(Time::ZERO, Duration::from_millis(100));
@@ -244,8 +244,8 @@ impl Interval {
     /// # Example
     ///
     /// ```
-    /// use asupersync::time::Interval;
-    /// use asupersync::types::Time;
+    /// use skein::time::Interval;
+    /// use skein::types::Time;
     /// use std::time::Duration;
     ///
     /// let mut interval = Interval::new(Time::ZERO, Duration::from_millis(100));
@@ -283,8 +283,8 @@ impl Interval {
     /// # Example
     ///
     /// ```
-    /// use asupersync::time::Interval;
-    /// use asupersync::types::Time;
+    /// use skein::time::Interval;
+    /// use skein::types::Time;
     /// use std::time::Duration;
     ///
     /// let mut interval = Interval::new(Time::ZERO, Duration::from_secs(1));
@@ -339,8 +339,8 @@ impl Interval {
     /// # Example
     ///
     /// ```
-    /// use asupersync::time::Interval;
-    /// use asupersync::types::Time;
+    /// use skein::time::Interval;
+    /// use skein::types::Time;
     /// use std::time::Duration;
     ///
     /// let mut interval = Interval::new(Time::ZERO, Duration::from_millis(100));
@@ -359,8 +359,8 @@ impl Interval {
     /// # Example
     ///
     /// ```
-    /// use asupersync::time::Interval;
-    /// use asupersync::types::Time;
+    /// use skein::time::Interval;
+    /// use skein::types::Time;
     /// use std::time::Duration;
     ///
     /// let mut interval = Interval::new(Time::ZERO, Duration::from_millis(100));
@@ -377,8 +377,8 @@ impl Interval {
     /// # Example
     ///
     /// ```
-    /// use asupersync::time::Interval;
-    /// use asupersync::types::Time;
+    /// use skein::time::Interval;
+    /// use skein::types::Time;
     /// use std::time::Duration;
     ///
     /// let mut interval = Interval::new(Time::ZERO, Duration::from_millis(100));
@@ -430,8 +430,8 @@ impl Interval {
 /// # Example
 ///
 /// ```
-/// use asupersync::time::interval;
-/// use asupersync::types::Time;
+/// use skein::time::interval;
+/// use skein::types::Time;
 /// use std::time::Duration;
 ///
 /// let now = Time::ZERO;
@@ -456,8 +456,8 @@ pub fn interval(now: Time, period: Duration) -> Interval {
 /// # Example
 ///
 /// ```
-/// use asupersync::time::interval_at;
-/// use asupersync::types::Time;
+/// use skein::time::interval_at;
+/// use skein::types::Time;
 /// use std::time::Duration;
 ///
 /// // Start 1 second in the future

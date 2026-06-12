@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::combinator::bulkhead::*;
+//! use skein::combinator::bulkhead::*;
 //! use std::time::Duration;
 //!
 //! let policy = BulkheadPolicy {

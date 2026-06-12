@@ -1,7 +1,7 @@
 //! Kafka consumer with Cx integration for cancel-correct message consumption.
 //!
 //! This module defines the API surface for a Kafka consumer that integrates
-//! with the Asupersync `Cx` context. The Phase 0 implementation is a stub
+//! with the Skein `Cx` context. The Phase 0 implementation is a stub
 //! that returns a clear error until rdkafka integration is added.
 //!
 //! # Cancel-Correct Behavior
@@ -76,7 +76,7 @@ impl Default for ConsumerConfig {
     fn default() -> Self {
         Self {
             bootstrap_servers: vec!["localhost:9092".to_string()],
-            group_id: "asupersync-default".to_string(),
+            group_id: "skein-default".to_string(),
             client_id: None,
             session_timeout: Duration::from_secs(45),
             heartbeat_interval: Duration::from_secs(3),
@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn test_config_defaults() {
         let config = ConsumerConfig::default();
-        assert_eq!(config.group_id, "asupersync-default");
+        assert_eq!(config.group_id, "skein-default");
         assert_eq!(config.max_poll_records, 500);
         assert!(config.enable_auto_commit);
     }

@@ -20,8 +20,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::trace::crashpack::{CrashPack, CrashPackConfig, FailureInfo, FailureOutcome};
-//! use asupersync::types::{TaskId, RegionId, Time};
+//! use skein::trace::crashpack::{CrashPack, CrashPackConfig, FailureInfo, FailureOutcome};
+//! use skein::types::{TaskId, RegionId, Time};
 //!
 //! let pack = CrashPack::builder(CrashPackConfig {
 //!     seed: 42,
@@ -751,7 +751,7 @@ impl CrashPackBuilder {
 /// An environment variable required for deterministic replay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayEnvVar {
-    /// Variable name (e.g., `ASUPERSYNC_SEED`).
+    /// Variable name (e.g., `SKEIN_SEED`).
     pub key: String,
     /// Variable value.
     pub value: String,
@@ -768,8 +768,8 @@ pub struct ReplayEnvVar {
 /// {
 ///   "program": "cargo",
 ///   "args": ["test", "--lib", "--", "--seed", "42"],
-///   "env": [{"key": "ASUPERSYNC_WORKERS", "value": "4"}],
-///   "command_line": "ASUPERSYNC_WORKERS=4 cargo test --lib -- --seed 42"
+///   "env": [{"key": "SKEIN_WORKERS", "value": "4"}],
+///   "command_line": "SKEIN_WORKERS=4 cargo test --lib -- --seed 42"
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -808,13 +808,13 @@ impl ReplayCommand {
         let mut env = Vec::new();
 
         env.push(ReplayEnvVar {
-            key: "ASUPERSYNC_WORKERS".to_string(),
+            key: "SKEIN_WORKERS".to_string(),
             value: config.worker_count.to_string(),
         });
 
         if let Some(max_steps) = config.max_steps {
             env.push(ReplayEnvVar {
-                key: "ASUPERSYNC_MAX_STEPS".to_string(),
+                key: "SKEIN_MAX_STEPS".to_string(),
                 value: max_steps.to_string(),
             });
         }
@@ -834,7 +834,7 @@ impl ReplayCommand {
         }
     }
 
-    /// Build a replay command for the `asupersync trace replay` CLI subcommand.
+    /// Build a replay command for the `skein trace replay` CLI subcommand.
     #[must_use]
     pub fn from_config_cli(config: &CrashPackConfig, artifact_path: &str) -> Self {
         let mut args = vec![
@@ -853,10 +853,10 @@ impl ReplayCommand {
 
         args.push(artifact_path.to_string());
 
-        let command_line = build_command_line("asupersync", &args, &[]);
+        let command_line = build_command_line("skein", &args, &[]);
 
         Self {
-            program: "asupersync".to_string(),
+            program: "skein".to_string(),
             args,
             env: Vec::new(),
             command_line,
@@ -960,7 +960,7 @@ impl std::error::Error for CrashPackWriteError {
 ///
 /// This is the **only** way to persist a crash pack. There are no ambient
 /// filesystem writes — callers must hold an explicit `&dyn CrashPackWriter`
-/// to write artifacts. This follows asupersync's capability-security model.
+/// to write artifacts. This follows skein's capability-security model.
 ///
 /// # Deterministic Paths
 ///
@@ -1873,7 +1873,7 @@ mod tests {
     fn file_writer_writes_to_disk() {
         init_test("file_writer_writes_to_disk");
 
-        let dir = std::env::temp_dir().join("asupersync_test_crashpack");
+        let dir = std::env::temp_dir().join("skein_test_crashpack");
         let _ = std::fs::create_dir_all(&dir);
 
         let writer = FileCrashPackWriter::new(dir.clone());
@@ -2346,7 +2346,7 @@ mod tests {
         assert!(cmd.command_line.contains("cargo"));
         assert!(cmd.command_line.contains("--seed"));
         assert!(cmd.command_line.contains("42"));
-        assert!(cmd.command_line.contains("ASUPERSYNC_WORKERS=4"));
+        assert!(cmd.command_line.contains("SKEIN_WORKERS=4"));
 
         crate::test_complete!("replay_command_from_config_basic");
     }
@@ -2382,7 +2382,7 @@ mod tests {
         };
 
         let cmd = ReplayCommand::from_config_cli(&config, "crashpack.json");
-        assert_eq!(cmd.program, "asupersync");
+        assert_eq!(cmd.program, "skein");
         assert!(cmd.args.contains(&"trace".to_string()));
         assert!(cmd.args.contains(&"replay".to_string()));
         assert!(cmd.args.contains(&"--seed".to_string()));
@@ -2395,7 +2395,7 @@ mod tests {
         assert!(cmd.env.is_empty());
         assert_eq!(
             cmd.command_line,
-            "asupersync trace replay --seed 7 --workers 8 --max-steps 500 crashpack.json"
+            "skein trace replay --seed 7 --workers 8 --max-steps 500 crashpack.json"
         );
 
         crate::test_complete!("replay_command_cli_mode");
@@ -2523,7 +2523,7 @@ mod tests {
             },
             None,
         );
-        assert!(with_steps.command_line.contains("ASUPERSYNC_MAX_STEPS=999"));
+        assert!(with_steps.command_line.contains("SKEIN_MAX_STEPS=999"));
 
         let without_steps = ReplayCommand::from_config(
             &CrashPackConfig {
@@ -2533,7 +2533,7 @@ mod tests {
             },
             None,
         );
-        assert!(!without_steps.command_line.contains("ASUPERSYNC_MAX_STEPS"));
+        assert!(!without_steps.command_line.contains("SKEIN_MAX_STEPS"));
 
         crate::test_complete!("replay_command_max_steps_included_when_set");
     }
@@ -3080,7 +3080,7 @@ mod tests {
     /// Step 4: Replay command generation.
     ///
     /// The crash pack generates a shell one-liner that reproduces the failure.
-    /// Two modes: `cargo test` (development) and `asupersync trace replay` (CLI).
+    /// Two modes: `cargo test` (development) and `skein trace replay` (CLI).
     #[test]
     fn walkthrough_04_replay_command() {
         init_test("walkthrough_04_replay_command");
@@ -3118,7 +3118,7 @@ mod tests {
         // -- CLI mode --
         let cli_replay =
             ReplayCommand::from_config_cli(&pack.manifest.config, "/tmp/crashpack.json");
-        assert_eq!(cli_replay.program, "asupersync");
+        assert_eq!(cli_replay.program, "skein");
         assert!(
             cli_replay.command_line.contains("trace replay"),
             "CLI mode should use 'trace replay' subcommand: {}",

@@ -1,4 +1,4 @@
-//! HTTP protocol support for Asupersync.
+//! HTTP protocol support for Skein.
 //!
 //! This module provides HTTP/1.1 and HTTP/2 protocol implementations
 //! with cancel-safe body handling and connection pooling.

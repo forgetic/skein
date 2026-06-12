@@ -25,8 +25,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::channel::{mpsc, fault::*};
-//! use asupersync::evidence_sink::{CollectorSink, EvidenceSink};
+//! use skein::channel::{mpsc, fault::*};
+//! use skein::evidence_sink::{CollectorSink, EvidenceSink};
 //! use std::sync::Arc;
 //!
 //! let (tx, rx) = mpsc::channel::<u32>(16);

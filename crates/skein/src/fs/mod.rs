@@ -16,7 +16,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::fs::File;
+//! use skein::fs::File;
 //!
 //! async fn example() -> std::io::Result<()> {
 //!     // Create and write

@@ -1,4 +1,4 @@
-//! Test utilities for Asupersync.
+//! Test utilities for Skein.
 //!
 //! This module provides shared helpers for unit tests:
 //! - Consistent tracing-based logging initialization
@@ -10,7 +10,7 @@
 //!
 //! # Example
 //! ```
-//! use asupersync::test_utils::{init_test_logging, run_test};
+//! use skein::test_utils::{init_test_logging, run_test};
 //!
 //! fn my_async_test() {
 //!     init_test_logging();

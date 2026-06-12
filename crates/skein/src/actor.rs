@@ -1,6 +1,6 @@
 //! Actor abstraction for region-owned, message-driven concurrency.
 //!
-//! Actors in Asupersync are region-owned tasks that process messages from a
+//! Actors in Skein are region-owned tasks that process messages from a
 //! bounded mailbox. They integrate with the runtime's structured concurrency
 //! model:
 //!

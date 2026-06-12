@@ -15,8 +15,8 @@ use core::fmt;
 /// # Example
 ///
 /// ```
-/// use asupersync::time::Elapsed;
-/// use asupersync::types::Time;
+/// use skein::time::Elapsed;
+/// use skein::types::Time;
 ///
 /// let elapsed = Elapsed::new(Time::from_secs(5));
 /// assert_eq!(elapsed.deadline(), Time::from_secs(5));

@@ -68,8 +68,8 @@ impl TimeSource for WallClock {
 /// # Example
 ///
 /// ```
-/// use asupersync::time::{TimeSource, VirtualClock};
-/// use asupersync::types::Time;
+/// use skein::time::{TimeSource, VirtualClock};
+/// use skein::types::Time;
 ///
 /// let clock = VirtualClock::new();
 /// assert_eq!(clock.now(), Time::ZERO);
@@ -199,8 +199,8 @@ pub use super::wheel::TimerHandle;
 /// # Example
 ///
 /// ```
-/// use asupersync::time::{TimerDriver, VirtualClock};
-/// use asupersync::types::Time;
+/// use skein::time::{TimerDriver, VirtualClock};
+/// use skein::types::Time;
 /// use std::sync::Arc;
 ///
 /// let clock = Arc::new(VirtualClock::new());
@@ -403,7 +403,7 @@ impl<T: TimeSource + std::fmt::Debug + 'static> TimerDriverApi for TimerDriver<T
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::time::TimerDriverHandle;
+/// use skein::time::TimerDriverHandle;
 ///
 /// // Get handle from current context
 /// if let Some(timer) = Cx::current().and_then(|cx| cx.timer_driver()) {

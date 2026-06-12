@@ -28,10 +28,10 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::lab::http::{VirtualServer, VirtualClient, TestHarness};
-//! use asupersync::lab::LabConfig;
-//! use asupersync::web::{Router, get};
-//! use asupersync::web::handler::FnHandler;
+//! use skein::lab::http::{VirtualServer, VirtualClient, TestHarness};
+//! use skein::lab::LabConfig;
+//! use skein::web::{Router, get};
+//! use skein::web::handler::FnHandler;
 //!
 //! let router = Router::new()
 //!     .route("/health", get(FnHandler::new(|| "ok")));

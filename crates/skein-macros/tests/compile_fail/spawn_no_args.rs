@@ -1,4 +1,4 @@
-use asupersync_macros::spawn;
+use skein_macros::spawn;
 
 fn main() {
     // spawn! requires at least a future expression

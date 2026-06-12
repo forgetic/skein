@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::net::quic::{QuicConfig, QuicEndpoint};
+//! use skein::net::quic::{QuicConfig, QuicEndpoint};
 //!
 //! // Create a client endpoint
 //! let endpoint = QuicEndpoint::client(&cx, QuicConfig::new())?;
@@ -39,7 +39,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! asupersync = { version = "0.1", features = ["quic"] }
+//! skein = { version = "0.1", features = ["quic"] }
 //! ```
 
 mod config;

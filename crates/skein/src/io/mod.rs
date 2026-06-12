@@ -6,7 +6,7 @@
 //!
 //! # I/O Capability Model
 //!
-//! Asupersync uses explicit capability-based I/O access. The [`IoCap`] trait
+//! Skein uses explicit capability-based I/O access. The [`IoCap`] trait
 //! defines the I/O capability boundary - tasks can only perform I/O when they
 //! have access to an implementation:
 //!

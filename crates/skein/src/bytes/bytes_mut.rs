@@ -18,7 +18,7 @@ use std::ops::{Deref, DerefMut, RangeBounds};
 /// # Examples
 ///
 /// ```
-/// use asupersync::bytes::BytesMut;
+/// use skein::bytes::BytesMut;
 ///
 /// let mut buf = BytesMut::with_capacity(100);
 /// buf.put_slice(b"hello");
@@ -44,7 +44,7 @@ impl BytesMut {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::BytesMut;
+    /// use skein::bytes::BytesMut;
     ///
     /// let buf = BytesMut::with_capacity(100);
     /// assert!(buf.is_empty());
@@ -83,7 +83,7 @@ impl BytesMut {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::BytesMut;
+    /// use skein::bytes::BytesMut;
     ///
     /// let mut buf = BytesMut::new();
     /// buf.put_slice(b"hello world");
@@ -101,7 +101,7 @@ impl BytesMut {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::BytesMut;
+    /// use skein::bytes::BytesMut;
     ///
     /// let mut buf = BytesMut::new();
     /// buf.reserve(100);
@@ -116,7 +116,7 @@ impl BytesMut {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::BytesMut;
+    /// use skein::bytes::BytesMut;
     ///
     /// let mut buf = BytesMut::new();
     /// buf.put_slice(b"hello");
@@ -148,7 +148,7 @@ impl BytesMut {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::BytesMut;
+    /// use skein::bytes::BytesMut;
     ///
     /// let mut buf = BytesMut::new();
     /// buf.put_slice(b"hello world");
@@ -180,7 +180,7 @@ impl BytesMut {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::BytesMut;
+    /// use skein::bytes::BytesMut;
     ///
     /// let mut buf = BytesMut::new();
     /// buf.put_slice(b"hello world");
@@ -223,7 +223,7 @@ impl BytesMut {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::BytesMut;
+    /// use skein::bytes::BytesMut;
     ///
     /// let mut buf = BytesMut::new();
     /// buf.put_slice(b"hello");

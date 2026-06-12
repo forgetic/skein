@@ -12,7 +12,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::sync::Mutex;
+//! use skein::sync::Mutex;
 //!
 //! let mutex = Mutex::new(42);
 //!

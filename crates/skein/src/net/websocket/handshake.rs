@@ -41,7 +41,7 @@ const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 /// # Example
 ///
 /// ```
-/// use asupersync::net::websocket::compute_accept_key;
+/// use skein::net::websocket::compute_accept_key;
 ///
 /// let client_key = "dGhlIHNhbXBsZSBub25jZQ==";
 /// let accept = compute_accept_key(client_key);

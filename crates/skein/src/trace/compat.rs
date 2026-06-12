@@ -17,7 +17,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::trace::compat::{TraceMigrator, CompatReader};
+//! use skein::trace::compat::{TraceMigrator, CompatReader};
 //!
 //! // Read a trace with compatibility handling
 //! let reader = CompatReader::open("old_trace.bin")?;

@@ -5,7 +5,7 @@
 //!
 //! # Invariant
 //!
-//! From asupersync_plan_v4.md:
+//! From skein_plan_v4.md:
 //! > Region close = quiescence: no live children + all finalizers done
 //!
 //! Formally: `∀r ∈ closed_regions: children(r) = ∅ ∧ tasks(r) = ∅`

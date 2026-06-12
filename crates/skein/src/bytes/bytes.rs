@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// # Examples
 ///
 /// ```
-/// use asupersync::bytes::Bytes;
+/// use skein::bytes::Bytes;
 ///
 /// // Create from static data (no allocation)
 /// let b = Bytes::from_static(b"hello world");
@@ -71,7 +71,7 @@ impl Bytes {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::Bytes;
+    /// use skein::bytes::Bytes;
     ///
     /// let b = Bytes::from_static(b"hello");
     /// assert_eq!(&b[..], b"hello");
@@ -92,7 +92,7 @@ impl Bytes {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::Bytes;
+    /// use skein::bytes::Bytes;
     ///
     /// let data = vec![1, 2, 3, 4, 5];
     /// let b = Bytes::copy_from_slice(&data);
@@ -135,7 +135,7 @@ impl Bytes {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::Bytes;
+    /// use skein::bytes::Bytes;
     ///
     /// let b = Bytes::from_static(b"hello world");
     /// let hello = b.slice(0..5);
@@ -181,7 +181,7 @@ impl Bytes {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::Bytes;
+    /// use skein::bytes::Bytes;
     ///
     /// let mut b = Bytes::from_static(b"hello world");
     /// let world = b.split_off(6);
@@ -217,7 +217,7 @@ impl Bytes {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::Bytes;
+    /// use skein::bytes::Bytes;
     ///
     /// let mut b = Bytes::from_static(b"hello world");
     /// let hello = b.split_to(6);
@@ -438,7 +438,7 @@ impl Bytes {
     /// # Examples
     ///
     /// ```
-    /// use asupersync::bytes::{Bytes, Buf};
+    /// use skein::bytes::{Bytes, Buf};
     ///
     /// let b = Bytes::from_static(b"\x00\x01\x02\x03");
     /// let mut cursor = b.reader();

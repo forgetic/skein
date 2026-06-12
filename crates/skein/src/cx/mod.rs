@@ -3,16 +3,16 @@
 //! The [`Cx`] type is the capability token that provides access to runtime effects.
 //! The [`Scope`] type provides the API for spawning work within a region.
 //!
-//! All effects in Asupersync flow through explicit capabilities, ensuring
+//! All effects in Skein flow through explicit capabilities, ensuring
 //! no ambient authority exists.
 //!
 //! # For External Crate Authors
 //!
-//! If you're building a framework (like fastapi_rust) that depends on Asupersync,
+//! If you're building a framework (like fastapi_rust) that depends on Skein,
 //! the `Cx` type is your primary interface to the runtime. You can:
 //!
 //! ```ignore
-//! use asupersync::Cx;
+//! use skein::Cx;
 //!
 //! // Wrap Cx in your own context type
 //! pub struct RequestContext<'a> {

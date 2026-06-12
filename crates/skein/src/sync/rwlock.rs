@@ -42,7 +42,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::sync::RwLock;
+//! use skein::sync::RwLock;
 //!
 //! let lock = RwLock::new(vec![1, 2, 3]);
 //!

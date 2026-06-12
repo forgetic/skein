@@ -17,7 +17,7 @@
 //! - Trace minimization and simplification
 //!
 //! ```ignore
-//! use asupersync::lab::replay::{normalize_for_replay, traces_equivalent};
+//! use skein::lab::replay::{normalize_for_replay, traces_equivalent};
 //!
 //! // Normalize a trace
 //! let result = normalize_for_replay(&events);
@@ -552,7 +552,7 @@ impl std::fmt::Display for NormalizationResult {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::lab::replay::normalize_for_replay;
+/// use skein::lab::replay::normalize_for_replay;
 ///
 /// let events: Vec<TraceEvent> = /* captured trace */;
 /// let result = normalize_for_replay(&events);

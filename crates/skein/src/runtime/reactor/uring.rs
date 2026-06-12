@@ -2,7 +2,7 @@
 //!
 //! This module will provide [`UringReactor`], a reactor implementation that uses
 //! Linux io_uring for high-performance async I/O. This is a future feature
-//! tracked by bead asupersync-8jx5.
+//! tracked by bead bead-8jx5.
 //!
 //! # Status
 //!
@@ -33,7 +33,7 @@ use super::Interest;
 ///
 /// # Status
 ///
-/// This is currently unimplemented. See bead asupersync-8jx5 for tracking.
+/// This is currently unimplemented. See bead bead-8jx5 for tracking.
 #[derive(Debug)]
 pub struct UringReactor {
     _private: (),
@@ -48,7 +48,7 @@ impl UringReactor {
     pub fn new() -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "io_uring reactor not yet implemented (see bead asupersync-8jx5)",
+            "io_uring reactor not yet implemented (see bead bead-8jx5)",
         ))
     }
 

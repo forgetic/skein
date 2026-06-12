@@ -4,7 +4,7 @@
 //!
 //! `Select` and `SelectAll` are low-level primitives that pick the winner
 //! and drop losers when the future is consumed. **Dropping a loser is NOT
-//! the same as draining it.** In asupersync, the "losers are drained"
+//! the same as draining it.** In skein, the "losers are drained"
 //! invariant requires that losers be explicitly cancelled and awaited to
 //! terminal state before the enclosing region can close.
 //!

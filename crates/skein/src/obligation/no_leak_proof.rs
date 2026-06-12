@@ -39,7 +39,7 @@
 //! 1. **Normal**: obligation explicitly released via `commit()` or `abort()`.
 //! 2. **Error**: obligation released in error handler or by `Drop` during `?`.
 //! 3. **Panic**: `Drop` runs during stack unwinding.
-//! 4. **Cancel**: Asupersync cancellation triggers task abort, which runs `Drop`.
+//! 4. **Cancel**: Skein cancellation triggers task abort, which runs `Drop`.
 //!
 //! ## Region Closure (Structured Concurrency)
 //!
@@ -62,10 +62,10 @@
 //! # Usage
 //!
 //! ```
-//! use asupersync::obligation::no_leak_proof::{NoLeakProver, ProofResult};
-//! use asupersync::obligation::marking::{MarkingEvent, MarkingEventKind};
-//! use asupersync::record::ObligationKind;
-//! use asupersync::types::{ObligationId, RegionId, TaskId, Time};
+//! use skein::obligation::no_leak_proof::{NoLeakProver, ProofResult};
+//! use skein::obligation::marking::{MarkingEvent, MarkingEventKind};
+//! use skein::record::ObligationKind;
+//! use skein::types::{ObligationId, RegionId, TaskId, Time};
 //!
 //! let r0 = RegionId::new_for_test(0, 0);
 //! let t0 = TaskId::new_for_test(0, 0);

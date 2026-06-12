@@ -344,8 +344,8 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for PipelineError<E> {}
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::pipeline::stage_outcome_to_result;
-/// use asupersync::types::Outcome;
+/// use skein::combinator::pipeline::stage_outcome_to_result;
+/// use skein::types::Outcome;
 ///
 /// // Stage 0 succeeded in a 3-stage pipeline
 /// let result = stage_outcome_to_result::<i32, &str>(
@@ -390,8 +390,8 @@ pub fn stage_outcome_to_result<T, E>(
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::pipeline::pipeline2_outcomes;
-/// use asupersync::types::Outcome;
+/// use skein::combinator::pipeline::pipeline2_outcomes;
+/// use skein::types::Outcome;
 ///
 /// // Both stages succeed
 /// let result = pipeline2_outcomes::<i32, &str>(
@@ -443,8 +443,8 @@ pub fn pipeline2_outcomes<T, E>(
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::pipeline::pipeline3_outcomes;
-/// use asupersync::types::Outcome;
+/// use skein::combinator::pipeline::pipeline3_outcomes;
+/// use skein::types::Outcome;
 ///
 /// // All stages succeed
 /// let result = pipeline3_outcomes::<i32, &str>(
@@ -512,8 +512,8 @@ pub fn pipeline3_outcomes<T, E>(
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::pipeline::pipeline_n_outcomes;
-/// use asupersync::types::Outcome;
+/// use skein::combinator::pipeline::pipeline_n_outcomes;
+/// use skein::types::Outcome;
 ///
 /// // All 4 stages succeed
 /// let outcomes: Vec<Outcome<i32, &str>> = vec![
@@ -593,8 +593,8 @@ pub fn pipeline_n_outcomes<T, E>(
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::pipeline::pipeline_with_final;
-/// use asupersync::types::Outcome;
+/// use skein::combinator::pipeline::pipeline_with_final;
+/// use skein::types::Outcome;
 ///
 /// // All stages succeed
 /// let intermediates: Vec<Outcome<i32, &str>> = vec![
@@ -646,8 +646,8 @@ pub fn pipeline_with_final<T, E>(
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::pipeline::{pipeline_to_result, PipelineResult, FailedStage};
-/// use asupersync::types::Outcome;
+/// use skein::combinator::pipeline::{pipeline_to_result, PipelineResult, FailedStage};
+/// use skein::types::Outcome;
 ///
 /// // Completed pipeline
 /// let result: PipelineResult<i32, &str> = PipelineResult::completed(42, 3);

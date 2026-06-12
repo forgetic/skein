@@ -280,7 +280,7 @@ impl Default for HttpClientConfig {
         Self {
             pool_config: PoolConfig::default(),
             redirect_policy: RedirectPolicy::default(),
-            user_agent: Some("asupersync/0.1".into()),
+            user_agent: Some("skein/0.1".into()),
         }
     }
 }
@@ -613,7 +613,7 @@ impl HttpClient {
                 {
                     let _ = stream;
                     Err(ClientError::TlsError(
-                        "TLS support is disabled (enable asupersync feature \"tls\")".into(),
+                        "TLS support is disabled (enable skein feature \"tls\")".into(),
                     ))
                 }
             }
@@ -940,7 +940,7 @@ mod tests {
             config.redirect_policy,
             RedirectPolicy::Limited(10)
         ));
-        assert_eq!(config.user_agent, Some("asupersync/0.1".into()));
+        assert_eq!(config.user_agent, Some("skein/0.1".into()));
     }
 
     #[test]

@@ -222,7 +222,7 @@ pub mod errors {
             format!("Invariant violated: {invariant}"),
         )
         .detail(details)
-        .docs("https://docs.asupersync.dev/invariants")
+        .docs("https://docs.skein.dev/invariants")
         .exit_code(ExitCode::RUNTIME_ERROR)
     }
 
@@ -257,7 +257,7 @@ pub mod errors {
         CliError::new("internal_error", "Internal error")
             .detail(details)
             .suggestion(
-                "Please report this bug at https://github.com/Dicklesworthstone/asupersync/issues",
+                "Please report this bug at https://github.com/free-ekanayaka/skein/issues",
             )
             .exit_code(ExitCode::INTERNAL_ERROR)
     }

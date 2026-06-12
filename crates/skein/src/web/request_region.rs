@@ -1,6 +1,6 @@
 //! Request-as-Region pattern for structured concurrency in HTTP handlers.
 //!
-//! Each incoming HTTP request executes within its own Asupersync region,
+//! Each incoming HTTP request executes within its own Skein region,
 //! providing automatic structured concurrency guarantees:
 //!
 //! - **No task leaks**: spawned background tasks are cancelled and drained
@@ -15,9 +15,9 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::cx::cap;
-//! use asupersync::web::request_region::{RequestRegion, RequestContext};
-//! use asupersync::Cx;
+//! use skein::cx::cap;
+//! use skein::web::request_region::{RequestRegion, RequestContext};
+//! use skein::Cx;
 //!
 //! async fn handler(ctx: &RequestContext<'_>) -> Response {
 //!     // Narrow capabilities for least-privilege handlers.
@@ -207,7 +207,7 @@ impl RequestContext<'_> {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::cx::cap::CapSet;
+    /// use skein::cx::cap::CapSet;
     ///
     /// type RequestCaps = CapSet<true, true, false, false, false>;
     /// let limited = ctx.cx_narrow::<RequestCaps>();

@@ -64,7 +64,7 @@ impl<L> ServiceBuilder<L> {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::service::ServiceBuilder;
+    /// use skein::service::ServiceBuilder;
     /// use std::time::Duration;
     ///
     /// let svc = ServiceBuilder::new()
@@ -84,7 +84,7 @@ impl<L> ServiceBuilder<L> {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::service::ServiceBuilder;
+    /// use skein::service::ServiceBuilder;
     ///
     /// let svc = ServiceBuilder::new()
     ///     .load_shed()
@@ -102,7 +102,7 @@ impl<L> ServiceBuilder<L> {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::service::ServiceBuilder;
+    /// use skein::service::ServiceBuilder;
     ///
     /// let svc = ServiceBuilder::new()
     ///     .concurrency_limit(10)  // Max 10 concurrent requests
@@ -132,7 +132,7 @@ impl<L> ServiceBuilder<L> {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::service::ServiceBuilder;
+    /// use skein::service::ServiceBuilder;
     /// use std::time::Duration;
     ///
     /// let svc = ServiceBuilder::new()
@@ -155,7 +155,7 @@ impl<L> ServiceBuilder<L> {
     /// # Example
     ///
     /// ```ignore
-    /// use asupersync::service::{ServiceBuilder, LimitedRetry};
+    /// use skein::service::{ServiceBuilder, LimitedRetry};
     ///
     /// let svc = ServiceBuilder::new()
     ///     .retry(LimitedRetry::new(3))  // Retry up to 3 times

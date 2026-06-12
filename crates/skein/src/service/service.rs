@@ -55,13 +55,13 @@ pub trait ServiceExt<Request>: Service<Request> {
 
 impl<T, Request> ServiceExt<Request> for T where T: Service<Request> + ?Sized {}
 
-/// A service that executes within an Asupersync [`Cx`].
+/// A service that executes within an Skein [`Cx`].
 ///
 /// Unlike [`Service`], this trait is async-native and does not expose readiness
 /// polling. Callers supply a `Cx` so cancellation, budgets, and capabilities
 /// are explicitly threaded through the call.
 #[allow(async_fn_in_trait)]
-pub trait AsupersyncService<Request>: Send + Sync {
+pub trait SkeinService<Request>: Send + Sync {
     /// Response type returned by the service.
     type Response;
     /// Error type returned by the service.
@@ -71,8 +71,8 @@ pub trait AsupersyncService<Request>: Send + Sync {
     async fn call(&self, cx: &Cx, request: Request) -> Result<Self::Response, Self::Error>;
 }
 
-/// Extension helpers for [`AsupersyncService`].
-pub trait AsupersyncServiceExt<Request>: AsupersyncService<Request> {
+/// Extension helpers for [`SkeinService`].
+pub trait SkeinServiceExt<Request>: SkeinService<Request> {
     /// Map the response type.
     fn map_response<F, NewResponse>(self, f: F) -> MapResponse<Self, F>
     where
@@ -118,7 +118,7 @@ pub trait AsupersyncServiceExt<Request>: AsupersyncService<Request> {
     /// # Example
     ///
     /// ```rust,ignore
-    /// use asupersync::service::AsupersyncServiceExt;
+    /// use skein::service::SkeinServiceExt;
     /// use tower::ServiceBuilder;
     /// use std::time::Duration;
     ///
@@ -137,9 +137,9 @@ pub trait AsupersyncServiceExt<Request>: AsupersyncService<Request> {
     }
 }
 
-impl<T, Request> AsupersyncServiceExt<Request> for T where T: AsupersyncService<Request> + ?Sized {}
+impl<T, Request> SkeinServiceExt<Request> for T where T: SkeinService<Request> + ?Sized {}
 
-/// Adapter that maps the response type of an [`AsupersyncService`].
+/// Adapter that maps the response type of an [`SkeinService`].
 pub struct MapResponse<S, F> {
     service: S,
     map: F,
@@ -151,9 +151,9 @@ impl<S, F> MapResponse<S, F> {
     }
 }
 
-impl<S, F, Request, NewResponse> AsupersyncService<Request> for MapResponse<S, F>
+impl<S, F, Request, NewResponse> SkeinService<Request> for MapResponse<S, F>
 where
-    S: AsupersyncService<Request>,
+    S: SkeinService<Request>,
     F: Fn(S::Response) -> NewResponse + Send + Sync,
 {
     type Response = NewResponse;
@@ -165,7 +165,7 @@ where
     }
 }
 
-/// Adapter that maps the error type of an [`AsupersyncService`].
+/// Adapter that maps the error type of an [`SkeinService`].
 pub struct MapErr<S, F> {
     service: S,
     map: F,
@@ -177,9 +177,9 @@ impl<S, F> MapErr<S, F> {
     }
 }
 
-impl<S, F, Request, NewError> AsupersyncService<Request> for MapErr<S, F>
+impl<S, F, Request, NewError> SkeinService<Request> for MapErr<S, F>
 where
-    S: AsupersyncService<Request>,
+    S: SkeinService<Request>,
     F: Fn(S::Error) -> NewError + Send + Sync,
 {
     type Response = S::Response;
@@ -191,7 +191,7 @@ where
 }
 
 /// Blanket implementation for async functions and closures.
-impl<F, Fut, Request, Response, Error> AsupersyncService<Request> for F
+impl<F, Fut, Request, Response, Error> SkeinService<Request> for F
 where
     F: Fn(&Cx, Request) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Response, Error>> + Send,
@@ -222,7 +222,7 @@ where
 /// # Example
 ///
 /// ```rust,ignore
-/// use asupersync::service::{CxProvider, TowerAdapterWithProvider};
+/// use skein::service::{CxProvider, TowerAdapterWithProvider};
 ///
 /// // Custom provider that creates Cx on demand
 /// struct OnDemandProvider;
@@ -237,7 +237,7 @@ pub trait CxProvider: Send + Sync {
     /// Returns the current Cx, if one is available.
     ///
     /// Returns `None` if no Cx is available (e.g., not running within
-    /// the asupersync runtime).
+    /// the skein runtime).
     fn current_cx(&self) -> Option<Cx>;
 }
 
@@ -255,7 +255,7 @@ pub trait CxProvider: Send + Sync {
 /// # Example
 ///
 /// ```rust,ignore
-/// use asupersync::service::{TowerAdapterWithProvider, ThreadLocalCxProvider};
+/// use skein::service::{TowerAdapterWithProvider, ThreadLocalCxProvider};
 ///
 /// let adapter = TowerAdapterWithProvider::new(my_service);
 /// // Uses ThreadLocalCxProvider by default
@@ -272,13 +272,13 @@ impl CxProvider for ThreadLocalCxProvider {
 /// Provides a fixed Cx for testing.
 ///
 /// This provider always returns a clone of the Cx provided at construction.
-/// Useful for testing Tower middleware stacks outside of the asupersync runtime.
+/// Useful for testing Tower middleware stacks outside of the skein runtime.
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use asupersync::service::{TowerAdapterWithProvider, FixedCxProvider};
-/// use asupersync::Cx;
+/// use skein::service::{TowerAdapterWithProvider, FixedCxProvider};
+/// use skein::Cx;
 ///
 /// let cx = Cx::for_testing();
 /// let provider = FixedCxProvider::new(cx);
@@ -384,18 +384,18 @@ impl AdapterConfig {
     }
 }
 
-/// Trait for mapping between Tower and Asupersync error types.
+/// Trait for mapping between Tower and Skein error types.
 pub trait ErrorAdapter: Send + Sync {
     /// The Tower error type.
     type TowerError;
-    /// The Asupersync error type.
-    type AsupersyncError;
+    /// The Skein error type.
+    type SkeinError;
 
-    /// Convert a Tower error to an Asupersync error.
-    fn to_asupersync(&self, err: Self::TowerError) -> Self::AsupersyncError;
+    /// Convert a Tower error to an Skein error.
+    fn to_skein(&self, err: Self::TowerError) -> Self::SkeinError;
 
-    /// Convert an Asupersync error to a Tower error.
-    fn to_tower(&self, err: Self::AsupersyncError) -> Self::TowerError;
+    /// Convert an Skein error to a Tower error.
+    fn to_tower(&self, err: Self::SkeinError) -> Self::TowerError;
 }
 
 /// Default error adapter that converts errors using Into.
@@ -419,13 +419,13 @@ where
     E: Clone + Send + Sync,
 {
     type TowerError = E;
-    type AsupersyncError = E;
+    type SkeinError = E;
 
-    fn to_asupersync(&self, err: Self::TowerError) -> Self::AsupersyncError {
+    fn to_skein(&self, err: Self::TowerError) -> Self::SkeinError {
         err
     }
 
-    fn to_tower(&self, err: Self::AsupersyncError) -> Self::TowerError {
+    fn to_tower(&self, err: Self::SkeinError) -> Self::TowerError {
         err
     }
 }
@@ -461,9 +461,9 @@ impl<E: std::fmt::Display> std::fmt::Display for TowerAdapterError<E> {
 
 impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for TowerAdapterError<E> {}
 
-/// Adapter that wraps an [`AsupersyncService`] for use with Tower.
+/// Adapter that wraps an [`SkeinService`] for use with Tower.
 ///
-/// This adapter allows Asupersync services to be used in Tower middleware stacks.
+/// This adapter allows Skein services to be used in Tower middleware stacks.
 /// The service is wrapped in an `Arc` for shared ownership.
 ///
 /// # Request Type
@@ -473,7 +473,7 @@ impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for TowerAdapterE
 ///
 /// # Limitations
 ///
-/// The returned future is not `Send` because `AsupersyncService::call` uses
+/// The returned future is not `Send` because `SkeinService::call` uses
 /// `async fn in trait` which doesn't guarantee Send futures. For multi-threaded
 /// Tower usage, services should implement `tower::Service` directly.
 #[cfg(feature = "tower")]
@@ -493,14 +493,14 @@ impl<S> TowerAdapter<S> {
 #[cfg(feature = "tower")]
 impl<S, Request> tower::Service<(Cx, Request)> for TowerAdapter<S>
 where
-    S: AsupersyncService<Request> + Send + Sync + 'static,
+    S: SkeinService<Request> + Send + Sync + 'static,
     Request: Send + 'static,
     S::Response: Send + 'static,
     S::Error: Send + 'static,
 {
     type Response = S::Response;
     type Error = S::Error;
-    // Note: This future is not Send because AsupersyncService::call uses async fn in trait
+    // Note: This future is not Send because SkeinService::call uses async fn in trait
     // which doesn't guarantee Send futures. For multi-threaded Tower usage, services should
     // implement tower::Service directly or use a Send-compatible wrapper.
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
@@ -525,7 +525,7 @@ impl std::fmt::Display for NoCxAvailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "no Cx available from provider (not running within asupersync runtime?)"
+            "no Cx available from provider (not running within skein runtime?)"
         )
     }
 }
@@ -556,7 +556,7 @@ impl<E: std::fmt::Display> std::fmt::Display for ProviderAdapterError<E> {
 #[cfg(feature = "tower")]
 impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for ProviderAdapterError<E> {}
 
-/// Adapter that wraps an [`AsupersyncService`] for use with Tower middleware.
+/// Adapter that wraps an [`SkeinService`] for use with Tower middleware.
 ///
 /// Unlike [`TowerAdapter`], which requires `(Cx, Request)` tuples, this adapter
 /// uses a [`CxProvider`] to obtain the Cx automatically. This allows seamless
@@ -571,13 +571,13 @@ impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for ProviderAdapt
 /// # Example
 ///
 /// ```rust,ignore
-/// use asupersync::service::{TowerAdapterWithProvider, AsupersyncService};
+/// use skein::service::{TowerAdapterWithProvider, SkeinService};
 /// use tower::ServiceBuilder;
 /// use std::time::Duration;
 ///
 /// struct MyService;
 ///
-/// impl AsupersyncService<Request> for MyService {
+/// impl SkeinService<Request> for MyService {
 ///     type Response = Response;
 ///     type Error = Error;
 ///
@@ -600,8 +600,8 @@ impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for ProviderAdapt
 /// For testing outside the runtime, use [`FixedCxProvider`]:
 ///
 /// ```rust,ignore
-/// use asupersync::service::{TowerAdapterWithProvider, FixedCxProvider};
-/// use asupersync::Cx;
+/// use skein::service::{TowerAdapterWithProvider, FixedCxProvider};
+/// use skein::Cx;
 ///
 /// let provider = FixedCxProvider::for_testing();
 /// let adapter = TowerAdapterWithProvider::with_provider(MyService, provider);
@@ -609,7 +609,7 @@ impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for ProviderAdapt
 ///
 /// # Limitations
 ///
-/// The returned future is not `Send` because `AsupersyncService::call` uses
+/// The returned future is not `Send` because `SkeinService::call` uses
 /// `async fn in trait`. For multi-threaded Tower usage, consider implementing
 /// `tower::Service` directly on your type.
 #[cfg(feature = "tower")]
@@ -677,7 +677,7 @@ where
 #[cfg(feature = "tower")]
 impl<S, P, Request> tower::Service<Request> for TowerAdapterWithProvider<S, P>
 where
-    S: AsupersyncService<Request> + Send + Sync + 'static,
+    S: SkeinService<Request> + Send + Sync + 'static,
     P: CxProvider,
     Request: Send + 'static,
     S::Response: 'static,
@@ -685,11 +685,11 @@ where
 {
     type Response = S::Response;
     type Error = ProviderAdapterError<S::Error>;
-    // Note: This future is not Send because AsupersyncService::call uses async fn in trait
+    // Note: This future is not Send because SkeinService::call uses async fn in trait
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Asupersync services are always ready (backpressure via budgets)
+        // Skein services are always ready (backpressure via budgets)
         Poll::Ready(Ok(()))
     }
 
@@ -711,31 +711,31 @@ where
     }
 }
 
-/// Adapter that wraps a Tower service for use with Asupersync.
+/// Adapter that wraps a Tower service for use with Skein.
 ///
-/// This adapter bridges Tower-style services to the Asupersync service model,
-/// providing graceful degradation when Tower services don't support asupersync
+/// This adapter bridges Tower-style services to the Skein service model,
+/// providing graceful degradation when Tower services don't support skein
 /// features like cancellation.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::service::{AsupersyncAdapter, AdapterConfig, CancellationMode};
+/// use skein::service::{SkeinAdapter, AdapterConfig, CancellationMode};
 ///
 /// let tower_service = MyTowerService::new();
-/// let adapter = AsupersyncAdapter::new(tower_service)
+/// let adapter = SkeinAdapter::new(tower_service)
 ///     .with_config(AdapterConfig::new()
 ///         .cancellation_mode(CancellationMode::TimeoutFallback)
 ///         .fallback_timeout(Duration::from_secs(30)));
 /// ```
 #[cfg(feature = "tower")]
-pub struct AsupersyncAdapter<S> {
+pub struct SkeinAdapter<S> {
     inner: parking_lot::Mutex<S>,
     config: AdapterConfig,
 }
 
 #[cfg(feature = "tower")]
-impl<S> AsupersyncAdapter<S> {
+impl<S> SkeinAdapter<S> {
     /// Create a new adapter with default configuration.
     pub fn new(service: S) -> Self {
         Self {
@@ -759,7 +759,7 @@ impl<S> AsupersyncAdapter<S> {
 }
 
 #[cfg(feature = "tower")]
-impl<S, Request> AsupersyncService<Request> for AsupersyncAdapter<S>
+impl<S, Request> SkeinService<Request> for SkeinAdapter<S>
 where
     S: tower::Service<Request> + Send + 'static,
     Request: Send + 'static,
@@ -953,14 +953,14 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{AsupersyncService, AsupersyncServiceExt};
+    use super::{SkeinService, SkeinServiceExt};
     use crate::test_utils::run_test_with_cx;
 
     #[test]
     fn function_service_call_works() {
         run_test_with_cx(|cx| async move {
             let svc = |_: &crate::cx::Cx, req: i32| async move { Ok::<_, ()>(req + 1) };
-            let result = AsupersyncService::call(&svc, &cx, 41).await.unwrap();
+            let result = SkeinService::call(&svc, &cx, 41).await.unwrap();
             assert_eq!(result, 42);
         });
     }
@@ -970,12 +970,12 @@ mod tests {
         run_test_with_cx(|cx| async move {
             let svc = |_: &crate::cx::Cx, req: i32| async move { Ok::<_, &str>(req) };
             let svc = svc.map_response(|v| v + 1).map_err(|e| format!("err:{e}"));
-            let result = AsupersyncService::call(&svc, &cx, 41).await.unwrap();
+            let result = SkeinService::call(&svc, &cx, 41).await.unwrap();
             assert_eq!(result, 42);
 
             let fail = |_: &crate::cx::Cx, _: i32| async move { Err::<i32, &str>("nope") };
             let fail = fail.map_err(|e| format!("err:{e}"));
-            let err = AsupersyncService::call(&fail, &cx, 0).await.unwrap_err();
+            let err = SkeinService::call(&fail, &cx, 0).await.unwrap_err();
             assert_eq!(err, "err:nope");
         });
     }
@@ -1023,7 +1023,7 @@ mod tests {
         let adapter = DefaultErrorAdapter::<String>::new();
 
         let original = "test error".to_string();
-        let converted = adapter.to_asupersync(original.clone());
+        let converted = adapter.to_skein(original.clone());
         assert_eq!(converted, original);
 
         let back = adapter.to_tower(converted);
@@ -1138,7 +1138,7 @@ mod tests {
     #[cfg(feature = "tower")]
     mod tower_provider_tests {
         use super::super::{
-            AsupersyncService, CxProvider, FixedCxProvider, NoCxAvailable, ProviderAdapterError,
+            SkeinService, CxProvider, FixedCxProvider, NoCxAvailable, ProviderAdapterError,
             TowerAdapterWithProvider,
         };
         use crate::Cx;
@@ -1146,7 +1146,7 @@ mod tests {
         // A simple test service
         struct AddOneService;
 
-        impl AsupersyncService<i32> for AddOneService {
+        impl SkeinService<i32> for AddOneService {
             type Response = i32;
             type Error = std::convert::Infallible;
 
@@ -1213,7 +1213,7 @@ mod tests {
     #[cfg(feature = "tower")]
     mod tower_adapter_timeout_tests {
         use super::super::{
-            AdapterConfig, AsupersyncAdapter, AsupersyncService, CancellationMode,
+            AdapterConfig, SkeinAdapter, SkeinService, CancellationMode,
             TowerAdapterError,
         };
         use crate::Cx;
@@ -1285,7 +1285,7 @@ mod tests {
             let config = AdapterConfig::new()
                 .cancellation_mode(CancellationMode::TimeoutFallback)
                 .fallback_timeout(Duration::from_millis(5));
-            let adapter = AsupersyncAdapter::with_config(PendingService, config);
+            let adapter = SkeinAdapter::with_config(PendingService, config);
 
             let mut fut = pin!(adapter.call(&cx, ()));
             let waker = noop_waker();

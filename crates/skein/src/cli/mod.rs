@@ -1,4 +1,4 @@
-//! CLI utilities for Asupersync tools.
+//! CLI utilities for Skein tools.
 //!
 //! This module provides a comprehensive framework for building CLI tools that are
 //! both human-friendly and machine-readable. Key features:
@@ -13,7 +13,7 @@
 //! # Quick Start
 //!
 //! ```rust,ignore
-//! use asupersync::cli::{Output, OutputFormat, CliError, ExitCode};
+//! use skein::cli::{Output, OutputFormat, CliError, ExitCode};
 //!
 //! // Auto-detect output format (JSON in CI/pipes, human in terminal)
 //! let format = OutputFormat::auto_detect();
@@ -33,7 +33,7 @@
 //! # Output Format Detection
 //!
 //! The output format is automatically detected based on:
-//! 1. `ASUPERSYNC_OUTPUT_FORMAT` environment variable
+//! 1. `SKEIN_OUTPUT_FORMAT` environment variable
 //! 2. `CI` environment variable (forces JSON)
 //! 3. TTY detection (JSON for pipes, human for terminals)
 //!
@@ -74,7 +74,7 @@ pub use signal::{CancellationToken, Signal, SignalHandler};
 /// Prelude for convenient imports.
 ///
 /// ```rust,ignore
-/// use asupersync::cli::prelude::*;
+/// use skein::cli::prelude::*;
 /// ```
 pub mod prelude {
     pub use super::args::{COMMON_ARGS_HELP, CommonArgs};

@@ -49,7 +49,7 @@ impl From<SignalError> for io::Error {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::signal::{signal, SignalKind};
+/// use skein::signal::{signal, SignalKind};
 ///
 /// async fn handle_signals() -> std::io::Result<()> {
 ///     let mut sigterm = signal(SignalKind::terminate())?;
@@ -117,7 +117,7 @@ impl Signal {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::signal::{signal, SignalKind};
+/// use skein::signal::{signal, SignalKind};
 ///
 /// let mut sigterm = signal(SignalKind::terminate())?;
 /// sigterm.recv().await;

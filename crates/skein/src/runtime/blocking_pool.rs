@@ -32,7 +32,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::runtime::BlockingPool;
+//! use skein::runtime::BlockingPool;
 //!
 //! let pool = BlockingPool::new(1, 4);
 //! let handle = pool.spawn(|| {
@@ -574,7 +574,7 @@ impl Default for BlockingPoolOptions {
     fn default() -> Self {
         Self {
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
-            thread_name_prefix: "asupersync".to_string(),
+            thread_name_prefix: "skein".to_string(),
             on_thread_start: None,
             on_thread_stop: None,
         }

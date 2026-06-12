@@ -18,7 +18,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::runtime::reactor::{Registration, Interest, Token};
+//! use skein::runtime::reactor::{Registration, Interest, Token};
 //!
 //! // Registration is created by the reactor when registering a source
 //! let registration = reactor.register(source, Interest::READABLE)?;

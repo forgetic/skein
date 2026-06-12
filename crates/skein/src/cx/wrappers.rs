@@ -143,7 +143,7 @@ impl BackgroundContext {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::cx::wrappers::{narrow, WebCaps};
+/// use skein::cx::wrappers::{narrow, WebCaps};
 ///
 /// // Full-capability Cx from runtime
 /// let full_cx: Arc<Cx<All>> = runtime.create_cx();

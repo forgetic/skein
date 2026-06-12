@@ -10,7 +10,7 @@
 //! |-------|---------|
 //! | `worker_threads` | available CPU parallelism |
 //! | `thread_stack_size` | 2 MiB |
-//! | `thread_name_prefix` | `"asupersync-worker"` |
+//! | `thread_name_prefix` | `"skein-worker"` |
 //! | `global_queue_limit` | 0 (unbounded) |
 //! | `steal_batch_size` | 16 |
 //! | `enable_parking` | true |
@@ -181,7 +181,7 @@ impl RuntimeConfig {
             }
         }
         if self.thread_name_prefix.is_empty() {
-            self.thread_name_prefix = "asupersync-worker".to_string();
+            self.thread_name_prefix = "skein-worker".to_string();
         }
         self.blocking.normalize();
     }
@@ -198,7 +198,7 @@ impl Default for RuntimeConfig {
         Self {
             worker_threads: Self::default_worker_threads(),
             thread_stack_size: 2 * 1024 * 1024,
-            thread_name_prefix: "asupersync-worker".to_string(),
+            thread_name_prefix: "skein-worker".to_string(),
             global_queue_limit: 0,
             steal_batch_size: 16,
             blocking: BlockingPoolConfig::default(),
@@ -355,9 +355,9 @@ mod tests {
             config.governor_interval
         );
         crate::assert_with_log!(
-            config.thread_name_prefix == "asupersync-worker",
+            config.thread_name_prefix == "skein-worker",
             "thread_name_prefix",
-            "asupersync-worker",
+            "skein-worker",
             config.thread_name_prefix
         );
         crate::assert_with_log!(

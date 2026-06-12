@@ -1,13 +1,13 @@
-//! Builder API types and validation for Asupersync.
+//! Builder API types and validation for Skein.
 //!
-//! This module defines the common types used by builders throughout Asupersync,
+//! This module defines the common types used by builders throughout Skein,
 //! including error types, validation utilities, and the builder trait.
 //!
 //! # Design Philosophy
 //!
 //! ## Builder Ownership Model
 //!
-//! Asupersync uses **move-based builders** where each method takes `self` by value
+//! Skein uses **move-based builders** where each method takes `self` by value
 //! and returns `Self`. This provides:
 //!
 //! - Clear ownership semantics with no borrowing issues
@@ -61,7 +61,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::types::builder::{BuildError, BuildResult};
+//! use skein::types::builder::{BuildError, BuildResult};
 //!
 //! struct MyBuilder {
 //!     name: Option<String>,
@@ -529,7 +529,7 @@ pub mod validate {
 // Builder Type Signatures
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// The following sections document the type signatures for builders in Asupersync.
+// The following sections document the type signatures for builders in Skein.
 // Implementations are in their respective modules; this serves as a design reference.
 
 // ───────────────────────────────────────────────────────────────────────────

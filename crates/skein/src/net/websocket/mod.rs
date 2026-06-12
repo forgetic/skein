@@ -14,7 +14,7 @@
 //! # Client Example
 //!
 //! ```ignore
-//! use asupersync::net::websocket::{WebSocket, Message};
+//! use skein::net::websocket::{WebSocket, Message};
 //!
 //! // Connect to a WebSocket server
 //! let ws = WebSocket::connect(&cx, "ws://example.com/chat").await?;
@@ -31,7 +31,7 @@
 //! # Server Example
 //!
 //! ```ignore
-//! use asupersync::net::websocket::{WebSocketAcceptor, Message};
+//! use skein::net::websocket::{WebSocketAcceptor, Message};
 //!
 //! // Create acceptor
 //! let acceptor = WebSocketAcceptor::new().protocol("chat");

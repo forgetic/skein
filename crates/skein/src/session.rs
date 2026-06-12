@@ -32,7 +32,7 @@
 //! Protocol violations are type errors. The following shows correct usage:
 //!
 //! ```rust
-//! use asupersync::session::{Send, Recv, End, Session, Dual};
+//! use skein::session::{Send, Recv, End, Session, Dual};
 //!
 //! // Dual of Send<T, End> is Recv<T, End>
 //! fn _check_duality() {
@@ -44,11 +44,11 @@
 //! Attempting to call `send` on a `Recv` endpoint is a type error:
 //!
 //! ```compile_fail
-//! use asupersync::session::{Recv, End, channel};
+//! use skein::session::{Recv, End, channel};
 //!
 //! // ERROR: Endpoint<Recv<u32, End>> does not have a send() method
 //! async fn wrong_direction() {
-//!     let cx = asupersync::cx::Cx::for_testing();
+//!     let cx = skein::cx::Cx::for_testing();
 //!     type P = Recv<u32, End>;
 //!     let (ep, _peer) = channel::<P>();
 //!     ep.send(&cx, 42).await.unwrap();
@@ -58,7 +58,7 @@
 //! Attempting to close an endpoint before the protocol completes is a type error:
 //!
 //! ```compile_fail
-//! use asupersync::session::{Send, End, channel};
+//! use skein::session::{Send, End, channel};
 //!
 //! // ERROR: Endpoint<Send<u32, End>> does not have close()
 //! fn premature_close() {
@@ -71,11 +71,11 @@
 //! Calling `recv` on a `Send` endpoint is a type error:
 //!
 //! ```compile_fail
-//! use asupersync::session::{Send, End, channel};
+//! use skein::session::{Send, End, channel};
 //!
 //! // ERROR: Endpoint<Send<u32, End>> does not have recv()
 //! async fn recv_on_send() {
-//!     let cx = asupersync::cx::Cx::for_testing();
+//!     let cx = skein::cx::Cx::for_testing();
 //!     type P = Send<u32, End>;
 //!     let (ep, _peer) = channel::<P>();
 //!     ep.recv(&cx).await.unwrap();

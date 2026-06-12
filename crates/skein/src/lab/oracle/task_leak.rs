@@ -5,7 +5,7 @@
 //!
 //! # Invariant
 //!
-//! From asupersync_plan_v4.md:
+//! From skein_plan_v4.md:
 //! > Structured concurrency – every task is owned by exactly one region
 //!
 //! Formally: `∀r ∈ closed_regions: ∀t ∈ tasks(r): t.state = Completed`

@@ -330,8 +330,8 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for HedgeError<E> {}
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::hedge::{hedge_outcomes, HedgeWinner};
-/// use asupersync::types::Outcome;
+/// use skein::combinator::hedge::{hedge_outcomes, HedgeWinner};
+/// use skein::types::Outcome;
 ///
 /// // Primary completed before hedge deadline
 /// let result = hedge_outcomes::<i32, &str>(
@@ -344,7 +344,7 @@ impl<E: fmt::Debug + fmt::Display> std::error::Error for HedgeError<E> {}
 ///
 /// // Hedge race occurred, backup won
 /// let result = hedge_outcomes::<i32, &str>(
-///     Outcome::Cancelled(asupersync::types::cancel::CancelReason::race_loser()),
+///     Outcome::Cancelled(skein::types::cancel::CancelReason::race_loser()),
 ///     true,
 ///     Some(Outcome::Ok(99)),
 ///     Some(HedgeWinner::Backup),
@@ -389,8 +389,8 @@ pub fn hedge_outcomes<T, E>(
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::hedge::{hedge_to_result, HedgeResult};
-/// use asupersync::types::Outcome;
+/// use skein::combinator::hedge::{hedge_to_result, HedgeResult};
+/// use skein::types::Outcome;
 ///
 /// // Primary fast success
 /// let result: HedgeResult<i32, &str> = HedgeResult::primary_fast(Outcome::Ok(42));
@@ -399,7 +399,7 @@ pub fn hedge_outcomes<T, E>(
 /// // Backup won with error
 /// let result: HedgeResult<i32, &str> = HedgeResult::backup_won(
 ///     Outcome::Err("backup failed"),
-///     Outcome::Cancelled(asupersync::types::cancel::CancelReason::race_loser()),
+///     Outcome::Cancelled(skein::types::cancel::CancelReason::race_loser()),
 /// );
 /// assert!(hedge_to_result(result).is_err());
 /// ```

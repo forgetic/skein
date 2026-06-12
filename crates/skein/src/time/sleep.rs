@@ -110,15 +110,15 @@ struct SleepState {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::time::sleep;
+/// use skein::time::sleep;
 /// use std::time::Duration;
 ///
 /// // Sleep for 100 milliseconds
 /// sleep(Duration::from_millis(100)).await;
 ///
 /// // Sleep until a specific time
-/// use asupersync::time::sleep_until;
-/// use asupersync::types::Time;
+/// use skein::time::sleep_until;
+/// use skein::types::Time;
 /// sleep_until(Time::from_secs(5)).await;
 /// ```
 #[derive(Debug)]
@@ -145,8 +145,8 @@ impl Sleep {
     /// # Example
     ///
     /// ```
-    /// use asupersync::time::Sleep;
-    /// use asupersync::types::Time;
+    /// use skein::time::Sleep;
+    /// use skein::types::Time;
     ///
     /// let sleep = Sleep::new(Time::from_secs(5));
     /// assert_eq!(sleep.deadline(), Time::from_secs(5));
@@ -176,8 +176,8 @@ impl Sleep {
     /// # Example
     ///
     /// ```
-    /// use asupersync::time::Sleep;
-    /// use asupersync::types::Time;
+    /// use skein::time::Sleep;
+    /// use skein::types::Time;
     /// use std::time::Duration;
     ///
     /// let now = Time::from_secs(10);
@@ -591,8 +591,8 @@ impl Clone for Sleep {
 /// # Example
 ///
 /// ```
-/// use asupersync::time::sleep;
-/// use asupersync::types::Time;
+/// use skein::time::sleep;
+/// use skein::types::Time;
 /// use std::time::Duration;
 ///
 /// let now = Time::from_secs(10);
@@ -613,8 +613,8 @@ pub fn sleep(now: Time, duration: Duration) -> Sleep {
 /// # Example
 ///
 /// ```
-/// use asupersync::time::sleep_until;
-/// use asupersync::types::Time;
+/// use skein::time::sleep_until;
+/// use skein::types::Time;
 ///
 /// let sleep_future = sleep_until(Time::from_secs(5));
 /// assert_eq!(sleep_future.deadline(), Time::from_secs(5));

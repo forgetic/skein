@@ -1,7 +1,7 @@
 //! OpenTelemetry metrics provider.
 //!
 //! This module provides [`OtelMetrics`], an implementation of [`MetricsProvider`]
-//! that exports Asupersync runtime metrics via OpenTelemetry.
+//! that exports Skein runtime metrics via OpenTelemetry.
 //!
 //! # Feature
 //!
@@ -18,7 +18,7 @@
 //!     overflow_strategy: CardinalityOverflow::Aggregate,
 //!     ..Default::default()
 //! };
-//! let metrics = OtelMetrics::new_with_config(global::meter("asupersync"), config);
+//! let metrics = OtelMetrics::new_with_config(global::meter("skein"), config);
 //! ```
 //!
 //! # Custom Exporters
@@ -36,7 +36,7 @@
 //! use opentelemetry::global;
 //! use opentelemetry_prometheus::exporter;
 //! use prometheus::Registry;
-//! use asupersync::observability::OtelMetrics;
+//! use skein::observability::OtelMetrics;
 //!
 //! let registry = Registry::new();
 //! let exporter = exporter().with_registry(registry.clone()).build().unwrap();
@@ -45,7 +45,7 @@
 //!     .build();
 //! opentelemetry::global::set_meter_provider(provider);
 //!
-//! let metrics = OtelMetrics::new(global::meter("asupersync"));
+//! let metrics = OtelMetrics::new(global::meter("skein"));
 //! // RuntimeBuilder::new().metrics(metrics).build();
 //! ```
 
@@ -561,7 +561,7 @@ impl MetricsExporter for InMemoryExporter {
 // OtelMetrics
 // =============================================================================
 
-/// OpenTelemetry metrics provider for Asupersync.
+/// OpenTelemetry metrics provider for Skein.
 ///
 /// This provider supports:
 /// - Cardinality limits to prevent metric explosion
@@ -678,7 +678,7 @@ impl OtelMetrics {
         let state = Arc::new(MetricsState::default());
 
         let tasks_active = meter
-            .u64_observable_gauge("asupersync.tasks.active")
+            .u64_observable_gauge("skein.tasks.active")
             .with_description("Currently running tasks")
             .with_callback({
                 let state = Arc::clone(&state);
@@ -689,7 +689,7 @@ impl OtelMetrics {
             .build();
 
         let regions_active = meter
-            .u64_observable_gauge("asupersync.regions.active")
+            .u64_observable_gauge("skein.regions.active")
             .with_description("Currently active regions")
             .with_callback({
                 let state = Arc::clone(&state);
@@ -700,7 +700,7 @@ impl OtelMetrics {
             .build();
 
         let obligations_active = meter
-            .u64_observable_gauge("asupersync.obligations.active")
+            .u64_observable_gauge("skein.obligations.active")
             .with_description("Currently active obligations")
             .with_callback({
                 let state = Arc::clone(&state);
@@ -713,85 +713,85 @@ impl OtelMetrics {
         Self {
             tasks_active,
             tasks_spawned: meter
-                .u64_counter("asupersync.tasks.spawned")
+                .u64_counter("skein.tasks.spawned")
                 .with_description("Total tasks spawned")
                 .build(),
             tasks_completed: meter
-                .u64_counter("asupersync.tasks.completed")
+                .u64_counter("skein.tasks.completed")
                 .with_description("Total tasks completed")
                 .build(),
             task_duration: meter
-                .f64_histogram("asupersync.tasks.duration")
+                .f64_histogram("skein.tasks.duration")
                 .with_description("Task execution duration in seconds")
                 .build(),
             regions_active,
             regions_created: meter
-                .u64_counter("asupersync.regions.created")
+                .u64_counter("skein.regions.created")
                 .with_description("Total regions created")
                 .build(),
             regions_closed: meter
-                .u64_counter("asupersync.regions.closed")
+                .u64_counter("skein.regions.closed")
                 .with_description("Total regions closed")
                 .build(),
             region_lifetime: meter
-                .f64_histogram("asupersync.regions.lifetime")
+                .f64_histogram("skein.regions.lifetime")
                 .with_description("Region lifetime in seconds")
                 .build(),
             cancellations: meter
-                .u64_counter("asupersync.cancellations")
+                .u64_counter("skein.cancellations")
                 .with_description("Cancellation requests")
                 .build(),
             drain_duration: meter
-                .f64_histogram("asupersync.cancellation.drain_duration")
+                .f64_histogram("skein.cancellation.drain_duration")
                 .with_description("Cancellation drain duration in seconds")
                 .build(),
             deadlines_set: meter
-                .u64_counter("asupersync.deadlines.set")
+                .u64_counter("skein.deadlines.set")
                 .with_description("Deadlines configured")
                 .build(),
             deadlines_exceeded: meter
-                .u64_counter("asupersync.deadlines.exceeded")
+                .u64_counter("skein.deadlines.exceeded")
                 .with_description("Deadline exceeded events")
                 .build(),
             deadline_warnings: meter
-                .u64_counter("asupersync.deadline.warnings_total")
+                .u64_counter("skein.deadline.warnings_total")
                 .with_description("Deadline warning events")
                 .build(),
             deadline_violations: meter
-                .u64_counter("asupersync.deadline.violations_total")
+                .u64_counter("skein.deadline.violations_total")
                 .with_description("Deadline violation events")
                 .build(),
             deadline_remaining: meter
-                .f64_histogram("asupersync.deadline.remaining_seconds")
+                .f64_histogram("skein.deadline.remaining_seconds")
                 .with_description("Time remaining at completion in seconds")
                 .build(),
             checkpoint_interval: meter
-                .f64_histogram("asupersync.checkpoint.interval_seconds")
+                .f64_histogram("skein.checkpoint.interval_seconds")
                 .with_description("Time between checkpoints in seconds")
                 .build(),
             task_stuck_detected: meter
-                .u64_counter("asupersync.task.stuck_detected_total")
+                .u64_counter("skein.task.stuck_detected_total")
                 .with_description("Tasks detected as stuck (no progress)")
                 .build(),
             obligations_active,
             obligations_created: meter
-                .u64_counter("asupersync.obligations.created")
+                .u64_counter("skein.obligations.created")
                 .with_description("Obligations created")
                 .build(),
             obligations_discharged: meter
-                .u64_counter("asupersync.obligations.discharged")
+                .u64_counter("skein.obligations.discharged")
                 .with_description("Obligations discharged")
                 .build(),
             obligations_leaked: meter
-                .u64_counter("asupersync.obligations.leaked")
+                .u64_counter("skein.obligations.leaked")
                 .with_description("Obligations leaked")
                 .build(),
             scheduler_poll_time: meter
-                .f64_histogram("asupersync.scheduler.poll_time")
+                .f64_histogram("skein.scheduler.poll_time")
                 .with_description("Scheduler poll duration in seconds")
                 .build(),
             scheduler_tasks_polled: meter
-                .f64_histogram("asupersync.scheduler.tasks_polled")
+                .f64_histogram("skein.scheduler.tasks_polled")
                 .with_description("Tasks polled per scheduler tick")
                 .build(),
             state,
@@ -896,12 +896,12 @@ impl MetricsProvider for OtelMetrics {
         self.state.dec_tasks();
 
         let labels = [KeyValue::new("outcome", outcome_label(outcome))];
-        if let Some(filtered) = self.check_cardinality("asupersync.tasks.completed", &labels) {
+        if let Some(filtered) = self.check_cardinality("skein.tasks.completed", &labels) {
             self.tasks_completed.add(1, &filtered);
         }
 
-        if self.should_sample("asupersync.tasks.duration") {
-            if let Some(filtered) = self.check_cardinality("asupersync.tasks.duration", &labels) {
+        if self.should_sample("skein.tasks.duration") {
+            if let Some(filtered) = self.check_cardinality("skein.tasks.duration", &labels) {
                 self.task_duration.record(duration.as_secs_f64(), &filtered);
             }
         }
@@ -916,20 +916,20 @@ impl MetricsProvider for OtelMetrics {
         self.state.dec_regions();
         self.regions_closed.add(1, &[]);
 
-        if self.should_sample("asupersync.regions.lifetime") {
+        if self.should_sample("skein.regions.lifetime") {
             self.region_lifetime.record(lifetime.as_secs_f64(), &[]);
         }
     }
 
     fn cancellation_requested(&self, _region_id: RegionId, kind: CancelKind) {
         let labels = [KeyValue::new("kind", cancel_kind_label(kind))];
-        if let Some(filtered) = self.check_cardinality("asupersync.cancellations", &labels) {
+        if let Some(filtered) = self.check_cardinality("skein.cancellations", &labels) {
             self.cancellations.add(1, &filtered);
         }
     }
 
     fn drain_completed(&self, _region_id: RegionId, duration: Duration) {
-        if self.should_sample("asupersync.cancellation.drain_duration") {
+        if self.should_sample("skein.cancellation.drain_duration") {
             self.drain_duration.record(duration.as_secs_f64(), &[]);
         }
     }
@@ -949,7 +949,7 @@ impl MetricsProvider for OtelMetrics {
             KeyValue::new("reason", reason),
         ];
         if let Some(filtered) =
-            self.check_cardinality("asupersync.deadline.warnings_total", &labels)
+            self.check_cardinality("skein.deadline.warnings_total", &labels)
         {
             self.deadline_warnings.add(1, &filtered);
         }
@@ -960,18 +960,18 @@ impl MetricsProvider for OtelMetrics {
         let task_type = task_type.to_string();
         let labels = [KeyValue::new("task_type", task_type)];
         if let Some(filtered) =
-            self.check_cardinality("asupersync.deadline.violations_total", &labels)
+            self.check_cardinality("skein.deadline.violations_total", &labels)
         {
             self.deadline_violations.add(1, &filtered);
         }
     }
 
     fn deadline_remaining(&self, task_type: &str, remaining: Duration) {
-        if self.should_sample("asupersync.deadline.remaining_seconds") {
+        if self.should_sample("skein.deadline.remaining_seconds") {
             let task_type = task_type.to_string();
             let labels = [KeyValue::new("task_type", task_type)];
             if let Some(filtered) =
-                self.check_cardinality("asupersync.deadline.remaining_seconds", &labels)
+                self.check_cardinality("skein.deadline.remaining_seconds", &labels)
             {
                 self.deadline_remaining
                     .record(remaining.as_secs_f64(), &filtered);
@@ -980,11 +980,11 @@ impl MetricsProvider for OtelMetrics {
     }
 
     fn checkpoint_interval(&self, task_type: &str, interval: Duration) {
-        if self.should_sample("asupersync.checkpoint.interval_seconds") {
+        if self.should_sample("skein.checkpoint.interval_seconds") {
             let task_type = task_type.to_string();
             let labels = [KeyValue::new("task_type", task_type)];
             if let Some(filtered) =
-                self.check_cardinality("asupersync.checkpoint.interval_seconds", &labels)
+                self.check_cardinality("skein.checkpoint.interval_seconds", &labels)
             {
                 self.checkpoint_interval
                     .record(interval.as_secs_f64(), &filtered);
@@ -996,7 +996,7 @@ impl MetricsProvider for OtelMetrics {
         let task_type = task_type.to_string();
         let labels = [KeyValue::new("task_type", task_type)];
         if let Some(filtered) =
-            self.check_cardinality("asupersync.task.stuck_detected_total", &labels)
+            self.check_cardinality("skein.task.stuck_detected_total", &labels)
         {
             self.task_stuck_detected.add(1, &filtered);
         }
@@ -1018,7 +1018,7 @@ impl MetricsProvider for OtelMetrics {
     }
 
     fn scheduler_tick(&self, tasks_polled: usize, duration: Duration) {
-        if self.should_sample("asupersync.scheduler") {
+        if self.should_sample("skein.scheduler") {
             self.scheduler_poll_time.record(duration.as_secs_f64(), &[]);
             // Precision loss is acceptable for metrics (only affects counts > 2^52)
             #[allow(clippy::cast_precision_loss)]
@@ -1066,26 +1066,26 @@ mod tests {
     use std::path::Path;
 
     const EXPECTED_METRICS: &[&str] = &[
-        "asupersync.tasks.spawned",
-        "asupersync.tasks.completed",
-        "asupersync.tasks.duration",
-        "asupersync.regions.created",
-        "asupersync.regions.closed",
-        "asupersync.regions.lifetime",
-        "asupersync.cancellations",
-        "asupersync.cancellation.drain_duration",
-        "asupersync.deadlines.set",
-        "asupersync.deadlines.exceeded",
-        "asupersync.deadline.warnings_total",
-        "asupersync.deadline.violations_total",
-        "asupersync.deadline.remaining_seconds",
-        "asupersync.checkpoint.interval_seconds",
-        "asupersync.task.stuck_detected_total",
-        "asupersync.obligations.created",
-        "asupersync.obligations.discharged",
-        "asupersync.obligations.leaked",
-        "asupersync.scheduler.poll_time",
-        "asupersync.scheduler.tasks_polled",
+        "skein.tasks.spawned",
+        "skein.tasks.completed",
+        "skein.tasks.duration",
+        "skein.regions.created",
+        "skein.regions.closed",
+        "skein.regions.lifetime",
+        "skein.cancellations",
+        "skein.cancellation.drain_duration",
+        "skein.deadlines.set",
+        "skein.deadlines.exceeded",
+        "skein.deadline.warnings_total",
+        "skein.deadline.violations_total",
+        "skein.deadline.remaining_seconds",
+        "skein.checkpoint.interval_seconds",
+        "skein.task.stuck_detected_total",
+        "skein.obligations.created",
+        "skein.obligations.discharged",
+        "skein.obligations.leaked",
+        "skein.scheduler.poll_time",
+        "skein.scheduler.tasks_polled",
     ];
 
     fn metric_names(finished: &[ResourceMetrics]) -> HashSet<String> {
@@ -1134,7 +1134,7 @@ mod tests {
         let exporter = OtelInMemoryExporter::default();
         let reader = PeriodicReader::builder(exporter.clone()).build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
-        let meter = provider.meter("asupersync");
+        let meter = provider.meter("skein");
 
         let metrics = OtelMetrics::new(meter);
 
@@ -1175,7 +1175,7 @@ mod tests {
         let exporter = OtelInMemoryExporter::default();
         let reader = PeriodicReader::builder(exporter.clone()).build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
-        let meter = provider.meter("asupersync");
+        let meter = provider.meter("skein");
 
         let metrics = OtelMetrics::new(meter);
         let runtime = RuntimeBuilder::new()
@@ -1202,9 +1202,9 @@ mod tests {
         assert_expected_metrics_present(
             &names,
             &[
-                "asupersync.tasks.spawned",
-                "asupersync.tasks.completed",
-                "asupersync.tasks.duration",
+                "skein.tasks.spawned",
+                "skein.tasks.completed",
+                "skein.tasks.duration",
             ],
         );
 
@@ -1225,16 +1225,16 @@ mod tests {
 
         let joined = queries.join("\n");
         let expected = [
-            "asupersync_tasks_spawned_total",
-            "asupersync_tasks_completed_total",
-            "asupersync_tasks_duration_bucket",
-            "asupersync_regions_active",
-            "asupersync_cancellations_total",
-            "asupersync_deadline_warnings_total",
-            "asupersync_deadline_violations_total",
-            "asupersync_deadline_remaining_seconds_bucket",
-            "asupersync_checkpoint_interval_seconds_bucket",
-            "asupersync_task_stuck_detected_total",
+            "skein_tasks_spawned_total",
+            "skein_tasks_completed_total",
+            "skein_tasks_duration_bucket",
+            "skein_regions_active",
+            "skein_cancellations_total",
+            "skein_deadline_warnings_total",
+            "skein_deadline_violations_total",
+            "skein_deadline_remaining_seconds_bucket",
+            "skein_checkpoint_interval_seconds_bucket",
+            "skein_task_stuck_detected_total",
         ];
         for metric in expected {
             assert!(
@@ -1249,7 +1249,7 @@ mod tests {
         let exporter = OtelInMemoryExporter::default();
         let reader = PeriodicReader::builder(exporter.clone()).build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
-        let meter = provider.meter("asupersync");
+        let meter = provider.meter("skein");
 
         let config = MetricsConfig::new()
             .with_max_cardinality(500)
@@ -1306,7 +1306,7 @@ mod tests {
         let exporter = OtelInMemoryExporter::default();
         let reader = PeriodicReader::builder(exporter.clone()).build();
         let provider = SdkMeterProvider::builder().with_reader(reader).build();
-        let meter = provider.meter("asupersync");
+        let meter = provider.meter("skein");
 
         let config = MetricsConfig::new().with_drop_label("request_id");
         let metrics = OtelMetrics::new_with_config(meter, config);

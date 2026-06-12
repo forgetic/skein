@@ -26,7 +26,7 @@ impl LogLevel {
     ///
     /// # Example
     /// ```
-    /// use asupersync::observability::LogLevel;
+    /// use skein::observability::LogLevel;
     ///
     /// assert!(LogLevel::Error.is_enabled_at(LogLevel::Info));
     /// assert!(!LogLevel::Debug.is_enabled_at(LogLevel::Info));

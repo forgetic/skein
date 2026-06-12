@@ -10,7 +10,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::net::websocket::{WebSocket, Message};
+//! use skein::net::websocket::{WebSocket, Message};
 //!
 //! let ws = WebSocket::connect(&cx, "ws://example.com/chat").await?;
 //! let (mut read, mut write) = ws.split();

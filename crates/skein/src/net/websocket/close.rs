@@ -17,7 +17,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::net::websocket::{CloseReason, CloseCode};
+//! use skein::net::websocket::{CloseReason, CloseCode};
 //!
 //! // Parse close frame payload
 //! let reason = CloseReason::parse(&payload)?;

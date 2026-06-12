@@ -21,8 +21,8 @@ use std::task::{Context, Poll};
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::service::{ServiceBuilder, ServiceExt};
-/// use asupersync::service::concurrency_limit::ConcurrencyLimitLayer;
+/// use skein::service::{ServiceBuilder, ServiceExt};
+/// use skein::service::concurrency_limit::ConcurrencyLimitLayer;
 ///
 /// let svc = ServiceBuilder::new()
 ///     .layer(ConcurrencyLimitLayer::new(10))  // Max 10 concurrent

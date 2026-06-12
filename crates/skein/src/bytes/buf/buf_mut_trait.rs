@@ -21,7 +21,7 @@ use super::Limit;
 /// # Examples
 ///
 /// ```
-/// use asupersync::bytes::BufMut;
+/// use skein::bytes::BufMut;
 ///
 /// let mut buf = Vec::new();
 /// buf.put_u16(0x1234);

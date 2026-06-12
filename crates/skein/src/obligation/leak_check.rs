@@ -507,8 +507,8 @@ impl LeakChecker {
 /// # Example
 ///
 /// ```
-/// use asupersync::obligation::BodyBuilder;
-/// use asupersync::record::ObligationKind;
+/// use skein::obligation::BodyBuilder;
+/// use skein::record::ObligationKind;
 ///
 /// let mut b = BodyBuilder::new("send_handler");
 /// let permit = b.reserve(ObligationKind::SendPermit);
@@ -518,7 +518,7 @@ impl LeakChecker {
 /// });
 /// let body = b.build();
 ///
-/// let mut checker = asupersync::obligation::LeakChecker::new();
+/// let mut checker = skein::obligation::LeakChecker::new();
 /// let result = checker.check(&body);
 /// assert!(result.is_clean());
 /// ```
@@ -654,8 +654,8 @@ impl ArmBuilder {
 /// # Example
 ///
 /// ```
-/// use asupersync::obligation::ObligationAnalyzer;
-/// use asupersync::record::ObligationKind;
+/// use skein::obligation::ObligationAnalyzer;
+/// use skein::record::ObligationKind;
 ///
 /// let mut analyzer = ObligationAnalyzer::new("my_handler");
 /// let permit = analyzer.reserve(ObligationKind::SendPermit);
@@ -753,15 +753,15 @@ impl ObligationAnalyzer {
 /// # Example
 ///
 /// ```
-/// use asupersync::obligation_body;
-/// use asupersync::record::ObligationKind;
+/// use skein::obligation_body;
+/// use skein::record::ObligationKind;
 ///
 /// let body = obligation_body!("handler", |b| {
 ///     let v = b.reserve(ObligationKind::SendPermit);
 ///     b.commit(v);
 /// });
 ///
-/// let mut checker = asupersync::obligation::LeakChecker::new();
+/// let mut checker = skein::obligation::LeakChecker::new();
 /// assert!(checker.check(&body).is_clean());
 /// ```
 #[macro_export]
@@ -791,8 +791,8 @@ macro_rules! obligation_body {
 /// # Example
 ///
 /// ```
-/// use asupersync::assert_no_leaks;
-/// use asupersync::record::ObligationKind;
+/// use skein::assert_no_leaks;
+/// use skein::record::ObligationKind;
 ///
 /// // Inline form:
 /// assert_no_leaks!("clean_handler", |b| {
@@ -802,8 +802,8 @@ macro_rules! obligation_body {
 /// ```
 ///
 /// ```should_panic
-/// use asupersync::assert_no_leaks;
-/// use asupersync::record::ObligationKind;
+/// use skein::assert_no_leaks;
+/// use skein::record::ObligationKind;
 ///
 /// // This panics because the obligation is never resolved:
 /// assert_no_leaks!("leaky_handler", |b| {
@@ -831,8 +831,8 @@ macro_rules! assert_no_leaks {
 /// # Example
 ///
 /// ```
-/// use asupersync::{assert_has_leaks, obligation_body};
-/// use asupersync::record::ObligationKind;
+/// use skein::{assert_has_leaks, obligation_body};
+/// use skein::record::ObligationKind;
 ///
 /// let body = obligation_body!("leaky", |b| {
 ///     let _v = b.reserve(ObligationKind::SendPermit);

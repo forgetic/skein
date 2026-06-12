@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::grpc::health::{HealthService, ServingStatus};
+//! use skein::grpc::health::{HealthService, ServingStatus};
 //!
 //! // Create health service
 //! let health = HealthService::new();

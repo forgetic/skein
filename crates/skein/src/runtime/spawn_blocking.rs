@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::runtime::spawn_blocking;
+//! use skein::runtime::spawn_blocking;
 //! use std::io;
 //!
 //! async fn read_file(path: &str) -> io::Result<String> {
@@ -222,7 +222,7 @@ where
     let f_cell = Arc::new(Mutex::new(Some(f)));
     let f_for_thread = Arc::clone(&f_cell);
     let thread_result = thread::Builder::new()
-        .name("asupersync-blocking".to_string())
+        .name("skein-blocking".to_string())
         .spawn(move || {
             let f = f_for_thread
                 .lock()

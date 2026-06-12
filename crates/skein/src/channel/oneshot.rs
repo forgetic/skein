@@ -29,7 +29,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::channel::oneshot;
+//! use skein::channel::oneshot;
 //!
 //! // Create a oneshot channel
 //! let (tx, rx) = oneshot::channel::<i32>();

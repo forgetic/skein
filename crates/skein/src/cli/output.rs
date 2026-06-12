@@ -34,7 +34,7 @@ impl OutputFormat {
     /// Uses JSON when:
     /// - `CI` environment variable is set
     /// - stdout is not a TTY (piped output)
-    /// - `ASUPERSYNC_OUTPUT_FORMAT` env var is set to a JSON variant
+    /// - `SKEIN_OUTPUT_FORMAT` env var is set to a JSON variant
     #[must_use]
     pub fn auto_detect() -> Self {
         // CI environment always uses JSON
@@ -48,7 +48,7 @@ impl OutputFormat {
         }
 
         // Check environment variable
-        if let Ok(format) = std::env::var("ASUPERSYNC_OUTPUT_FORMAT") {
+        if let Ok(format) = std::env::var("SKEIN_OUTPUT_FORMAT") {
             match format.to_lowercase().as_str() {
                 "json" => return Self::Json,
                 "stream-json" | "streamjson" | "stream_json" => return Self::StreamJson,

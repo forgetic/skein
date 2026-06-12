@@ -14,8 +14,8 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use asupersync::lab::{LabConfig, LabRuntime};
-//! use asupersync::types::Budget;
+//! use skein::lab::{LabConfig, LabRuntime};
+//! use skein::types::Budget;
 //!
 //! let mut runtime = LabRuntime::new(LabConfig::new(42));
 //! let region = runtime.state.create_root_region(Budget::INFINITE);

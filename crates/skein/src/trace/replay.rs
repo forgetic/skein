@@ -24,8 +24,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::trace::replay::{ReplayEvent, TraceMetadata, ReplayTrace};
-//! use asupersync::types::TaskId;
+//! use skein::trace::replay::{ReplayEvent, TraceMetadata, ReplayTrace};
+//! use skein::types::TaskId;
 //!
 //! // Create trace metadata
 //! let metadata = TraceMetadata::new(42); // seed

@@ -5,7 +5,7 @@
 //!
 //! # Invariant
 //!
-//! From asupersync_plan_v4.md:
+//! From skein_plan_v4.md:
 //! > Losers are drained: races must cancel and fully drain losers
 //!
 //! Formally: `∀race: ∀loser ∈ race.losers: loser.state = Completed`

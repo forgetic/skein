@@ -12,7 +12,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::database::PgConnection;
+//! use skein::database::PgConnection;
 //!
 //! async fn example(cx: &Cx) -> Result<(), PgError> {
 //!     let conn = PgConnection::connect(cx, "postgres://user:pass@localhost/db").await?;

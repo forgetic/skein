@@ -383,8 +383,8 @@ where
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::map_reduce::make_map_reduce_result;
-/// use asupersync::types::Outcome;
+/// use skein::combinator::map_reduce::make_map_reduce_result;
+/// use skein::types::Outcome;
 ///
 /// let outcomes: Vec<Outcome<i32, &str>> = vec![
 ///     Outcome::Ok(1),
@@ -419,8 +419,8 @@ where
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::map_reduce::{make_map_reduce_result, map_reduce_to_result};
-/// use asupersync::types::Outcome;
+/// use skein::combinator::map_reduce::{make_map_reduce_result, map_reduce_to_result};
+/// use skein::types::Outcome;
 ///
 /// let outcomes: Vec<Outcome<i32, &str>> = vec![
 ///     Outcome::Ok(1),
@@ -482,8 +482,8 @@ pub fn map_reduce_to_result<T, E: Clone>(
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::map_reduce::{make_map_reduce_result, reduce_successes};
-/// use asupersync::types::Outcome;
+/// use skein::combinator::map_reduce::{make_map_reduce_result, reduce_successes};
+/// use skein::types::Outcome;
 ///
 /// let outcomes: Vec<Outcome<i32, &str>> = vec![
 ///     Outcome::Ok(1),

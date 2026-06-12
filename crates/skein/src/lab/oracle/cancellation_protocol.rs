@@ -22,7 +22,7 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use asupersync::lab::oracle::cancellation_protocol::CancellationProtocolOracle;
+//! use skein::lab::oracle::cancellation_protocol::CancellationProtocolOracle;
 //!
 //! let mut oracle = CancellationProtocolOracle::new();
 //!

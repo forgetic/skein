@@ -26,8 +26,8 @@ fn wall_clock_now() -> Time {
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::service::{ServiceBuilder, ServiceExt};
-/// use asupersync::service::rate_limit::RateLimitLayer;
+/// use skein::service::{ServiceBuilder, ServiceExt};
+/// use skein::service::rate_limit::RateLimitLayer;
 /// use std::time::Duration;
 ///
 /// let svc = ServiceBuilder::new()

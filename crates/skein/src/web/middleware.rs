@@ -1,6 +1,6 @@
 //! Combinator middleware for HTTP handlers.
 //!
-//! This module bridges Asupersync's composable combinators (circuit breaker,
+//! This module bridges Skein's composable combinators (circuit breaker,
 //! retry, timeout, rate limit, bulkhead) with the web framework's [`Handler`]
 //! trait, enabling resilience patterns as middleware layers.
 //!
@@ -13,9 +13,9 @@
 //! # Example
 //!
 //! ```ignore
-//! use asupersync::web::middleware::*;
-//! use asupersync::web::{Router, get};
-//! use asupersync::combinator::*;
+//! use skein::web::middleware::*;
+//! use skein::web::{Router, get};
+//! use skein::combinator::*;
 //! use std::time::Duration;
 //!
 //! let handler = FnHandler::new(|| "hello");

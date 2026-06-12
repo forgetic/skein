@@ -61,12 +61,12 @@
 //! # Usage
 //!
 //! ```
-//! use asupersync::obligation::dialectica::{
+//! use skein::obligation::dialectica::{
 //!     DialecticaContract, ContractViolation, ContractChecker,
 //! };
-//! use asupersync::obligation::marking::{MarkingEvent, MarkingEventKind, MarkingAnalyzer};
-//! use asupersync::record::ObligationKind;
-//! use asupersync::types::{ObligationId, RegionId, TaskId, Time};
+//! use skein::obligation::marking::{MarkingEvent, MarkingEventKind, MarkingAnalyzer};
+//! use skein::record::ObligationKind;
+//! use skein::types::{ObligationId, RegionId, TaskId, Time};
 //!
 //! let r0 = RegionId::new_for_test(0, 0);
 //! let t0 = TaskId::new_for_test(0, 0);

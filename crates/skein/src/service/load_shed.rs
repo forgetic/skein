@@ -19,8 +19,8 @@ use std::task::{Context, Poll};
 /// # Example
 ///
 /// ```ignore
-/// use asupersync::service::{ServiceBuilder, ServiceExt};
-/// use asupersync::service::load_shed::LoadShedLayer;
+/// use skein::service::{ServiceBuilder, ServiceExt};
+/// use skein::service::load_shed::LoadShedLayer;
 ///
 /// let svc = ServiceBuilder::new()
 ///     .layer(LoadShedLayer::new())

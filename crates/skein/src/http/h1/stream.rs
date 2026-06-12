@@ -1,7 +1,7 @@
 //! HTTP/1 body streaming support.
 //!
 //! This module provides streaming body types for HTTP/1.1 that integrate with
-//! asupersync's cancel-safety guarantees and backpressure mechanisms.
+//! skein's cancel-safety guarantees and backpressure mechanisms.
 //!
 //! # Overview
 //!

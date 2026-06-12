@@ -40,10 +40,10 @@
 //! # Usage
 //!
 //! ```
-//! use asupersync::obligation::lyapunov::{
+//! use skein::obligation::lyapunov::{
 //!     LyapunovGovernor, PotentialWeights, StateSnapshot, SchedulingSuggestion,
 //! };
-//! use asupersync::types::Time;
+//! use skein::types::Time;
 //!
 //! let weights = PotentialWeights::default();
 //! let mut governor = LyapunovGovernor::new(weights);

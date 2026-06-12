@@ -65,7 +65,7 @@ pub struct CalmClassification {
     pub justification: &'static str,
 }
 
-/// All CALM classifications for Asupersync saga operations.
+/// All CALM classifications for Skein saga operations.
 ///
 /// Returns a static slice of classifications for every saga operation.
 #[must_use]

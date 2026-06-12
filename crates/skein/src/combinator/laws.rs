@@ -1,13 +1,13 @@
 //! Polynomial Functor Composition Laws for Phase 0 Combinators.
 //!
-//! This module serves as the formal **law sheet** for asupersync's combinator
+//! This module serves as the formal **law sheet** for skein's combinator
 //! algebra, documenting every algebraic law that Phase 0 commits to preserving.
 //! Future phases (polynomial functor rewrites, streaming pipelines, distributed
 //! scheduling) must not violate these laws.
 //!
 //! # Categorical Perspective
 //!
-//! Asupersync's combinators can be viewed through polynomial functors where:
+//! Skein's combinators can be viewed through polynomial functors where:
 //! - **Objects** are outcome-producing computations `F : 1 → Outcome<T,E>`
 //! - **Join** is a product-like operation (wait for all, take worst severity)
 //! - **Race** is a coproduct-like operation (take first, cancel rest)

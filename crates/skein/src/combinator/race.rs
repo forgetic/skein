@@ -5,7 +5,7 @@
 //!
 //! # Critical Invariant: Losers Are Drained
 //!
-//! Unlike other runtimes that abandon losers, asupersync always drains them:
+//! Unlike other runtimes that abandon losers, skein always drains them:
 //!
 //! ```text
 //! race(f1, f2):
@@ -47,7 +47,7 @@ use crate::types::outcome::PanicPayload;
 /// Trait for futures that support explicit cancellation.
 ///
 /// Futures participating in a `race!` must implement this trait to support
-/// the asupersync cancellation protocol.
+/// the skein cancellation protocol.
 pub trait Cancel: Future {
     /// Initiates cancellation of this future.
     fn cancel(&mut self, reason: CancelReason);
@@ -435,14 +435,14 @@ pub type Race2Result<T, E> = (Outcome<T, E>, RaceWinner, Outcome<T, E>);
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::race::{race2_outcomes, RaceWinner};
-/// use asupersync::types::Outcome;
+/// use skein::combinator::race::{race2_outcomes, RaceWinner};
+/// use skein::types::Outcome;
 ///
 /// // First branch completed first with Ok(42)
 /// let o1: Outcome<i32, &str> = Outcome::Ok(42);
 /// // Second branch was cancelled (as the loser)
 /// let o2: Outcome<i32, &str> = Outcome::Cancelled(
-///     asupersync::types::cancel::CancelReason::race_loser()
+///     skein::types::cancel::CancelReason::race_loser()
 /// );
 ///
 /// let (winner_outcome, winner, loser_outcome) = race2_outcomes(RaceWinner::First, o1, o2);
@@ -468,12 +468,12 @@ pub fn race2_outcomes<T, E>(
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::race::{race2_to_result, RaceWinner};
-/// use asupersync::types::Outcome;
+/// use skein::combinator::race::{race2_to_result, RaceWinner};
+/// use skein::types::Outcome;
 ///
 /// let o1: Outcome<i32, &str> = Outcome::Ok(42);
 /// let o2: Outcome<i32, &str> = Outcome::Cancelled(
-///     asupersync::types::cancel::CancelReason::race_loser()
+///     skein::types::cancel::CancelReason::race_loser()
 /// );
 ///
 /// let result = race2_to_result(RaceWinner::First, o1, o2);
@@ -580,9 +580,9 @@ pub fn race_all_outcomes<T, E>(
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::race::{race_all_to_result, RaceAllResult, RaceAllError};
-/// use asupersync::types::Outcome;
-/// use asupersync::types::cancel::CancelReason;
+/// use skein::combinator::race::{race_all_to_result, RaceAllResult, RaceAllError};
+/// use skein::types::Outcome;
+/// use skein::types::cancel::CancelReason;
 ///
 /// let result: RaceAllResult<i32, &str> = RaceAllResult::new(
 ///     Outcome::Ok(42),
@@ -628,9 +628,9 @@ pub fn race_all_to_result<T, E>(result: RaceAllResult<T, E>) -> Result<T, RaceAl
 ///
 /// # Example
 /// ```
-/// use asupersync::combinator::race::{make_race_all_result, RaceAllError};
-/// use asupersync::types::Outcome;
-/// use asupersync::types::cancel::CancelReason;
+/// use skein::combinator::race::{make_race_all_result, RaceAllError};
+/// use skein::types::Outcome;
+/// use skein::types::cancel::CancelReason;
 ///
 /// let outcomes: Vec<Outcome<i32, &str>> = vec![
 ///     Outcome::Ok(42),
@@ -654,7 +654,7 @@ pub fn make_race_all_result<T, E>(
 /// The first future to complete wins.
 ///
 /// Note: this macro is currently a placeholder and does **not** implement the
-/// full asupersync race semantics (cancel + drain losers). Use the `Scope`
+/// full skein race semantics (cancel + drain losers). Use the `Scope`
 /// APIs (`Scope::race`, `Scope::race_all`) when racing spawned tasks.
 ///
 /// # Basic Usage

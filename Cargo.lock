@@ -122,17 +122,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "asupersync-conformance"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c59d56fde799fcd3925c267688ee824cb31f7c7b53d4b135e47332a696e083ce"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1789,7 +1778,6 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "skein"
 version = "0.2.4"
 dependencies = [
- "asupersync-conformance",
  "base64",
  "bincode-next",
  "clap",
@@ -1827,6 +1815,7 @@ dependencies = [
  "serde_yaml",
  "sha1",
  "sha2",
+ "skein-conformance",
  "skein-macros",
  "slab",
  "smallvec",
@@ -1841,6 +1830,15 @@ dependencies = [
  "visibility",
  "webpki-roots",
  "x509-parser",
+]
+
+[[package]]
+name = "skein-conformance"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
