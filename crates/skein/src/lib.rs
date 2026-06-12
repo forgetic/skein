@@ -28,7 +28,6 @@
 //! - [`util`]: Internal utilities (deterministic RNG, arenas)
 //! - [`error`](mod@error): Error types
 //! - [`channel`]: Two-phase channel primitives (MPSC, etc.)
-//! - [`encoding`]: RaptorQ encoding pipeline
 //! - [`observability`]: Structured logging, metrics, and diagnostic context
 //! - [`security`]: Symbol authentication and security primitives
 //! - [`time`]: Sleep and timeout primitives for time-based operations
@@ -36,7 +35,6 @@
 //! - [`net`]: Async networking primitives (Phase 0: synchronous wrappers)
 //! - [`bytes`]: Zero-copy buffer types (Bytes, BytesMut, Buf, BufMut)
 //! - [`tracing_compat`]: Optional tracing integration (requires `tracing-integration` feature)
-//! - [`plan`]: Plan DAG IR for join/race/timeout rewrites
 //!
 //! # API Stability
 //!
@@ -72,7 +70,6 @@ pub mod channel;
 pub mod codec;
 pub mod combinator;
 pub mod config;
-pub mod conformance;
 pub mod console;
 pub mod cx;
 pub mod error;
@@ -95,7 +92,6 @@ pub mod remote;
 pub mod runtime;
 pub mod security;
 pub mod server;
-pub mod service;
 pub mod signal;
 pub mod stream;
 pub mod supervision;
@@ -113,7 +109,6 @@ pub mod trace;
 pub mod tracing_compat;
 pub mod types;
 pub mod util;
-pub mod web;
 
 // Re-exports for convenient access to core types
 pub use config::{

@@ -52,7 +52,6 @@ pub mod config;
 pub mod conformal;
 pub mod explorer;
 pub mod fuzz;
-pub mod http;
 pub mod injection;
 pub mod instrumented_future;
 pub mod meta;
@@ -80,9 +79,6 @@ pub use explorer::{
     RunResult, ScheduleExplorer, TopologyExplorer, ViolationReport,
 };
 pub use fuzz::{FuzzConfig, FuzzFinding, FuzzHarness, FuzzReport, fuzz_quick};
-pub use http::{
-    RequestBuilder, RequestTrace, TestHarness, TraceEntry, VirtualClient, VirtualServer,
-};
 pub use injection::{
     LabBuilder, LabInjectionConfig, LabInjectionReport, LabInjectionResult, LabInjectionRunner, lab,
 };

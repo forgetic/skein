@@ -22,11 +22,7 @@ pub mod body;
 pub mod compress;
 pub mod h1;
 pub mod h2;
-#[cfg(feature = "http3")]
-pub mod h3;
 pub mod pool;
 
 pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};
-#[cfg(feature = "http3")]
-pub use h3::{H3Body, H3Client, H3Driver, H3Error};
 pub use pool::{Pool, PoolConfig, PoolKey, PoolStats, PooledConnectionMeta, PooledConnectionState};

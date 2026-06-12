@@ -7,9 +7,6 @@
 
 /// DNS resolution with caching and Happy Eyeballs support.
 pub mod dns;
-/// QUIC protocol implementation via quinn.
-#[cfg(feature = "quic")]
-pub mod quic;
 mod resolve;
 pub mod sys;
 /// TCP networking primitives.
@@ -21,11 +18,6 @@ pub mod unix;
 /// WebSocket protocol implementation (RFC 6455).
 pub mod websocket;
 
-#[cfg(feature = "quic")]
-pub use quic::{
-    ClientAuth as QuicClientAuth, QuicConfig, QuicConnection, QuicEndpoint, QuicError,
-    RecvStream as QuicRecvStream, SendStream as QuicSendStream,
-};
 pub use resolve::{lookup_all, lookup_one};
 pub use tcp::listener::{Incoming, TcpListener};
 pub use tcp::socket::TcpSocket;
