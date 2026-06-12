@@ -157,6 +157,7 @@ version = "0.31"
 features = [
     "fs",
     "poll",
+    "signal",
     "socket",
     "uio",
     "user",

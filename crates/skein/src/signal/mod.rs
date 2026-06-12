@@ -6,22 +6,20 @@
 //! # Components
 //!
 //! - [`SignalKind`]: Enumeration of Unix signal types
-//! - [`Signal`]: Async stream for receiving signals (Phase 1)
-//! - [`ctrl_c`]: Cross-platform Ctrl+C handling (Phase 1)
+//! - [`Signal`]: Async stream for receiving signals
+//! - [`ctrl_c`]: Cross-platform Ctrl+C handling
 //! - [`ShutdownController`]: Coordinated graceful shutdown
 //! - [`ShutdownReceiver`]: Handle for receiving shutdown notifications
 //! - [`with_graceful_shutdown`]: Run tasks with shutdown support
 //!
-//! # Phase 0 Implementation
+//! # Implementation
 //!
-//! In Phase 0, signal handling requires external infrastructure that is not
-//! yet available:
-//!
-//! - Unix signals require either unsafe libc bindings or the `signal-hook` crate
-//! - Cross-platform Ctrl+C requires the `ctrlc` crate or similar
-//!
-//! The [`ShutdownController`] and graceful shutdown helpers are fully
-//! functional using our sync primitives.
+//! On Unix, signal streams are backed by a process-global self-pipe: a
+//! minimal async-signal-safe handler forwards each delivery through a pipe
+//! to a dedicated dispatcher thread, which wakes every registered stream.
+//! Polling is purely waker-based, so signal futures work under any executor
+//! and need no reactor. See the `registry` module for details. On non-Unix
+//! platforms, constructing a signal stream returns an error.
 //!
 //! # Example
 //!
@@ -56,6 +54,8 @@
 mod ctrl_c;
 mod graceful;
 mod kind;
+#[cfg(unix)]
+mod registry;
 mod shutdown;
 mod signal;
 

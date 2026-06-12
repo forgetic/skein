@@ -1,16 +1,19 @@
 //! Async signal stream for Unix signals.
 //!
+//! On Unix, signal streams are backed by the process-global self-pipe
+//! registry in [`super::registry`]: a minimal async-signal-safe handler
+//! forwards each delivery through a pipe to a dispatcher thread, which wakes
+//! every registered stream. Polling is purely waker-based, so streams work
+//! under any executor — no reactor or runtime context is required.
+//!
+//! On non-Unix platforms, [`signal`] returns an error.
+//!
 //! # Cancel Safety
 //!
 //! - `Signal::recv`: Cancel-safe, can be cancelled at any await point.
-//!
-//! # Phase 0 Implementation
-//!
-//! In Phase 0, signal streams are not yet implemented due to the lack of
-//! a reactor and the `unsafe_code = "forbid"` constraint. The API surface
-//! is defined for forward compatibility.
 
 use std::io;
+use std::task::{Context, Poll};
 
 use super::SignalKind;
 
@@ -22,10 +25,10 @@ pub struct SignalError {
 }
 
 impl SignalError {
-    fn not_implemented(kind: SignalKind) -> Self {
+    fn unsupported(kind: SignalKind) -> Self {
         Self {
             kind,
-            message: "Signal handling not implemented in Phase 0",
+            message: "Signal handling is not supported on this platform",
         }
     }
 }
@@ -46,6 +49,13 @@ impl From<SignalError> for io::Error {
 
 /// An async stream that receives signals of a particular kind.
 ///
+/// Deliveries coalesce, matching Unix semantics: any number of deliveries
+/// between two `recv` calls completes the next `recv` exactly once.
+///
+/// Dropping the stream stops its notifications, but the process-wide signal
+/// handler stays installed — the signal's default action remains suppressed
+/// for the lifetime of the process.
+///
 /// # Example
 ///
 /// ```ignore
@@ -65,6 +75,8 @@ impl From<SignalError> for io::Error {
 #[derive(Debug)]
 pub struct Signal {
     kind: SignalKind,
+    #[cfg(unix)]
+    state: std::sync::Arc<super::registry::ListenerState>,
 }
 
 impl Signal {
@@ -72,23 +84,29 @@ impl Signal {
     ///
     /// # Errors
     ///
-    /// Returns an error if signal handling is not available for this platform
-    /// or signal kind.
-    fn new(kind: SignalKind) -> Result<Self, SignalError> {
-        // Phase 0: Signal streams not yet implemented
-        // This requires either:
-        // 1. A reactor with signal fd support (epoll + signalfd on Linux)
-        // 2. The signal-hook crate with async integration
-        // 3. Unsafe signal handler registration via libc
-        //
-        // Since we forbid unsafe code and want minimal dependencies,
-        // this is deferred to Phase 1.
-        Err(SignalError::not_implemented(kind))
+    /// Returns an error if signal handling is not available on this platform
+    /// or the handler could not be installed.
+    #[cfg(unix)]
+    fn new(kind: SignalKind) -> io::Result<Self> {
+        let state = super::registry::register(kind)?;
+        Ok(Self { kind, state })
+    }
+
+    /// Creates a new signal stream for the given signal kind.
+    ///
+    /// # Errors
+    ///
+    /// Always errors: signal handling is only supported on Unix.
+    #[cfg(not(unix))]
+    fn new(kind: SignalKind) -> io::Result<Self> {
+        Err(SignalError::unsupported(kind).into())
     }
 
     /// Receives the next signal notification.
     ///
-    /// Returns `None` if the signal stream has been closed.
+    /// Returns `None` if the signal stream has been closed. (The current
+    /// Unix implementation never closes the stream, so this returns
+    /// `Some(())` for every delivery.)
     ///
     /// # Cancel Safety
     ///
@@ -96,9 +114,23 @@ impl Signal {
     /// statement and some other branch completes first, no signal notification
     /// is lost.
     pub async fn recv(&mut self) -> Option<()> {
-        // Phase 0: Would poll the signal notification mechanism
-        // For now, this would pend forever if it were reachable
-        std::future::pending().await
+        std::future::poll_fn(|cx| self.poll_recv(cx)).await
+    }
+
+    /// Polls for the next signal notification.
+    ///
+    /// Like [`recv`](Self::recv), but usable from manual `Future`
+    /// implementations.
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<()>> {
+        #[cfg(unix)]
+        {
+            self.state.poll_recv(cx)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = cx;
+            Poll::Pending
+        }
     }
 
     /// Returns the signal kind this stream is listening for.
@@ -123,7 +155,7 @@ impl Signal {
 /// sigterm.recv().await;
 /// ```
 pub fn signal(kind: SignalKind) -> io::Result<Signal> {
-    Signal::new(kind).map_err(Into::into)
+    Signal::new(kind)
 }
 
 /// Creates a stream for SIGINT (Ctrl+C on Unix).
@@ -218,53 +250,77 @@ mod tests {
     #[test]
     fn signal_error_display() {
         init_test("signal_error_display");
-        let err = SignalError::not_implemented(SignalKind::Terminate);
+        let err = SignalError::unsupported(SignalKind::Terminate);
         let msg = format!("{err}");
         let has_sigterm = msg.contains("SIGTERM");
         crate::assert_with_log!(has_sigterm, "contains SIGTERM", true, has_sigterm);
-        let has_phase = msg.contains("Phase 0");
-        crate::assert_with_log!(has_phase, "contains Phase 0", true, has_phase);
+        let has_reason = msg.contains("not supported");
+        crate::assert_with_log!(has_reason, "contains reason", true, has_reason);
         crate::test_complete!("signal_error_display");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn signal_not_implemented() {
-        init_test("signal_not_implemented");
-        // All signals should return NotImplemented error in Phase 0
-        let result = signal(SignalKind::terminate());
-        let is_err = result.is_err();
-        crate::assert_with_log!(is_err, "result err", true, is_err);
-        let err = result.unwrap_err();
+    fn signal_creates_stream() {
+        init_test("signal_creates_stream");
+        let stream = signal(SignalKind::terminate());
+        let is_ok = stream.is_ok();
+        crate::assert_with_log!(is_ok, "stream created", true, is_ok);
+        let kind = stream.expect("stream").kind();
+        crate::assert_with_log!(
+            kind == SignalKind::Terminate,
+            "kind",
+            SignalKind::Terminate,
+            kind
+        );
+        crate::test_complete!("signal_creates_stream");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn signal_unsupported_off_unix() {
+        init_test("signal_unsupported_off_unix");
+        let err = signal(SignalKind::terminate()).expect_err("must error off unix");
         crate::assert_with_log!(
             err.kind() == io::ErrorKind::Unsupported,
             "err kind",
             io::ErrorKind::Unsupported,
             err.kind()
         );
-        crate::test_complete!("signal_not_implemented");
+        crate::test_complete!("signal_unsupported_off_unix");
     }
 
     #[cfg(unix)]
     #[test]
     fn unix_signal_helpers() {
         init_test("unix_signal_helpers");
-        // Verify all helper functions return the expected error
-        let sigint_err = sigint().is_err();
-        crate::assert_with_log!(sigint_err, "sigint err", true, sigint_err);
-        let sigterm_err = sigterm().is_err();
-        crate::assert_with_log!(sigterm_err, "sigterm err", true, sigterm_err);
-        let sighup_err = sighup().is_err();
-        crate::assert_with_log!(sighup_err, "sighup err", true, sighup_err);
-        let sigusr1_err = sigusr1().is_err();
-        crate::assert_with_log!(sigusr1_err, "sigusr1 err", true, sigusr1_err);
-        let sigusr2_err = sigusr2().is_err();
-        crate::assert_with_log!(sigusr2_err, "sigusr2 err", true, sigusr2_err);
-        let sigquit_err = sigquit().is_err();
-        crate::assert_with_log!(sigquit_err, "sigquit err", true, sigquit_err);
-        let sigchld_err = sigchld().is_err();
-        crate::assert_with_log!(sigchld_err, "sigchld err", true, sigchld_err);
-        let sigwinch_err = sigwinch().is_err();
-        crate::assert_with_log!(sigwinch_err, "sigwinch err", true, sigwinch_err);
+        let cases = [
+            (sigint().expect("sigint"), SignalKind::Interrupt),
+            (sigterm().expect("sigterm"), SignalKind::Terminate),
+            (sighup().expect("sighup"), SignalKind::Hangup),
+            (sigusr1().expect("sigusr1"), SignalKind::User1),
+            (sigusr2().expect("sigusr2"), SignalKind::User2),
+            (sigquit().expect("sigquit"), SignalKind::Quit),
+            (sigchld().expect("sigchld"), SignalKind::Child),
+            (sigwinch().expect("sigwinch"), SignalKind::WindowChange),
+        ];
+        for (stream, expected) in cases {
+            let kind = stream.kind();
+            crate::assert_with_log!(kind == expected, "helper kind", expected, kind);
+        }
         crate::test_complete!("unix_signal_helpers");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signal_stream_receives_delivery() {
+        init_test("signal_stream_receives_delivery");
+        // SIGALRM is used by this test only (registry tests use other kinds),
+        // so concurrently running tests cannot interfere.
+        let mut stream = signal(SignalKind::alarm()).expect("stream");
+        nix::sys::signal::raise(nix::sys::signal::Signal::SIGALRM).expect("raise");
+        let received = futures_lite::future::block_on(stream.recv());
+        crate::assert_with_log!(received.is_some(), "received", true, received.is_some());
+        crate::test_complete!("signal_stream_receives_delivery");
     }
 }
