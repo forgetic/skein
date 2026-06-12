@@ -1,11 +1,8 @@
 //! Built-in meta-mutations for testing the oracle suite.
 
-use crate::actor::ActorId;
 use crate::lab::oracle::{CapabilityKind, OracleViolation, RRefId};
 use crate::record::ObligationKind;
-use crate::supervision::{EscalationPolicy, RestartPolicy};
-use crate::types::{Budget, CancelReason, TaskId};
-use crate::util::ArenaIndex;
+use crate::types::{Budget, CancelReason};
 
 use super::runner::MetaHarness;
 
@@ -27,22 +24,8 @@ pub const INVARIANT_AMBIENT_AUTHORITY: &str = "ambient_authority";
 pub const INVARIANT_DEADLINE_MONOTONE: &str = "deadline_monotone";
 /// Invariant name for the cancellation protocol oracle.
 pub const INVARIANT_CANCELLATION_PROTOCOL: &str = "cancellation_protocol";
-/// Invariant name for the actor leak oracle.
-pub const INVARIANT_ACTOR_LEAK: &str = "actor_leak";
-/// Invariant name for the supervision oracle.
-pub const INVARIANT_SUPERVISION: &str = "supervision";
-/// Invariant name for the mailbox oracle.
-pub const INVARIANT_MAILBOX: &str = "mailbox";
 /// Invariant name for the RRef access oracle.
 pub const INVARIANT_RREF_ACCESS: &str = "rref_access";
-/// Invariant name for the reply linearity oracle (Spork).
-pub const INVARIANT_REPLY_LINEARITY: &str = "reply_linearity";
-/// Invariant name for the registry lease linearity oracle (Spork).
-pub const INVARIANT_REGISTRY_LEASE: &str = "registry_lease";
-/// Invariant name for the deterministic DOWN ordering oracle (Spork).
-pub const INVARIANT_DOWN_ORDER: &str = "down_order";
-/// Invariant name for the supervisor quiescence oracle (Spork).
-pub const INVARIANT_SUPERVISOR_QUIESCENCE: &str = "supervisor_quiescence";
 
 /// Ordered list of all oracle invariants covered by the meta runner.
 pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
@@ -55,14 +38,7 @@ pub const ALL_ORACLE_INVARIANTS: &[&str] = &[
     INVARIANT_FINALIZER,
     INVARIANT_REGION_TREE,
     INVARIANT_DEADLINE_MONOTONE,
-    INVARIANT_ACTOR_LEAK,
-    INVARIANT_SUPERVISION,
-    INVARIANT_MAILBOX,
     INVARIANT_RREF_ACCESS,
-    INVARIANT_REPLY_LINEARITY,
-    INVARIANT_REGISTRY_LEASE,
-    INVARIANT_DOWN_ORDER,
-    INVARIANT_SUPERVISOR_QUIESCENCE,
 ];
 
 /// Built-in mutations used to validate oracle detection.
@@ -86,12 +62,6 @@ pub enum BuiltinMutation {
     DeadlineMonotoneChildUnbounded,
     /// Cancel does not propagate to child region.
     CancelPropagationMissingChild,
-    /// Actor not stopped before region close.
-    ActorLeak,
-    /// Supervision restart limit exceeded without escalation.
-    SupervisionRestartLimitExceeded,
-    /// Mailbox capacity exceeded.
-    MailboxCapacityExceeded,
     /// Task accesses RRef from a different region.
     CrossRegionRRefAccess,
 }
@@ -109,9 +79,6 @@ pub fn builtin_mutations() -> Vec<BuiltinMutation> {
         BuiltinMutation::AmbientAuthoritySpawnWithoutCapability,
         BuiltinMutation::DeadlineMonotoneChildUnbounded,
         BuiltinMutation::CancelPropagationMissingChild,
-        BuiltinMutation::ActorLeak,
-        BuiltinMutation::SupervisionRestartLimitExceeded,
-        BuiltinMutation::MailboxCapacityExceeded,
         BuiltinMutation::CrossRegionRRefAccess,
     ]
 }
@@ -132,9 +99,6 @@ impl BuiltinMutation {
             }
             Self::DeadlineMonotoneChildUnbounded => "mutation_deadline_child_unbounded",
             Self::CancelPropagationMissingChild => "mutation_cancel_missing_child",
-            Self::ActorLeak => "mutation_actor_leak",
-            Self::SupervisionRestartLimitExceeded => "mutation_supervision_restart_limit",
-            Self::MailboxCapacityExceeded => "mutation_mailbox_capacity_exceeded",
             Self::CrossRegionRRefAccess => "mutation_cross_region_rref_access",
         }
     }
@@ -152,9 +116,6 @@ impl BuiltinMutation {
             Self::AmbientAuthoritySpawnWithoutCapability => INVARIANT_AMBIENT_AUTHORITY,
             Self::DeadlineMonotoneChildUnbounded => INVARIANT_DEADLINE_MONOTONE,
             Self::CancelPropagationMissingChild => INVARIANT_CANCELLATION_PROTOCOL,
-            Self::ActorLeak => INVARIANT_ACTOR_LEAK,
-            Self::SupervisionRestartLimitExceeded => INVARIANT_SUPERVISION,
-            Self::MailboxCapacityExceeded => INVARIANT_MAILBOX,
             Self::CrossRegionRRefAccess => INVARIANT_RREF_ACCESS,
         }
     }
@@ -170,9 +131,6 @@ impl BuiltinMutation {
             Self::AmbientAuthoritySpawnWithoutCapability => baseline_ambient_authority(harness),
             Self::DeadlineMonotoneChildUnbounded => baseline_deadline_monotone(harness),
             Self::CancelPropagationMissingChild => baseline_cancel_propagation(harness),
-            Self::ActorLeak => baseline_actor_leak(harness),
-            Self::SupervisionRestartLimitExceeded => baseline_supervision_restart(harness),
-            Self::MailboxCapacityExceeded => baseline_mailbox_capacity(harness),
             Self::CrossRegionRRefAccess => baseline_rref_access(harness),
         }
     }
@@ -188,16 +146,9 @@ impl BuiltinMutation {
             Self::AmbientAuthoritySpawnWithoutCapability => mutation_ambient_authority(harness),
             Self::DeadlineMonotoneChildUnbounded => mutation_deadline_monotone(harness),
             Self::CancelPropagationMissingChild => mutation_cancel_propagation(harness),
-            Self::ActorLeak => mutation_actor_leak(harness),
-            Self::SupervisionRestartLimitExceeded => mutation_supervision_restart(harness),
-            Self::MailboxCapacityExceeded => mutation_mailbox_capacity(harness),
             Self::CrossRegionRRefAccess => mutation_rref_access(harness),
         }
     }
-}
-
-fn actor(n: u32) -> ActorId {
-    ActorId::from_task(TaskId::from_arena(ArenaIndex::new(n, 0)))
 }
 
 fn baseline_task_leak(harness: &mut MetaHarness) {
@@ -470,87 +421,6 @@ fn mutation_cancel_propagation(harness: &mut MetaHarness) {
         .on_region_cancel(parent, CancelReason::shutdown(), now);
 }
 
-fn baseline_actor_leak(harness: &mut MetaHarness) {
-    let now = harness.now();
-    let region = harness.next_region();
-    harness.oracles.actor_leak.on_spawn(actor(100), region, now);
-    harness.oracles.actor_leak.on_stop(actor(100), now);
-    harness.oracles.actor_leak.on_region_close(region, now);
-}
-
-fn mutation_actor_leak(harness: &mut MetaHarness) {
-    let now = harness.now();
-    let region = harness.next_region();
-    harness.oracles.actor_leak.on_spawn(actor(100), region, now);
-    harness.oracles.actor_leak.on_region_close(region, now);
-}
-
-fn baseline_supervision_restart(harness: &mut MetaHarness) {
-    let now = harness.now();
-    harness.oracles.supervision.register_supervisor(
-        actor(200),
-        RestartPolicy::OneForOne,
-        2,
-        EscalationPolicy::Escalate,
-    );
-    harness
-        .oracles
-        .supervision
-        .register_child(actor(200), actor(201));
-    harness
-        .oracles
-        .supervision
-        .on_child_failed(actor(200), actor(201), now, "test error".into());
-    harness.oracles.supervision.on_restart(actor(201), 1, now);
-}
-
-fn mutation_supervision_restart(harness: &mut MetaHarness) {
-    let now = harness.now();
-    harness.oracles.supervision.register_supervisor(
-        actor(200),
-        RestartPolicy::OneForOne,
-        2,
-        EscalationPolicy::Escalate,
-    );
-    harness
-        .oracles
-        .supervision
-        .register_child(actor(200), actor(201));
-    harness
-        .oracles
-        .supervision
-        .on_child_failed(actor(200), actor(201), now, "test error".into());
-    harness.oracles.supervision.on_restart(actor(201), 3, now);
-}
-
-fn baseline_mailbox_capacity(harness: &mut MetaHarness) {
-    let now = harness.now();
-    harness
-        .oracles
-        .mailbox
-        .configure_mailbox(actor(300), 2, false);
-    harness.oracles.mailbox.on_send(actor(300), now);
-    harness.oracles.mailbox.on_send(actor(300), now);
-    // Baseline must fully drain the mailbox so the "no silent drops" invariant holds.
-    harness.oracles.mailbox.on_receive(actor(300), now);
-    harness.oracles.mailbox.on_receive(actor(300), now);
-}
-
-fn mutation_mailbox_capacity(harness: &mut MetaHarness) {
-    let now = harness.now();
-    harness
-        .oracles
-        .mailbox
-        .configure_mailbox(actor(300), 2, false);
-    harness.oracles.mailbox.on_send(actor(300), now);
-    harness.oracles.mailbox.on_send(actor(300), now);
-    harness.oracles.mailbox.on_send(actor(300), now);
-    // Drain all messages so `check()` reports the capacity violation (not a generic "message lost").
-    harness.oracles.mailbox.on_receive(actor(300), now);
-    harness.oracles.mailbox.on_receive(actor(300), now);
-    harness.oracles.mailbox.on_receive(actor(300), now);
-}
-
 fn baseline_rref_access(harness: &mut MetaHarness) {
     let now = harness.now();
     let region = harness.next_region();
@@ -595,14 +465,7 @@ pub fn invariant_from_violation(violation: &OracleViolation) -> &'static str {
         OracleViolation::AmbientAuthority(_) => INVARIANT_AMBIENT_AUTHORITY,
         OracleViolation::DeadlineMonotone(_) => INVARIANT_DEADLINE_MONOTONE,
         OracleViolation::CancellationProtocol(_) => INVARIANT_CANCELLATION_PROTOCOL,
-        OracleViolation::ActorLeak(_) => INVARIANT_ACTOR_LEAK,
-        OracleViolation::Supervision(_) => INVARIANT_SUPERVISION,
-        OracleViolation::Mailbox(_) => INVARIANT_MAILBOX,
         OracleViolation::RRefAccess(_) => INVARIANT_RREF_ACCESS,
-        OracleViolation::ReplyLinearity(_) => INVARIANT_REPLY_LINEARITY,
-        OracleViolation::RegistryLease(_) => INVARIANT_REGISTRY_LEASE,
-        OracleViolation::DownOrder(_) => INVARIANT_DOWN_ORDER,
-        OracleViolation::SupervisorQuiescence(_) => INVARIANT_SUPERVISOR_QUIESCENCE,
     }
 }
 
@@ -613,7 +476,7 @@ mod tests {
 
     #[test]
     fn all_oracle_invariants_count() {
-        assert_eq!(ALL_ORACLE_INVARIANTS.len(), 17);
+        assert_eq!(ALL_ORACLE_INVARIANTS.len(), 10);
     }
 
     #[test]
@@ -624,7 +487,7 @@ mod tests {
 
     #[test]
     fn builtin_mutations_count() {
-        assert_eq!(builtin_mutations().len(), 13);
+        assert_eq!(builtin_mutations().len(), 10);
     }
 
     #[test]
@@ -678,15 +541,6 @@ mod tests {
             BuiltinMutation::CancelPropagationMissingChild.name(),
             "mutation_cancel_missing_child"
         );
-        assert_eq!(BuiltinMutation::ActorLeak.name(), "mutation_actor_leak");
-        assert_eq!(
-            BuiltinMutation::SupervisionRestartLimitExceeded.name(),
-            "mutation_supervision_restart_limit"
-        );
-        assert_eq!(
-            BuiltinMutation::MailboxCapacityExceeded.name(),
-            "mutation_mailbox_capacity_exceeded"
-        );
         assert_eq!(
             BuiltinMutation::CrossRegionRRefAccess.name(),
             "mutation_cross_region_rref_access"
@@ -724,15 +578,6 @@ mod tests {
         assert_eq!(
             BuiltinMutation::CancelPropagationMissingChild.invariant(),
             INVARIANT_CANCELLATION_PROTOCOL
-        );
-        assert_eq!(BuiltinMutation::ActorLeak.invariant(), INVARIANT_ACTOR_LEAK);
-        assert_eq!(
-            BuiltinMutation::SupervisionRestartLimitExceeded.invariant(),
-            INVARIANT_SUPERVISION
-        );
-        assert_eq!(
-            BuiltinMutation::MailboxCapacityExceeded.invariant(),
-            INVARIANT_MAILBOX
         );
         assert_eq!(
             BuiltinMutation::CrossRegionRRefAccess.invariant(),

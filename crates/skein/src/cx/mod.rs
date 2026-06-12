@@ -40,7 +40,6 @@
 pub mod cap;
 pub mod cx;
 pub mod macaroon;
-pub mod registry;
 pub mod scope;
 pub mod wrappers;
 
@@ -50,9 +49,6 @@ pub use cap::{
 };
 pub use cx::{Cx, SpanGuard};
 pub use macaroon::{CaveatPredicate, MacaroonToken, VerificationContext, VerificationError};
-pub use registry::{
-    NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryEvent, RegistryHandle,
-};
 pub use scope::Scope;
 pub use wrappers::{
     BackgroundCaps, BackgroundContext, EntropyCaps, GrpcCaps, GrpcContext, PureCaps, WebCaps,

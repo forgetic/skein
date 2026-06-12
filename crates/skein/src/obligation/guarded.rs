@@ -1,7 +1,7 @@
-//! Guarded Recursion Lens: Time-Indexed Behavior for Actors and Leases.
+//! Guarded Recursion Lens: Time-Indexed Behavior for Leases.
 //!
 //! This module captures the guarded recursion / "later" modality lens as a
-//! concrete design note tied to actor and lease APIs in skein.
+//! concrete design note tied to lease and region APIs in skein.
 //!
 //! # Background: What is Guarded Recursion?
 //!
@@ -18,32 +18,6 @@
 //! Skein's runtime is inherently step-indexed via its deterministic lab
 //! runtime (virtual time advances in discrete steps) and its explicit state
 //! machines. The "later" modality is realized concretely:
-//!
-//! ## Actors as Guarded Fixed Points
-//!
-//! An actor's behavior unfolds one message at a time:
-//!
-//! ```text
-//! ActorBehavior<S, M> = S × (M → ▸(ActorBehavior<S, M>))
-//! ```
-//!
-//! This reads: an actor has a current state `S` and a handler that, given a
-//! message `M`, produces the *next* behavior (guarded by `▸`). The `handle()`
-//! method implements this unfolding:
-//!
-//! ```text
-//! step(t):
-//!   msg ← mailbox.recv()       // blocks until message or close
-//!   self.handle(cx, msg)        // mutate state, may spawn sub-tasks
-//!   → ▸(step(t+1))             // next step is "later"
-//! ```
-//!
-//! The guard ensures:
-//! - **Productivity**: Each step processes exactly one message.
-//! - **Termination**: The loop terminates when the mailbox closes
-//!   (mailbox close = coinductive termination signal).
-//! - **Cancel safety**: `on_stop` runs after the mailbox drains, providing a
-//!   clean finalization phase.
 //!
 //! ## Leases as Time-Indexed Obligations
 //!
@@ -108,11 +82,6 @@
 //!    deadline `D`, the lease's expiry cannot exceed `D`. This is the
 //!    deadline monotonicity invariant: `lease.expires_at ≤ region.deadline`.
 //!
-//! 4. **Actor restart reasoning**: A supervised actor restarts with fresh
-//!    state, but the restart itself is a `▸`-guarded step. This means the
-//!    restart protocol is well-founded (no infinite restart loops without
-//!    time advancing).
-//!
 //! # Constraints for Future Phases
 //!
 //! See [`PreservationConstraint`] for the machine-readable checklist.
@@ -127,16 +96,6 @@ use std::time::Duration;
 /// violated, would break the time-indexed reasoning described above.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimeIndexedInvariant {
-    /// Actor message processing is sequential: at most one message is
-    /// handled per step per actor. Concurrent message delivery to the
-    /// same actor would break the guarded fixed-point model.
-    ActorSequentialProcessing,
-
-    /// Actor mailbox close triggers `on_stop`. The coinductive
-    /// termination signal (mailbox close) must produce the finalization
-    /// step rather than silently dropping the actor.
-    ActorCleanFinalization,
-
     /// Lease expiry is monotonically determined by time: once
     /// `now ≥ expires_at`, the lease is expired regardless of state.
     /// No operation other than `renew` can move `expires_at` forward.
@@ -162,11 +121,6 @@ pub enum TimeIndexedInvariant {
     /// Deadline monotonicity across the region tree: child deadline
     /// cannot exceed parent deadline.
     DeadlineTreeMonotonicity,
-
-    /// Supervised actor restart is a guarded step: the restart factory
-    /// produces a `▸(Actor)`, meaning time must advance before the new
-    /// actor processes messages.
-    SupervisedRestartGuarded,
 }
 
 /// Constraints that future phases must preserve to keep the guarded
@@ -187,20 +141,6 @@ pub struct PreservationConstraint {
 #[must_use]
 pub fn preservation_constraints() -> Vec<PreservationConstraint> {
     vec![
-        PreservationConstraint {
-            invariant: TimeIndexedInvariant::ActorSequentialProcessing,
-            constraint: "Actor mailbox must remain single-consumer",
-            rationale: "Concurrent message handling would make the actor's state evolution \
-                        non-deterministic within a single time step, breaking the guarded \
-                        fixed-point model where each step produces exactly one state transition.",
-        },
-        PreservationConstraint {
-            invariant: TimeIndexedInvariant::ActorCleanFinalization,
-            constraint: "Actor on_stop must run when mailbox closes",
-            rationale: "The coinductive termination signal (mailbox close) must trigger \
-                        finalization. Skipping on_stop would leave the actor in a \
-                        non-terminal state, breaking the coinductive unwinding.",
-        },
         PreservationConstraint {
             invariant: TimeIndexedInvariant::LeaseTimeMonotonicity,
             constraint: "Lease expiry is determined solely by time comparison",
@@ -243,13 +183,6 @@ pub fn preservation_constraints() -> Vec<PreservationConstraint> {
             rationale: "Nested time bounds must tighten inward. A child with a longer \
                         deadline than its parent would outlive the parent's scope, \
                         violating structured concurrency.",
-        },
-        PreservationConstraint {
-            invariant: TimeIndexedInvariant::SupervisedRestartGuarded,
-            constraint: "Actor restart via supervision advances time by at least one step",
-            rationale: "The restart factory must be guarded: spawning a replacement actor \
-                        consumes at least one scheduling step. Without this guard, a \
-                        crash-restart loop could diverge at a single time point.",
         },
     ]
 }
@@ -331,71 +264,6 @@ impl LeaseModel {
     }
 }
 
-/// A lightweight model of actor step evolution.
-///
-/// Models the actor's behavior as a sequence of time-indexed steps where
-/// each step processes one message and advances the step counter.
-#[derive(Debug, Clone)]
-pub struct ActorStepModel {
-    /// Current step index (how many messages processed).
-    pub step: u64,
-    /// Whether the mailbox is closed.
-    pub mailbox_closed: bool,
-    /// Whether on_stop has been called.
-    pub finalized: bool,
-}
-
-impl ActorStepModel {
-    /// Create a new actor model at step 0.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            step: 0,
-            mailbox_closed: false,
-            finalized: false,
-        }
-    }
-
-    /// Process one message (advance one step).
-    ///
-    /// Returns `false` if the mailbox is closed.
-    pub fn process_message(&mut self) -> bool {
-        if self.mailbox_closed {
-            return false;
-        }
-        self.step += 1;
-        true
-    }
-
-    /// Close the mailbox (coinductive termination signal).
-    pub fn close_mailbox(&mut self) {
-        self.mailbox_closed = true;
-    }
-
-    /// Run finalization (on_stop).
-    ///
-    /// Returns `false` if already finalized or mailbox not closed.
-    pub fn finalize(&mut self) -> bool {
-        if self.finalized || !self.mailbox_closed {
-            return false;
-        }
-        self.finalized = true;
-        true
-    }
-
-    /// Is the actor in a terminal state?
-    #[must_use]
-    pub fn is_terminal(&self) -> bool {
-        self.mailbox_closed && self.finalized
-    }
-}
-
-impl Default for ActorStepModel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -437,15 +305,12 @@ mod tests {
             constraints.iter().map(|c| c.invariant).collect();
 
         let all = [
-            TimeIndexedInvariant::ActorSequentialProcessing,
-            TimeIndexedInvariant::ActorCleanFinalization,
             TimeIndexedInvariant::LeaseTimeMonotonicity,
             TimeIndexedInvariant::LeaseRenewalFromNow,
             TimeIndexedInvariant::LeaseTerminalIrreversibility,
             TimeIndexedInvariant::RegionPhaseMonotonicity,
             TimeIndexedInvariant::BudgetMonotonicConsumption,
             TimeIndexedInvariant::DeadlineTreeMonotonicity,
-            TimeIndexedInvariant::SupervisedRestartGuarded,
         ];
 
         for inv in &all {
@@ -569,93 +434,6 @@ mod tests {
         // At t=500, the region is closing, so the lease is effectively over
         // even though lease.expires_at = t(1000)
         assert!(Time::from_nanos(500) >= effective_expiry);
-    }
-
-    // ========================================================================
-    // Actor step-indexed properties
-    // ========================================================================
-
-    /// Actor processes messages sequentially, one per step.
-    #[test]
-    fn actor_sequential_steps() {
-        let mut actor = ActorStepModel::new();
-        assert_eq!(actor.step, 0);
-        assert!(!actor.is_terminal());
-
-        // Process 5 messages
-        for i in 1..=5 {
-            assert!(actor.process_message());
-            assert_eq!(actor.step, i);
-        }
-        assert!(!actor.is_terminal());
-    }
-
-    /// Actor cannot process messages after mailbox closes.
-    #[test]
-    fn actor_no_messages_after_close() {
-        let mut actor = ActorStepModel::new();
-        actor.process_message();
-        actor.process_message();
-        actor.close_mailbox();
-
-        // No more message processing
-        assert!(!actor.process_message());
-        assert_eq!(actor.step, 2);
-    }
-
-    /// Actor finalization requires mailbox closure.
-    #[test]
-    fn actor_finalization_requires_close() {
-        let mut actor = ActorStepModel::new();
-
-        // Cannot finalize while mailbox is open
-        assert!(!actor.finalize());
-
-        // Close then finalize
-        actor.close_mailbox();
-        assert!(actor.finalize());
-        assert!(actor.is_terminal());
-
-        // Cannot finalize twice
-        assert!(!actor.finalize());
-    }
-
-    /// Actor lifecycle: open → process → close → finalize → terminal.
-    #[test]
-    fn actor_full_lifecycle() {
-        let mut actor = ActorStepModel::new();
-
-        // Phase 1: process messages
-        for _ in 0..10 {
-            assert!(actor.process_message());
-        }
-
-        // Phase 2: close and finalize
-        actor.close_mailbox();
-        assert!(!actor.process_message()); // no more messages
-        assert!(actor.finalize());
-        assert!(actor.is_terminal());
-
-        assert_eq!(actor.step, 10);
-        assert!(actor.mailbox_closed);
-        assert!(actor.finalized);
-    }
-
-    /// Supervised restart: new actor starts at step 0.
-    #[test]
-    fn actor_restart_resets_state() {
-        let mut actor = ActorStepModel::new();
-        actor.process_message();
-        actor.process_message();
-        actor.close_mailbox();
-        actor.finalize();
-        assert!(actor.is_terminal());
-
-        // Restart: create a new actor (guarded step)
-        let new_actor = ActorStepModel::new();
-        assert_eq!(new_actor.step, 0);
-        assert!(!new_actor.is_terminal());
-        // The restart itself consumed a scheduling step (modeled externally)
     }
 
     // ========================================================================

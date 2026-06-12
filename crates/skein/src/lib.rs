@@ -62,8 +62,6 @@
 #![cfg_attr(test, allow(clippy::large_stack_frames))]
 #![cfg_attr(feature = "simd-intrinsics", feature(portable_simd))]
 
-pub mod actor;
-pub mod app;
 pub mod bytes;
 pub mod cancel;
 pub mod channel;
@@ -73,15 +71,11 @@ pub mod config;
 pub mod console;
 pub mod cx;
 pub mod error;
-pub mod evidence;
 pub mod evidence_sink;
 pub mod fs;
-pub mod gen_server;
 pub mod http;
 pub mod io;
 pub mod lab;
-pub mod migration;
-pub mod monitor;
 pub mod net;
 pub mod obligation;
 pub mod observability;
@@ -94,7 +88,6 @@ pub mod security;
 pub mod server;
 pub mod signal;
 pub mod stream;
-pub mod supervision;
 pub mod sync;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod test_logging;

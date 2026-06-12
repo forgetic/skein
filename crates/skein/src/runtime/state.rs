@@ -2619,7 +2619,7 @@ pub enum CancelKindSnapshot {
     ResourceUnavailable,
     /// Runtime shutdown cancellation.
     Shutdown,
-    /// Linked task exit propagation (Spork).
+    /// Linked task exit propagation.
     LinkedExit,
 }
 
@@ -2708,45 +2708,6 @@ impl OutcomeSnapshot {
             },
             Outcome::Panicked(payload) => Self::Panicked {
                 message: Some(payload.message().to_string()),
-            },
-        }
-    }
-}
-
-/// Serializable down/exit reason.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DownReasonSnapshot {
-    /// Process completed successfully.
-    Normal,
-    /// Process terminated with an application error.
-    Error {
-        /// Error message.
-        message: String,
-    },
-    /// Process was cancelled.
-    Cancelled {
-        /// Cancellation reason.
-        reason: CancelReasonSnapshot,
-    },
-    /// Process panicked.
-    Panicked {
-        /// Panic message.
-        message: String,
-    },
-}
-
-impl From<&crate::monitor::DownReason> for DownReasonSnapshot {
-    fn from(reason: &crate::monitor::DownReason) -> Self {
-        match reason {
-            crate::monitor::DownReason::Normal => Self::Normal,
-            crate::monitor::DownReason::Error(message) => Self::Error {
-                message: message.clone(),
-            },
-            crate::monitor::DownReason::Cancelled(reason) => Self::Cancelled {
-                reason: CancelReasonSnapshot::from(reason),
-            },
-            crate::monitor::DownReason::Panicked(payload) => Self::Panicked {
-                message: payload.message().to_string(),
             },
         }
     }
@@ -2941,18 +2902,6 @@ pub enum EventKindSnapshot {
     ChaosInjection,
     /// User trace point.
     UserTrace,
-    /// A monitor was established.
-    MonitorCreated,
-    /// A monitor was removed.
-    MonitorDropped,
-    /// A Down notification was delivered.
-    DownDelivered,
-    /// A link was established.
-    LinkCreated,
-    /// A link was removed.
-    LinkDropped,
-    /// An exit signal was delivered to a linked task.
-    ExitDelivered,
 }
 
 impl From<TraceEventKind> for EventKindSnapshot {
@@ -2988,12 +2937,6 @@ impl From<TraceEventKind> for EventKindSnapshot {
             TraceEventKind::FuturelockDetected => Self::FuturelockDetected,
             TraceEventKind::ChaosInjection => Self::ChaosInjection,
             TraceEventKind::UserTrace => Self::UserTrace,
-            TraceEventKind::MonitorCreated => Self::MonitorCreated,
-            TraceEventKind::MonitorDropped => Self::MonitorDropped,
-            TraceEventKind::DownDelivered => Self::DownDelivered,
-            TraceEventKind::LinkCreated => Self::LinkCreated,
-            TraceEventKind::LinkDropped => Self::LinkDropped,
-            TraceEventKind::ExitDelivered => Self::ExitDelivered,
         }
     }
 }
@@ -3122,56 +3065,6 @@ pub enum EventDataSnapshot {
         /// Obligations held at detection time.
         held: Vec<HeldObligationSnapshot>,
     },
-    /// Monitor lifecycle event.
-    Monitor {
-        /// Monitor reference id.
-        monitor_ref: u64,
-        /// Watcher task id.
-        watcher: IdSnapshot,
-        /// Watcher region id.
-        watcher_region: IdSnapshot,
-        /// Monitored task id.
-        monitored: IdSnapshot,
-    },
-    /// Down notification delivery.
-    Down {
-        /// Monitor reference id.
-        monitor_ref: u64,
-        /// Watcher task id.
-        watcher: IdSnapshot,
-        /// Monitored task id.
-        monitored: IdSnapshot,
-        /// Completion virtual time (nanoseconds).
-        completion_vt: u64,
-        /// Reason for termination.
-        reason: DownReasonSnapshot,
-    },
-    /// Link lifecycle event.
-    Link {
-        /// Link reference id.
-        link_ref: u64,
-        /// One side task id.
-        task_a: IdSnapshot,
-        /// One side region id.
-        region_a: IdSnapshot,
-        /// Other side task id.
-        task_b: IdSnapshot,
-        /// Other side region id.
-        region_b: IdSnapshot,
-    },
-    /// Exit signal delivery.
-    Exit {
-        /// Link reference id.
-        link_ref: u64,
-        /// Source task id.
-        from: IdSnapshot,
-        /// Target task id.
-        to: IdSnapshot,
-        /// Failure virtual time (nanoseconds).
-        failure_vt: u64,
-        /// Reason for termination.
-        reason: DownReasonSnapshot,
-    },
     /// User-defined message.
     Message(String),
     /// Chaos injection details.
@@ -3279,56 +3172,6 @@ impl EventDataSnapshot {
                         kind: ObligationKindSnapshot::from(*kind),
                     })
                     .collect(),
-            },
-            TraceData::Monitor {
-                monitor_ref,
-                watcher,
-                watcher_region,
-                monitored,
-            } => Self::Monitor {
-                monitor_ref: *monitor_ref,
-                watcher: (*watcher).into(),
-                watcher_region: (*watcher_region).into(),
-                monitored: (*monitored).into(),
-            },
-            TraceData::Down {
-                monitor_ref,
-                watcher,
-                monitored,
-                completion_vt,
-                reason,
-            } => Self::Down {
-                monitor_ref: *monitor_ref,
-                watcher: (*watcher).into(),
-                monitored: (*monitored).into(),
-                completion_vt: completion_vt.as_nanos(),
-                reason: DownReasonSnapshot::from(reason),
-            },
-            TraceData::Link {
-                link_ref,
-                task_a,
-                region_a,
-                task_b,
-                region_b,
-            } => Self::Link {
-                link_ref: *link_ref,
-                task_a: (*task_a).into(),
-                region_a: (*region_a).into(),
-                task_b: (*task_b).into(),
-                region_b: (*region_b).into(),
-            },
-            TraceData::Exit {
-                link_ref,
-                from,
-                to,
-                failure_vt,
-                reason,
-            } => Self::Exit {
-                link_ref: *link_ref,
-                from: (*from).into(),
-                to: (*to).into(),
-                failure_vt: failure_vt.as_nanos(),
-                reason: DownReasonSnapshot::from(reason),
             },
             TraceData::Message(message) => Self::Message(message.clone()),
             TraceData::Chaos { kind, task, detail } => Self::Chaos {

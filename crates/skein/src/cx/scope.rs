@@ -549,7 +549,6 @@ impl<P: Policy> Scope<'_, P> {
         // Note: create_task_infrastructure already attached `Cx` to the TaskRecord; update it
         // so other runtime paths observe the same capability set.
         let child_cx_full = base_cx_full
-            .with_registry_handle(cx.registry_handle())
             .with_remote_cap_handle(cx.remote_cap_handle())
             .with_blocking_pool_handle(cx.blocking_pool_handle())
             .with_evidence_sink(cx.evidence_sink_handle());
@@ -1094,7 +1093,6 @@ impl<P: Policy> Scope<'_, P> {
             Some(child_entropy),
         )
         .with_logical_clock(logical_clock)
-        .with_registry_handle(parent_cx.registry_handle())
         .with_remote_cap_handle(parent_cx.remote_cap_handle())
         .with_blocking_pool_handle(parent_cx.blocking_pool_handle())
         .with_evidence_sink(parent_cx.evidence_sink_handle());
@@ -1264,8 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_inherits_registry_and_remote_capabilities() {
-        use crate::cx::registry::RegistryHandle;
+    fn spawn_inherits_remote_capability() {
         use crate::remote::{NodeId, RemoteCap};
         use std::task::{Context, Waker};
 
@@ -1276,12 +1273,7 @@ mod tests {
 
         let mut state = RuntimeState::new();
 
-        let registry = crate::cx::NameRegistry::new();
-        let registry_handle = RegistryHandle::new(Arc::new(registry));
-        let parent_registry_arc = registry_handle.as_arc();
-
         let cx = test_cx()
-            .with_registry_handle(Some(registry_handle))
             .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("origin-test")));
 
         let region = state.create_root_region(Budget::INFINITE);
@@ -1289,14 +1281,8 @@ mod tests {
 
         let handle = scope
             .spawn_registered(&mut state, &cx, move |cx| async move {
-                let child_registry = cx.registry_handle().expect("child must inherit registry");
-                let child_registry_arc = child_registry.as_arc();
-                let same_registry = Arc::ptr_eq(&child_registry_arc, &parent_registry_arc);
-
                 let child_remote = cx.remote().expect("child must inherit remote cap");
-                let origin = child_remote.local_node().as_str().to_owned();
-
-                (same_registry, origin)
+                child_remote.local_node().as_str().to_owned()
             })
             .unwrap();
 
@@ -1310,11 +1296,7 @@ mod tests {
 
         let mut join_fut = Box::pin(handle.join(&cx));
         match join_fut.as_mut().poll(&mut poll_cx) {
-            Poll::Ready(Ok((same_registry, origin))) => {
-                assert!(
-                    same_registry,
-                    "child should observe the same RegistryCap instance"
-                );
+            Poll::Ready(Ok(origin)) => {
                 assert_eq!(origin, "origin-test");
             }
             other => unreachable!("Expected Ready(Ok(_)), got {other:?}"),

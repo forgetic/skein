@@ -382,14 +382,7 @@ impl EProcessMonitor {
             "ambient_authority",
             "deadline_monotone",
             "cancellation_protocol",
-            "actor_leak",
-            "supervision",
-            "mailbox",
             "rref_access",
-            "reply_linearity",
-            "registry_lease",
-            "down_order",
-            "supervisor_quiescence",
         ];
         Self::new(&invariants, config)
     }
@@ -858,13 +851,13 @@ mod tests {
     }
 
     #[test]
-    fn monitor_all_invariants_has_spork_invariants_too() {
+    fn monitor_all_invariants_covers_oracle_suite() {
         let monitor = EProcessMonitor::all_invariants();
-        assert_eq!(monitor.processes.len(), 17);
-        assert!(monitor.process("reply_linearity").is_some());
-        assert!(monitor.process("registry_lease").is_some());
-        assert!(monitor.process("down_order").is_some());
-        assert!(monitor.process("supervisor_quiescence").is_some());
+        assert_eq!(monitor.processes.len(), 10);
+        assert!(monitor.process("rref_access").is_some());
+        assert!(monitor.process("cancellation_protocol").is_some());
+        assert!(monitor.process("deadline_monotone").is_some());
+        assert!(monitor.process("ambient_authority").is_some());
     }
 
     #[test]

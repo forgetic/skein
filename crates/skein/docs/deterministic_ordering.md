@@ -1,6 +1,6 @@
-# Spork deterministic ordering
+# Deterministic ordering
 
-Spork's deterministic replay relies on a stable, totally ordered trace of
+Skein's deterministic replay relies on a stable, totally ordered trace of
 runtime events. Every event carries a monotonically increasing sequence
 number assigned at emission time, a virtual timestamp, and a kind-specific
 payload. Replays compare traces structurally: two runs are equivalent when
@@ -68,15 +68,6 @@ Each entry maps a kind's stable name to the fields its payload must carry:
 - `futurelock_detected` => `task, region, idle_steps, held`
 - `chaos_injection` => `kind, task, detail`
 - `user_trace` => `message`
-
-### Monitors and links
-
-- `monitor_created` => `monitor_ref, watcher, watcher_region, monitored`
-- `monitor_dropped` => `monitor_ref, watcher, watcher_region, monitored`
-- `down_delivered` => `monitor_ref, watcher, monitored, completion_vt, reason`
-- `link_created` => `link_ref, task_a, region_a, task_b, region_b`
-- `link_dropped` => `link_ref, task_a, region_a, task_b, region_b`
-- `exit_delivered` => `link_ref, from, to, failure_vt, reason`
 
 ## Ordering guarantees
 

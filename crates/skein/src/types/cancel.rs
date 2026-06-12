@@ -207,7 +207,7 @@ pub enum CancelKind {
     ResourceUnavailable,
     /// Cancellation due to runtime shutdown.
     Shutdown,
-    /// Cancellation due to a linked task's abnormal exit (Spork link propagation).
+    /// Cancellation due to a linked task's abnormal exit.
     LinkedExit,
 }
 
@@ -560,7 +560,7 @@ impl CancelReason {
         Self::new(CancelKind::Shutdown)
     }
 
-    /// Creates a linked-exit cancellation reason (Spork link propagation).
+    /// Creates a linked-exit cancellation reason.
     #[must_use]
     pub const fn linked_exit() -> Self {
         Self::new(CancelKind::LinkedExit)

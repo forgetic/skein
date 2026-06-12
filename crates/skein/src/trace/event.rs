@@ -3,7 +3,6 @@
 //! Each event in the trace represents an observable action in the runtime.
 //! Events carry sufficient information for replay and analysis.
 
-use crate::monitor::DownReason;
 use crate::record::{ObligationAbortReason, ObligationKind, ObligationState};
 use crate::trace::distributed::LogicalTime;
 use crate::types::{CancelReason, ObligationId, RegionId, TaskId, Time};
@@ -75,26 +74,13 @@ pub enum TraceEventKind {
     ChaosInjection,
     /// User-defined trace point.
     UserTrace,
-    /// A monitor was established.
-    MonitorCreated,
-    /// A monitor was removed.
-    MonitorDropped,
-    /// A Down notification was delivered.
-    DownDelivered,
-    /// A link was established.
-    LinkCreated,
-    /// A link was removed.
-    LinkDropped,
-    /// An exit signal was delivered to a linked task.
-    ExitDelivered,
 }
 
 impl TraceEventKind {
     /// Canonical list of all trace event kinds.
     ///
-    /// Keep this list in sync with the enum definition and
-    /// `docs/spork_deterministic_ordering.md` taxonomy section.
-    pub const ALL: [Self; 36] = [
+    /// Keep this list in sync with the enum definition.
+    pub const ALL: [Self; 30] = [
         Self::Spawn,
         Self::Schedule,
         Self::Yield,
@@ -125,12 +111,6 @@ impl TraceEventKind {
         Self::FuturelockDetected,
         Self::ChaosInjection,
         Self::UserTrace,
-        Self::MonitorCreated,
-        Self::MonitorDropped,
-        Self::DownDelivered,
-        Self::LinkCreated,
-        Self::LinkDropped,
-        Self::ExitDelivered,
     ];
 
     /// Stable, grep-friendly taxonomy name.
@@ -167,12 +147,6 @@ impl TraceEventKind {
             Self::FuturelockDetected => "futurelock_detected",
             Self::ChaosInjection => "chaos_injection",
             Self::UserTrace => "user_trace",
-            Self::MonitorCreated => "monitor_created",
-            Self::MonitorDropped => "monitor_dropped",
-            Self::DownDelivered => "down_delivered",
-            Self::LinkCreated => "link_created",
-            Self::LinkDropped => "link_dropped",
-            Self::ExitDelivered => "exit_delivered",
         }
     }
 
@@ -209,12 +183,6 @@ impl TraceEventKind {
             Self::FuturelockDetected => "task, region, idle_steps, held",
             Self::ChaosInjection => "kind, task, detail",
             Self::UserTrace => "message",
-            Self::MonitorCreated | Self::MonitorDropped => {
-                "monitor_ref, watcher, watcher_region, monitored"
-            }
-            Self::DownDelivered => "monitor_ref, watcher, monitored, completion_vt, reason",
-            Self::LinkCreated | Self::LinkDropped => "link_ref, task_a, region_a, task_b, region_b",
-            Self::ExitDelivered => "link_ref, from, to, failure_vt, reason",
         }
     }
 }
@@ -348,60 +316,6 @@ pub enum TraceData {
         idle_steps: u64,
         /// Obligations held by the task at detection time.
         held: Vec<(ObligationId, ObligationKind)>,
-    },
-    /// Monitor lifecycle event.
-    Monitor {
-        /// Monitor reference id.
-        monitor_ref: u64,
-        /// The task watching for termination.
-        watcher: TaskId,
-        /// The region owning the watcher (for region-close cleanup).
-        watcher_region: RegionId,
-        /// The task being monitored.
-        monitored: TaskId,
-    },
-    /// Down notification delivery.
-    ///
-    /// Includes the deterministic ordering key (`completion_vt`, `monitored`).
-    Down {
-        /// Monitor reference id from establishment.
-        monitor_ref: u64,
-        /// The task receiving the notification.
-        watcher: TaskId,
-        /// The task that terminated.
-        monitored: TaskId,
-        /// Virtual time of monitored task completion.
-        completion_vt: Time,
-        /// Why it terminated.
-        reason: DownReason,
-    },
-    /// Link lifecycle event.
-    Link {
-        /// Link reference id.
-        link_ref: u64,
-        /// One side of the link.
-        task_a: TaskId,
-        /// Region owning task_a (for region-close cleanup).
-        region_a: RegionId,
-        /// The other side of the link.
-        task_b: TaskId,
-        /// Region owning task_b (for region-close cleanup).
-        region_b: RegionId,
-    },
-    /// Exit signal delivery to a linked task.
-    ///
-    /// Includes the deterministic ordering key (`failure_vt`, `from`).
-    Exit {
-        /// Link reference id.
-        link_ref: u64,
-        /// The task that terminated (source of the exit).
-        from: TaskId,
-        /// The linked task receiving the exit signal.
-        to: TaskId,
-        /// Virtual time of failure used for deterministic ordering.
-        failure_vt: Time,
-        /// Why it terminated.
-        reason: DownReason,
     },
     /// User message.
     Message(String),
@@ -821,152 +735,6 @@ impl TraceEvent {
         )
     }
 
-    /// Creates a monitor created event.
-    #[must_use]
-    pub fn monitor_created(
-        seq: u64,
-        time: Time,
-        monitor_ref: u64,
-        watcher: TaskId,
-        watcher_region: RegionId,
-        monitored: TaskId,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::MonitorCreated,
-            TraceData::Monitor {
-                monitor_ref,
-                watcher,
-                watcher_region,
-                monitored,
-            },
-        )
-    }
-
-    /// Creates a monitor dropped event.
-    #[must_use]
-    pub fn monitor_dropped(
-        seq: u64,
-        time: Time,
-        monitor_ref: u64,
-        watcher: TaskId,
-        watcher_region: RegionId,
-        monitored: TaskId,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::MonitorDropped,
-            TraceData::Monitor {
-                monitor_ref,
-                watcher,
-                watcher_region,
-                monitored,
-            },
-        )
-    }
-
-    /// Creates a down delivered event.
-    #[must_use]
-    pub fn down_delivered(
-        seq: u64,
-        time: Time,
-        monitor_ref: u64,
-        watcher: TaskId,
-        monitored: TaskId,
-        completion_vt: Time,
-        reason: DownReason,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::DownDelivered,
-            TraceData::Down {
-                monitor_ref,
-                watcher,
-                monitored,
-                completion_vt,
-                reason,
-            },
-        )
-    }
-
-    /// Creates a link created event.
-    #[must_use]
-    pub fn link_created(
-        seq: u64,
-        time: Time,
-        link_ref: u64,
-        task_a: TaskId,
-        region_a: RegionId,
-        task_b: TaskId,
-        region_b: RegionId,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::LinkCreated,
-            TraceData::Link {
-                link_ref,
-                task_a,
-                region_a,
-                task_b,
-                region_b,
-            },
-        )
-    }
-
-    /// Creates a link dropped event.
-    #[must_use]
-    pub fn link_dropped(
-        seq: u64,
-        time: Time,
-        link_ref: u64,
-        task_a: TaskId,
-        region_a: RegionId,
-        task_b: TaskId,
-        region_b: RegionId,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::LinkDropped,
-            TraceData::Link {
-                link_ref,
-                task_a,
-                region_a,
-                task_b,
-                region_b,
-            },
-        )
-    }
-
-    /// Creates an exit delivered event.
-    #[must_use]
-    pub fn exit_delivered(
-        seq: u64,
-        time: Time,
-        link_ref: u64,
-        from: TaskId,
-        to: TaskId,
-        failure_vt: Time,
-        reason: DownReason,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::ExitDelivered,
-            TraceData::Exit {
-                link_ref,
-                from,
-                to,
-                failure_vt,
-                reason,
-            },
-        )
-    }
-
     /// Creates a user trace event.
     #[must_use]
     pub fn user_trace(seq: u64, time: Time, message: impl Into<String>) -> Self {
@@ -1068,45 +836,6 @@ impl fmt::Display for TraceEvent {
                 }
                 write!(f, "]")?;
             }
-            TraceData::Monitor {
-                monitor_ref,
-                watcher,
-                watcher_region,
-                monitored,
-            } => write!(
-                f,
-                " monitor_ref={monitor_ref} watcher={watcher} watcher_region={watcher_region} monitored={monitored}"
-            )?,
-            TraceData::Down {
-                monitor_ref,
-                watcher,
-                monitored,
-                completion_vt,
-                reason,
-            } => write!(
-                f,
-                " down monitor_ref={monitor_ref} watcher={watcher} monitored={monitored} completion_vt={completion_vt} reason={reason}"
-            )?,
-            TraceData::Link {
-                link_ref,
-                task_a,
-                region_a,
-                task_b,
-                region_b,
-            } => write!(
-                f,
-                " link_ref={link_ref} a={task_a} region_a={region_a} b={task_b} region_b={region_b}"
-            )?,
-            TraceData::Exit {
-                link_ref,
-                from,
-                to,
-                failure_vt,
-                reason,
-            } => write!(
-                f,
-                " exit link_ref={link_ref} from={from} to={to} failure_vt={failure_vt} reason={reason}"
-            )?,
             TraceData::Message(msg) => write!(f, " \"{msg}\"")?,
             TraceData::Chaos { kind, task, detail } => {
                 write!(f, " chaos:{kind}")?;
@@ -1123,7 +852,6 @@ impl fmt::Display for TraceEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::monitor::DownReason;
     use crate::record::{ObligationAbortReason, ObligationKind, ObligationState};
     use crate::trace::distributed::LamportTime;
     use crate::types::CancelReason;
@@ -1157,20 +885,20 @@ mod tests {
 
     #[test]
     fn trace_event_taxonomy_is_documented() {
-        const DOC: &str = include_str!("../../docs/spork_deterministic_ordering.md");
+        const DOC: &str = include_str!("../../docs/deterministic_ordering.md");
         for kind in TraceEventKind::ALL {
             let marker = format!("- `{}` => `{}`", kind.stable_name(), kind.required_fields());
             assert!(
                 DOC.contains(&marker),
-                "missing taxonomy entry in docs/spork_deterministic_ordering.md for {}",
+                "missing taxonomy entry in docs/deterministic_ordering.md for {}",
                 kind.stable_name()
             );
         }
     }
 
     #[test]
-    fn all_array_has_36_kinds() {
-        assert_eq!(TraceEventKind::ALL.len(), 36);
+    fn all_array_has_30_kinds() {
+        assert_eq!(TraceEventKind::ALL.len(), 30);
     }
 
     #[test]
@@ -1599,118 +1327,6 @@ mod tests {
     }
 
     #[test]
-    fn monitor_created_constructor() {
-        let e = TraceEvent::monitor_created(27, Time::ZERO, 100, task(1), region(2), task(3));
-        assert_eq!(e.kind, TraceEventKind::MonitorCreated);
-        assert_eq!(
-            e.data,
-            TraceData::Monitor {
-                monitor_ref: 100,
-                watcher: task(1),
-                watcher_region: region(2),
-                monitored: task(3),
-            }
-        );
-    }
-
-    #[test]
-    fn monitor_dropped_constructor() {
-        let e = TraceEvent::monitor_dropped(28, Time::ZERO, 100, task(1), region(2), task(3));
-        assert_eq!(e.kind, TraceEventKind::MonitorDropped);
-        assert_eq!(
-            e.data,
-            TraceData::Monitor {
-                monitor_ref: 100,
-                watcher: task(1),
-                watcher_region: region(2),
-                monitored: task(3),
-            }
-        );
-    }
-
-    #[test]
-    fn down_delivered_constructor() {
-        let e = TraceEvent::down_delivered(
-            29,
-            Time::ZERO,
-            100,
-            task(1),
-            task(3),
-            Time::from_nanos(500),
-            DownReason::Normal,
-        );
-        assert_eq!(e.kind, TraceEventKind::DownDelivered);
-        assert_eq!(
-            e.data,
-            TraceData::Down {
-                monitor_ref: 100,
-                watcher: task(1),
-                monitored: task(3),
-                completion_vt: Time::from_nanos(500),
-                reason: DownReason::Normal,
-            }
-        );
-    }
-
-    #[test]
-    fn link_created_constructor() {
-        let e =
-            TraceEvent::link_created(30, Time::ZERO, 200, task(1), region(2), task(3), region(4));
-        assert_eq!(e.kind, TraceEventKind::LinkCreated);
-        assert_eq!(
-            e.data,
-            TraceData::Link {
-                link_ref: 200,
-                task_a: task(1),
-                region_a: region(2),
-                task_b: task(3),
-                region_b: region(4),
-            }
-        );
-    }
-
-    #[test]
-    fn link_dropped_constructor() {
-        let e =
-            TraceEvent::link_dropped(31, Time::ZERO, 200, task(1), region(2), task(3), region(4));
-        assert_eq!(e.kind, TraceEventKind::LinkDropped);
-        assert_eq!(
-            e.data,
-            TraceData::Link {
-                link_ref: 200,
-                task_a: task(1),
-                region_a: region(2),
-                task_b: task(3),
-                region_b: region(4),
-            }
-        );
-    }
-
-    #[test]
-    fn exit_delivered_constructor() {
-        let e = TraceEvent::exit_delivered(
-            32,
-            Time::ZERO,
-            200,
-            task(1),
-            task(3),
-            Time::from_nanos(999),
-            DownReason::Normal,
-        );
-        assert_eq!(e.kind, TraceEventKind::ExitDelivered);
-        assert_eq!(
-            e.data,
-            TraceData::Exit {
-                link_ref: 200,
-                from: task(1),
-                to: task(3),
-                failure_vt: Time::from_nanos(999),
-                reason: DownReason::Normal,
-            }
-        );
-    }
-
-    #[test]
     fn user_trace_constructor() {
         let e = TraceEvent::user_trace(33, Time::ZERO, "hello");
         assert_eq!(e.kind, TraceEventKind::UserTrace);
@@ -1943,53 +1559,6 @@ mod tests {
     }
 
     #[test]
-    fn display_monitor() {
-        let e = TraceEvent::monitor_created(20, Time::ZERO, 100, task(1), region(2), task(3));
-        let s = format!("{e}");
-        assert!(s.contains("monitor_ref=100"), "expected ref in {s}");
-    }
-
-    #[test]
-    fn display_down() {
-        let e = TraceEvent::down_delivered(
-            21,
-            Time::ZERO,
-            100,
-            task(1),
-            task(3),
-            Time::from_nanos(500),
-            DownReason::Normal,
-        );
-        let s = format!("{e}");
-        assert!(s.contains("down"), "expected down in {s}");
-        assert!(s.contains("monitor_ref=100"), "expected ref in {s}");
-    }
-
-    #[test]
-    fn display_link() {
-        let e =
-            TraceEvent::link_created(22, Time::ZERO, 200, task(1), region(2), task(3), region(4));
-        let s = format!("{e}");
-        assert!(s.contains("link_ref=200"), "expected ref in {s}");
-    }
-
-    #[test]
-    fn display_exit() {
-        let e = TraceEvent::exit_delivered(
-            23,
-            Time::ZERO,
-            200,
-            task(1),
-            task(3),
-            Time::from_nanos(999),
-            DownReason::Normal,
-        );
-        let s = format!("{e}");
-        assert!(s.contains("exit"), "expected exit in {s}");
-        assert!(s.contains("link_ref=200"), "expected ref in {s}");
-    }
-
-    #[test]
     fn display_message() {
         let e = TraceEvent::user_trace(24, Time::ZERO, "hello world");
         let s = format!("{e}");
@@ -2162,46 +1731,6 @@ mod tests {
                 }
                 _ => panic!("wrong variant"),
             }
-        }
-    }
-
-    // ── Down with error variant ────────────────────────────────────
-
-    #[test]
-    fn down_delivered_with_error_reason() {
-        let e = TraceEvent::down_delivered(
-            1,
-            Time::ZERO,
-            50,
-            task(1),
-            task(2),
-            Time::from_nanos(100),
-            DownReason::Error("boom".into()),
-        );
-        match &e.data {
-            TraceData::Down { reason, .. } => {
-                assert_eq!(*reason, DownReason::Error("boom".into()));
-            }
-            _ => panic!("wrong variant"),
-        }
-    }
-
-    #[test]
-    fn exit_delivered_with_cancelled_reason() {
-        let e = TraceEvent::exit_delivered(
-            1,
-            Time::ZERO,
-            50,
-            task(1),
-            task(2),
-            Time::from_nanos(100),
-            DownReason::Cancelled(CancelReason::timeout()),
-        );
-        match &e.data {
-            TraceData::Exit { reason, .. } => {
-                assert!(matches!(reason, DownReason::Cancelled(_)));
-            }
-            _ => panic!("wrong variant"),
         }
     }
 

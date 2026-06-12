@@ -85,7 +85,7 @@ pub use compat::{
 pub use compression::{CompressedTrace, Level as CompressionLevel, compress as compress_trace};
 pub use crashpack::{
     CRASHPACK_SCHEMA_VERSION, CrashPack, CrashPackBuilder, CrashPackConfig, CrashPackManifest,
-    EvidenceEntrySnapshot, FailureInfo, FailureOutcome, SupervisionSnapshot,
+    EvidenceEntrySnapshot, FailureInfo, FailureOutcome,
 };
 pub use delta_debug::{
     DeltaDebugConfig, DeltaDebugResult, MinimizationStats, generate_narrative,

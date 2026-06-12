@@ -53,7 +53,6 @@
 
 use super::cap;
 use super::macaroon::{MacaroonToken, VerificationContext, VerificationError};
-use super::registry::RegistryHandle;
 use crate::combinator::select::SelectAll;
 use crate::evidence_sink::EvidenceSink;
 use crate::observability::{
@@ -111,7 +110,6 @@ struct CxHandles {
     entropy: Arc<dyn EntropySource>,
     logical_clock: LogicalClockHandle,
     remote_cap: Option<Arc<RemoteCap>>,
-    registry: Option<RegistryHandle>,
     pressure: Option<Arc<SystemPressure>>,
     evidence_sink: Option<Arc<dyn EvidenceSink>>,
     macaroon: Option<Arc<MacaroonToken>>,
@@ -304,7 +302,6 @@ impl<Caps> Cx<Caps> {
                 entropy: Arc::new(OsEntropy),
                 logical_clock: LogicalClockHandle::default(),
                 remote_cap: None,
-                registry: None,
                 pressure: None,
                 evidence_sink: None,
                 macaroon: None,
@@ -401,7 +398,6 @@ impl<Caps> Cx<Caps> {
                 entropy,
                 logical_clock: LogicalClockHandle::default(),
                 remote_cap: None,
-                registry: None,
                 pressure: None,
                 evidence_sink: None,
                 macaroon: None,
@@ -460,16 +456,6 @@ impl<Caps> Cx<Caps> {
         }
     }
 
-    /// Attaches a registry handle to this context.
-    ///
-    /// This is how Spork-style naming is made capability-scoped (no globals):
-    /// tasks only see a registry if their `Cx` carries one.
-    #[must_use]
-    pub(crate) fn with_registry_handle(mut self, registry: Option<RegistryHandle>) -> Self {
-        Arc::make_mut(&mut self.handles).registry = registry;
-        self
-    }
-
     /// Attaches a remote capability to this context.
     ///
     /// This allows the context to perform remote operations like `spawn_remote`.
@@ -515,18 +501,6 @@ impl<Caps> Cx<Caps> {
     pub(crate) fn with_remote_cap_handle(mut self, cap: Option<Arc<RemoteCap>>) -> Self {
         Arc::make_mut(&mut self.handles).remote_cap = cap;
         self
-    }
-
-    /// Returns the registry capability handle, if attached.
-    #[must_use]
-    pub fn registry_handle(&self) -> Option<RegistryHandle> {
-        self.handles.registry.clone()
-    }
-
-    /// Returns true if a registry handle is attached.
-    #[must_use]
-    pub fn has_registry(&self) -> bool {
-        self.handles.registry.is_some()
     }
 
     /// Attaches an evidence sink for runtime decision tracing.

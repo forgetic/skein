@@ -1,4 +1,4 @@
-//! Deterministic crash pack format for Spork failures.
+//! Deterministic crash pack format for lab runtime failures.
 //!
 //! Crash packs are **repro artifacts**, not logs. They capture the minimal
 //! information needed to reproduce a concurrency bug under `LabRuntime`:
@@ -6,7 +6,7 @@
 //! - Deterministic seed + configuration snapshot
 //! - Canonical trace fingerprint
 //! - Minimal divergent prefix (if available)
-//! - Evidence ledger snapshot for key supervision/registry decisions
+//! - Evidence ledger snapshot for key runtime decisions
 //!
 //! # Format Goals
 //!
@@ -183,32 +183,6 @@ impl From<EvidenceEntry> for EvidenceEntrySnapshot {
 }
 
 // =============================================================================
-// Supervision Decision Snapshot
-// =============================================================================
-
-/// Snapshot of a supervision decision captured in the crash pack.
-///
-/// Records what the supervisor decided and why, providing the "evidence
-/// ledger" for debugging supervision chain behavior.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SupervisionSnapshot {
-    /// Virtual time when the decision was made.
-    pub virtual_time: Time,
-
-    /// The task involved in the decision.
-    pub task: TaskId,
-
-    /// The region containing the task.
-    pub region: RegionId,
-
-    /// Human-readable decision tag (e.g., "restart", "stop", "escalate").
-    pub decision: String,
-
-    /// Additional context (e.g., "attempt 3 of 5", "budget exhausted").
-    pub context: Option<String>,
-}
-
-// =============================================================================
 // Crash Pack Manifest (bd-35u33)
 // =============================================================================
 
@@ -231,8 +205,6 @@ pub enum AttachmentKind {
     DivergentPrefix,
     /// Evidence ledger entries.
     EvidenceLedger,
-    /// Supervision decision log.
-    SupervisionLog,
     /// Oracle violation list.
     OracleViolations,
     /// User-defined or future attachment type.
@@ -407,7 +379,7 @@ impl CrashPackManifest {
 // Crash Pack
 // =============================================================================
 
-/// A complete crash pack: a self-contained repro artifact for a Spork failure.
+/// A complete crash pack: a self-contained repro artifact for a lab failure.
 ///
 /// # Structure
 ///
@@ -417,8 +389,7 @@ impl CrashPackManifest {
 /// ├── failure           — triggering failure (task, region, outcome, vt)
 /// ├── canonical_prefix  — Foata layers of the trace prefix (deterministic)
 /// ├── divergent_prefix  — minimal replay prefix to reach the divergence point
-/// ├── evidence          — evidence ledger entries (supervision/registry decisions)
-/// ├── supervision_log   — supervision decision snapshots
+/// ├── evidence          — evidence ledger entries (key runtime decisions)
 /// └── oracle_violations — invariant violations detected by oracles
 /// ```
 ///
@@ -453,12 +424,6 @@ pub struct CrashPack {
     /// that document why the runtime made particular choices.
     pub evidence: Vec<EvidenceEntrySnapshot>,
 
-    /// Supervision decision log leading up to the failure.
-    ///
-    /// Ordered by virtual time; captures the chain of restart/stop/escalate
-    /// decisions that preceded (or caused) the failure.
-    pub supervision_log: Vec<SupervisionSnapshot>,
-
     /// Oracle invariant violations detected during the execution.
     ///
     /// Sorted and deduplicated. Empty if all invariants held.
@@ -484,7 +449,6 @@ impl PartialEq for CrashPack {
             && self.canonical_prefix == other.canonical_prefix
             && self.divergent_prefix == other.divergent_prefix
             && self.evidence == other.evidence
-            && self.supervision_log == other.supervision_log
             && self.oracle_violations == other.oracle_violations
             && self.replay == other.replay
     }
@@ -504,7 +468,6 @@ impl CrashPack {
             canonical_prefix: Vec::new(),
             divergent_prefix: Vec::new(),
             evidence: Vec::new(),
-            supervision_log: Vec::new(),
             oracle_violations: Vec::new(),
             replay: None,
         }
@@ -561,7 +524,6 @@ pub struct CrashPackBuilder {
     canonical_prefix: Vec<Vec<TraceEventKey>>,
     divergent_prefix: Vec<ReplayEvent>,
     evidence: Vec<EvidenceEntrySnapshot>,
-    supervision_log: Vec<SupervisionSnapshot>,
     oracle_violations: Vec<String>,
     replay: Option<ReplayCommand>,
 }
@@ -635,13 +597,6 @@ impl CrashPackBuilder {
         self
     }
 
-    /// Add a supervision decision snapshot.
-    #[must_use]
-    pub fn supervision_snapshot(mut self, snapshot: SupervisionSnapshot) -> Self {
-        self.supervision_log.push(snapshot);
-        self
-    }
-
     /// Set oracle violations.
     #[must_use]
     pub fn oracle_violations(mut self, violations: Vec<String>) -> Self {
@@ -672,19 +627,6 @@ impl CrashPackBuilder {
     pub fn build(self) -> CrashPack {
         let failure = self.failure.expect("CrashPackBuilder requires a failure");
 
-        // Sort supervision log with a total order for determinism.
-        // Equal virtual times are expected in practice; include stable
-        // secondary keys so serialization does not depend on insertion order.
-        let mut supervision_log = self.supervision_log;
-        supervision_log.sort_by(|a, b| {
-            a.virtual_time
-                .cmp(&b.virtual_time)
-                .then_with(|| a.task.cmp(&b.task))
-                .then_with(|| a.region.cmp(&b.region))
-                .then_with(|| a.decision.cmp(&b.decision))
-                .then_with(|| a.context.cmp(&b.context))
-        });
-
         // Build attachment table of contents from non-empty sections
         let mut attachments = Vec::new();
         if !self.canonical_prefix.is_empty() {
@@ -713,13 +655,6 @@ impl CrashPackBuilder {
                 size_hint_bytes: 0,
             });
         }
-        if !supervision_log.is_empty() {
-            attachments.push(ManifestAttachment {
-                kind: AttachmentKind::SupervisionLog,
-                item_count: supervision_log.len() as u64,
-                size_hint_bytes: 0,
-            });
-        }
         if !self.oracle_violations.is_empty() {
             attachments.push(ManifestAttachment {
                 kind: AttachmentKind::OracleViolations,
@@ -737,7 +672,6 @@ impl CrashPackBuilder {
             canonical_prefix: self.canonical_prefix,
             divergent_prefix: self.divergent_prefix,
             evidence: self.evidence,
-            supervision_log,
             oracle_violations: self.oracle_violations,
             replay: self.replay,
         }
@@ -1241,91 +1175,6 @@ mod tests {
     }
 
     #[test]
-    fn supervision_log_sorted_by_vt() {
-        init_test("supervision_log_sorted_by_vt");
-
-        let pack = CrashPack::builder(CrashPackConfig::default())
-            .failure(sample_failure())
-            .supervision_snapshot(SupervisionSnapshot {
-                virtual_time: Time::from_secs(10),
-                task: tid(1),
-                region: rid(0),
-                decision: "restart".into(),
-                context: Some("attempt 2 of 3".into()),
-            })
-            .supervision_snapshot(SupervisionSnapshot {
-                virtual_time: Time::from_secs(5),
-                task: tid(1),
-                region: rid(0),
-                decision: "restart".into(),
-                context: Some("attempt 1 of 3".into()),
-            })
-            .supervision_snapshot(SupervisionSnapshot {
-                virtual_time: Time::from_secs(15),
-                task: tid(1),
-                region: rid(0),
-                decision: "stop".into(),
-                context: Some("budget exhausted".into()),
-            })
-            .build();
-
-        assert_eq!(pack.supervision_log.len(), 3);
-        // Should be sorted by virtual_time
-        assert_eq!(pack.supervision_log[0].virtual_time, Time::from_secs(5));
-        assert_eq!(pack.supervision_log[1].virtual_time, Time::from_secs(10));
-        assert_eq!(pack.supervision_log[2].virtual_time, Time::from_secs(15));
-
-        crate::test_complete!("supervision_log_sorted_by_vt");
-    }
-
-    #[test]
-    fn supervision_log_equal_vt_has_deterministic_total_order() {
-        init_test("supervision_log_equal_vt_has_deterministic_total_order");
-
-        let s1 = SupervisionSnapshot {
-            virtual_time: Time::from_secs(5),
-            task: tid(2),
-            region: rid(0),
-            decision: "restart".into(),
-            context: Some("ctx-b".into()),
-        };
-        let s2 = SupervisionSnapshot {
-            virtual_time: Time::from_secs(5),
-            task: tid(1),
-            region: rid(0),
-            decision: "restart".into(),
-            context: Some("ctx-a".into()),
-        };
-        let s3 = SupervisionSnapshot {
-            virtual_time: Time::from_secs(5),
-            task: tid(1),
-            region: rid(0),
-            decision: "escalate".into(),
-            context: Some("ctx-a".into()),
-        };
-
-        let pack_a = CrashPack::builder(CrashPackConfig::default())
-            .failure(sample_failure())
-            .supervision_snapshot(s1.clone())
-            .supervision_snapshot(s2.clone())
-            .supervision_snapshot(s3.clone())
-            .build();
-
-        let pack_b = CrashPack::builder(CrashPackConfig::default())
-            .failure(sample_failure())
-            .supervision_snapshot(s3.clone())
-            .supervision_snapshot(s1.clone())
-            .supervision_snapshot(s2.clone())
-            .build();
-
-        // Same logical entries must yield identical ordering regardless of insertion order.
-        assert_eq!(pack_a.supervision_log, pack_b.supervision_log);
-        assert_eq!(pack_a.supervision_log, vec![s3, s2, s1]);
-
-        crate::test_complete!("supervision_log_equal_vt_has_deterministic_total_order");
-    }
-
-    #[test]
     fn crash_pack_equality_ignores_created_at() {
         init_test("crash_pack_equality_ignores_created_at");
 
@@ -1397,7 +1246,6 @@ mod tests {
         assert!(pack.canonical_prefix.is_empty());
         assert!(pack.divergent_prefix.is_empty());
         assert!(pack.evidence.is_empty());
-        assert!(pack.supervision_log.is_empty());
         assert!(pack.oracle_violations.is_empty());
         assert!(!pack.has_violations());
         assert!(!pack.has_divergent_prefix());
@@ -1495,24 +1343,6 @@ mod tests {
         assert_eq!(pack.canonical_prefix.len(), 1);
 
         crate::test_complete!("with_canonical_prefix");
-    }
-
-    #[test]
-    fn supervision_snapshot_with_context() {
-        init_test("supervision_snapshot_with_context");
-
-        let snap = SupervisionSnapshot {
-            virtual_time: Time::from_secs(10),
-            task: tid(3),
-            region: rid(1),
-            decision: "escalate".into(),
-            context: Some("parent region R0".into()),
-        };
-
-        assert_eq!(snap.decision, "escalate");
-        assert_eq!(snap.context.as_deref(), Some("parent region R0"));
-
-        crate::test_complete!("supervision_snapshot_with_context");
     }
 
     // =================================================================
@@ -2065,11 +1895,6 @@ mod tests {
                 .manifest
                 .has_attachment(&AttachmentKind::EvidenceLedger)
         );
-        assert!(
-            !pack
-                .manifest
-                .has_attachment(&AttachmentKind::SupervisionLog)
-        );
 
         crate::test_complete!("manifest_attachments_auto_populated");
     }
@@ -2115,13 +1940,6 @@ mod tests {
                     },
                 ],
             ])
-            .supervision_snapshot(SupervisionSnapshot {
-                virtual_time: Time::from_secs(1),
-                task: tid(1),
-                region: rid(0),
-                decision: "restart".into(),
-                context: None,
-            })
             .build();
 
         // Canonical prefix: 2 layers with 3 total events
@@ -2130,13 +1948,6 @@ mod tests {
             .attachment(&AttachmentKind::CanonicalPrefix)
             .unwrap();
         assert_eq!(cp.item_count, 3);
-
-        // Supervision log: 1 entry
-        let sl = pack
-            .manifest
-            .attachment(&AttachmentKind::SupervisionLog)
-            .unwrap();
-        assert_eq!(sl.item_count, 1);
 
         crate::test_complete!("manifest_attachment_item_counts");
     }
@@ -2149,7 +1960,6 @@ mod tests {
             AttachmentKind::CanonicalPrefix,
             AttachmentKind::DivergentPrefix,
             AttachmentKind::EvidenceLedger,
-            AttachmentKind::SupervisionLog,
             AttachmentKind::OracleViolations,
             AttachmentKind::Custom {
                 tag: "heap-dump".into(),
@@ -2279,13 +2089,6 @@ mod tests {
             .from_trace(&events)
             .divergent_prefix(vec![ReplayEvent::RngSeed { seed: 42 }])
             .oracle_violations(vec!["v1".into()])
-            .supervision_snapshot(SupervisionSnapshot {
-                virtual_time: Time::from_secs(1),
-                task: tid(1),
-                region: rid(0),
-                decision: "restart".into(),
-                context: None,
-            })
             .build();
 
         let writer = MemoryCrashPackWriter::new();
@@ -2294,13 +2097,12 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
 
         let atts = parsed["manifest"]["attachments"].as_array().unwrap();
-        assert_eq!(atts.len(), 4);
+        assert_eq!(atts.len(), 3);
 
         // Verify kinds are tagged correctly
         let kinds: Vec<&str> = atts.iter().map(|a| a["kind"].as_str().unwrap()).collect();
         assert!(kinds.contains(&"CanonicalPrefix"));
         assert!(kinds.contains(&"DivergentPrefix"));
-        assert!(kinds.contains(&"SupervisionLog"));
         assert!(kinds.contains(&"OracleViolations"));
 
         crate::test_complete!("conformance_attachments_in_crash_pack_json");
@@ -2915,7 +2717,7 @@ mod tests {
 
         // -- Simulate execution producing trace events --
         //
-        // In a real Spork app, these events are emitted by the LabRuntime.
+        // In a real run, these events are emitted by the LabRuntime.
         // Here we construct them directly to show the data flow.
         let events = vec![
             TraceEvent::region_created(1, Time::ZERO, rid(1), None),

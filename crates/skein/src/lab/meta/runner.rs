@@ -408,14 +408,17 @@ mod tests {
         let report = runner.run(builtin_mutations());
         let missing = report.coverage().missing_invariants();
         assert!(
-            !missing.contains(&"actor_leak"),
-            "actor_leak should be covered"
+            !missing.contains(&"task_leak"),
+            "task_leak should be covered"
         );
         assert!(
-            !missing.contains(&"supervision"),
-            "supervision should be covered"
+            !missing.contains(&"quiescence"),
+            "quiescence should be covered"
         );
-        assert!(!missing.contains(&"mailbox"), "mailbox should be covered");
+        assert!(
+            !missing.contains(&"rref_access"),
+            "rref_access should be covered"
+        );
     }
 
     #[test]

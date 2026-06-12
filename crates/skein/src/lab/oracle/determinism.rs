@@ -221,41 +221,6 @@ impl TraceEventSummary {
             } => {
                 format!("seq={sequence} tasks={active_tasks} regions={active_regions}")
             }
-            TraceData::Monitor {
-                monitor_ref,
-                watcher,
-                watcher_region,
-                monitored,
-            } => format!(
-                "monitor_ref={monitor_ref} watcher={watcher} watcher_region={watcher_region} monitored={monitored}"
-            ),
-            TraceData::Down {
-                monitor_ref,
-                watcher,
-                monitored,
-                completion_vt,
-                reason,
-            } => format!(
-                "down monitor_ref={monitor_ref} watcher={watcher} monitored={monitored} completion_vt={completion_vt} reason={reason}"
-            ),
-            TraceData::Link {
-                link_ref,
-                task_a,
-                region_a,
-                task_b,
-                region_b,
-            } => format!(
-                "link_ref={link_ref} a={task_a} region_a={region_a} b={task_b} region_b={region_b}"
-            ),
-            TraceData::Exit {
-                link_ref,
-                from,
-                to,
-                failure_vt,
-                reason,
-            } => format!(
-                "exit link_ref={link_ref} from={from} to={to} failure_vt={failure_vt} reason={reason}"
-            ),
         }
     }
 }

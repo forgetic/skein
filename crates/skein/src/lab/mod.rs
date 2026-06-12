@@ -63,7 +63,6 @@ pub mod runtime;
 pub mod scenario;
 pub mod scenario_runner;
 pub mod snapshot_restore;
-pub mod spork_harness;
 pub mod virtual_time_wheel;
 
 pub use crate::util::{
@@ -96,30 +95,24 @@ pub use network::{
     NetworkMetrics, NetworkTraceEvent, NetworkTraceKind, Packet, SimulatedNetwork,
 };
 pub use oracle::{
-    ActorLeakOracle, ActorLeakViolation, BayesFactor, DetectionModel, DeterminismOracle,
-    DeterminismViolation, DownOrderOracle, DownOrderViolation, EProcess, EProcessConfig,
+    BayesFactor, DetectionModel, DeterminismOracle, DeterminismViolation, EProcess, EProcessConfig,
     EProcessMonitor, EValue, EvidenceEntry, EvidenceLedger, EvidenceLine, EvidenceStrength,
     EvidenceSummary, FinalizerId, FinalizerOracle, FinalizerViolation, LogLikelihoodContributions,
-    LoserDrainOracle, LoserDrainViolation, MailboxOracle, MailboxViolation, MailboxViolationKind,
-    MonitorResult, ObligationLeakOracle, ObligationLeakViolation, OracleEntryReport, OracleReport,
-    OracleStats, OracleSuite, OracleViolation, QuiescenceOracle, QuiescenceViolation,
-    RegistryLeaseOracle, RegistryLeaseViolation, ReplyLinearityOracle, ReplyLinearityViolation,
-    SupervisionOracle, SupervisionViolation, SupervisionViolationKind, SupervisorQuiescenceOracle,
-    SupervisorQuiescenceViolation, TaskLeakOracle, TaskLeakViolation, TraceEventSummary,
-    assert_deterministic, assert_deterministic_multi,
+    LoserDrainOracle, LoserDrainViolation, MonitorResult, ObligationLeakOracle,
+    ObligationLeakViolation, OracleEntryReport, OracleReport, OracleStats, OracleSuite,
+    OracleViolation, QuiescenceOracle, QuiescenceViolation, TaskLeakOracle, TaskLeakViolation,
+    TraceEventSummary, assert_deterministic, assert_deterministic_multi,
 };
 pub use replay::{
     ExplorationFingerprintClass as ReplayExplorationFingerprintClass,
     ExplorationReport as ReplayExplorationReport,
     ExplorationRunSummary as ReplayExplorationRunSummary, NormalizationResult, ReplayValidation,
-    SporkExplorationReport, SporkExplorationRunSummary, TraceDivergence, TraceSummary,
-    classify_fingerprint_classes, compare_normalized, explore_scenario_runner_seed_space,
-    explore_seed_space, explore_spork_seed_space, normalize_for_replay,
-    normalize_for_replay_with_config, summarize_spork_reports, traces_equivalent,
+    TraceDivergence, TraceSummary, classify_fingerprint_classes, compare_normalized,
+    explore_seed_space, normalize_for_replay, normalize_for_replay_with_config, traces_equivalent,
 };
 pub use runtime::{
-    HarnessAttachmentKind, HarnessAttachmentRef, LabConfigSummary, LabRunReport, LabRuntime,
-    LabSpawner, LabTraceCertificateSummary, SporkHarnessReport, VirtualTimeReport,
+    LabConfigSummary, LabRunReport, LabRuntime, LabSpawner, LabTraceCertificateSummary,
+    VirtualTimeReport,
 };
 pub use scenario::{
     CancellationSection, CancellationStrategy, ChaosSection, FaultAction, FaultEvent, IncludeRef,
@@ -132,9 +125,5 @@ pub use scenario_runner::{
 };
 pub use snapshot_restore::{
     RestorableSnapshot, RestoreError, SnapshotRestore, SnapshotStats, ValidationResult,
-};
-pub use spork_harness::{
-    HarnessError, ScenarioRunnerError, SporkAppHarness, SporkScenarioConfig, SporkScenarioResult,
-    SporkScenarioRunner, SporkScenarioSpec,
 };
 pub use virtual_time_wheel::{ExpiredTimer, VirtualTimerHandle, VirtualTimerWheel};
