@@ -4,7 +4,6 @@ resolver = "2"
 members = [
     "crates/skein",
     "crates/skein-macros",
-    "crates/skein-conformance",
     "crates/franken-decision",
     "crates/franken-evidence",
     "crates/franken-kernel",

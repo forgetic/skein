@@ -13,8 +13,7 @@ projects (temper, smith, …).
 | crate | purpose |
 |-------|---------|
 | `crates/skein` | the runtime: scheduler, `Cx`/cancellation, channels/sync, timers, io, net/tcp + h1 http, process, bytes, codecs |
-| `crates/skein-macros` | optional proc-macros for the structured-concurrency surface (`scope`, `spawn`, `join`, `race`, `session_protocol`) |
-| `crates/skein-conformance` | conformance test suite and traceability tooling used by the `cli` feature |
+| `crates/skein-macros` | optional proc-macros for the structured-concurrency surface (`scope`, `spawn`, `join`, `race`) |
 | `crates/franken-{decision,evidence,kernel}` | the evidence-ledger / decision-kernel support crates the runtime depends on (MIT siblings, vendored at 0.2.0) |
 
 ## Using it

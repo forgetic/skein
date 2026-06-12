@@ -13,7 +13,6 @@ pub mod framed_read;
 pub mod framed_write;
 pub mod length_delimited;
 pub mod lines;
-pub mod raptorq;
 
 pub use bytes_codec::BytesCodec;
 pub use decoder::Decoder;
@@ -23,4 +22,3 @@ pub use framed_read::FramedRead;
 pub use framed_write::FramedWrite;
 pub use length_delimited::{LengthDelimitedCodec, LengthDelimitedCodecBuilder};
 pub use lines::{LinesCodec, LinesCodecError};
-pub use raptorq::{EncodedSymbol, EncodingConfig, EncodingError, EncodingPipeline};

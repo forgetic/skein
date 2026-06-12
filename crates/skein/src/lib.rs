@@ -66,52 +66,37 @@
 
 pub mod actor;
 pub mod app;
-pub mod audit;
 pub mod bytes;
 pub mod cancel;
 pub mod channel;
-pub mod cli;
 pub mod codec;
 pub mod combinator;
 pub mod config;
 pub mod conformance;
 pub mod console;
 pub mod cx;
-#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
-pub mod database;
-pub mod decoding;
-pub mod distributed;
-pub mod encoding;
-pub mod epoch;
 pub mod error;
 pub mod evidence;
 pub mod evidence_sink;
 pub mod fs;
 pub mod gen_server;
-pub mod grpc;
 pub mod http;
 pub mod io;
 pub mod lab;
-pub mod link;
-pub mod messaging;
 pub mod migration;
 pub mod monitor;
 pub mod net;
 pub mod obligation;
 pub mod observability;
-pub mod plan;
 #[cfg(unix)]
 pub mod process;
-pub mod raptorq;
 pub mod record;
 pub mod remote;
 pub mod runtime;
 pub mod security;
 pub mod server;
 pub mod service;
-pub mod session;
 pub mod signal;
-pub mod spork;
 pub mod stream;
 pub mod supervision;
 pub mod sync;
@@ -126,7 +111,6 @@ pub mod time;
 pub mod tls;
 pub mod trace;
 pub mod tracing_compat;
-pub mod transport;
 pub mod types;
 pub mod util;
 pub mod web;
@@ -138,19 +122,6 @@ pub use config::{
     TimeoutConfig, TransportConfig,
 };
 pub use cx::{Cx, Scope};
-pub use decoding::{
-    DecodingConfig, DecodingError, DecodingPipeline, DecodingProgress, RejectReason,
-    SymbolAcceptResult,
-};
-pub use encoding::{EncodedSymbol, EncodingError, EncodingPipeline, EncodingStats};
-pub use epoch::{
-    BarrierResult, BarrierTrigger, Epoch, EpochBarrier, EpochBulkheadError,
-    EpochCircuitBreakerError, EpochClock, EpochConfig, EpochContext, EpochError, EpochId,
-    EpochJoin2, EpochPolicy, EpochRace2, EpochScoped, EpochSelect, EpochSource, EpochState,
-    EpochTransitionBehavior, SymbolValidityWindow, bulkhead_call_in_epoch,
-    bulkhead_call_weighted_in_epoch, circuit_breaker_call_in_epoch, epoch_join2, epoch_race2,
-    epoch_select,
-};
 pub use error::{
     AcquireError, BackoffHint, Error, ErrorCategory, ErrorKind, Recoverability, RecoveryAction,
     RecvError, Result, ResultExt, SendError,
@@ -182,5 +153,5 @@ pub mod proc_macros {
     //!
     //! These are provided for explicit access when the macro_rules! versions
     //! are also in scope.
-    pub use skein_macros::{join, join_all, race, scope, session_protocol, spawn};
+    pub use skein_macros::{join, join_all, race, scope, spawn};
 }

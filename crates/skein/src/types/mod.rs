@@ -23,7 +23,6 @@ pub mod rref;
 pub mod symbol;
 pub mod symbol_set;
 pub mod task_context;
-pub mod typed_symbol;
 
 pub use budget::{Budget, CurveBudget, CurveError, MinPlusCurve, backlog_bound, delay_bound};
 pub use builder::{BuildError, BuildResult};
@@ -41,8 +40,3 @@ pub use symbol_set::{
     BlockProgress, ConcurrentSymbolSet, InsertResult, SymbolSet, ThresholdConfig,
 };
 pub use task_context::{CheckpointState, CxInner, MAX_MASK_DEPTH};
-pub use typed_symbol::{
-    DeserializationError, Deserializer, SerdeCodec, SerializationError, SerializationFormat,
-    Serializer, TYPED_SYMBOL_HEADER_LEN, TYPED_SYMBOL_MAGIC, TypeDescriptor, TypeMismatchError,
-    TypeRegistry, TypedDecoder, TypedEncoder, TypedSymbol,
-};
