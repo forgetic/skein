@@ -8,7 +8,7 @@
 //! Each framework wrapper holds a `Cx<C>` with a capability set appropriate
 //! for its use case:
 //!
-//! - Web request handlers: time + IO (no spawn, no random, no remote)
+//! - Web request handlers: time + IO (no spawn, no random)
 //! - gRPC handlers: time + IO + spawn (for streaming)
 //! - Background tasks: spawn + time (no IO, no random)
 //! - Pure computations: no capabilities
@@ -21,30 +21,30 @@ use crate::cx::cap::CapSet;
 use std::sync::Arc;
 
 /// Capability set for web request handlers: time + IO only.
-pub type WebCaps = CapSet<false, true, false, true, false>;
+pub type WebCaps = CapSet<false, true, false, true>;
 
 /// Capability set for gRPC handlers: spawn + time + IO.
-pub type GrpcCaps = CapSet<true, true, false, true, false>;
+pub type GrpcCaps = CapSet<true, true, false, true>;
 
 /// Capability set for background tasks: spawn + time only.
-pub type BackgroundCaps = CapSet<true, true, false, false, false>;
+pub type BackgroundCaps = CapSet<true, true, false, false>;
 
 /// Capability set for pure computations: no capabilities.
-pub type PureCaps = CapSet<false, false, false, false, false>;
+pub type PureCaps = CapSet<false, false, false, false>;
 
 /// Capability set for tasks needing entropy: random only.
-pub type EntropyCaps = CapSet<false, false, true, false, false>;
+pub type EntropyCaps = CapSet<false, false, true, false>;
 
 /// Web request context with narrowed capabilities.
 ///
 /// Provides time and IO capabilities but prevents spawning tasks,
-/// accessing entropy, or making remote calls.
+/// or accessing entropy.
 ///
 /// # Example
 ///
 /// ```ignore
 /// async fn handle_request(ctx: &WebContext) {
-///     // ctx.cx() provides time + IO but NOT spawn/random/remote
+///     // ctx.cx() provides time + IO but NOT spawn/random
 ///     let deadline = ctx.cx().deadline();
 ///     // ctx.cx().spawn(...) — compile error!
 /// }
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn web_caps_have_time_and_io() {
-        // WebCaps = CapSet<false, true, false, true, false>
+        // WebCaps = CapSet<false, true, false, true>
         // This is a compile-time check — if WebCaps doesn't satisfy
         // HasTime + HasIo, these functions won't compile.
         fn requires_time<C: cap::HasTime>() {}
@@ -177,7 +177,7 @@ mod tests {
         // Negative test: WebCaps should NOT have spawn.
         // We can't directly test "doesn't implement trait" at runtime,
         // but we verify the const generic values.
-        // WebCaps = CapSet<false, true, false, true, false>
+        // WebCaps = CapSet<false, true, false, true>
         // SPAWN=false, so HasSpawn is NOT implemented.
         // This is verified by the compile_fail doctest pattern.
     }
@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn pure_caps_have_nothing() {
-        // PureCaps = CapSet<false, false, false, false, false> = cap::None
+        // PureCaps = CapSet<false, false, false, false> = cap::None
         // No capability traits are implemented.
         // Verified by type equality.
         let _: PureCaps = cap::None::default();

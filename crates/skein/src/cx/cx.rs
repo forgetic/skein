@@ -58,7 +58,6 @@ use crate::evidence_sink::EvidenceSink;
 use crate::observability::{
     DiagnosticContext, LogCollector, LogEntry, ObservabilityConfig, SpanId,
 };
-use crate::remote::RemoteCap;
 use crate::runtime::blocking_pool::BlockingPoolHandle;
 use crate::runtime::io_driver::{IoDriverHandle, IoRegistration};
 use crate::runtime::reactor::{Interest, Source};
@@ -109,7 +108,6 @@ struct CxHandles {
     blocking_pool: Option<BlockingPoolHandle>,
     entropy: Arc<dyn EntropySource>,
     logical_clock: LogicalClockHandle,
-    remote_cap: Option<Arc<RemoteCap>>,
     pressure: Option<Arc<SystemPressure>>,
     evidence_sink: Option<Arc<dyn EvidenceSink>>,
     macaroon: Option<Arc<MacaroonToken>>,
@@ -301,7 +299,6 @@ impl<Caps> Cx<Caps> {
                 blocking_pool: None,
                 entropy: Arc::new(OsEntropy),
                 logical_clock: LogicalClockHandle::default(),
-                remote_cap: None,
                 pressure: None,
                 evidence_sink: None,
                 macaroon: None,
@@ -397,7 +394,6 @@ impl<Caps> Cx<Caps> {
                 blocking_pool: None,
                 entropy,
                 logical_clock: LogicalClockHandle::default(),
-                remote_cap: None,
                 pressure: None,
                 evidence_sink: None,
                 macaroon: None,
@@ -456,15 +452,6 @@ impl<Caps> Cx<Caps> {
         }
     }
 
-    /// Attaches a remote capability to this context.
-    ///
-    /// This allows the context to perform remote operations like `spawn_remote`.
-    #[must_use]
-    pub fn with_remote_cap(mut self, cap: RemoteCap) -> Self {
-        Arc::make_mut(&mut self.handles).remote_cap = Some(Arc::new(cap));
-        self
-    }
-
     /// Attach a system pressure handle for compute budget propagation.
     ///
     /// The handle is shared via `Arc` so all clones observe the same pressure
@@ -482,25 +469,6 @@ impl<Caps> Cx<Caps> {
     #[must_use]
     pub fn pressure(&self) -> Option<&SystemPressure> {
         self.handles.pressure.as_deref()
-    }
-
-    /// Returns a cloned handle to the configured remote capability, if any.
-    ///
-    /// This is `pub(crate)` so internal wiring (e.g. spawning child tasks) can
-    /// inherit remote capability without requiring `Caps: HasRemote` bounds.
-    #[must_use]
-    pub(crate) fn remote_cap_handle(&self) -> Option<Arc<RemoteCap>> {
-        self.handles.remote_cap.clone()
-    }
-
-    /// Attaches an already-shared remote capability handle to this context.
-    ///
-    /// This is the internal counterpart to [`Cx::with_remote_cap`] used for
-    /// capability propagation to child contexts.
-    #[must_use]
-    pub(crate) fn with_remote_cap_handle(mut self, cap: Option<Arc<RemoteCap>>) -> Self {
-        Arc::make_mut(&mut self.handles).remote_cap = cap;
-        self
     }
 
     /// Attaches an evidence sink for runtime decision tracing.
@@ -849,37 +817,6 @@ impl<Caps> Cx<Caps> {
         Caps: cap::HasIo,
     {
         self.handles.io_cap.is_some()
-    }
-
-    /// Returns the remote capability, if one is configured.
-    ///
-    /// The remote capability authorizes spawning tasks on remote nodes.
-    /// Without this capability, [`spawn_remote`](crate::remote::spawn_remote)
-    /// returns [`RemoteError::NoCapability`](crate::remote::RemoteError::NoCapability).
-    ///
-    /// # Capability Model
-    ///
-    /// Remote execution is an explicit capability:
-    /// - Production runtime configures remote capability with transport config
-    /// - Lab runtime can configure it for deterministic distributed testing
-    /// - Code that needs remote spawning must check for this capability
-    #[must_use]
-    pub fn remote(&self) -> Option<&RemoteCap>
-    where
-        Caps: cap::HasRemote,
-    {
-        self.handles.remote_cap.as_ref().map(AsRef::as_ref)
-    }
-
-    /// Returns true if the remote capability is available.
-    ///
-    /// Convenience method to check if remote task operations can be performed.
-    #[must_use]
-    pub fn has_remote(&self) -> bool
-    where
-        Caps: cap::HasRemote,
-    {
-        self.handles.remote_cap.is_some()
     }
 
     /// Registers an I/O source with the reactor for the given interest.
@@ -2238,20 +2175,6 @@ impl Cx<cap::All> {
         Self::for_request_with_budget(Budget::INFINITE)
     }
 
-    /// Creates a test-only capability context with a remote capability.
-    ///
-    /// This constructor creates a Cx with a [`RemoteCap`] for testing remote
-    /// task spawning without a real network transport.
-    ///
-    /// # Note
-    ///
-    /// This API is intended for testing only.
-    #[must_use]
-    pub fn for_testing_with_remote(cap: RemoteCap) -> Self {
-        let mut cx = Self::for_testing();
-        Arc::make_mut(&mut cx.handles).remote_cap = Some(Arc::new(cap));
-        cx
-    }
 }
 
 /// RAII guard returned by [`Cx::enter_span`].

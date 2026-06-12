@@ -219,7 +219,7 @@ fn extract_task_id(event: &TraceEvent) -> Option<TaskId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::NodeId;
+    use crate::trace::distributed::NodeId;
     use crate::trace::distributed::{LamportClock, VectorClock};
     use crate::types::{RegionId, Time};
 

@@ -8,7 +8,7 @@
 //!
 //! ```rust
 //! use skein::trace::distributed::vclock::{VectorClock, CausalOrder};
-//! use skein::remote::NodeId;
+//! use skein::trace::distributed::NodeId;
 //!
 //! let mut vc_a = VectorClock::new();
 //! let node_a = NodeId::new("node-a");
@@ -29,7 +29,7 @@
 //! assert!(merged.get(&node_b) == 1);
 //! ```
 
-use crate::remote::NodeId;
+use crate::trace::distributed::NodeId;
 use crate::time::{TimeSource, TimerDriverHandle, WallClock};
 use crate::types::Time;
 use parking_lot::Mutex;

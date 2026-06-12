@@ -27,7 +27,7 @@
 //!
 //! The merge operation is associative, commutative, and idempotent.
 
-use crate::remote::NodeId;
+use crate::trace::distributed::NodeId;
 use crate::types::ObligationId;
 use std::collections::BTreeMap;
 use std::fmt;

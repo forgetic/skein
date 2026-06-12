@@ -549,7 +549,6 @@ impl<P: Policy> Scope<'_, P> {
         // Note: create_task_infrastructure already attached `Cx` to the TaskRecord; update it
         // so other runtime paths observe the same capability set.
         let child_cx_full = base_cx_full
-            .with_remote_cap_handle(cx.remote_cap_handle())
             .with_blocking_pool_handle(cx.blocking_pool_handle())
             .with_evidence_sink(cx.evidence_sink_handle());
         if let Some(record) = state.task_mut(task_id) {
@@ -1093,7 +1092,6 @@ impl<P: Policy> Scope<'_, P> {
             Some(child_entropy),
         )
         .with_logical_clock(logical_clock)
-        .with_remote_cap_handle(parent_cx.remote_cap_handle())
         .with_blocking_pool_handle(parent_cx.blocking_pool_handle())
         .with_evidence_sink(parent_cx.evidence_sink_handle());
         child_cx.set_trace_buffer(state.trace_handle());
@@ -1259,48 +1257,6 @@ mod tests {
         // Task should be owned by the region
         let task = task.unwrap();
         assert_eq!(task.owner, region);
-    }
-
-    #[test]
-    fn spawn_inherits_remote_capability() {
-        use crate::remote::{NodeId, RemoteCap};
-        use std::task::{Context, Waker};
-
-        struct NoopWaker;
-        impl std::task::Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
-        let mut state = RuntimeState::new();
-
-        let cx = test_cx()
-            .with_remote_cap(RemoteCap::new().with_local_node(NodeId::new("origin-test")));
-
-        let region = state.create_root_region(Budget::INFINITE);
-        let scope = test_scope(region, Budget::INFINITE);
-
-        let handle = scope
-            .spawn_registered(&mut state, &cx, move |cx| async move {
-                let child_remote = cx.remote().expect("child must inherit remote cap");
-                child_remote.local_node().as_str().to_owned()
-            })
-            .unwrap();
-
-        let waker = Waker::from(Arc::new(NoopWaker));
-        let mut poll_cx = Context::from_waker(&waker);
-
-        let stored = state
-            .get_stored_future(handle.task_id())
-            .expect("spawn_registered must store the task");
-        assert!(stored.poll(&mut poll_cx).is_ready());
-
-        let mut join_fut = Box::pin(handle.join(&cx));
-        match join_fut.as_mut().poll(&mut poll_cx) {
-            Poll::Ready(Ok(origin)) => {
-                assert_eq!(origin, "origin-test");
-            }
-            other => unreachable!("Expected Ready(Ok(_)), got {other:?}"),
-        }
     }
 
     #[test]
