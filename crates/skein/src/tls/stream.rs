@@ -478,28 +478,64 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
             }
         }
 
-        // Write to the TLS session
-        let n = io::Write::write(&mut self.conn.writer(), buf)?;
-        #[cfg(feature = "tracing-integration")]
-        trace!(bytes = n, "TLS write");
-
-        // Flush encrypted data to underlying IO
-        while self.conn.wants_write() {
-            match self.poll_write_tls(cx) {
-                Poll::Ready(Ok(0)) => break,
-                Poll::Ready(Ok(_)) => {}
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => {
-                    // If we wrote some data to the TLS session, report success
-                    if n > 0 {
-                        return Poll::Ready(Ok(n));
-                    }
-                    return Poll::Pending;
-                }
-            }
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
         }
 
-        Poll::Ready(Ok(n))
+        // Write plaintext into rustls' send buffer. That buffer is bounded
+        // (rustls caps the unsent plaintext it will accept), so for a large
+        // `buf` `Writer::write` returns a short count — and `Ok(0)` once the
+        // buffer is full. A naive `poll_write` that propagated that 0 makes
+        // `write_all` fail with `WriteZero` on bodies larger than the cap
+        // (~600KB LLM requests hit this). Instead, when rustls accepts no
+        // plaintext we must drain encrypted bytes to the socket to free the
+        // buffer, then retry — only yielding `Pending`/`Ok(progress)` when the
+        // socket itself cannot take more. We never return `Ok(0)` for a
+        // non-empty `buf`.
+        let mut written = 0usize;
+        loop {
+            let accepted = io::Write::write(&mut self.conn.writer(), &buf[written..])?;
+            written += accepted;
+            #[cfg(feature = "tracing-integration")]
+            trace!(bytes = accepted, total = written, "TLS write");
+
+            // Drain whatever rustls has encrypted so far to the socket.
+            let mut socket_blocked = false;
+            while self.conn.wants_write() {
+                match self.poll_write_tls(cx) {
+                    Poll::Ready(Ok(0)) => {
+                        // Socket accepted nothing and produced no error: treat
+                        // as a closed/stuck peer to avoid spinning.
+                        socket_blocked = true;
+                        break;
+                    }
+                    Poll::Ready(Ok(_)) => {}
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => {
+                        socket_blocked = true;
+                        break;
+                    }
+                }
+            }
+
+            if written == buf.len() {
+                return Poll::Ready(Ok(written));
+            }
+            if accepted == 0 {
+                // rustls took no more plaintext this round. If we already made
+                // progress on this call, report it so the caller advances; the
+                // next poll resumes. Otherwise the socket is the bottleneck.
+                if written > 0 {
+                    return Poll::Ready(Ok(written));
+                }
+                if socket_blocked {
+                    return Poll::Pending;
+                }
+                // No plaintext accepted, nothing pending to flush, no progress:
+                // the buffer is full but we couldn't drain it — yield to retry.
+                return Poll::Pending;
+            }
+        }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
