@@ -81,6 +81,13 @@ tracing-integration = ["dep:tracing"]
 name = "skein"
 path = "src/lib.rs"
 
+# End-to-end tests of the production I/O path (runtime + real platform
+# reactor). Kept as an integration target so they exercise only the public
+# API, exactly as downstream consumers do.
+[[test]]
+name = "real_reactor_e2e"
+path = "tests/real_reactor_e2e.rs"
+
 [dependencies.skein-macros]
 path = "../skein-macros"
 version = "0.2.0"

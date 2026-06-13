@@ -962,8 +962,13 @@ mod tests {
             }
         });
 
+        // The stale-entry race only exists with a real reactor attached;
+        // without one, registration degrades to a busy-poll fallback and
+        // this test would pass vacuously.
+        let reactor = crate::runtime::reactor::create_reactor().expect("create reactor");
         let runtime = crate::runtime::RuntimeBuilder::new()
             .worker_threads(2)
+            .with_reactor(reactor)
             .build()
             .expect("build runtime");
         let handle = runtime.handle();
