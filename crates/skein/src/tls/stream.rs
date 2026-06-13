@@ -529,11 +529,19 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
                     return Poll::Ready(Ok(written));
                 }
                 if socket_blocked {
+                    // The socket itself returned Pending/0 — `poll_write_tls`
+                    // registered the waker via the inner `poll_write`, so it is
+                    // safe to yield: we will be polled again when it drains.
                     return Poll::Pending;
                 }
-                // No plaintext accepted, nothing pending to flush, no progress:
-                // the buffer is full but we couldn't drain it — yield to retry.
-                return Poll::Pending;
+                // rustls' plaintext buffer was full BUT we just drained all the
+                // encrypted bytes to the socket without blocking (`wants_write`
+                // is now false). The buffer therefore has room again, so loop
+                // and feed more plaintext. Returning `Poll::Pending` here would
+                // hang the task forever: nothing registered a waker (the socket
+                // is writable, not blocked), so no event would ever re-poll us.
+                // This was the large-body (>~128KB) stall.
+                continue;
             }
         }
     }
@@ -605,4 +613,18 @@ mod tests {
         assert_ne!(TlsState::Ready, TlsState::ShuttingDown);
         assert_ne!(TlsState::ShuttingDown, TlsState::Closed);
     }
+
+    // Regression note for the large-body `poll_write` fix below
+    // (`AsyncWrite for TlsStream`): a `poll_write` of a buffer larger than
+    // rustls' plaintext send cap (~128KB) used to return `Poll::Pending`
+    // *without registering a waker* once rustls stopped accepting plaintext but
+    // the socket had drained cleanly, deadlocking the task forever. Real
+    // symptom: anvil/tongs requests with bodies >~128KB (LLM sub-agent and
+    // synthesis turns) hung indefinitely; smaller bodies were unaffected. The
+    // fix `continue`s to feed more plaintext after a clean drain instead of
+    // yielding. A unit test would need a full client/server rustls handshake
+    // over an in-memory duplex; `rcgen` (the dev-dep for self-signed certs)
+    // does not compile in this workspace's feature set, so the live regression
+    // reproducer is `tongs`' `anthropic_reset_repro` example, which hangs at
+    // ≥140KB before the fix and passes through 600KB after it.
 }
