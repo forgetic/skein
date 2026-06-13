@@ -1537,6 +1537,196 @@ mod tests {
     }
 
     #[test]
+    fn test_wait_with_output_async_collects_both_streams() {
+        init_test("test_wait_with_output_async_collects_both_streams");
+
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg("echo out; echo err >&2")
+                .stdin(Stdio::Null)
+                .stdout(Stdio::Pipe)
+                .stderr(Stdio::Pipe)
+                .spawn()
+                .expect("spawn failed");
+
+            let output = child
+                .wait_with_output_async(&cx)
+                .await
+                .expect("wait_with_output_async failed");
+
+            crate::assert_with_log!(
+                output.status.success(),
+                "success",
+                true,
+                output.status.success()
+            );
+            crate::assert_with_log!(
+                output.stdout == b"out\n",
+                "stdout",
+                "out\\n",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            crate::assert_with_log!(
+                output.stderr == b"err\n",
+                "stderr",
+                "err\\n",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        });
+        crate::test_complete!("test_wait_with_output_async_collects_both_streams");
+    }
+
+    #[test]
+    fn test_wait_with_output_async_large_output_no_deadlock() {
+        init_test("test_wait_with_output_async_large_output_no_deadlock");
+
+        // Both streams produce more than a pipe buffer (64 KiB) so the child
+        // blocks unless the parent drains stdout and stderr concurrently.
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(
+                    "head -c 200000 /dev/zero | tr '\\0' a; \
+                     head -c 200000 /dev/zero | tr '\\0' b >&2",
+                )
+                .stdin(Stdio::Null)
+                .stdout(Stdio::Pipe)
+                .stderr(Stdio::Pipe)
+                .spawn()
+                .expect("spawn failed");
+
+            let output = child
+                .wait_with_output_async(&cx)
+                .await
+                .expect("wait_with_output_async failed");
+
+            crate::assert_with_log!(
+                output.stdout.len() == 200_000,
+                "stdout length",
+                200_000,
+                output.stdout.len()
+            );
+            crate::assert_with_log!(
+                output.stderr.len() == 200_000,
+                "stderr length",
+                200_000,
+                output.stderr.len()
+            );
+            assert!(output.stdout.iter().all(|&b| b == b'a'));
+            assert!(output.stderr.iter().all(|&b| b == b'b'));
+        });
+        crate::test_complete!("test_wait_with_output_async_large_output_no_deadlock");
+    }
+
+    #[test]
+    fn test_wait_with_output_async_exit_code_no_output() {
+        init_test("test_wait_with_output_async_exit_code_no_output");
+
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg("exit 3")
+                .stdin(Stdio::Null)
+                .stdout(Stdio::Pipe)
+                .stderr(Stdio::Pipe)
+                .spawn()
+                .expect("spawn failed");
+
+            let output = child
+                .wait_with_output_async(&cx)
+                .await
+                .expect("wait_with_output_async failed");
+
+            crate::assert_with_log!(
+                output.status.code() == Some(3),
+                "exit code",
+                Some(3),
+                output.status.code()
+            );
+            assert!(output.stdout.is_empty());
+            assert!(output.stderr.is_empty());
+        });
+        crate::test_complete!("test_wait_with_output_async_exit_code_no_output");
+    }
+
+    #[test]
+    fn test_output_async_collects_output() {
+        init_test("test_output_async_collects_output");
+
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg("echo hi; exit 7")
+                .output_async(&cx)
+                .await
+                .expect("output_async failed");
+
+            crate::assert_with_log!(
+                output.status.code() == Some(7),
+                "exit code",
+                Some(7),
+                output.status.code()
+            );
+            crate::assert_with_log!(
+                output.stdout == b"hi\n",
+                "stdout",
+                "hi\\n",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        });
+        crate::test_complete!("test_output_async_collects_output");
+    }
+
+    #[test]
+    fn test_wait_with_output_async_timeout_cancel_leaves_child_intact() {
+        init_test("test_wait_with_output_async_timeout_cancel_leaves_child_intact");
+
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let mut child = Command::new("sleep")
+                .arg("5")
+                .stdin(Stdio::Null)
+                .stdout(Stdio::Pipe)
+                .stderr(Stdio::Pipe)
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn failed");
+
+            let now = Cx::current()
+                .and_then(|current| current.timer_driver())
+                .map_or_else(crate::time::wall_now, |driver| driver.now());
+            let result = crate::time::timeout(
+                now,
+                Duration::from_millis(50),
+                child.wait_with_output_async(&cx),
+            )
+            .await;
+
+            crate::assert_with_log!(result.is_err(), "timed out", true, result.is_err());
+
+            // Cancelling the future must leave the borrowed Child usable.
+            crate::assert_with_log!(
+                child.id().is_some(),
+                "child still owned",
+                true,
+                child.id().is_some()
+            );
+            child.kill().expect("kill failed");
+            let status = child.wait().expect("wait failed");
+            #[cfg(unix)]
+            crate::assert_with_log!(
+                status.signal().is_some(),
+                "killed by signal",
+                true,
+                status.signal().is_some()
+            );
+            #[cfg(not(unix))]
+            let _ = status;
+        });
+        crate::test_complete!("test_wait_with_output_async_timeout_cancel_leaves_child_intact");
+    }
+
+    #[test]
     fn test_exit_status_display() {
         init_test("test_exit_status_display");
 

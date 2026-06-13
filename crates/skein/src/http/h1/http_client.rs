@@ -701,6 +701,10 @@ fn resolve_redirect(current: &ParsedUrl, location: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::h1::listener::Http1Listener;
+    use crate::runtime::RuntimeBuilder;
+    use crate::test_utils::init_test_logging;
+    use std::time::Duration;
 
     // =========================================================================
     // URL parsing
@@ -963,5 +967,220 @@ mod tests {
     fn redirect_policy_default_is_limited() {
         let policy = RedirectPolicy::default();
         assert!(matches!(policy, RedirectPolicy::Limited(10)));
+    }
+
+    // =========================================================================
+    // End-to-end requests against an in-process listener
+    // =========================================================================
+
+    /// Runs `test` on a current-thread runtime with an in-process HTTP/1.1
+    /// server bound to a loopback port; the server is drained afterwards.
+    fn with_server<H, HFut, F, Fut>(handler: H, test: F)
+    where
+        H: Fn(Request) -> HFut + Send + Sync + 'static,
+        HFut: std::future::Future<Output = Response> + Send + 'static,
+        F: FnOnce(std::net::SocketAddr) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        init_test_logging();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        let handle = runtime.handle();
+        runtime.block_on(async move {
+            let listener = Http1Listener::bind("127.0.0.1:0", handler)
+                .await
+                .expect("bind listener");
+            let addr = listener.local_addr().expect("local_addr");
+            let shutdown = listener.shutdown_signal();
+            let run_handle = handle
+                .clone()
+                .try_spawn(async move { listener.run(&handle).await })
+                .expect("spawn listener");
+
+            test(addr).await;
+
+            let _ = shutdown.begin_drain(Duration::from_millis(500));
+            let _ = run_handle.await;
+        });
+    }
+
+    #[test]
+    fn get_end_to_end() {
+        with_server(
+            |req| async move {
+                let host = get_header(&req.headers, "Host").unwrap_or_default();
+                let ua = get_header(&req.headers, "User-Agent").unwrap_or_default();
+                let body = format!("{} {} host={host} ua={ua}", req.method.as_str(), req.uri);
+                Response::new(200, "OK", body.into_bytes())
+            },
+            |addr| async move {
+                let client = HttpClient::new();
+                let resp = client
+                    .get(&format!("http://{addr}/hello?q=1"))
+                    .await
+                    .expect("get");
+                assert_eq!(resp.status, 200);
+                let body = String::from_utf8(resp.body).expect("utf8 body");
+                assert!(body.starts_with("GET /hello?q=1 "), "{body}");
+                assert!(body.contains(&format!("host=127.0.0.1:{}", addr.port())), "{body}");
+                assert!(body.contains("ua=skein/0.1"), "{body}");
+            },
+        );
+    }
+
+    #[test]
+    fn post_round_trips_body_and_extra_headers() {
+        with_server(
+            |req| async move {
+                let custom = get_header(&req.headers, "X-Custom").unwrap_or_default();
+                let mut body = req.body;
+                body.extend_from_slice(custom.as_bytes());
+                Response::new(201, "Created", body)
+            },
+            |addr| async move {
+                let client = HttpClient::new();
+                let resp = client
+                    .request(
+                        Method::Post,
+                        &format!("http://{addr}/items"),
+                        vec![("X-Custom".into(), "v1".into())],
+                        b"payload".to_vec(),
+                    )
+                    .await
+                    .expect("post");
+                assert_eq!(resp.status, 201);
+                assert_eq!(resp.body, b"payloadv1");
+            },
+        );
+    }
+
+    #[test]
+    fn put_and_delete_round_trip() {
+        with_server(
+            |req| async move {
+                Response::new(200, "OK", req.method.as_str().as_bytes().to_vec())
+            },
+            |addr| async move {
+                let client = HttpClient::new();
+                let url = format!("http://{addr}/resource");
+                let resp = client.put(&url, b"x".to_vec()).await.expect("put");
+                assert_eq!(resp.body, b"PUT");
+                let resp = client.delete(&url).await.expect("delete");
+                assert_eq!(resp.body, b"DELETE");
+            },
+        );
+    }
+
+    #[test]
+    fn redirect_303_followed_as_get() {
+        with_server(
+            |req| async move {
+                if req.uri == "/start" {
+                    Response::new(303, "See Other", Vec::new()).with_header("Location", "/final")
+                } else {
+                    let body = format!("{} {} len={}", req.method.as_str(), req.uri, req.body.len());
+                    Response::new(200, "OK", body.into_bytes())
+                }
+            },
+            |addr| async move {
+                let client = HttpClient::new();
+                let resp = client
+                    .post(&format!("http://{addr}/start"), b"body".to_vec())
+                    .await
+                    .expect("post");
+                // 303 converts the redirected request to GET and drops the body.
+                assert_eq!(resp.status, 200);
+                assert_eq!(resp.body, b"GET /final len=0");
+            },
+        );
+    }
+
+    #[test]
+    fn redirect_policy_none_returns_redirect_response() {
+        with_server(
+            |_req| async move {
+                Response::new(303, "See Other", Vec::new()).with_header("Location", "/elsewhere")
+            },
+            |addr| async move {
+                let client = HttpClient::with_config(HttpClientConfig {
+                    redirect_policy: RedirectPolicy::None,
+                    ..HttpClientConfig::default()
+                });
+                let resp = client
+                    .get(&format!("http://{addr}/start"))
+                    .await
+                    .expect("get");
+                assert_eq!(resp.status, 303);
+                assert_eq!(
+                    get_header(&resp.headers, "Location"),
+                    Some("/elsewhere".into())
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn too_many_redirects_errors() {
+        with_server(
+            |_req| async move {
+                Response::new(302, "Found", Vec::new()).with_header("Location", "/loop")
+            },
+            |addr| async move {
+                let client = HttpClient::with_config(HttpClientConfig {
+                    redirect_policy: RedirectPolicy::Limited(2),
+                    ..HttpClientConfig::default()
+                });
+                let err = client
+                    .get(&format!("http://{addr}/loop"))
+                    .await
+                    .expect_err("expected redirect limit error");
+                assert!(
+                    matches!(err, ClientError::TooManyRedirects { count: 3, max: 2 }),
+                    "{err}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn streaming_request_returns_head() {
+        with_server(
+            |_req| async move { Response::new(200, "OK", b"streamed".to_vec()) },
+            |addr| async move {
+                let client = HttpClient::new();
+                let resp = client
+                    .request_streaming(
+                        Method::Get,
+                        &format!("http://{addr}/stream"),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("request_streaming");
+                assert_eq!(resp.head.status, 200);
+            },
+        );
+    }
+
+    #[test]
+    fn connect_error_when_nothing_listens() {
+        init_test_logging();
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build runtime");
+        runtime.block_on(async {
+            // Bind to grab a free port, then drop the listener so connecting fails.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            drop(listener);
+
+            let client = HttpClient::new();
+            let err = client
+                .get(&format!("http://{addr}/"))
+                .await
+                .expect_err("expected connection failure");
+            assert!(matches!(err, ClientError::ConnectError(_)), "{err}");
+        });
     }
 }
