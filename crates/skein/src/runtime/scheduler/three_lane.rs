@@ -91,10 +91,18 @@ pub(crate) struct WorkerCoordinator {
     /// Bitmask for power-of-two worker counts (replaces IDIV with AND).
     /// `None` when the count is zero or non-power-of-two.
     mask: Option<usize>,
+    /// I/O driver handle used to interrupt a worker blocked in the reactor poll.
+    ///
+    /// A worker that is the I/O leader blocks in `turn_with` until the next timer
+    /// deadline (no more 1ms busy-poll). Unparking it is not enough — it is asleep
+    /// in `epoll_wait`, not on its parker — so every wake also pokes the reactor's
+    /// wake source so the blocked poll returns and the worker re-checks its queues.
+    /// `None` when the runtime has no I/O driver (then a plain unpark suffices).
+    io_driver: Option<IoDriverHandle>,
 }
 
 impl WorkerCoordinator {
-    pub(crate) fn new(parkers: Vec<Parker>) -> Self {
+    pub(crate) fn new(parkers: Vec<Parker>, io_driver: Option<IoDriverHandle>) -> Self {
         let count = parkers.len();
         let mask = if count > 0 && count.is_power_of_two() {
             Some(count - 1)
@@ -105,6 +113,21 @@ impl WorkerCoordinator {
             parkers,
             next_wake: CachePadded::new(AtomicUsize::new(0)),
             mask,
+            io_driver,
+        }
+    }
+
+    /// Interrupts a worker blocked in the reactor poll, if there is an I/O driver.
+    ///
+    /// Paired with every `unpark`: the targeted worker may be the I/O leader
+    /// asleep in `turn_with` (epoll) rather than on its parker, in which case the
+    /// unpark alone is a no-op until the poll times out. Poking the reactor's wake
+    /// source returns the poll at once. A failed wake is non-fatal (the worker
+    /// still wakes at the next deadline), so the error is ignored.
+    #[inline]
+    fn wake_reactor(&self) {
+        if let Some(io_driver) = &self.io_driver {
+            let _ = io_driver.wake();
         }
     }
 
@@ -118,12 +141,14 @@ impl WorkerCoordinator {
         // Use bitmask (AND) when worker count is power-of-two to avoid IDIV.
         let slot = self.mask.map_or_else(|| idx % count, |mask| idx & mask);
         self.parkers[slot].unpark();
+        self.wake_reactor();
     }
 
     #[inline]
     pub(crate) fn wake_worker(&self, worker_id: WorkerId) {
         if let Some(parker) = self.parkers.get(worker_id) {
             parker.unpark();
+            self.wake_reactor();
         }
     }
 
@@ -132,6 +157,7 @@ impl WorkerCoordinator {
         for parker in &self.parkers {
             parker.unpark();
         }
+        self.wake_reactor();
     }
 }
 
@@ -423,7 +449,7 @@ impl ThreeLaneScheduler {
         for _ in 0..worker_count {
             parkers.push(Parker::new());
         }
-        let coordinator = Arc::new(WorkerCoordinator::new(parkers.clone()));
+        let coordinator = Arc::new(WorkerCoordinator::new(parkers.clone(), io_driver.clone()));
 
         // Create fast queues (O(1) IntrusiveStack) for ready-lane fast path.
         // When a sharded TaskTable is available, back the queues directly
@@ -1028,6 +1054,43 @@ impl ThreeLaneWorker {
         self.cached_suggestion = suggestion;
     }
 
+    /// Whether any lane has work runnable at `now` (ready or due-timed), across
+    /// the global injector, this worker's fast queue, and its local scheduler /
+    /// non-stealable ready queue. Used by the I/O leader to decide between a
+    /// non-blocking poll (work waiting) and a blocking poll (truly idle).
+    fn has_pending_work(&self, now: Time) -> bool {
+        if self.global.has_runnable_work(now) || !self.fast_queue.is_empty() {
+            return true;
+        }
+        if !self.local_ready.lock().is_empty() {
+            return true;
+        }
+        self.local.lock().has_runnable_work(now)
+    }
+
+    /// The timeout for an idle blocking reactor poll: the earliest deadline
+    /// across the timer driver, this worker's local timed lane, and the global
+    /// injector, expressed as a duration from `now`. `None` means "no deadline —
+    /// block until an I/O event or an explicit reactor wake". `Some(ZERO)` means
+    /// a deadline is already due, so the poll returns at once to process it.
+    fn next_poll_timeout(&self, now: Time) -> Option<Duration> {
+        let timer_deadline = self
+            .timer_driver
+            .as_ref()
+            .and_then(TimerDriverHandle::next_deadline);
+        let local_deadline = self.local.lock().next_deadline();
+        let global_deadline = self.global.peek_earliest_deadline();
+        let next_deadline = [timer_deadline, local_deadline, global_deadline]
+            .into_iter()
+            .flatten()
+            .min()?;
+        if next_deadline > now {
+            Some(Duration::from_nanos(next_deadline.duration_since(now)))
+        } else {
+            Some(Duration::ZERO)
+        }
+    }
+
     /// Runs the worker scheduling loop.
     ///
     /// The loop maintains strict priority ordering:
@@ -1058,11 +1121,31 @@ impl ThreeLaneWorker {
             }
 
             // PHASE 5: Drive I/O (Leader/Follower pattern)
-            // If we can acquire the IO driver lock, we become the I/O leader
-            // and poll the reactor for ready events (e.g. TCP connect completion).
+            // If we can acquire the IO driver lock, we become the I/O leader and
+            // poll the reactor for ready events (e.g. TCP connect completion).
+            //
+            // The poll BLOCKS until the next timer deadline (or indefinitely when
+            // there is none) instead of busy-polling on a fixed 1ms timeout: I/O
+            // readiness, the deadline, or a cross-thread `WorkerCoordinator` wake
+            // (which pokes the reactor's wake source — see `wake_reactor`) all
+            // return the poll promptly. Before committing to a blocking poll we
+            // re-check for ready work so a task enqueued just before we took the
+            // lock is not missed (it would have called `wake()`, but the explicit
+            // check closes the race without depending on wake ordering).
             if let Some(io) = &self.io_driver {
                 if let Some(mut driver) = io.try_lock() {
-                    let _ = driver.turn_with(Some(Duration::from_millis(1)), |_, _| {});
+                    let now = self
+                        .timer_driver
+                        .as_ref()
+                        .map_or(Time::ZERO, TimerDriverHandle::now);
+                    let timeout = if self.has_pending_work(now) {
+                        // Work is ready: poll without blocking, then go run it.
+                        Some(Duration::ZERO)
+                    } else {
+                        // Idle: block until the next deadline, or forever if none.
+                        self.next_poll_timeout(now)
+                    };
+                    let _ = driver.turn_with(timeout, |_, _| {});
                     continue;
                 }
             }
@@ -1141,12 +1224,15 @@ impl ThreeLaneWorker {
                             // If deadline is due or passed, don't park - break to process timers/tasks.
                             break;
                         }
-                    } else if has_io {
-                        // No pending timers but IO driver is active;
-                        // use short timeout so we periodically poll the reactor.
-                        self.parker.park_timeout(Duration::from_millis(1));
                     } else {
-                        // No timer driver and no IO, park indefinitely.
+                        // No pending deadline anywhere. Park indefinitely: a
+                        // follower is unparked by the `WorkerCoordinator` when
+                        // work arrives, and the I/O leader is the one that blocks
+                        // in the reactor poll (woken by I/O or a reactor wake), so
+                        // there is no longer any reason to wake on a fixed 1ms
+                        // interval just to re-poll. `has_io` is now irrelevant to
+                        // the park timeout.
+                        let _ = has_io;
                         self.parker.park();
                     }
                     // After waking, re-check queues by continuing the loop.
@@ -1817,7 +1903,15 @@ impl ThreeLaneWorker {
 
         trace!(task_id = ?task_id, worker_id = self.id, "executing task");
 
-        let (mut stored, wake_state, priority, cx_inner, cached_waker, cached_cancel_waker, task_cx) = {
+        let (
+            mut stored,
+            wake_state,
+            priority,
+            cx_inner,
+            cached_waker,
+            cached_cancel_waker,
+            task_cx,
+        ) = {
             // Fast path: single lock for global tasks (remove stored future + read record).
             let merged = self.with_task_table(|tt| {
                 let global_stored = tt.remove_stored_future(task_id)?;
@@ -2920,7 +3014,7 @@ mod tests {
         let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
         let global = Arc::new(GlobalInjector::new());
         let parker = Parker::new();
-        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker]));
+        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker], None));
         let waker = Waker::from(Arc::new(CancelLaneWaker {
             task_id,
             default_priority: Budget::INFINITE.priority,
@@ -3293,7 +3387,7 @@ mod tests {
         let wake_state = Arc::new(crate::record::task::TaskWakeState::new());
         let global = Arc::new(GlobalInjector::new());
         let parker = Parker::new();
-        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker]));
+        let coordinator = Arc::new(WorkerCoordinator::new(vec![parker], None));
 
         // Create multiple wakers (simulating cloned wakers)
         let wakers: Vec<_> = (0..10)

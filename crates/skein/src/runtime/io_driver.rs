@@ -431,16 +431,17 @@ impl IoDriverHandle {
         interest: Interest,
         waker: Waker,
     ) -> io::Result<IoRegistration> {
-        // We wake the reactor first to ensure that if another thread is blocking
-        // in `poll` (via turn_with), it wakes up and releases the lock.
-        // However, with the split-lock `turn_with` implementation, the lock
-        // is NOT held during poll, so this is strictly necessary only if
-        // we revert to holding the lock, but good practice for responsiveness.
-        // Actually, since we don't hold the lock during poll, we can just lock.
         let token = {
             let mut driver = self.inner.lock();
             driver.register(source, interest, waker)?
         };
+        // Wake the reactor after registering. The I/O leader now blocks in `poll`
+        // until the next timer deadline (it no longer busy-polls on a 1ms timer),
+        // so an in-flight `epoll_wait` would not include this freshly added fd
+        // until it returned. Poking the wake source returns the poll at once, so
+        // the new source is picked up immediately. (`turn_with` releases the
+        // driver lock during poll, so this never deadlocks.)
+        let _ = self.reactor.wake();
         Ok(IoRegistration::new(
             token,
             Arc::downgrade(&self.inner),
@@ -508,6 +509,23 @@ impl IoDriverHandle {
             driver.restore_events_only(events);
             poll_result
         }
+    }
+
+    /// Wakes a blocking [`turn_with`](Self::turn_with) poll from any thread.
+    ///
+    /// Writes to the reactor's internal wake source (e.g. the eventfd registered
+    /// with epoll), so a worker blocked in the reactor `poll` returns promptly.
+    /// This is what lets the I/O leader block until the next timer deadline (or
+    /// indefinitely) instead of busy-polling: a cross-thread `spawn`, a
+    /// blocking-pool completion, a newly registered I/O source, or shutdown calls
+    /// this to interrupt the blocked poll. Coalesced by the reactor, so repeated
+    /// calls collapse to a single wakeup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the reactor wake fails.
+    pub fn wake(&self) -> io::Result<()> {
+        self.reactor.wake()
     }
 
     /// Returns a lock guard for direct access to the driver.
