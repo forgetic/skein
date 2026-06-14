@@ -264,6 +264,9 @@ impl Default for RedirectPolicy {
     }
 }
 
+/// Default maximum buffered response-body size (16 MiB) for [`HttpClient`].
+pub const DEFAULT_MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
+
 /// Configuration for the HTTP client.
 #[derive(Debug, Clone)]
 pub struct HttpClientConfig {
@@ -273,6 +276,12 @@ pub struct HttpClientConfig {
     pub redirect_policy: RedirectPolicy,
     /// Default User-Agent header value.
     pub user_agent: Option<String>,
+    /// Maximum buffered response-body size for non-streaming requests.
+    ///
+    /// Responses whose body exceeds this are rejected with
+    /// [`ClientError`]`(BodyTooLarge)`. Defaults to [`DEFAULT_MAX_BODY_SIZE`]
+    /// (16 MiB); raise it for large downloads, or prefer the streaming API.
+    pub max_body_size: usize,
 }
 
 impl Default for HttpClientConfig {
@@ -281,6 +290,7 @@ impl Default for HttpClientConfig {
             pool_config: PoolConfig::default(),
             redirect_policy: RedirectPolicy::default(),
             user_agent: Some("skein/0.1".into()),
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
         }
     }
 }
@@ -536,7 +546,8 @@ impl HttpClient {
 
         // Connect and send
         let stream = self.connect_io(parsed).await?;
-        let resp = Http1Client::request(stream, req).await?;
+        let resp =
+            Http1Client::request_with_max_body_size(stream, req, self.config.max_body_size).await?;
         Ok(resp)
     }
 
@@ -1027,6 +1038,22 @@ mod tests {
                 assert!(body.contains("ua=skein/0.1"), "{body}");
             },
         );
+    }
+
+    #[test]
+    fn config_carries_max_body_size() {
+        assert_eq!(
+            HttpClientConfig::default().max_body_size,
+            DEFAULT_MAX_BODY_SIZE
+        );
+        let cfg = HttpClientConfig {
+            max_body_size: 32 * 1024 * 1024,
+            ..HttpClientConfig::default()
+        };
+        // The client stores the configured cap and applies it on the buffered
+        // request path (see `execute_single` → `request_with_max_body_size`).
+        let client = HttpClient::with_config(cfg.clone());
+        assert_eq!(client.config.max_body_size, 32 * 1024 * 1024);
     }
 
     #[test]

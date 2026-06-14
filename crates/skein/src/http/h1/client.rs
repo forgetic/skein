@@ -452,9 +452,22 @@ impl Http1Client {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
+        Self::request_with_max_body_size(io, req, DEFAULT_MAX_BODY_SIZE).await
+    }
+
+    /// Like [`request`](Self::request) but caps the buffered body at
+    /// `max_body_size` bytes (default is [`DEFAULT_MAX_BODY_SIZE`]).
+    pub async fn request_with_max_body_size<T>(
+        io: T,
+        req: Request,
+        max_body_size: usize,
+    ) -> Result<Response, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
         // Reuse the method-aware streaming implementation so HEAD responses
         // correctly ignore Content-Length/Transfer-Encoding bodies.
-        let mut streaming = Self::request_streaming(io, req).await?;
+        let mut streaming = Self::request_streaming_with_max_body_size(io, req, max_body_size).await?;
 
         let mut response = Response {
             version: streaming.head.version,
@@ -499,8 +512,21 @@ impl Http1Client {
     /// - `Transfer-Encoding: chunked` (including trailers)
     /// - EOF-delimited bodies (no length headers)
     pub async fn request_streaming<T>(
+        io: T,
+        req: Request,
+    ) -> Result<ClientStreamingResponse<T>, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        Self::request_streaming_with_max_body_size(io, req, DEFAULT_MAX_BODY_SIZE).await
+    }
+
+    /// Like [`request_streaming`](Self::request_streaming) but caps the body at
+    /// `max_body_size` bytes (default is [`DEFAULT_MAX_BODY_SIZE`]).
+    pub async fn request_streaming_with_max_body_size<T>(
         mut io: T,
         req: Request,
+        max_body_size: usize,
     ) -> Result<ClientStreamingResponse<T>, HttpError>
     where
         T: AsyncRead + AsyncWrite + Unpin,
@@ -572,9 +598,8 @@ impl Http1Client {
                         if content_length == 0 {
                             ClientBodyKind::Empty
                         } else {
-                            let max_body_size =
-                                u64::try_from(DEFAULT_MAX_BODY_SIZE).unwrap_or(u64::MAX);
-                            if content_length > max_body_size {
+                            let max = u64::try_from(max_body_size).unwrap_or(u64::MAX);
+                            if content_length > max {
                                 return Err(HttpError::BodyTooLarge);
                             }
 
@@ -601,7 +626,7 @@ impl Http1Client {
                     read_buf
                 };
 
-                let body = ClientIncomingBody::new(io, kind, body_buf);
+                let body = ClientIncomingBody::with_max_body_size(io, kind, body_buf, max_body_size);
                 return Ok(ClientStreamingResponse { head, body });
             }
 
@@ -684,6 +709,15 @@ impl<T> ClientIncomingBody<T> {
     const DEFAULT_MAX_BUFFERED_BYTES: usize = 256 * 1024;
 
     fn new(io: T, kind: ClientBodyKind, buffer: BytesMut) -> Self {
+        Self::with_max_body_size(io, kind, buffer, DEFAULT_MAX_BODY_SIZE)
+    }
+
+    fn with_max_body_size(
+        io: T,
+        kind: ClientBodyKind,
+        buffer: BytesMut,
+        max_body_size: usize,
+    ) -> Self {
         let size_hint = match &kind {
             ClientBodyKind::Empty => SizeHint::with_exact(0),
             ClientBodyKind::ContentLength { remaining } => SizeHint::with_exact(*remaining),
@@ -698,7 +732,7 @@ impl<T> ClientIncomingBody<T> {
             received: 0,
             size_hint,
             max_chunk_size: Self::DEFAULT_MAX_CHUNK_SIZE,
-            max_body_size: u64::try_from(DEFAULT_MAX_BODY_SIZE).unwrap_or(u64::MAX),
+            max_body_size: u64::try_from(max_body_size).unwrap_or(u64::MAX),
             max_trailers_size: Self::DEFAULT_MAX_TRAILERS_SIZE,
             max_buffered_bytes: Self::DEFAULT_MAX_BUFFERED_BYTES,
         }
