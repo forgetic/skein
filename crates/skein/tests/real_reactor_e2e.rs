@@ -114,9 +114,7 @@ fn assert_reactor_used(reactor: &CountingReactor) {
 fn block_on_guarded<F: Future>(runtime: &Runtime, fut: F) -> F::Output {
     runtime
         .block_on(timeout(wall_now(), Duration::from_secs(30), Box::pin(fut)))
-        .unwrap_or_else(|_| {
-            panic!("e2e test timed out — possible lost wakeup in the reactor path")
-        })
+        .unwrap_or_else(|_| panic!("e2e test timed out — possible lost wakeup in the reactor path"))
 }
 
 #[test]
@@ -126,7 +124,9 @@ fn tcp_echo_round_trip_via_real_reactor() {
 
     let (addr_tx, addr_rx) = mpsc::channel();
     let server = handle.spawn(async move {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind listener");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
         addr_tx
             .send(listener.local_addr().expect("local addr"))
             .expect("send addr");

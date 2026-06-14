@@ -20,7 +20,9 @@ use crate::runtime::reactor::LabReactor;
 use crate::runtime::scheduler::{DispatchLane, ScheduleCertificate};
 use crate::time::VirtualClock;
 use crate::trace::TraceBufferHandle;
-use crate::trace::crashpack::{CrashPack, CrashPackConfig, FailureInfo, FailureOutcome, ReplayCommand};
+use crate::trace::crashpack::{
+    CrashPack, CrashPackConfig, FailureInfo, FailureOutcome, ReplayCommand,
+};
 use crate::trace::event::TraceEventKind;
 use crate::trace::recorder::TraceRecorder;
 use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};

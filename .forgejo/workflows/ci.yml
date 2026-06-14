@@ -1,0 +1,96 @@
+name: ci
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - main
+
+# Builds are cached transparently by the kache daemon (rustc-wrapper in
+# ~/.cargo/config.toml on the host runner). skein is self-contained — all
+# path-dependencies are internal workspace members — so there are no sibling
+# repos to clone. Test executables emit real artifacts that kache caches in
+# full, so we build them before linting (clippy's metadata-only outputs cannot
+# be cached and always recompile; keeping that pass after the cached build keeps
+# the uncacheable work small). The TLS feature set mirrors what downstream
+# consumers (temper) enable, so the HTTP client and TLS paths are covered.
+jobs:
+  validate:
+    runs-on: host
+    defaults:
+      run:
+        working-directory: ${{ env.HOME }}/.local/state/forgejo/runner/data/skein
+    steps:
+      - name: Checkout
+        # Run from $HOME, not the job-default working-directory: on the first
+        # ever run the repo dir does not exist yet, and the runner cd's into
+        # working-directory before the step — which would fail here. This step
+        # is what creates it.
+        working-directory: ${{ env.HOME }}
+        run: |
+          set -eu
+
+          repo_dir="$HOME/.local/state/forgejo/runner/data/skein"
+          repo_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+
+          mkdir -p "$(dirname "$repo_dir")"
+
+          if [ -d "$repo_dir/.git" ]; then
+            cd "$repo_dir"
+            git remote set-url origin "$repo_url"
+          else
+            rm -rf "$repo_dir"
+            git -c http.extraheader="AUTHORIZATION: token $GITHUB_TOKEN" \
+              clone --no-checkout "$repo_url" "$repo_dir"
+            cd "$repo_dir"
+          fi
+
+          git -c http.extraheader="AUTHORIZATION: token $GITHUB_TOKEN" \
+            fetch --force --prune origin "$GITHUB_REF"
+          git checkout --force --detach FETCH_HEAD
+          git reset --hard "$GITHUB_SHA"
+          # Keep the shared Cargo target symlink. `target/` does not match a
+          # symlink, so exclude `target` without a trailing slash.
+          git clean -ffdx -e target
+
+          mkdir -p "$HOME/.cache/cargo-target-skein"
+          if [ -e target ] && [ ! -L target ]; then
+            rm -rf target
+          fi
+          ln -sfn "$HOME/.cache/cargo-target-skein" target
+      - name: Format
+        run: |
+          set -eu
+          cargo fmt --all -- --check
+      - name: Build tests
+        run: |
+          set -eu
+          cargo test --workspace \
+            --features tls,tls-native-roots,tls-webpki-roots --no-run
+      - name: Lint
+        # clippy runs as a non-blocking signal for now: skein carries a large
+        # backlog of pre-existing clippy findings under `-D warnings` (map_or,
+        # redundant continue, cast lints, doc-link nits, …). Build + Test are the
+        # enforced correctness gates; tightening clippy to deny is a separate
+        # cleanup. The `|| true` keeps the surfacing without failing the run.
+        run: |
+          set -eu
+          cargo clippy --workspace --all-targets \
+            --features tls,tls-native-roots,tls-webpki-roots || true
+      - name: Test
+        # The library unit tests run fully parallel. The real-reactor e2e tests
+        # (tests/real_reactor_e2e.rs) share a real reactor/ports and interfere
+        # when run concurrently, so they run single-threaded; each passes in
+        # isolation. `--lib` excludes the integration binary from the first run.
+        run: |
+          set -eu
+          cargo test --workspace --lib \
+            --features tls,tls-native-roots,tls-webpki-roots
+          cargo test --workspace --test real_reactor_e2e \
+            --features tls,tls-native-roots,tls-webpki-roots -- --test-threads=1

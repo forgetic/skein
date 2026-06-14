@@ -83,10 +83,17 @@ impl fmt::Display for TlsError {
             Self::AlpnNegotiationFailed {
                 expected,
                 negotiated,
-            } => write!(
-                f,
-                "ALPN negotiation failed: expected one of {expected:?}, negotiated {negotiated:?}"
-            ),
+            } => {
+                // ALPN protocol IDs are ASCII byte strings (e.g. b"h2",
+                // b"http/1.1"); render them as text, not raw byte arrays.
+                let render = |p: &[u8]| String::from_utf8_lossy(p).into_owned();
+                let expected: Vec<String> = expected.iter().map(|p| render(p)).collect();
+                let negotiated = negotiated.as_deref().map(render);
+                write!(
+                    f,
+                    "ALPN negotiation failed: expected one of {expected:?}, negotiated {negotiated:?}"
+                )
+            }
             #[cfg(feature = "tls")]
             Self::Rustls(err) => write!(f, "rustls error: {err}"),
         }

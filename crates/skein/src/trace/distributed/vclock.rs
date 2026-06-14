@@ -29,8 +29,8 @@
 //! assert!(merged.get(&node_b) == 1);
 //! ```
 
-use crate::trace::distributed::NodeId;
 use crate::time::{TimeSource, TimerDriverHandle, WallClock};
+use crate::trace::distributed::NodeId;
 use crate::types::Time;
 use parking_lot::Mutex;
 use std::collections::BTreeMap;

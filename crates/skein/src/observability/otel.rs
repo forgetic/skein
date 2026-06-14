@@ -948,9 +948,7 @@ impl MetricsProvider for OtelMetrics {
             KeyValue::new("task_type", task_type),
             KeyValue::new("reason", reason),
         ];
-        if let Some(filtered) =
-            self.check_cardinality("skein.deadline.warnings_total", &labels)
-        {
+        if let Some(filtered) = self.check_cardinality("skein.deadline.warnings_total", &labels) {
             self.deadline_warnings.add(1, &filtered);
         }
         let _ = remaining;
@@ -959,9 +957,7 @@ impl MetricsProvider for OtelMetrics {
     fn deadline_violation(&self, task_type: &str, _over_by: Duration) {
         let task_type = task_type.to_string();
         let labels = [KeyValue::new("task_type", task_type)];
-        if let Some(filtered) =
-            self.check_cardinality("skein.deadline.violations_total", &labels)
-        {
+        if let Some(filtered) = self.check_cardinality("skein.deadline.violations_total", &labels) {
             self.deadline_violations.add(1, &filtered);
         }
     }
@@ -995,9 +991,7 @@ impl MetricsProvider for OtelMetrics {
     fn task_stuck_detected(&self, task_type: &str) {
         let task_type = task_type.to_string();
         let labels = [KeyValue::new("task_type", task_type)];
-        if let Some(filtered) =
-            self.check_cardinality("skein.task.stuck_detected_total", &labels)
-        {
+        if let Some(filtered) = self.check_cardinality("skein.task.stuck_detected_total", &labels) {
             self.task_stuck_detected.add(1, &filtered);
         }
     }
