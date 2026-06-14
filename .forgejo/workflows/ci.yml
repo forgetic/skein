@@ -84,7 +84,13 @@ jobs:
           cargo clippy --workspace --all-targets \
             --features tls,tls-native-roots,tls-webpki-roots || true
       - name: Test
+        # The library unit tests run fully parallel. The real-reactor e2e tests
+        # (tests/real_reactor_e2e.rs) share a real reactor/ports and interfere
+        # when run concurrently, so they run single-threaded; each passes in
+        # isolation. `--lib` excludes the integration binary from the first run.
         run: |
           set -eu
-          cargo test --workspace \
+          cargo test --workspace --lib \
             --features tls,tls-native-roots,tls-webpki-roots
+          cargo test --workspace --test real_reactor_e2e \
+            --features tls,tls-native-roots,tls-webpki-roots -- --test-threads=1
