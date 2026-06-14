@@ -1034,7 +1034,10 @@ mod tests {
                 assert_eq!(resp.status, 200);
                 let body = String::from_utf8(resp.body).expect("utf8 body");
                 assert!(body.starts_with("GET /hello?q=1 "), "{body}");
-                assert!(body.contains(&format!("host=127.0.0.1:{}", addr.port())), "{body}");
+                assert!(
+                    body.contains(&format!("host=127.0.0.1:{}", addr.port())),
+                    "{body}"
+                );
                 assert!(body.contains("ua=skein/0.1"), "{body}");
             },
         );
@@ -1085,9 +1088,7 @@ mod tests {
     #[test]
     fn put_and_delete_round_trip() {
         with_server(
-            |req| async move {
-                Response::new(200, "OK", req.method.as_str().as_bytes().to_vec())
-            },
+            |req| async move { Response::new(200, "OK", req.method.as_str().as_bytes().to_vec()) },
             |addr| async move {
                 let client = HttpClient::new();
                 let url = format!("http://{addr}/resource");
@@ -1106,7 +1107,8 @@ mod tests {
                 if req.uri == "/start" {
                     Response::new(303, "See Other", Vec::new()).with_header("Location", "/final")
                 } else {
-                    let body = format!("{} {} len={}", req.method.as_str(), req.uri, req.body.len());
+                    let body =
+                        format!("{} {} len={}", req.method.as_str(), req.uri, req.body.len());
                     Response::new(200, "OK", body.into_bytes())
                 }
             },

@@ -467,7 +467,8 @@ impl Http1Client {
     {
         // Reuse the method-aware streaming implementation so HEAD responses
         // correctly ignore Content-Length/Transfer-Encoding bodies.
-        let mut streaming = Self::request_streaming_with_max_body_size(io, req, max_body_size).await?;
+        let mut streaming =
+            Self::request_streaming_with_max_body_size(io, req, max_body_size).await?;
 
         let mut response = Response {
             version: streaming.head.version,
@@ -626,7 +627,8 @@ impl Http1Client {
                     read_buf
                 };
 
-                let body = ClientIncomingBody::with_max_body_size(io, kind, body_buf, max_body_size);
+                let body =
+                    ClientIncomingBody::with_max_body_size(io, kind, body_buf, max_body_size);
                 return Ok(ClientStreamingResponse { head, body });
             }
 

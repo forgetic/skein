@@ -546,7 +546,10 @@ impl Command {
         self.stderr(Stdio::Pipe);
 
         let mut child = self.spawn()?;
-        child.wait_with_output_async(cx).await.map_err(ProcessError::Io)
+        child
+            .wait_with_output_async(cx)
+            .await
+            .map_err(ProcessError::Io)
     }
 
     /// Spawns the command and waits for it to complete, returning status.

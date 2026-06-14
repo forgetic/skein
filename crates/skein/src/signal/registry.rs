@@ -342,9 +342,9 @@ mod tests {
 
         let registry = Registry::global().expect("registry");
         let listeners = registry.listeners.lock();
-        let live = listeners
-            .get(&kind.as_raw_value())
-            .map_or(0, |list| list.iter().filter(|w| w.strong_count() > 0).count());
+        let live = listeners.get(&kind.as_raw_value()).map_or(0, |list| {
+            list.iter().filter(|w| w.strong_count() > 0).count()
+        });
         crate::assert_with_log!(live == 1, "one live listener", 1, live);
         crate::test_complete!("dropped_listeners_are_pruned");
     }

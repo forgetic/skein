@@ -2174,7 +2174,6 @@ impl Cx<cap::All> {
     pub fn for_request() -> Self {
         Self::for_request_with_budget(Budget::INFINITE)
     }
-
 }
 
 /// RAII guard returned by [`Cx::enter_span`].

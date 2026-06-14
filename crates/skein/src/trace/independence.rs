@@ -113,10 +113,10 @@ pub fn accesses_conflict(a: &ResourceAccess, b: &ResourceAccess) -> bool {
 pub fn resource_footprint(event: &TraceEvent) -> Vec<ResourceAccess> {
     use TraceEventKind::{
         CancelAck, CancelRequest, ChaosInjection, Checkpoint, Complete, FuturelockDetected,
-        IoError, IoReady, IoRequested, IoResult, ObligationAbort, ObligationCommit,
-        ObligationLeak, ObligationReserve, Poll, RegionCancelled, RegionCloseBegin,
-        RegionCloseComplete, RegionCreated, RngSeed, RngValue, Schedule, Spawn, TimeAdvance,
-        TimerCancelled, TimerFired, TimerScheduled, UserTrace, Wake, Yield,
+        IoError, IoReady, IoRequested, IoResult, ObligationAbort, ObligationCommit, ObligationLeak,
+        ObligationReserve, Poll, RegionCancelled, RegionCloseBegin, RegionCloseComplete,
+        RegionCreated, RngSeed, RngValue, Schedule, Spawn, TimeAdvance, TimerCancelled, TimerFired,
+        TimerScheduled, UserTrace, Wake, Yield,
     };
 
     match (&event.kind, &event.data) {
