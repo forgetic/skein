@@ -502,39 +502,66 @@ impl TimerWheel {
     pub fn next_deadline(&mut self) -> Option<Time> {
         let current = self.current_time();
         let mut min_deadline: Option<Time> = None;
+        let mut due_ready = false;
+        let active = &self.active;
+        let is_live = |entry: &TimerEntry| {
+            active
+                .get(&entry.id)
+                .is_some_and(|generation| *generation == entry.generation)
+        };
 
-        for entry in &self.ready {
-            if !self.is_live(entry) {
+        let mut i = 0;
+        while i < self.ready.len() {
+            let entry = &self.ready[i];
+            if !is_live(entry) {
+                self.ready.swap_remove(i);
                 continue;
             }
             if entry.deadline <= current {
-                return Some(current);
+                due_ready = true;
+                min_deadline = Some(current);
+                break;
             }
             min_deadline =
                 Some(min_deadline.map_or(entry.deadline, |current| current.min(entry.deadline)));
+            i += 1;
         }
 
-        for level in &self.levels {
-            for slot in &level.slots {
-                for entry in slot {
-                    if !self.is_live(entry) {
-                        continue;
+        if !due_ready {
+            for level in &mut self.levels {
+                for slot_idx in 0..SLOTS_PER_LEVEL {
+                    let slot_empty = {
+                        let slot = &mut level.slots[slot_idx];
+                        let mut i = 0;
+                        while i < slot.len() {
+                            let entry = &slot[i];
+                            if !is_live(entry) {
+                                slot.swap_remove(i);
+                                continue;
+                            }
+                            min_deadline = Some(
+                                min_deadline
+                                    .map_or(entry.deadline, |current| current.min(entry.deadline)),
+                            );
+                            i += 1;
+                        }
+                        slot.is_empty()
+                    };
+                    if slot_empty {
+                        level.clear_occupied(slot_idx);
                     }
+                }
+            }
+
+            while let Some(entry) = self.overflow.peek() {
+                if is_live(&entry.entry) {
                     min_deadline = Some(
                         min_deadline.map_or(entry.deadline, |current| current.min(entry.deadline)),
                     );
+                    break;
                 }
+                let _ = self.overflow.pop();
             }
-        }
-
-        while let Some(entry) = self.overflow.peek() {
-            if self.is_live(&entry.entry) {
-                min_deadline = Some(
-                    min_deadline.map_or(entry.deadline, |current| current.min(entry.deadline)),
-                );
-                break;
-            }
-            let _ = self.overflow.pop();
         }
 
         min_deadline
