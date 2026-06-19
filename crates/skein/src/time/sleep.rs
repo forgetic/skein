@@ -84,6 +84,8 @@ struct SleepState {
     fallback: Option<FallbackThread>,
     /// Handle to the registered timer in the timer driver.
     timer_handle: Option<TimerHandle>,
+    /// Deadline currently registered with `timer_handle`.
+    timer_deadline: Option<Time>,
     /// Timer driver used to register the current handle.
     timer_driver: Option<TimerDriverHandle>,
 }
@@ -161,6 +163,7 @@ impl Sleep {
                 waker: None,
                 fallback: None,
                 timer_handle: None,
+                timer_deadline: None,
                 timer_driver: None,
             })),
         }
@@ -208,6 +211,7 @@ impl Sleep {
                 waker: None,
                 fallback: None,
                 timer_handle: None,
+                timer_deadline: None,
                 timer_driver: None,
             })),
         }
@@ -259,6 +263,7 @@ impl Sleep {
                 request_stop_fallback(&fallback);
                 fallback.join
             });
+            state.timer_deadline = None;
             (
                 state.timer_handle.take(),
                 state.timer_driver.take(),
@@ -294,6 +299,7 @@ impl Sleep {
                 request_stop_fallback(&fallback);
                 fallback.join
             });
+            state.timer_deadline = None;
             (
                 state.timer_handle.take(),
                 state.timer_driver.take(),
@@ -363,6 +369,7 @@ impl Future for Sleep {
                 // Cancel any registered timer on completion
                 let (handle, driver) = {
                     let mut state = self.state.lock();
+                    state.timer_deadline = None;
                     (state.timer_handle.take(), state.timer_driver.clone())
                 };
                 if let Some(handle) = handle {
@@ -385,12 +392,14 @@ impl Future for Sleep {
 
                 let mut state = self.state.lock();
                 let finished_handle = take_finished_fallback(&mut state);
+                let mut waker_changed = false;
                 if !state
                     .waker
                     .as_ref()
                     .is_some_and(|w| w.will_wake(cx.waker()))
                 {
                     state.waker = Some(cx.waker().clone());
+                    waker_changed = true;
                 }
 
                 // Prefer timer driver over background thread
@@ -424,11 +433,19 @@ impl Future for Sleep {
                             }
                             let _ = prev_driver.cancel(&handle);
                         }
+                        state.timer_deadline = None;
                         // Note: timer_handle is now None; the code below will
                         // register a fresh handle on the new driver.
                     }
 
                     state.timer_driver = Some(timer.clone());
+
+                    if state.timer_handle.is_some()
+                        && state.timer_deadline == Some(self.deadline)
+                        && !waker_changed
+                    {
+                        return Poll::Pending;
+                    }
 
                     // Register or update timer in the driver's wheel
                     if let Some(handle) = state.timer_handle.take() {
@@ -446,6 +463,7 @@ impl Future for Sleep {
                                 self.deadline,
                             ));
                         }
+                        state.timer_deadline = Some(self.deadline);
                         state.timer_handle = Some(new_handle);
                     } else {
                         // Register new timer
@@ -459,6 +477,7 @@ impl Future for Sleep {
                                 self.deadline,
                             ));
                         }
+                        state.timer_deadline = Some(self.deadline);
                         state.timer_handle = Some(handle);
                     }
                 } else {
@@ -475,6 +494,7 @@ impl Future for Sleep {
                             }
                             let _ = prev_driver.cancel(&old_handle);
                         }
+                        state.timer_deadline = None;
                     }
 
                     if state.fallback.is_none() {
@@ -539,6 +559,7 @@ impl Drop for Sleep {
                 request_stop_fallback(&fallback);
                 fallback.join
             });
+            state.timer_deadline = None;
             (
                 state.timer_handle.take(),
                 state.timer_driver.take(),
@@ -572,6 +593,7 @@ impl Clone for Sleep {
                 waker: None,
                 fallback: None,
                 timer_handle: None, // Fresh clone has no timer registration
+                timer_deadline: None,
                 timer_driver: None,
             })),
         }

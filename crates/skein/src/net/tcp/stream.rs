@@ -28,6 +28,7 @@ pub struct TcpStream {
     /// it: a stale reactor entry for a reused fd number makes the next
     /// `register()` fail with `AlreadyExists` ("fd already registered").
     registration: Option<IoRegistration>,
+    pending_interest: Interest,
     inner: Arc<net::TcpStream>,
     shutdown_on_drop: bool,
 }
@@ -122,6 +123,7 @@ impl TcpStream {
         Ok(Self {
             inner: Arc::new(stream),
             registration: None,
+            pending_interest: Interest::empty(),
             shutdown_on_drop: true,
         })
     }
@@ -134,6 +136,7 @@ impl TcpStream {
         Self {
             inner,
             registration,
+            pending_interest: Interest::empty(),
             shutdown_on_drop: true,
         }
     }
@@ -247,12 +250,30 @@ impl TcpStream {
 
     #[inline]
     fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        self.pending_interest = self.pending_interest.add(interest);
+        self.refresh_registration(cx)
+    }
+
+    fn clear_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        self.pending_interest = self.pending_interest.remove(interest);
+        self.refresh_registration(cx)
+    }
+
+    fn refresh_registration(&mut self, cx: &Context<'_>) -> io::Result<()> {
+        if self.pending_interest.is_empty() {
+            // No operation is currently parked on readiness. Drop any old
+            // registration so a previous writable wait cannot keep waking a
+            // future that is now only doing successful reads (or vice versa).
+            self.registration = None;
+            return Ok(());
+        }
+
         if let Some(registration) = &mut self.registration {
-            let combined = registration.interest() | interest;
-            // Re-arm reactor interest and conditionally update the waker in a
-            // single lock acquisition.  The waker clone is skipped when the
-            // task's waker hasn't changed (will_wake guard).
-            match registration.rearm(combined, cx.waker()) {
+            // Re-arm only the operations that are actually pending. Keeping a
+            // stale writable bit after a prior write wait makes TCP sockets
+            // (almost always writable) wake the task immediately even when the
+            // task is now waiting for reads, creating a tight poll/epoll loop.
+            match registration.rearm(self.pending_interest, cx.waker()) {
                 Ok(true) => return Ok(()),
                 Ok(false) => {
                     // Slab slot gone — fall through to fresh registration.
@@ -276,7 +297,7 @@ impl TcpStream {
             return Ok(());
         };
 
-        match driver.register(&*self.inner, interest, cx.waker().clone()) {
+        match driver.register(&*self.inner, self.pending_interest, cx.waker().clone()) {
             Ok(registration) => {
                 self.registration = Some(registration);
                 Ok(())
@@ -415,6 +436,9 @@ impl AsyncRead for TcpStream {
         match (&*inner).read(buf.unfilled()) {
             Ok(n) => {
                 buf.advance(n);
+                if let Err(err) = this.clear_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(err));
+                }
                 Poll::Ready(Ok(()))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -440,7 +464,12 @@ impl AsyncReadVectored for TcpStream {
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).read_vectored(bufs) {
-            Ok(n) => Poll::Ready(Ok(n)),
+            Ok(n) => {
+                if let Err(err) = this.clear_interest(cx, Interest::READABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Ready(Ok(n))
+            }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if let Err(err) = this.register_interest(cx, Interest::READABLE) {
                     return Poll::Ready(Err(err));
@@ -463,7 +492,12 @@ impl AsyncWrite for TcpStream {
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).write(buf) {
-            Ok(n) => Poll::Ready(Ok(n)),
+            Ok(n) => {
+                if let Err(err) = this.clear_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Ready(Ok(n))
+            }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
                     return Poll::Ready(Err(err));
@@ -485,7 +519,12 @@ impl AsyncWrite for TcpStream {
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).write_vectored(bufs) {
-            Ok(n) => Poll::Ready(Ok(n)),
+            Ok(n) => {
+                if let Err(err) = this.clear_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Ready(Ok(n))
+            }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
                     return Poll::Ready(Err(err));
@@ -507,7 +546,12 @@ impl AsyncWrite for TcpStream {
         let this = self.get_mut();
         let inner: &net::TcpStream = &this.inner;
         match (&*inner).flush() {
-            Ok(()) => Poll::Ready(Ok(())),
+            Ok(()) => {
+                if let Err(err) = this.clear_interest(cx, Interest::WRITABLE) {
+                    return Poll::Ready(Err(err));
+                }
+                Poll::Ready(Ok(()))
+            }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 if let Err(err) = this.register_interest(cx, Interest::WRITABLE) {
                     return Poll::Ready(Err(err));
