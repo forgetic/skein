@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 skein-lib = { path = "crates/skein-lib" }
+skein-io = { path = "crates/skein-io" }
 
 # Panics are fail-stop and overflow traps, in every profile. (The test harness
 # needs unwinding, so cargo ignores `panic` for test targets.)
