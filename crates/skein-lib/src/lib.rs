@@ -1,0 +1,43 @@
+//! The building blocks every step crate shares (programming-style.md, 9.2):
+//! typed handles and the slabs that issue them, bounded queues, lists, maps and
+//! sets, the per-layer deadline table, a writer for sized bytes and the
+//! decimal digits of a count to write with it, time, randomness, the tokens
+//! that cross layer boundaries, and the environment a step reads.
+//!
+//! Application code does not hand-roll data structures: what is missing goes
+//! here, written once and tested hard.
+
+#![cfg_attr(not(test), no_std)]
+#![forbid(unsafe_code)]
+
+extern crate alloc;
+
+mod btree;
+pub mod bytes;
+mod deadlines;
+mod decimal;
+mod env;
+mod id;
+mod list;
+mod map;
+mod queue;
+mod rng;
+mod set;
+mod slab;
+mod time;
+mod token;
+mod writer;
+
+pub use deadlines::Deadlines;
+pub use decimal::Decimal;
+pub use env::Env;
+pub use id::Id;
+pub use list::List;
+pub use map::Map;
+pub use queue::Queue;
+pub use rng::Rng;
+pub use set::Set;
+pub use slab::Slab;
+pub use time::{Duration, Time};
+pub use token::{ReplyTo, Token};
+pub use writer::{Overflow, Writer};

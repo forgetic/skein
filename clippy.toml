@@ -1,0 +1,212 @@
+# What the step crates may not use: docs/design/programming-style.md, section 9.
+#
+# Applies to every crate below this directory that has no clippy.toml of its
+# own. skein-lib is held to it too; where lib builds a container on a type that
+# is out (Vec, VecDeque, PhantomData), the module says so with a scoped
+# #[expect(clippy::disallowed_types, reason = "...")]. Ordinary Rust (the
+# simulators and test harnesses) has its own clippy.toml.
+#
+# panic! is out through the clippy::panic lint rather than here, and
+# format_args! is not listed: unreachable!("why") and assertion messages expand
+# to both, and those stay in.
+#
+# Some of the subset cannot be checked by clippy and stays a review rule:
+# `loop`, `while` and recursion; closures stored in locals; defining traits and
+# generic items; trait impls by hand (Drop, Deref, operators); `if let` on own
+# enums and tuple scrutinees; macro_rules!.
+
+# Unit tests run with std and may assert by panicking.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+
+disallowed-types = [
+    # Growth without a check.
+    { path = "alloc::vec::Vec", reason = "Box<[T]> for owned sequences, skein_lib::List or Queue for bounded ones" },
+    { path = "alloc::collections::VecDeque", reason = "skein_lib::Queue" },
+    { path = "alloc::collections::BinaryHeap", reason = "skein_lib::Deadlines, or a BTreeMap" },
+    { path = "alloc::collections::LinkedList", reason = "skein_lib::List" },
+    { path = "alloc::string::String", reason = "text is UTF-8 in a Box<[u8]>, checked by the protocol layer" },
+    { path = "alloc::borrow::Cow", reason = "one owner: borrow or move, never maybe-clone" },
+    # Shared ownership, interior mutability, global state.
+    { path = "alloc::rc::Rc", reason = "one owner; everyone else holds an Id<T>" },
+    { path = "alloc::rc::Weak", reason = "one owner; everyone else holds an Id<T>" },
+    { path = "alloc::sync::Arc", reason = "one owner; everyone else holds an Id<T>" },
+    { path = "alloc::sync::Weak", reason = "one owner; everyone else holds an Id<T>" },
+    { path = "core::cell::Cell", reason = "no interior mutability" },
+    { path = "core::cell::RefCell", reason = "no interior mutability" },
+    { path = "core::cell::UnsafeCell", reason = "no interior mutability" },
+    { path = "core::cell::OnceCell", reason = "no interior mutability" },
+    { path = "core::cell::LazyCell", reason = "no interior mutability" },
+    { path = "core::sync::atomic::AtomicBool", reason = "no global state" },
+    { path = "core::sync::atomic::AtomicI8", reason = "no global state" },
+    { path = "core::sync::atomic::AtomicI16", reason = "no global state" },
+    { path = "core::sync::atomic::AtomicI32", reason = "no global state" },
+    { path = "core::sync::atomic::AtomicI64", reason = "no global state" },
+    { path = "core::sync::atomic::AtomicIsize", reason = "no global state" },
+    { path = "core::sync::atomic::AtomicU8", reason = "no global state" },
+    { path = "core::sync::atomic::AtomicU16", reason = "no global state" },
+    { path = "core::sync::atomic::AtomicU32", reason = "no global state" },
+    { path = "core::sync::atomic::AtomicU64", reason = "no global state" },
+    { path = "core::sync::atomic::AtomicUsize", reason = "no global state" },
+    { path = "core::sync::atomic::AtomicPtr", reason = "no global state" },
+    # Leaks, pointers and pinning: none of it is needed outside the ring adapter.
+    { path = "core::mem::ManuallyDrop", reason = "an entity ends when it is reclaimed, not never" },
+    { path = "core::mem::MaybeUninit", reason = "no uninitialised state" },
+    { path = "core::ptr::NonNull", reason = "handles, not pointers" },
+    { path = "core::pin::Pin", reason = "no self-referential state" },
+    # async: the loop schedules. Banning Future also catches `async fn`.
+    { path = "core::future::Future", reason = "an enum state machine driven by the loop" },
+    { path = "core::task::Poll", reason = "an enum state machine driven by the loop" },
+    { path = "core::task::Context", reason = "an enum state machine driven by the loop" },
+    { path = "core::task::Waker", reason = "an enum state machine driven by the loop" },
+    # Closures, function pointers and dynamic types, as parameters and bounds.
+    { path = "core::ops::Fn", reason = "events in, requests out: no callbacks" },
+    { path = "core::ops::FnMut", reason = "events in, requests out: no callbacks" },
+    { path = "core::ops::FnOnce", reason = "events in, requests out: no callbacks" },
+    { path = "core::any::Any", reason = "concrete types only" },
+    { path = "core::marker::PhantomData", reason = "only skein_lib::Id needs it" },
+    # Floats: no total order, and nothing in this domain needs them.
+    { path = "f32", reason = "integers, with a stated unit" },
+    { path = "f64", reason = "integers, with a stated unit" },
+    # Formatting. (Not fmt::Arguments: assertion messages are made of it.)
+    { path = "core::fmt::Write", reason = "no formatting in step code; diagnostics are enum values" },
+    # Time and hashing that the step does not control (reachable in unit tests, which have std).
+    { path = "core::time::Duration", reason = "skein_lib::Duration" },
+    { path = "std::time::Instant", reason = "env.now, a skein_lib::Time" },
+    { path = "std::time::SystemTime", reason = "env.now, a skein_lib::Time" },
+    { path = "std::collections::HashMap", reason = "iteration order depends on a random seed: BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order depends on a random seed: BTreeSet" },
+]
+
+disallowed-macros = [
+    { path = "alloc::format", reason = "no formatting in step code" },
+    { path = "alloc::vec", reason = "no Vec in step code" },
+    { path = "core::matches", reason = "a catch-all match in disguise" },
+    { path = "core::write", reason = "no formatting in step code" },
+    { path = "core::writeln", reason = "no formatting in step code" },
+    { path = "core::debug_assert", reason = "assertions stay on in production: assert!" },
+    { path = "core::debug_assert_eq", reason = "assertions stay on in production: assert!" },
+    { path = "core::debug_assert_ne", reason = "assertions stay on in production: assert!" },
+    { path = "core::default::Default", reason = "only the derives in section 9.2; a default can be a live state" },
+    { path = "core::include", reason = "code the reader cannot see" },
+    { path = "core::include_str", reason = "data comes in events and limits" },
+    { path = "core::include_bytes", reason = "data comes in events and limits" },
+    { path = "core::env", reason = "behaviour does not depend on the build environment" },
+    { path = "core::option_env", reason = "behaviour does not depend on the build environment" },
+    { path = "std::thread_local", reason = "no global state" },
+    { path = "std::dbg", reason = "diagnostics are enum values" },
+    { path = "std::print", reason = "diagnostics are enum values" },
+    { path = "std::println", reason = "diagnostics are enum values" },
+    { path = "std::eprint", reason = "diagnostics are enum values" },
+    { path = "std::eprintln", reason = "diagnostics are enum values" },
+]
+
+disallowed-methods = [
+    # Closure-taking combinators: match, `let ... else`, or a `for` loop instead.
+    { path = "core::option::Option::map", reason = "no closures: match" },
+    { path = "core::option::Option::map_or", reason = "no closures: match" },
+    { path = "core::option::Option::map_or_else", reason = "no closures: match" },
+    { path = "core::option::Option::and_then", reason = "no closures: match or ?" },
+    { path = "core::option::Option::or_else", reason = "no closures: match" },
+    { path = "core::option::Option::unwrap_or_else", reason = "no closures: match" },
+    { path = "core::option::Option::ok_or_else", reason = "no closures: ok_or or match" },
+    { path = "core::option::Option::filter", reason = "no closures: match" },
+    { path = "core::option::Option::is_some_and", reason = "no closures: match" },
+    { path = "core::option::Option::is_none_or", reason = "no closures: match" },
+    { path = "core::option::Option::inspect", reason = "no closures: match" },
+    { path = "core::option::Option::take_if", reason = "no closures: match" },
+    { path = "core::option::Option::get_or_insert_with", reason = "no closures: match" },
+    { path = "core::result::Result::map", reason = "no closures: match" },
+    { path = "core::result::Result::map_err", reason = "no closures: match" },
+    { path = "core::result::Result::map_or", reason = "no closures: match" },
+    { path = "core::result::Result::map_or_else", reason = "no closures: match" },
+    { path = "core::result::Result::and_then", reason = "no closures: match or ?" },
+    { path = "core::result::Result::or_else", reason = "no closures: match" },
+    { path = "core::result::Result::unwrap_or_else", reason = "no closures: match" },
+    { path = "core::result::Result::is_ok_and", reason = "no closures: match" },
+    { path = "core::result::Result::is_err_and", reason = "no closures: match" },
+    { path = "core::result::Result::inspect", reason = "no closures: match" },
+    { path = "core::result::Result::inspect_err", reason = "no closures: match" },
+    { path = "bool::then", reason = "no closures: if, or then_some" },
+    { path = "core::iter::Iterator::map", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::filter", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::filter_map", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::flat_map", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::map_while", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::take_while", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::skip_while", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::scan", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::inspect", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::fold", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::try_fold", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::reduce", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::for_each", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::try_for_each", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::any", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::all", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::find", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::find_map", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::position", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::rposition", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::partition", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::max_by", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::min_by", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::max_by_key", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::min_by_key", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::is_sorted_by", reason = "no closures: a for loop" },
+    { path = "core::iter::Iterator::is_sorted_by_key", reason = "no closures: a for loop" },
+    { path = "core::iter::DoubleEndedIterator::rfind", reason = "no closures: a for loop" },
+    { path = "core::iter::DoubleEndedIterator::rfold", reason = "no closures: a for loop" },
+    { path = "core::iter::DoubleEndedIterator::try_rfold", reason = "no closures: a for loop" },
+    { path = "core::iter::from_fn", reason = "no closures: a for loop" },
+    { path = "core::iter::successors", reason = "no closures: a for loop" },
+    { path = "core::iter::repeat_with", reason = "no closures: a for loop" },
+    { path = "core::array::from_fn", reason = "no closures: a for loop" },
+    { path = "slice::sort_by", reason = "no closures: order the keys (BTreeMap)" },
+    { path = "slice::sort_by_key", reason = "no closures: order the keys (BTreeMap)" },
+    { path = "slice::sort_by_cached_key", reason = "no closures: order the keys (BTreeMap)" },
+    { path = "slice::sort_unstable_by", reason = "no closures: order the keys (BTreeMap)" },
+    { path = "slice::sort_unstable_by_key", reason = "no closures: order the keys (BTreeMap)" },
+    { path = "slice::binary_search_by", reason = "no closures: binary_search, or a BTreeMap" },
+    { path = "slice::binary_search_by_key", reason = "no closures: binary_search, or a BTreeMap" },
+    { path = "slice::partition_point", reason = "no closures: binary_search, or a BTreeMap" },
+    { path = "slice::split", reason = "no closures: the protocol layer splits bytes" },
+    { path = "slice::splitn", reason = "no closures: the protocol layer splits bytes" },
+    { path = "slice::rsplit", reason = "no closures: the protocol layer splits bytes" },
+    { path = "slice::rsplitn", reason = "no closures: the protocol layer splits bytes" },
+    { path = "slice::split_mut", reason = "no closures: the protocol layer splits bytes" },
+    { path = "slice::chunk_by", reason = "no closures: a for loop" },
+    { path = "slice::fill_with", reason = "no closures: fill, or a for loop" },
+    { path = "alloc::collections::btree::map::BTreeMap::retain", reason = "no closures: a bounded for loop" },
+    { path = "alloc::collections::btree::set::BTreeSet::retain", reason = "no closures: a bounded for loop" },
+    { path = "alloc::collections::btree::map::Entry::or_insert_with", reason = "no closures: or_insert, or match" },
+    { path = "alloc::collections::btree::map::Entry::or_insert_with_key", reason = "no closures: or_insert, or match" },
+    { path = "alloc::collections::btree::map::Entry::and_modify", reason = "no closures: match" },
+    # Allocation behind the reader's back.
+    { path = "core::iter::Iterator::collect", reason = "allocates a container the limits do not bound: skein_lib::List" },
+    { path = "core::iter::Iterator::sum", reason = "unchecked arithmetic: a for loop with checked_add" },
+    { path = "core::iter::Iterator::product", reason = "unchecked arithmetic: a for loop with checked_mul" },
+    { path = "slice::to_vec", reason = "no Vec in step code: skein_lib::bytes::copy_of" },
+    { path = "slice::into_vec", reason = "no Vec in step code" },
+    { path = "slice::concat", reason = "no Vec in step code" },
+    { path = "slice::join", reason = "no Vec in step code" },
+    { path = "slice::repeat", reason = "no Vec in step code" },
+    { path = "alloc::borrow::ToOwned::to_owned", reason = "skein_lib::bytes::copy_of, or clone" },
+    { path = "alloc::string::ToString::to_string", reason = "no String in step code" },
+    # Panics a peer could trigger: the checked forms return Option.
+    { path = "slice::split_at", reason = "split_at_checked" },
+    { path = "slice::split_at_mut", reason = "split_at_mut_checked" },
+    { path = "slice::copy_from_slice", reason = "panics on a length mismatch: a Writer, or lengths checked first" },
+    { path = "slice::clone_from_slice", reason = "panics on a length mismatch: a Writer, or lengths checked first" },
+    { path = "slice::swap", reason = "panics out of range: get_mut" },
+    # The model never parses: bytes become typed values in the protocol layer.
+    { path = "core::str::from_utf8", reason = "the protocol layer validates text" },
+    { path = "core::str::from_utf8_mut", reason = "the protocol layer validates text" },
+    { path = "str::parse", reason = "the protocol layer parses" },
+    # Lifecycle and memory.
+    { path = "core::mem::take", reason = "the placeholder is the terminal state: mem::replace" },
+    { path = "core::mem::forget", reason = "an entity ends when it is reclaimed, not never" },
+    { path = "alloc::boxed::Box::leak", reason = "an entity ends when it is reclaimed, not never" },
+]
