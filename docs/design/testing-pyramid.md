@@ -301,7 +301,7 @@ As of 2026-10-02.
 | stack worlds | none |
 | io worlds | none: no io, no simulator |
 | service worlds | none: no examples |
-| real loop | none: no shell |
+| real loop | not yet: no examples. Below it, `skein-shell`'s ring adapter is tested on the real kernel, on loopback, by records submitted directly (`crates/skein-shell/tests/`) |
 
 The checks:
 
@@ -309,7 +309,15 @@ The checks:
   container has them.
 - **Memory, replay, coverage and fuzzing:** none yet. State types
   already derive `Hash` for the replay digest.
-- **Conformance:** none, as there is no backend.
+- **Conformance:** none yet. The ring's tests on the real kernel check
+  each completion with `Complete::is_valid`, that every record comes back
+  exactly once, and the socket behaviour of the kernel contract (bind,
+  listen, accept, short sends, shutdown, reset, refused, address in use,
+  cancels); they become the ring's half of the suite. They fail, saying
+  so, where io_uring is not usable (a seccomp profile, `io_uring_disabled`).
+  Socket options the contract makes defaults but no record can observe
+  (close-on-exec, `TCP_NODELAY`) are not checked; `SO_REUSEADDR` and
+  `IPV6_V6ONLY` are, by their effects.
 - `scripts/check.sh` runs formatting, the lints as errors, and the tests
   with nextest, as CI will.
 
@@ -319,12 +327,13 @@ By tier, in the order temper pulls the parts (overview.md, section 11):
 
 - **io worlds and the simulator,** with the minimal machine, when the
   agent's LLM client pulls io sockets.
-- **Conformance,** with the ring, at the same time.
+- **Conformance,** with the simulator: one suite run against both, from
+  the ring's tests that exist now.
 - **Machine worlds** for HTTP, server-sent events and JSON, with their
   transcripts and fuzz targets, and **stack worlds** once two of them
   stack.
 - **TLS's own tests,** when the TLS client is built.
-- **Service worlds and the real loop,** with the examples and the shell.
+- **Service worlds and the real loop,** with the examples.
 
 By check: the counting allocator, replay digests over a run, transition
 coverage, fuzzing.
