@@ -25,8 +25,14 @@
 //! - **`Cancel` completes too,** separately from its target and in either
 //!   order: `Ok(Done::Nothing)` if it found the target in flight, and
 //!   `Err(TooLate)` if the target had already completed or could no longer be
-//!   stopped. Either way the target's own completion says what it did.
-//!   A `Cancel` is never itself the target of a `Cancel`.
+//!   stopped. Either way the target's own completion says what it did. It may
+//!   also complete with `Err(InvalidArgument)` or `Err(Other)`, when the
+//!   backend failed to submit it; the target is then not stopped. The
+//!   simulator randomises the order of a `Cancel` and its target's
+//!   completion. A `Cancel` is never itself the target of a `Cancel`.
+//! - **A `Bind` answers with the address bound** ([`Done::Bound`]), its port
+//!   resolved when it asked for port 0. The backend learns it from its kernel
+//!   (`getsockname`); only the plain [`Addr`] crosses.
 //! - **A `Recv` of zero bytes means the peer ended** its sending direction.
 //!   That is why a `Recv` buffer is never empty ([`Op::recv`]).
 //! - **A `Send` sends from `from` onwards,** and its count is how many bytes
@@ -42,6 +48,13 @@
 //!   closes one, and nothing closes on drop. A `Close` releases the
 //!   descriptor whatever its result. io closes a descriptor only once no
 //!   other operation on it is in flight, and never names it again after.
+//!   A `Close` with operations on its descriptor still in flight is a broken
+//!   invariant: the simulator fails the world, and the ring backend's
+//!   behaviour is unspecified.
+//! - **Socket options are backend defaults, not records,** until a service
+//!   pulls one: every descriptor is close-on-exec, a socket that binds gets
+//!   `SO_REUSEADDR`, and connected and accepted TCP sockets get
+//!   `TCP_NODELAY`.
 //! - **Plain values only cross.** Kernel structures (socket addresses, for
 //!   one) stay in the backend's in-flight table and are decoded before they
 //!   go up; kernel error numbers are mapped onto [`Error`].
@@ -117,7 +130,8 @@ pub struct Complete {
 /// | Op | `Ok` |
 /// |---|---|
 /// | `Socket` | `Done::Fd`, the new socket |
-/// | `Bind`, `Listen`, `Connect`, `Shutdown`, `Close` | `Done::Nothing` |
+/// | `Bind` | `Done::Bound`, the address bound, its port resolved if it was 0 |
+/// | `Listen`, `Connect`, `Shutdown`, `Close` | `Done::Nothing` |
 /// | `Accept` | `Done::Accepted`, the new socket and its peer |
 /// | `Recv` | `Done::Count`, bytes received into `buf[..n]`, 0 at the end |
 /// | `Send` | `Done::Count`, bytes sent from `from`, at least 1 |
@@ -183,6 +197,9 @@ pub enum Done {
     Fd(Fd),
     /// A new socket, accepted from `peer`.
     Accepted { fd: Fd, peer: Addr },
+    /// The address a socket was bound to, with the port the kernel chose when
+    /// the `Bind` asked for port 0.
+    Bound(Addr),
 }
 
 /// The kinds of [`Done`], by which an operation's success value is checked
@@ -193,6 +210,7 @@ pub enum Shape {
     Count,
     Fd,
     Accepted,
+    Bound,
 }
 
 /// The errors io handles by name. Each backend maps its kernel's error numbers
@@ -285,12 +303,10 @@ impl Op {
             Op::Socket { .. } => Shape::Fd,
             Op::Accept { .. } => Shape::Accepted,
             Op::Recv { .. } | Op::Send { .. } => Shape::Count,
-            Op::Bind { .. }
-            | Op::Listen { .. }
-            | Op::Connect { .. }
-            | Op::Shutdown { .. }
-            | Op::Close { .. }
-            | Op::Cancel { .. } => Shape::Nothing,
+            Op::Bind { .. } => Shape::Bound,
+            Op::Listen { .. } | Op::Connect { .. } | Op::Shutdown { .. } | Op::Close { .. } | Op::Cancel { .. } => {
+                Shape::Nothing
+            }
         }
     }
 }
@@ -303,6 +319,7 @@ impl Done {
             Done::Count(_) => Shape::Count,
             Done::Fd(_) => Shape::Fd,
             Done::Accepted { .. } => Shape::Accepted,
+            Done::Bound(_) => Shape::Bound,
         }
     }
 }
@@ -310,12 +327,13 @@ impl Done {
 impl Complete {
     /// Whether a backend kept the contract with this completion, given that the
     /// operation was valid: a success of the operation's shape, with a count
-    /// its buffer allows, and `TooLate` only for a `Cancel`. For the simulator
-    /// and the conformance suite to check; io trusts its backend.
+    /// its buffer allows or the address its `Bind` asked for, and `TooLate`
+    /// only for a `Cancel`. Any other error may answer any operation. For the
+    /// simulator and the conformance suite to check; io trusts its backend.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         match &self.result {
-            Ok(done) => done.shape() == self.kind.shape() && counts(&self.kind, done),
+            Ok(done) => done.shape() == self.kind.shape() && fits(&self.kind, done),
             Err(error) => match error {
                 Error::TooLate => match &self.kind {
                     Op::Cancel { .. } => true,
@@ -355,16 +373,46 @@ fn left(bytes: &[u8], from: u32) -> Option<usize> {
     }
 }
 
+/// Whether a success value fits the operation it answers, beyond its shape,
+/// which is checked apart: a count within its buffer, a bound address that is
+/// the one asked for.
+fn fits(op: &Op, done: &Done) -> bool {
+    match done {
+        Done::Count(n) => match usize::try_from(*n) {
+            Ok(n) => counts(op, n),
+            Err(_) => false,
+        },
+        Done::Bound(bound) => binds(op, bound),
+        Done::Nothing | Done::Fd(_) | Done::Accepted { .. } => true,
+    }
+}
+
+/// Whether a `Bind` bound the address it asked for: the same IP, and the same
+/// port, or a port the kernel chose when it asked for port 0.
+fn binds(op: &Op, bound: &Addr) -> bool {
+    match op {
+        Op::Bind { addr, .. } => {
+            let port = match addr.port() {
+                0 => bound.port() != 0,
+                asked => bound.port() == asked,
+            };
+            bound.ip() == addr.ip() && port
+        }
+        Op::Socket { .. }
+        | Op::Listen { .. }
+        | Op::Accept { .. }
+        | Op::Connect { .. }
+        | Op::Recv { .. }
+        | Op::Send { .. }
+        | Op::Shutdown { .. }
+        | Op::Close { .. }
+        | Op::Cancel { .. } => false,
+    }
+}
+
 /// Whether a count fits the buffer of the operation it answers. Only `Recv`
-/// and `Send` have one; the shapes are checked apart.
-fn counts(op: &Op, done: &Done) -> bool {
-    let n = match done {
-        Done::Count(n) => usize::try_from(*n).ok(),
-        Done::Nothing | Done::Fd(_) | Done::Accepted { .. } => return true,
-    };
-    let Some(n) = n else {
-        return false;
-    };
+/// and `Send` have one.
+fn counts(op: &Op, n: usize) -> bool {
     match op {
         Op::Recv { buf, .. } => n <= buf.len(),
         Op::Send { bytes, from, .. } => match left(bytes, *from) {
@@ -378,7 +426,7 @@ fn counts(op: &Op, done: &Done) -> bool {
         | Op::Connect { .. }
         | Op::Shutdown { .. }
         | Op::Close { .. }
-        | Op::Cancel { .. } => true,
+        | Op::Cancel { .. } => false,
     }
 }
 
@@ -430,18 +478,17 @@ mod tests {
             Op::Socket { .. } => Done::Fd(NEW),
             Op::Accept { .. } => Done::Accepted { fd: NEW, peer: v4() },
             Op::Recv { .. } | Op::Send { .. } => Done::Count(1),
-            Op::Bind { .. }
-            | Op::Listen { .. }
-            | Op::Connect { .. }
-            | Op::Shutdown { .. }
-            | Op::Close { .. }
-            | Op::Cancel { .. } => Done::Nothing,
+            Op::Bind { .. } => Done::Bound(v4()),
+            Op::Listen { .. } | Op::Connect { .. } | Op::Shutdown { .. } | Op::Close { .. } | Op::Cancel { .. } => {
+                Done::Nothing
+            }
         }
     }
 
     #[test]
     fn every_operation_succeeds_with_its_documented_shape_and_no_other() {
-        let candidates = [Done::Nothing, Done::Count(1), Done::Fd(NEW), Done::Accepted { fd: NEW, peer: v4() }];
+        let candidates =
+            [Done::Nothing, Done::Count(1), Done::Fd(NEW), Done::Accepted { fd: NEW, peer: v4() }, Done::Bound(v4())];
         for op in every_op() {
             assert!(op.is_valid(), "the examples are valid");
             let expected = documented(&op);
@@ -460,9 +507,34 @@ mod tests {
         let [socket, bind, listen, accept, connect, recv, send, shutdown, close, cancel] = every_op();
         assert_eq!(socket.shape(), Shape::Fd);
         assert_eq!(accept.shape(), Shape::Accepted);
+        assert_eq!(bind.shape(), Shape::Bound);
         assert_eq!((recv.shape(), send.shape()), (Shape::Count, Shape::Count));
-        for op in [bind, listen, connect, shutdown, close, cancel] {
+        for op in [listen, connect, shutdown, close, cancel] {
             assert_eq!(op.shape(), Shape::Nothing);
+        }
+    }
+
+    #[test]
+    fn a_bind_answers_with_the_address_it_asked_for_and_port_zero_resolved() {
+        let ip = Ipv4Addr::LOCALHOST;
+        let bind = |port: u16| Op::Bind { fd: FD, addr: SocketAddr::from((ip, port)) };
+        let cases = [
+            (8080, SocketAddr::from((ip, 8080)), true),
+            (8080, SocketAddr::from((ip, 8081)), false),
+            (0, SocketAddr::from((ip, 40000)), true),
+            (0, SocketAddr::from((ip, 0)), false),
+            (8080, SocketAddr::from((Ipv4Addr::UNSPECIFIED, 8080)), false),
+            (8080, SocketAddr::from((Ipv6Addr::LOCALHOST, 8080)), false),
+        ];
+        for (port, bound, valid) in cases {
+            assert_eq!(complete(bind(port), Ok(Done::Bound(bound))).is_valid(), valid, "port {port}");
+        }
+    }
+
+    #[test]
+    fn a_cancel_may_fail_to_be_submitted() {
+        for error in [Error::InvalidArgument, Error::Other(5)] {
+            assert!(complete(Op::Cancel { target: Token::new(2) }, Err(error)).is_valid(), "a backend failure");
         }
     }
 

@@ -352,6 +352,9 @@ with, or an `Error`), so every record comes back up whatever happened.
   (`Addr`, `Stat`, `Exit`) before they go up. io never sees a kernel
   layout, so it needs no `libc`. A backend for another kernel
   translates.
+- **Socket options are backend defaults, not records,** until a service
+  pulls one: every descriptor is close-on-exec, a socket that binds gets
+  `SO_REUSEADDR`, and connected and accepted TCP sockets get `TCP_NODELAY`.
 - **Errors cross as a skein enum:** the errors io handles by name, plus
   an `Other` code. Each backend maps its kernel's error numbers onto it.
 - **Every operation completes exactly once,** cancelled or not. A
