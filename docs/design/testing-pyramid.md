@@ -309,13 +309,16 @@ The checks:
   container has them.
 - **The simulator** (`skein-sim`) plays the kernel for sockets: one world
   of processes, each with its own descriptors, a loopback network with
-  bounded buffers, its own clock, and faults drawn from the seed (latency,
-  short receives and sends, resets, refused connects, cancel races). It
+  bounded buffers, a descriptor limit, its own clock, and faults drawn
+  from the seed and traced (latency, short receives and sends, resets,
+  timeouts, refused connects, buffer exhaustion, cancel races and
+  cancels the backend cannot submit). It
   fails the world on each broken invariant of `skein_io::kernel`, checks
   every completion it makes, and checks quiescence on request. Its own
   tests (`crates/skein-sim/tests/sim/`) submit records by hand: each rule
   of the contract, each broken invariant, and a client and a server
-  exchanging bytes, calm and under chaos for 200 seeds.
+  exchanging bytes, calm and under chaos for 200 seeds, which asserts
+  that every fault fell.
 - **Replay:** a seed replays to the same trace of submissions and
   completions. No state digest yet. State types already derive `Hash`
   for it.
