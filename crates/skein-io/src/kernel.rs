@@ -82,6 +82,10 @@
 //! - a `Close` while any other operation on its descriptor is in flight, or
 //!   any operation on a descriptor after its `Close`.
 //!
+//! Dropping a backend with operations in flight is a shutdown path, not
+//! part of the contract: those records are not handed back, and their
+//! descriptors stay open until the process ends.
+//!
 //! Backend defaults, not records, until a service pulls one: every
 //! descriptor is close-on-exec; a socket that binds gets `SO_REUSEADDR`;
 //! every IPv6 socket gets `IPV6_V6ONLY`, so families never mix; connected

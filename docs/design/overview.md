@@ -127,7 +127,7 @@ skein-io       lib
 skein-http     lib
 skein-json     lib
 skein-tls      lib, rustls
-skein-shell    io, io-uring, libc
+skein-shell    lib, io, io-uring, libc
 skein-sim      io
 ```
 
