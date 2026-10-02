@@ -306,7 +306,7 @@ all they share.
 ```rust
 // skein-io, a sketch of the kernel side
 pub struct Submit   { pub op: Token, pub kind: Op }          // io -> kernel
-pub struct Complete { pub op: Token, pub outcome: Outcome }  // kernel -> io
+pub struct Complete { pub op: Token, pub kind: Op, pub result: Result<Done, Error> }  // kernel -> io
 
 pub enum Op {
     // sockets
@@ -332,6 +332,10 @@ pub enum Op {
     Cancel   { target: Token },
 }
 ```
+
+The completion hands back the operation it answers, buffers and all,
+beside its result (a `Done` of the one shape that operation succeeds
+with, or an `Error`), so every record comes back up whatever happened.
 
 - **Memory moves with the operation.** A buffer that the kernel will
   read or write is a `Box` inside the record. io moves it down, and the
