@@ -43,7 +43,7 @@ unused_qualifications = "warn"
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 # Pedantic lints that fight the model.
-module_name_repetitions = "allow"     # llm::LlmX reads fine next to agent::X
+module_name_repetitions = "allow"     # http::HttpX reads fine next to io::X
 missing_errors_doc = "allow"          # errors are enum values, documented on the enum
 missing_panics_doc = "allow"          # panics are assertions, named by expect("...")
 needless_pass_by_value = "allow"      # cell handlers take the source state by value

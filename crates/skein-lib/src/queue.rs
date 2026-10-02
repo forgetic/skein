@@ -1,4 +1,5 @@
-//! Bounded queues (consumers.md, section 4): the records between stages, sized at startup.
+//! Bounded queues (consumers.md, 4): the records between stages, sized at
+//! startup.
 
 #![expect(clippy::disallowed_types, reason = "a queue is a VecDeque allocated once, at its final capacity")]
 
