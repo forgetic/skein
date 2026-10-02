@@ -1,10 +1,24 @@
-# skein
+# skein: overview
 
 Provisional, 2026-10-02. The design of skein: the parts that every
 service written in the programming style shares, so that a service
-writes only its model and its own protocols. The style itself is
-`programming-style.md`, which moves here from temper (section 12).
-Section 13 lists what is still open. Nothing is built yet.
+writes only its model and its own protocols. Section 12 lists what is
+still open. Nothing is built yet.
+
+The design is three documents, each the one place for its concepts:
+
+- **`overview.md`** (this one): what skein is and how its parts work. The
+  stream types, io's records, the kernel boundary, the backends, the shell
+  kit, the simulator and the protocol machines.
+- **`programming-style.md`**: the rules all step code follows, in skein
+  and in every service. Step functions, boundaries, handles and
+  lifecycle, memory, flow control, time, the Rust subset and testing.
+- **`consumers.md`**: how a service is built on skein. Who writes what,
+  the loop, the three layers, the protocol layer, sub-models, worlds, and
+  how to start.
+
+Read this one first, then the style, then consumers.md if you are
+writing a service.
 
 ## 1. In one page
 
@@ -20,9 +34,9 @@ Section 13 lists what is still open. Nothing is built yet.
   its `main`.
 - **A kit, not a framework.** skein has no service trait, no generic
   loop, no scheduler and no callbacks. A service calls the parts by
-  name, in its own loop of about ten lines (programming-style.md,
-  section 2). Nothing in skein calls into a service, not even the
-  simulator (section 9).
+  name, in its own loop of about ten lines (consumers.md, section 4).
+  Nothing in skein calls into a service, not even the simulator
+  (section 9).
 - **Built when pulled.** A part is built when its first user needs it,
   and that user is its first test. temper is the first user.
 - **io_uring is the kernel interface.** io talks to the kernel in owned
@@ -39,7 +53,7 @@ Section 13 lists what is still open. Nothing is built yet.
   stacks machines by calling them in order. Machines depend on lib only,
   not on io and not on each other.
 - **Counted and bounded throughout.** Every part exports its `Limits`
-  and its `worst_case` (programming-style.md, 6.4), and a service adds
+  and its `worst_case` (programming-style.md, 5.4), and a service adds
   them up.
 - **One exception to "nothing from outside".** TLS wraps rustls. It is
   the only step crate with a dependency from outside the workspace, and
@@ -61,8 +75,8 @@ Section 13 lists what is still open. Nothing is built yet.
 | the simulated kernel | `skein-sim` | ordinary Rust |
 
 skein also holds the programming style, the workspace lints and
-`clippy.toml`. A service's workspace copies the lints and
-`clippy.toml`.
+`clippy.toml` (programming-style.md, 9.4). A service's workspace copies
+the lints and `clippy.toml`.
 
 ### 2.2 Not in skein
 
@@ -70,7 +84,7 @@ skein also holds the programming style, the workspace lints and
   provider's API, a forge's API, temper's protocol between worker and
   engine. They are built on skein's machines.
 - **A service's wiring:** its `iterate`, the sum of its worst cases, its
-  `main`.
+  `main` (consumers.md).
 - **What a simulated program does.** The simulator plays the kernel. The
   files and programs a scenario needs come from the embedder's fake
   machine, which plugs in at a seam (section 9).
@@ -81,9 +95,9 @@ skein also holds the programming style, the workspace lints and
 
 ```
 skein/
-  Cargo.toml       workspace: profiles and lints (programming-style.md, 10.4)
+  Cargo.toml       workspace: profiles and lints (programming-style.md, 9.4)
   clippy.toml      disallowed types and macros for the step crates
-  docs/design/     skein.md (this document), programming-style.md
+  docs/design/     overview.md (this document), programming-style.md, consumers.md
   crates/
     skein-lib/     Id, Slab, Token, ReplyTo, Queue, List, Map, Set, Stack,
                    Reader, Writer, bytes, Deadlines, Time, Duration, Rng, Env;
@@ -120,13 +134,10 @@ one place where they meet.
 
 ## 4. Streams
 
-The style's io vocabulary (programming-style.md, 4.3) has two parts:
-
-- **Entities:** listen, accept, connect, spawn, close.
-- **Bytes:** demand, deliver, room, send, end.
-
-The byte part is the same wherever bytes flow. So it is defined once, in
-lib, and every byte boundary uses it.
+The byte part of io's vocabulary (demand, deliver, room, send, end) is
+the same wherever bytes flow, so it is defined once, in lib, and every
+byte boundary uses it. The rules for reading by demand and writing by
+move are programming-style.md, 3.3; this section is the types.
 
 ```rust
 // lib::stream, a sketch
@@ -153,10 +164,11 @@ pub enum Up {                           // from the side below
   - it appends what arrives;
   - it meets a fill or a scan as soon as it can;
   - it reports the room left, so receiving stops at the cap.
-- **A stack is a connection's states, called in order.** A connection
-  holds one state per machine. Within its step, it routes each `Up` from
-  a machine to the one above it, and each `Down` the other way. There is
-  no pipeline type: the order is the code.
+- **A stack is a connection's states, called in order,** with no
+  pipeline type and no timers in the machines (programming-style.md,
+  3.4). Flow control runs through the whole stack: a reader that stops
+  demanding stops the peer, through every machine, and no buffer grows
+  past its cap (programming-style.md, section 6). An LLM client's stack:
 
   ```
   model
@@ -174,19 +186,10 @@ pub enum Up {                           // from the side below
   io socket
   ```
 
-- **Machines keep no timers.** Each machine says what it is waiting for
-  (a head, a body, room). The connection that stacks the machines arms
-  their deadlines from that, in one place (programming-style.md, 5.4
-  and 9). There is still one deadline table per layer.
-- **Flow control runs through the whole stack.** The top demands. Each
-  machine demands from the one below only what it needs to meet that
-  demand. io receives only while its intake has room. A reader that
-  stops demanding therefore stops the peer, through every machine, and
-  no buffer grows past its cap.
-
 ## 5. io
 
-io is the style's lowest step layer (programming-style.md, 4.3). It owns:
+io is the lowest step layer of every service (consumers.md, section 5).
+It owns:
 
 - sockets, pipes, files and child processes;
 - the operations in flight on them;
@@ -235,7 +238,7 @@ pub enum Event {
   offset into the same `Box`; the remainder is never copied.
 - **Accepts are re-armed one at a time** while the listener's owner has
   room, up to a configured number per iteration. A flood of connections
-  then waits in the kernel's backlog (programming-style.md, 4.3).
+  then waits in the kernel's backlog (programming-style.md, section 6).
 - **Close is graceful:**
   1. flush the queued output;
   2. half-close;
@@ -335,7 +338,7 @@ pub enum Op {
   backend holds the record until the operation's completion. The
   completion moves the buffer back up: filled, or with the count sent.
   - While the kernel holds the buffer, no other code can name it. That
-    is the compiler's half of programming-style.md, 6.3.
+    is the compiler's half of programming-style.md, 5.3.
   - The backend's `unsafe` is the other half. It takes addresses only
     from records it holds, and it gives a record back only after the
     operation's completion.
@@ -350,7 +353,7 @@ pub enum Op {
 - **Every operation completes exactly once,** cancelled or not. A
   cancelled operation still completes: either as cancelled, or with
   what it did before the cancel landed. Until then, io keeps the entity
-  *settling* (programming-style.md, 5.3).
+  *settling* (programming-style.md, 4.3).
 - **Single-shot operations only, to start:** one submission, one
   completion. The completion queue can then be sized from io's operation
   slab, so it cannot overflow. Every receive and every accept is then a
@@ -359,11 +362,10 @@ pub enum Op {
   pipe, listing a directory. None of these is a ring operation at the
   kernel floor (7.1), and some are not ring operations at all. The
   backend performs them when they are submitted and completes them at
-  the next reap, in the same records, so io cannot tell the difference
-  (programming-style.md, 2.1).
+  the next reap, in the same records, so io cannot tell the difference.
 - **Timers are not operations.** The shell waits for completions with a
   timeout: the earliest deadline over every layer (programming-style.md,
-  section 9).
+  section 8).
 
 ## 7. Backends
 
@@ -409,12 +411,20 @@ pub enum Op {
   - fixed files;
   - zero-copy send;
   - linked operations;
-  - exact-size receives for a fill demand;
+  - exact-size receives for a fill demand: io allocates the `Box`, the
+    kernel reads straight into it, and the copy out of the intake
+    disappears;
+  - shared immutable buffers (`Arc<[u8]>`, confined to io) for large
+    values sent to many slow readers, or zero-copy relaying;
+  - batched submits: submitting every few rounds, or when about to wait,
+    which saves syscalls under pipelining at the cost of delaying each
+    submission by up to that many rounds;
   - kernel TLS.
 
   Each must keep the contract of section 6: explicit backpressure, one
   terminal event per operation, and a completion queue that cannot
-  overflow.
+  overflow. Each is measured before it goes in, and none changes code
+  above io (programming-style.md, 5.6).
 
 ### 7.2 The simulator
 
@@ -451,25 +461,16 @@ It is not built until a deployment needs it.
 
 ## 8. The shell kit
 
-- **The loop belongs to the service.** It is about ten lines
-  (programming-style.md, section 2):
-  1. reap into io's completion queue;
-  2. read the clock;
-  3. call `iterate`;
-  4. submit, waiting until the earliest deadline.
-
-  skein provides `Kernel` (open, reap, submit), `Clock` and the seed. It
-  does not provide a `run`.
-- **The clock gives two times, read once per iteration:**
-  - monotonic time, for every deadline;
-  - wall time, for things about the world: a certificate's validity, a
-    timestamp that a peer will read.
-
-  Both reach the steps through `Env`.
+- **The loop belongs to the service** (consumers.md, section 4). skein
+  provides `Kernel` (open, reap, submit), `Clock` and the seed. It does
+  not provide a `run`.
+- **The clock gives two times,** monotonic and wall, read once per
+  iteration and handed to the steps through `Env` (programming-style.md,
+  section 8).
 - **The seed** comes from `getrandom`, once, at startup.
 - **At startup,** before opening the kernel, the shell:
   - checks the worst case against the configured memory
-    (programming-style.md, 6.4);
+    (programming-style.md, 5.4);
   - blocks the termination signals that io will read (5.4).
 - **Panics abort,** and a supervisor restarts the process.
 
@@ -495,12 +496,11 @@ service's `iterate` in turn.
   the programs. A spawned program may be another service, which the
   world then starts and hosts, so one world can hold a parent and the
   children it starts. skein ships no machine. Its own tests use a minimal one.
-- **Invariants checked at every iteration:**
-  - one completion per operation;
-  - every record handed back;
-  - the heap within the worst case, measured by the counting allocator.
-- **Invariants checked at quiescence:** no operation in flight, and
-  every slab empty.
+- **Invariants of the kernel boundary,** on top of the style's universal
+  ones and its memory check (programming-style.md, section 10):
+  - at every iteration, one completion per operation, and every record
+    handed back;
+  - at quiescence, no operation in flight.
 - **Conformance.** One suite of scripted operation sequences runs
   against each backend:
   - the ring, on the real kernel, with loopback sockets and a scratch
@@ -549,7 +549,7 @@ pub fn down(conn: &mut Client, env: &Env<Limits>, rq: Request,
   - Interim responses (1xx) are skipped.
 - **A server connection** takes one request at a time. It parses the
   next request only once the response is queued and there is room for
-  the response after it (programming-style.md, section 7).
+  the response after it (programming-style.md, section 6).
 - **Not planned:** HTTP/2 and upgrades. Revisit them when a peer
   requires them.
 
@@ -567,7 +567,7 @@ Its writer side frames events for a server.
 
 - **A tokenizer,** pulled by demand:
   - the nesting is held in a `lib::Stack` of configured depth
-    (programming-style.md, section 8);
+    (programming-style.md, section 7);
   - strings are unescaped and checked as UTF-8, into exact-size
     `Box<[u8]>`s under a maximum length;
   - numbers go up as validated text, never as floats. The consumer
@@ -576,8 +576,8 @@ Its writer side frames events for a server.
   `Writer::new(len)`.
 - **An application decodes its own documents** with small state machines
   over these tokens, in its own protocol layer, into its model's types.
-  This follows programming-style.md, section 4: a tool call reaches the
-  model already typed.
+  This follows consumers.md, section 5: a tool call reaches the model
+  already typed.
 
 ### 10.4 TLS
 
@@ -611,34 +611,10 @@ io connects to addresses only.
   file and the resolver configuration at startup. io gains datagram
   sockets for it.
 
-## 11. Changes to the programming style
+## 11. The first consumer
 
-The style moves here from temper. These changes amend it as it moves:
-
-1. **The kernel boundary is records** (section 6). Transit memory moves
-   with the operation into the backend and back. It no longer stays in
-   an io slot that the adapter reads from; this restates 6.3. Kernel
-   layouts belong to the backend.
-2. **Streams are a lib vocabulary** (section 4), shared by io and by
-   every stream machine. The carry-over buffer is `lib::Intake`.
-3. **Machines in a stack depend on lib only,** and keep no timers. The
-   connection that stacks them arms their deadlines.
-4. **`Env` carries wall time** beside monotonic time.
-5. **TLS is the exception** to two rules: that step crates depend on
-   nothing outside the workspace, and that steps are deterministic.
-6. **Operations are single-shot** until an optimisation shows that it
-   keeps the contract.
-
-## 12. temper and skein
-
-- **What moves out of temper:**
-  - temper-lib becomes skein-lib, with the same API plus streams and
-    `Intake`;
-  - programming-style.md moves to `docs/design/`, and temper's docs
-    point here;
-  - the lint configuration is copied, and skein's copy is the reference.
-- **temper depends on skein** by path.
-- **What pulls what:**
+temper is the first service built on skein, and what it builds decides
+the order in which skein's parts are built:
 
 | temper builds | which pulls from skein |
 |---|---|
@@ -647,7 +623,7 @@ The style moves here from temper. These changes amend it as it moves:
 | the worker's processes and workspaces | io processes, pipes and files |
 | the engine's forge client and its webhooks | the HTTP client and server |
 
-## 13. Open questions
+## 12. Open questions
 
 - **Decoding JSON by hand** into an application's types is verbose
   without serde or traits. If that hurts, the candidate is a generator
@@ -660,5 +636,5 @@ The style moves here from temper. These changes amend it as it moves:
   instead of a descriptor. Decide when it has been measured.
 - **Processes in the readiness backend on macOS,** which has no pidfd
   and no `clone3`, if that backend is ever built.
-- The style's own open questions (programming-style.md, section 13) stay
+- The style's own open questions (programming-style.md, section 12) stay
   open.
