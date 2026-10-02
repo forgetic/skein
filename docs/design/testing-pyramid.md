@@ -299,7 +299,7 @@ As of 2026-10-02.
 | step tests | lib: every container and value type, by hand |
 | machine worlds | none: no machine exists |
 | stack worlds | none |
-| io worlds | none: no io, no simulator |
+| io worlds | none: no io yet. The simulator exists for sockets, with its own tests |
 | service worlds | none: no examples |
 | real loop | not yet: no examples. Below it, `skein-shell`'s ring adapter is tested on the real kernel, on loopback, by records submitted directly (`crates/skein-shell/tests/`) |
 
@@ -307,8 +307,19 @@ The checks:
 
 - **Contracts and invariants** are asserted in lib's step tests where a
   container has them.
-- **Memory, replay, coverage and fuzzing:** none yet. State types
-  already derive `Hash` for the replay digest.
+- **The simulator** (`skein-sim`) plays the kernel for sockets: one world
+  of processes, each with its own descriptors, a loopback network with
+  bounded buffers, its own clock, and faults drawn from the seed (latency,
+  short receives and sends, resets, refused connects, cancel races). It
+  fails the world on each broken invariant of `skein_io::kernel`, checks
+  every completion it makes, and checks quiescence on request. Its own
+  tests (`crates/skein-sim/tests/sim/`) submit records by hand: each rule
+  of the contract, each broken invariant, and a client and a server
+  exchanging bytes, calm and under chaos for 200 seeds.
+- **Replay:** a seed replays to the same trace of submissions and
+  completions. No state digest yet. State types already derive `Hash`
+  for it.
+- **Memory, coverage and fuzzing:** none yet.
 - **Conformance:** none yet. The ring's tests on the real kernel check
   each completion with `Complete::is_valid`, that every record comes back
   exactly once, and the socket behaviour of the kernel contract (bind,
@@ -317,7 +328,9 @@ The checks:
   so, where io_uring is not usable (a seccomp profile, `io_uring_disabled`).
   Socket options the contract makes defaults but no record can observe
   (close-on-exec, `TCP_NODELAY`) are not checked; `SO_REUSEADDR` and
-  `IPV6_V6ONLY` are, by their effects.
+  `IPV6_V6ONLY` are, by their effects. The simulator's `submit` and `reap`
+  per process take the same queues as the shell's `Kernel`, for the suite
+  to drive both.
 - `scripts/check.sh` runs formatting, the lints as errors, and the tests
   with nextest, as CI will.
 
@@ -325,9 +338,10 @@ The checks:
 
 By tier, in the order temper pulls the parts (overview.md, section 11):
 
-- **io worlds and the simulator,** with the minimal machine, when the
-  agent's LLM client pulls io sockets.
-- **Conformance,** with the simulator: one suite run against both, from
+- **io worlds,** with the minimal machine, when the agent's LLM client
+  pulls io sockets. The simulator lacks files, processes and the machine
+  seam, which come with them.
+- **Conformance,** one suite run against the simulator and the ring, from
   the ring's tests that exist now.
 - **Machine worlds** for HTTP, server-sent events and JSON, with their
   transcripts and fuzz targets, and **stack worlds** once two of them
@@ -335,8 +349,8 @@ By tier, in the order temper pulls the parts (overview.md, section 11):
 - **TLS's own tests,** when the TLS client is built.
 - **Service worlds and the real loop,** with the examples.
 
-By check: the counting allocator, replay digests over a run, transition
-coverage, fuzzing.
+By check: the counting allocator, replay digests of the state over a run
+(the trace replays already), transition coverage, fuzzing.
 
 ## 11. Open questions
 
