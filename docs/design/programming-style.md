@@ -19,6 +19,8 @@ This document holds the rules. Its neighbours hold the rest:
   backends, the simulator and the protocol machines.
 - `consumers.md` is the shape of a service built on skein: its loop, its
   three layers (io, protocol, model), its sub-models and its worlds.
+- `testing-pyramid.md` is how skein is tested: the tiers, what each makes
+  real and what it fakes.
 
 ## 1. In one page
 
@@ -840,9 +842,10 @@ disallowed-macros = [
 
 ## 10. Testing
 
-What each kind of world is, and how a service arranges its own, is in
-consumers.md, section 8; the simulator itself is overview.md, section 9.
-These rules hold for all of them:
+The tiers of worlds, what each makes real and what it fakes, are in
+testing-pyramid.md; how a service arranges its own is consumers.md,
+section 8; the simulator itself is overview.md, section 9. These rules
+hold for all of them:
 
 - **Deterministic simulation.** The simulator owns the clock, the seeds
   and the kernel, and drives the same `iterate` the shell runs. It runs

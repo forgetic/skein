@@ -5,7 +5,7 @@ service written in the programming style shares, so that a service
 writes only its model and its own protocols. Section 12 lists what is
 still open. Nothing is built yet.
 
-The design is three documents, each the one place for its concepts:
+The design is four documents, each the one place for its concepts:
 
 - **`overview.md`** (this one): what skein is and how its parts work. The
   stream types, io's records, the kernel boundary, the backends, the shell
@@ -16,6 +16,9 @@ The design is three documents, each the one place for its concepts:
 - **`consumers.md`**: how a service is built on skein. Who writes what,
   the loop, the three layers, the protocol layer, sub-models, worlds, and
   how to start.
+- **`testing-pyramid.md`**: how skein is tested, tier by tier, what is
+  real and what is fake in each, and what skein supplies for a service's
+  own tiers.
 
 Read this one first, then the style, then consumers.md if you are
 writing a service.
@@ -97,7 +100,8 @@ the lints and `clippy.toml`.
 skein/
   Cargo.toml       workspace: profiles and lints (programming-style.md, 9.4)
   clippy.toml      disallowed types and macros for the step crates
-  docs/design/     overview.md (this document), programming-style.md, consumers.md
+  docs/design/     overview.md (this document), programming-style.md, consumers.md,
+                   testing-pyramid.md
   crates/
     skein-lib/     Id, Slab, Token, ReplyTo, Queue, List, Map, Set, Stack,
                    Reader, Writer, bytes, Deadlines, Time, Duration, Rng, Env;
@@ -510,7 +514,7 @@ service's `iterate` in turn.
 
   It checks that each one answers as section 6 allows. This keeps the
   simulator honest: a simulated kernel that drifts from the real one
-  tests the wrong thing.
+  tests the wrong thing (testing-pyramid.md, section 5).
 
 ## 10. Protocol machines
 

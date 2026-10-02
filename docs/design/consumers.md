@@ -227,7 +227,9 @@ top-level model crate.
 
 The rules every world follows (tiny limits, faults in every state, the
 universal invariants, coverage, memory, replay) are programming-style.md,
-section 10. The worlds a service builds:
+section 10. How the service's tiers sit on skein's own, and what skein
+supplies for each, is testing-pyramid.md, section 7. The worlds a service
+builds:
 
 - **Model worlds.** Each model, and each sub-model, runs in a world of its
   own: the model, the clock, the seeds, and fakes standing in for its
