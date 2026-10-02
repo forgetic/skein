@@ -312,8 +312,13 @@ all they share.
 
 ```rust
 // skein-io, a sketch of the kernel side
-pub struct Submit   { pub op: Token, pub kind: Op }          // io -> kernel
-pub struct Complete { pub op: Token, pub outcome: Outcome }  // kernel -> io
+// io -> kernel
+pub struct Submit   { pub op: Token, pub kind: Op }
+// kernel -> io: the operation handed back, and what came of it
+pub struct Complete { pub op: Token, pub kind: Op, pub result: Result<Done, Error> }
+
+// one success shape per operation
+pub enum Done { Nothing, Count(u32), Fd(Fd), Accepted { fd: Fd, peer: Addr }, Bound(Addr) }
 
 pub enum Op {
     // sockets
@@ -340,6 +345,10 @@ pub enum Op {
 }
 ```
 
+The completion hands back the operation it answers, buffers and all,
+beside its result (a `Done` of the one shape that operation succeeds
+with, or an `Error`), so every record comes back up whatever happened.
+
 - **Memory moves with the operation.** A buffer that the kernel will
   read or write is a `Box` inside the record. io moves it down, and the
   backend holds the record until the operation's completion. The
@@ -355,16 +364,54 @@ pub enum Op {
   (`Addr`, `Stat`, `Exit`) before they go up. io never sees a kernel
   layout, so it needs no `libc`. A backend for another kernel
   translates.
+- **Socket options are backend defaults, not records,** until a service
+  pulls one: every descriptor is close-on-exec, a socket that binds gets
+  `SO_REUSEADDR`, an IPv6 socket gets `IPV6_V6ONLY` (families never mix),
+  connected and accepted sockets get `TCP_NODELAY`, and a send never
+  raises `SIGPIPE`.
 - **Errors cross as a skein enum:** the errors io handles by name, plus
-  an `Other` code. Each backend maps its kernel's error numbers onto it.
+  an `Other` code. Each backend maps its kernel's error numbers onto it,
+  per operation: the same number can mean different things on a cancel
+  and on a receive.
 - **Every operation completes exactly once,** cancelled or not. A
   cancelled operation still completes: either as cancelled, or with
   what it did before the cancel landed. Until then, io keeps the entity
   *settling* (programming-style.md, 4.3).
+- **A cancel completes too,** before or after its target: found and
+  asked to stop, too late (the target had completed or could not be
+  stopped), or not submitted at all, when the backend failed. The
+  target's own completion always says what it did.
 - **Single-shot operations only, to start:** one submission, one
-  completion. The completion queue can then be sized from io's operation
-  slab, so it cannot overflow. Every receive and every accept is then a
-  choice io made while it had room.
+  completion, and every cancel takes an operation slot of its own. The
+  completion queue can then be sized from io's operation slab, so it
+  cannot overflow. Every receive and every accept is then a choice io
+  made while it had room.
+- **Sockets behave as Linux's do,** and the simulator matches them:
+  - a bind answers with the address bound, its port chosen when it
+    asked for port 0; two sockets may bind one address, and the second
+    listen fails;
+  - a full accept queue delays a connect, never refuses it; a failed
+    accept takes no waiting connection;
+  - a send's count is what the kernel accepted, and a half-close goes
+    out behind every completed send; receiving still works after it;
+  - a receive of zero bytes means the stream ended, which is not proof
+    of a graceful close;
+  - a reset fails one operation; after it, receives give zero bytes and
+    sends and half-closes fail;
+  - a descriptor is closed only by a close. Closing with unread data
+    resets the peer; closing a listener resets the connections waiting
+    on it.
+
+  `skein_io::kernel`'s module documentation states each rule exactly.
+- **Broken invariants** are mistakes io never makes, so backends may
+  assume they never happen: an invalid record (an empty receive
+  buffer, a send with nothing left), a token already in flight, a
+  cancel of a cancel, an address of the wrong family, more than one
+  receive, send or accept in flight on a socket or anything beside a
+  connect, any operation but close after a failed connect, a half-close
+  during a send, and a close with anything else in flight. The
+  simulator fails the world on each; the ring checks the first two at
+  submit.
 - **Some operations are synchronous:** spawning, signalling, making a
   pipe, listing a directory. None of these is a ring operation at the
   kernel floor (7.1), and some are not ring operations at all. The
@@ -507,7 +554,9 @@ service's `iterate` in turn.
   ones and its memory check (programming-style.md, section 10):
   - at every iteration, one completion per operation, and every record
     handed back;
-  - at quiescence, no operation in flight.
+  - at quiescence, no operation in flight;
+  - at every submit, none of section 6's broken invariants: each one
+    fails the world.
 - **Conformance.** One suite of scripted operation sequences runs
   against each backend:
   - the ring, on the real kernel, with loopback sockets and a scratch
