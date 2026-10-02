@@ -487,7 +487,7 @@ refuses to start when the sum exceeds the configured memory. An
 allocation failure is then a bug or fragmentation, never load. A layer
 adds up what its containers report, not `size_of` times a capacity: each
 lib container has its own `worst_case(capacity)` (`Slab`, `Queue`, `List`,
-`Map`, `Set`, `Deadlines`, `Intake`), which counts its bookkeeping too: a
+`Map`, `Set`, `Stack`, `Deadlines`, `Intake`), which counts its bookkeeping too: a
 slab's slot tags and free lists, the tree nodes of a map, a set or a
 deadline table. The formula counts containers and payload bytes, not
 allocator overhead: leave headroom, and measure the resident size under
@@ -703,7 +703,7 @@ layer, model and `iterate`) uses:
   B-trees), `Stack<T>`, `stream`, `Intake`, `Reader`, `Writer` (sized),
   `Decimal` (the digits of a count, for text protocols), `bytes::copy_of`, the byte search `bytes::find`, `find_from` and
   `count` (linear time, no allocation), `Deadlines`, `Time`, `Duration`,
-  `Rng`, `Env<L>`.
+  `Wall` (wall-clock time, never a deadline), `Rng`, `Env<L>`.
 
 lib uses the same, plus generic types, lifetime parameters on its cursors,
 hand-written impls of std traits for its own types, `Vec` inside its
