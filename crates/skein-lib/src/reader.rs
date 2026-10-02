@@ -8,7 +8,7 @@
 /// Integers are big-endian: byte order is chosen, never the host's. Counts
 /// are `u32`, as every length a demand delivers is, so a reader is over at
 /// most `u32::MAX` bytes.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Reader<'a> {
     rest: &'a [u8],
 }

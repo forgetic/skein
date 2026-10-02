@@ -13,11 +13,15 @@ use alloc::boxed::Box;
 pub enum Read {
     /// Nothing: no `Bytes` are delivered.
     Nothing,
-    /// Exactly this many bytes.
+    /// Exactly this many bytes. The count is at most the cap of the side
+    /// below; a larger one could never be met, and is the caller's bug,
+    /// asserted below.
     Fill(u32),
     /// The bytes up to and including the first `until`, if it ends within
     /// the first `max` bytes; otherwise exactly `max` bytes, which the side
     /// above, seeing no delimiter at their end, treats as a framing error.
+    /// `max` is at least the delimiter's length and at most the cap of the
+    /// side below; breaking either is the caller's bug, asserted below.
     Scan { until: Delimiter, max: u32 },
 }
 

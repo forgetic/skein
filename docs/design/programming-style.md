@@ -485,7 +485,7 @@ refuses to start when the sum exceeds the configured memory. An
 allocation failure is then a bug or fragmentation, never load. A layer
 adds up what its containers report, not `size_of` times a capacity: each
 lib container has its own `worst_case(capacity)` (`Slab`, `Queue`, `List`,
-`Map`, `Set`, `Deadlines`, `Intake`), which counts its bookkeeping too: a
+`Map`, `Set`, `Stack`, `Deadlines`, `Intake`), which counts its bookkeeping too: a
 slab's slot tags and free lists, the tree nodes of a map, a set or a
 deadline table. The formula counts containers and payload bytes, not
 allocator overhead: leave headroom, and measure the resident size under

@@ -100,7 +100,7 @@ skein/
   docs/design/     overview.md (this document), programming-style.md, consumers.md
   crates/
     skein-lib/     Id, Slab, Token, ReplyTo, Queue, List, Map, Set, Stack,
-                   Reader, Writer, bytes, Deadlines, Time, Duration, Rng, Env;
+                   Reader, Writer, bytes, Deadlines, Time, Duration, Wall, Rng, Env;
                    stream, Intake
     skein-io/      io::up, io::down: sockets, pipes, files, processes;
                    the operation and completion records

@@ -1,6 +1,6 @@
 [package]
 name = "skein-lib"
-description = "Handles, slabs, queues, maps, deadline tables, time and randomness for the step crates"
+description = "Handles, slabs, queues, maps, stacks, deadline tables, streams and their intake, readers and writers, time and randomness for the step crates"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
