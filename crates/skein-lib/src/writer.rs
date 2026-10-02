@@ -20,8 +20,8 @@ pub struct Writer {
     len: usize,
 }
 
-/// What a [`Writer`] refuses: bytes past the length it was made for. Nothing
-/// was written.
+/// What a [`Writer`] or an [`Intake`](crate::Intake) refuses: bytes past the
+/// length or the cap it was made for. Nothing was written.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Overflow;
 

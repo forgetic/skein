@@ -162,7 +162,10 @@ pub enum Up {                           // from the side below
   cap: io for a socket, TLS for its plaintext. `lib::Intake` is that
   buffer, written once:
   - it appends what arrives;
-  - it meets a fill or a scan as soon as it can;
+  - it meets a fill or a scan as soon as it can, and a scan that reaches
+    its maximum with no delimiter in it delivers exactly the maximum: the
+    demand was for at most that many bytes, so the side above sees a scan
+    that does not end with the delimiter and treats it as a framing error;
   - it reports the room left, so receiving stops at the cap.
 - **A stack is a connection's states, called in order,** with no
   pipeline type and no timers in the machines (programming-style.md,
