@@ -222,10 +222,11 @@ checks keep that trust earned:
   among outcomes the kernel allows (a short send, a cancel that loses
   the race), the suite checks the kernel's answer is one of them. Where
   the kernel answers one way, the simulator must too.
-- **The simulator checks io.** It refuses what the kernel refuses (an
-  operation on a closed descriptor, a buffer submitted twice), and
-  asserts the kernel boundary's invariants: one completion per
-  operation, every record handed back, nothing in flight at quiescence.
+- **The simulator checks io.** It fails the world on the kernel
+  boundary's broken invariants (an operation on a closed descriptor, a
+  token already in flight; overview.md, section 6), and asserts its
+  promises: one completion per operation, every record handed back,
+  nothing in flight at quiescence.
 
 A behaviour found in the kernel that the simulator lacks is added to
 the suite first, then to the simulator.

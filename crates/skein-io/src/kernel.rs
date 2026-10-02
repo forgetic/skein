@@ -48,7 +48,7 @@
 //!   never refuses it: `Refused` means nothing listens there.
 //! - **A failed `Accept`** (`TooManyOpenFiles`, `NoBufferSpace`) consumed no
 //!   waiting connection. A connection reset while waiting is still accepted,
-//!   and its first `Recv` fails with `Reset`.
+//!   and its first `Recv` or `Send` fails with `Reset`.
 //! - **A `Recv` of zero bytes means the stream ended:** the peer shut down or
 //!   closed, or a reset was already reported. It does not prove a graceful
 //!   close. A `Recv` buffer is never empty ([`Op::recv`]).
@@ -56,8 +56,9 @@
 //!   one and no more than were left. io continues a short send from
 //!   `from + n` (overview.md, 5.1).
 //! - **`Shutdown` ends this side's sending:** it completes `Ok` once the end
-//!   is queued, behind the bytes of every completed `Send`, and a second
-//!   `Shutdown` is `Ok` too. `Recv` keeps working after it.
+//!   is queued, behind the bytes of every completed `Send`. A second
+//!   `Shutdown` is `Ok` while the connection lasts and `NotConnected` once it
+//!   is closed. `Recv` keeps working after it.
 //! - **A reset is reported to exactly one operation,** as `Reset`. After it,
 //!   a `Recv` gives `Ok(Count(0))`, a `Send` fails with `BrokenPipe` and a
 //!   `Shutdown` with `NotConnected`.
@@ -94,7 +95,8 @@ use skein_lib::Token;
 
 /// A descriptor, in whatever backend issued it: a file descriptor on the
 /// ring, a table slot in the simulator. Only io and its backend ever see one,
-/// and it is closed only by [`Op::Close`].
+/// and it is closed only by [`Op::Close`]. The simulator never reuses a
+/// descriptor number, so an operation on a closed one is caught.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Fd(i32);
 
@@ -253,13 +255,13 @@ pub enum Error {
     /// `Recv`, `Send`, `Connect`: the peer reset the connection
     /// (`ECONNRESET`), reported to one operation only. `Accept`:
     /// `ECONNABORTED`, not seen on Linux, where a connection reset while it
-    /// waits is still accepted and its first `Recv` fails with this.
+    /// waits is still accepted and its first `Recv` or `Send` fails with this.
     Reset,
     /// `Send`: the connection can send no more, after a reset was reported or
     /// after this side's own `Shutdown` (`EPIPE`).
     BrokenPipe,
-    /// `Shutdown`: the socket is not connected, as after a reset was reported
-    /// (`ENOTCONN`).
+    /// `Shutdown`: the socket is not connected: after a reset or a timeout was
+    /// reported, or after both sides closed (`ENOTCONN`).
     NotConnected,
     /// `Bind`: a listening socket holds the address, or a socket bound without
     /// `SO_REUSEADDR`. `Listen`: another socket listens on it; two sockets
