@@ -30,11 +30,13 @@
 //!   did before the cancel landed. io keeps the entity *settling* until then
 //!   (programming-style.md, 4.3).
 //! - **A `Cancel` completes on its own,** before or after its target (the
-//!   simulator randomises which): `Ok(Nothing)` if it found the target in
-//!   flight, `Err(TooLate)` if the target had completed or could no longer be
-//!   stopped, `Err(InvalidArgument)` or `Err(Other)` if the backend could not
-//!   submit it, the target then not stopped. The target's own completion says
-//!   what it did.
+//!   simulator randomises which):
+//!   - `Ok(Nothing)`: it stopped the target, which completes `Err(Cancelled)`;
+//!   - `Err(TooLate)`: the target had completed or could no longer be
+//!     stopped, and completes with its own result, or `Err(Cancelled)` when
+//!     the kernel interrupted it;
+//!   - `Err(InvalidArgument)` or `Err(Other)`: the backend could not submit
+//!     it, and the target runs on.
 //!
 //! Sockets:
 //!
@@ -45,10 +47,12 @@
 //!   second `Listen` fails.
 //! - **`Listen`'s backlog is a hint** the backend may clamp; at least one
 //!   connection can always wait. A full accept queue delays a `Connect` and
-//!   never refuses it: `Refused` means nothing listens there.
+//!   never refuses it: `Refused` means nothing listened there when the
+//!   connect arrived. A `Connect` delayed too long fails with `TimedOut`.
 //! - **A failed `Accept`** (`TooManyOpenFiles`, `NoBufferSpace`) consumed no
-//!   waiting connection. A connection reset while waiting is still accepted,
-//!   and its first `Recv` or `Send` fails with `Reset`.
+//!   waiting connection. A connection reset while waiting is still accepted;
+//!   its first `Send`, or its first `Recv` after the bytes already received,
+//!   fails with `Reset`.
 //! - **A `Recv` of zero bytes means the stream ended:** the peer shut down or
 //!   closed, or a reset was already reported. It does not prove a graceful
 //!   close. A `Recv` buffer is never empty ([`Op::recv`]).
@@ -59,12 +63,23 @@
 //!   is queued, behind the bytes of every completed `Send`. A second
 //!   `Shutdown` is `Ok` while the connection lasts and `NotConnected` once it
 //!   is closed. `Recv` keeps working after it.
-//! - **A reset is reported to exactly one operation,** as `Reset`. After it,
-//!   a `Recv` gives `Ok(Count(0))`, a `Send` fails with `BrokenPipe` and a
-//!   `Shutdown` with `NotConnected`.
+//! - **A reset is reported to exactly one operation,** as `Reset` (or
+//!   `TimedOut`, when this end gave up): to a `Send` at once, to a `Recv`
+//!   after the bytes already received, which stay readable. After it, a
+//!   `Recv` gives `Ok(Count(0))`, a `Send` fails with `BrokenPipe` and a
+//!   `Shutdown` with `NotConnected`. An end that already received the peer's
+//!   end of stream hears of no reset: its `Recv` drains to `Ok(Count(0))`,
+//!   its `Send` fails with `BrokenPipe`, its `Shutdown` with `NotConnected`.
+//! - **A `Send` after the peer closed** with nothing unread may succeed once,
+//!   its bytes lost; later ones fail with `BrokenPipe`, never `Reset`.
 //! - **An [`Fd`] is closed only by `Close`,** which releases it whatever its
 //!   result. A `Close` with received data unread makes the peer see `Reset`;
 //!   closing a listener resets the connections waiting on it.
+//! - **Records the kernel refuses for the socket's state** are bugs in io,
+//!   answered rather than assumed away: a `Recv` on a socket never connected
+//!   fails with `NotConnected`, a `Send` with `BrokenPipe`; a second `Bind`,
+//!   a `Bind` or `Listen` on a connected socket, and an `Accept` on one that
+//!   does not listen, with `InvalidArgument`.
 //!
 //! Broken invariants, which io never commits and backends may assume never
 //! happen. The simulator fails the world on each; the ring asserts the first
@@ -78,6 +93,11 @@
 //!   flight, or anything in flight beside a `Connect`;
 //! - after a `Connect` that failed or was cancelled, any operation on its
 //!   descriptor but `Close`;
+//! - a `Connect` on a socket that is not fresh (bound or not, but never
+//!   connecting, connected or listening);
+//! - a `Listen` on a socket that is not bound;
+//! - a `Shutdown` on a socket that is not a connection (a listener, or one
+//!   never connected);
 //! - a `Shutdown` while a `Send` on its descriptor is in flight;
 //! - a `Close` while any other operation on its descriptor is in flight, or
 //!   any operation on a descriptor after its `Close`.
@@ -253,19 +273,23 @@ pub enum Shape {
 /// adapter), and anything else onto `Other`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Error {
-    /// `Connect`: nothing listens at the address (`ECONNREFUSED`). A full
-    /// accept queue delays a `Connect`, never refuses it.
+    /// `Connect`: nothing listened at the address when the connect arrived
+    /// (`ECONNREFUSED`). A full accept queue delays a `Connect`, never refuses
+    /// it.
     Refused,
     /// `Recv`, `Send`, `Connect`: the peer reset the connection
-    /// (`ECONNRESET`), reported to one operation only. `Accept`:
+    /// (`ECONNRESET`), reported to one operation only, and to a `Recv` after
+    /// the bytes already received. `Accept`:
     /// `ECONNABORTED`, not seen on Linux, where a connection reset while it
     /// waits is still accepted and its first `Recv` or `Send` fails with this.
     Reset,
-    /// `Send`: the connection can send no more, after a reset was reported or
-    /// after this side's own `Shutdown` (`EPIPE`).
+    /// `Send`: the connection can send no more: after a reset was reported,
+    /// after this side's own `Shutdown`, after the peer closed, or on a socket
+    /// never connected (`EPIPE`).
     BrokenPipe,
-    /// `Shutdown`: the socket is not connected: after a reset or a timeout was
-    /// reported, or after both sides closed (`ENOTCONN`).
+    /// `Shutdown`: the socket is not connected: after a reset or a timeout,
+    /// reported or not, or after both sides closed. `Recv`: the socket was
+    /// never connected (`ENOTCONN`).
     NotConnected,
     /// `Bind`: a listening socket holds the address, or a socket bound without
     /// `SO_REUSEADDR`. `Listen`: another socket listens on it; two sockets
@@ -280,7 +304,8 @@ pub enum Error {
     Unreachable,
     /// `Connect`, `Recv`, `Send`: the kernel's own timeout, such as a connect
     /// that was never answered or retransmissions that went unacknowledged
-    /// (`ETIMEDOUT`). io's own deadlines are not this: they end in a `Cancel`.
+    /// (`ETIMEDOUT`), reported as a reset is. io's own deadlines are not this:
+    /// they end in a `Cancel`.
     TimedOut,
     /// `Socket`, `Accept`: the process or the system has no descriptor left
     /// (`EMFILE`, `ENFILE`). A failed `Accept` consumed no waiting connection.
@@ -294,7 +319,8 @@ pub enum Error {
     Cancelled,
     /// `Cancel` only: the target had already completed, or was too far along
     /// to stop (`ENOENT`, `EALREADY`; on any other operation those are
-    /// `Other`). Its own completion says what it did.
+    /// `Other`). Its own completion says what it did: its own result, or
+    /// `Cancelled` when the kernel interrupted it.
     TooLate,
     /// Any operation: the record was one the kernel refuses, such as `Listen`
     /// on a connected socket (`EINVAL`, `EAFNOSUPPORT`). A bug in io, reported
