@@ -612,7 +612,10 @@ fn operation_error(kind: &Op, errno: i32) -> Error {
             libc::EADDRNOTAVAIL => Some(Error::AddressNotAvailable),
             other => stream_error(other),
         },
-        Op::Recv { .. } => stream_error(errno),
+        Op::Recv { .. } => match errno {
+            libc::ENOTCONN => Some(Error::NotConnected),
+            other => stream_error(other),
+        },
         Op::Send { .. } => match errno {
             libc::EPIPE => Some(Error::BrokenPipe),
             other => stream_error(other),
