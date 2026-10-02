@@ -377,10 +377,11 @@ with, or an `Error`), so every record comes back up whatever happened.
   cancelled operation still completes: either as cancelled, or with
   what it did before the cancel landed. Until then, io keeps the entity
   *settling* (programming-style.md, 4.3).
-- **A cancel completes too,** before or after its target: found and
-  asked to stop, too late (the target had completed or could not be
-  stopped), or not submitted at all, when the backend failed. The
-  target's own completion always says what it did.
+- **A cancel completes too,** before or after its target: it stopped
+  the target, which then completes cancelled; too late (the target had
+  completed or could not be stopped, and completes with its own result
+  or cancelled, if the kernel interrupted it); or not submitted at all,
+  when the backend failed, the target running on.
 - **Single-shot operations only, to start:** one submission, one
   completion, and every cancel takes an operation slot of its own. The
   completion queue can then be sized from io's operation slab, so it
@@ -390,14 +391,18 @@ with, or an `Error`), so every record comes back up whatever happened.
   - a bind answers with the address bound, its port chosen when it
     asked for port 0; two sockets may bind one address, and the second
     listen fails;
-  - a full accept queue delays a connect, never refuses it; a failed
-    accept takes no waiting connection;
+  - a full accept queue delays a connect, never refuses it (refused
+    means nothing listened there), until it times out; a failed accept
+    takes no waiting connection;
   - a send's count is what the kernel accepted, and a half-close goes
     out behind every completed send; receiving still works after it;
   - a receive of zero bytes means the stream ended, which is not proof
     of a graceful close;
-  - a reset fails one operation; after it, receives give zero bytes and
-    sends and half-closes fail;
+  - a reset fails one operation: a send at once, a receive after the
+    bytes already received; after it, receives give zero bytes and sends
+    and half-closes fail. An end that already received the peer's end of
+    stream hears of no reset, and a send after the peer closed may
+    succeed once, its bytes lost, then fails without a reset;
   - a descriptor is closed only by a close. Closing with unread data
     resets the peer; closing a listener resets the connections waiting
     on it.
@@ -408,8 +413,10 @@ with, or an `Error`), so every record comes back up whatever happened.
   buffer, a send with nothing left), a token already in flight, a
   cancel of a cancel, an address of the wrong family, more than one
   receive, send or accept in flight on a socket or anything beside a
-  connect, any operation but close after a failed connect, a half-close
-  during a send, and a close with anything else in flight. The
+  connect, any operation but close after a failed connect, a connect on
+  a socket that is not fresh, a listen on an unbound socket, a half-close
+  on a socket that is not a connection or during a send, and a close
+  with anything else in flight. The
   simulator fails the world on each; the ring checks the first two at
   submit.
 - **Some operations are synchronous:** spawning, signalling, making a
