@@ -1,0 +1,31 @@
+# What the shell may not use. It is ordinary Rust, with the two rules of its
+# own in programming-style.md, 9.2: `unsafe` in the ring adapter only (the
+# lints in Cargo.toml), and no std handle types that close on drop (here).
+
+# Tests run against the real kernel and may assert by panicking.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+
+doc-valid-idents = ["io_uring", ".."]
+
+disallowed-types = [
+    # A descriptor is a plain Fd, closed by a Close record.
+    { path = "std::os::fd::OwnedFd", reason = "a descriptor is closed by a Close record, not on drop" },
+    { path = "std::fs::File", reason = "a descriptor is closed by a Close record, not on drop" },
+    { path = "std::net::TcpStream", reason = "a descriptor is closed by a Close record, not on drop" },
+    { path = "std::net::TcpListener", reason = "a descriptor is closed by a Close record, not on drop" },
+    { path = "std::net::UdpSocket", reason = "a descriptor is closed by a Close record, not on drop" },
+    { path = "std::process::Child", reason = "std::process is not used (overview.md, 5.3)" },
+    { path = "std::process::Command", reason = "std::process is not used (overview.md, 5.3)" },
+    # Time is the Clock's: CLOCK_MONOTONIC as a skein_lib::Time, which the
+    # ring's wait takes as an absolute deadline.
+    { path = "std::time::Instant", reason = "skein_shell::Clock, a skein_lib::Time" },
+    { path = "std::time::SystemTime", reason = "skein_shell::Clock, a skein_lib::Wall" },
+    { path = "std::collections::HashMap", reason = "iteration order depends on a random seed: BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order depends on a random seed: BTreeSet" },
+]
+
+disallowed-methods = [
+    { path = "std::thread::spawn", reason = "one loop per process, and the ring is set up for a single issuer" },
+]

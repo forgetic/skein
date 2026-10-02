@@ -13,6 +13,12 @@ publish = false
 [workspace.dependencies]
 skein-lib = { path = "crates/skein-lib" }
 skein-io = { path = "crates/skein-io" }
+skein-shell = { path = "crates/skein-shell" }
+
+# The only dependencies from outside the workspace, with rustls later
+# (programming-style.md, 9.2): the shell's, for the ring adapter.
+io-uring = "0.7.15"
+libc = "0.2.186"
 
 # Panics are fail-stop and overflow traps, in every profile. (The test harness
 # needs unwinding, so cargo ignores `panic` for test targets.)
