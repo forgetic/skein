@@ -164,3 +164,41 @@ fn a_late_cancel_never_lands_on_a_later_operation_with_its_target_token() {
     assert_eq!(got.len(), 1, "only the cancel completes");
     assert_eq!((got[0].op, got[0].result), (cancel, Err(Error::TooLate)), "its target is gone");
 }
+
+#[test]
+fn a_raced_cancel_may_interrupt_its_target_and_say_it_was_too_late() {
+    let faults = Faults { cancel_race: 1000, latency_max: Duration::from_millis(1), ..Faults::NONE };
+    let (mut stopped, mut interrupted) = (0_u32, 0_u32);
+    for seed in 0..32_u64 {
+        let mut world = World::new(seed, Config { faults, ..Config::calm() });
+        let server = world.spawn();
+        let (listener, _) = world.listener(server);
+        let accept = world.submit(server, Op::Accept { fd: listener });
+        let cancel = world.submit(server, Op::Cancel { target: accept });
+        assert!(world.sim.advance(), "the cancel lands");
+        let (of_cancel, of_target, _) = both(&mut world, server, cancel, accept);
+        assert_eq!(of_target.result, Err(Error::Cancelled), "nothing connected: the accept is stopped");
+        match of_cancel.result {
+            Ok(Done::Nothing) => stopped = stopped.checked_add(1).unwrap(),
+            Err(Error::TooLate) => interrupted = interrupted.checked_add(1).unwrap(),
+            other => panic!("seed {seed}: a cancel: {other:?}"),
+        }
+    }
+    assert!(stopped > 0 && interrupted > 0, "{stopped} stopped, {interrupted} interrupted");
+}
+
+#[test]
+fn a_cancel_the_backend_cannot_submit_leaves_its_target_running() {
+    let faults = Faults { cancel_unsubmitted: 1000, ..Faults::NONE };
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (c, s) = world.pair(client, server);
+    let recv = world.submit(server, recv_op(s, 8));
+    world.sim.set_faults(faults);
+    let cancel = world.submit(server, Op::Cancel { target: recv });
+    let complete = world.reap_one(server, cancel);
+    assert!(matches!(complete.result, Err(Error::Other(_))), "not submitted: {:?}", complete.result);
+    world.sim.set_faults(Faults::NONE);
+    assert_eq!(world.send(client, c, b"still"), Ok(Done::Count(5)));
+    assert_eq!(received(world.reap_one(server, recv)), Ok(b"still".to_vec()), "the target ran on");
+}

@@ -4,7 +4,8 @@ use alloc::boxed::Box;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use skein_io::kernel::{Done, Error, Family, Op};
-use skein_sim::Config;
+use skein_lib::{Duration, Time};
+use skein_sim::{Config, Faults};
 
 use crate::support::{World, local, received, recv_op};
 
@@ -242,7 +243,7 @@ fn closing_a_listener_refuses_the_connects_still_waiting_for_room() {
 }
 
 #[test]
-fn a_connection_reset_while_waiting_is_still_accepted() {
+fn a_connection_closed_while_waiting_is_still_accepted_and_ends_after_its_bytes() {
     let mut world = World::calm();
     let (client, server) = (world.spawn(), world.spawn());
     let (listener, addr) = world.listener(server);
@@ -258,22 +259,196 @@ fn a_connection_reset_while_waiting_is_still_accepted() {
 #[test]
 fn records_the_kernel_refuses_for_the_socket_state_fail_without_effect() {
     let mut world = World::calm();
-    let pid = world.spawn();
-    let fd = world.socket(pid);
-    assert_eq!(world.call(pid, Op::Accept { fd }).result, Err(Error::InvalidArgument), "not listening");
-    assert_eq!(world.listen(pid, fd), Err(Error::InvalidArgument), "not bound");
-    assert_eq!(world.recv(pid, fd, 4), Err(Error::NotConnected));
-    assert_eq!(world.send(pid, fd, b"x"), Err(Error::BrokenPipe));
-    assert_eq!(world.shutdown(pid, fd), Err(Error::NotConnected));
-    world.bind(pid, fd, local(0)).unwrap();
-    assert_eq!(world.bind(pid, fd, local(0)), Err(Error::InvalidArgument), "bound already");
-    world.close(pid, fd);
-    world.settled(pid);
+    let (client, server) = (world.spawn(), world.spawn());
+    let fd = world.socket(client);
+    assert_eq!(world.call(client, Op::Accept { fd }).result, Err(Error::InvalidArgument), "not listening");
+    assert_eq!(world.recv(client, fd, 4), Err(Error::NotConnected), "never connected");
+    assert_eq!(world.send(client, fd, b"x"), Err(Error::BrokenPipe), "never connected");
+    world.bind(client, fd, local(0)).unwrap();
+    assert_eq!(world.bind(client, fd, local(0)), Err(Error::InvalidArgument), "bound already");
+    world.close(client, fd);
+    let (c, s) = world.pair(client, server);
+    assert_eq!(world.bind(client, c, local(0)), Err(Error::InvalidArgument), "connected");
+    assert_eq!(world.listen(server, s), Err(Error::InvalidArgument), "connected");
+    world.close(client, c);
+    world.close(server, s);
+    world.settled(client);
+    world.settled(server);
+}
+
+#[test]
+fn a_connection_reset_while_waiting_is_still_accepted_and_reports_after_its_bytes() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (listener, addr) = world.listener(server);
+    let fd = world.socket(client);
+    assert_eq!(world.connect(client, fd, addr), Ok(Done::Nothing));
+    assert_eq!(world.send(client, fd, b"hi"), Ok(Done::Count(2)));
+    world.sim.set_faults(Faults { reset: 1000, ..Faults::NONE });
+    assert_eq!(world.send(client, fd, b"more"), Err(Error::Reset), "the reset, on the client's end");
+    world.sim.set_faults(Faults::NONE);
+    let (accepted, _) = world.accept(server, listener);
+    assert_eq!(world.recv(server, accepted, 8), Ok(b"hi".to_vec()), "the bytes received before the reset");
+    assert_eq!(world.recv(server, accepted, 8), Err(Error::Reset), "then the reset");
+    assert_eq!(world.recv(server, accepted, 8), Ok(Vec::new()));
+}
+
+#[test]
+fn a_reset_is_reported_to_a_recv_after_the_bytes_already_received() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (c, s) = world.pair(client, server);
+    assert_eq!(world.send(server, s, b"x"), Ok(Done::Count(1)));
+    assert_eq!(world.send(client, c, b"unread"), Ok(Done::Count(6)));
+    world.close(server, s);
+    assert_eq!(world.recv(client, c, 8), Ok(b"x".to_vec()));
+    assert_eq!(world.recv(client, c, 8), Err(Error::Reset));
+    assert_eq!(world.recv(client, c, 8), Ok(Vec::new()));
+}
+
+#[test]
+fn a_reset_is_reported_to_a_send_at_once_and_the_bytes_stay_readable() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (c, s) = world.pair(client, server);
+    assert_eq!(world.send(server, s, b"x"), Ok(Done::Count(1)));
+    assert_eq!(world.send(client, c, b"unread"), Ok(Done::Count(6)));
+    world.close(server, s);
+    assert_eq!(world.send(client, c, b"y"), Err(Error::Reset));
+    assert_eq!(world.recv(client, c, 8), Ok(b"x".to_vec()));
+    assert_eq!(world.recv(client, c, 8), Ok(Vec::new()));
+}
+
+#[test]
+fn an_end_that_got_the_peer_end_of_stream_hears_of_no_reset() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (c, s) = world.pair(client, server);
+    assert_eq!(world.send(client, c, b"unread"), Ok(Done::Count(6)));
+    assert_eq!(world.shutdown(server, s), Ok(Done::Nothing));
+    world.close(server, s);
+    assert_eq!(world.recv(client, c, 8), Ok(Vec::new()), "the end of stream, and no reset");
+    assert_eq!(world.recv(client, c, 8), Ok(Vec::new()));
+    assert_eq!(world.send(client, c, b"y"), Err(Error::BrokenPipe));
+    assert_eq!(world.shutdown(client, c), Err(Error::NotConnected));
+}
+
+#[test]
+fn the_reset_fault_spares_an_end_that_got_the_peer_end_of_stream() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (c, s) = world.pair(client, server);
+    assert_eq!(world.shutdown(server, s), Ok(Done::Nothing));
+    world.sim.set_faults(Faults { reset: 1000, timed_out: 1000, ..Faults::NONE });
+    assert_eq!(world.send(client, c, b"still"), Ok(Done::Count(5)), "the peer can still read");
+    assert_eq!(world.recv(client, c, 8), Ok(Vec::new()));
+}
+
+#[test]
+fn a_timed_out_end_reports_it_once_and_its_peer_sees_a_reset() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (c, s) = world.pair(client, server);
+    world.sim.set_faults(Faults { timed_out: 1000, ..Faults::NONE });
+    assert_eq!(world.recv(client, c, 8), Err(Error::TimedOut));
+    world.sim.set_faults(Faults::NONE);
+    assert_eq!(world.recv(client, c, 8), Ok(Vec::new()));
+    assert_eq!(world.send(client, c, b"x"), Err(Error::BrokenPipe));
+    assert_eq!(world.send(server, s, b"x"), Err(Error::Reset));
+}
+
+#[test]
+fn a_connect_can_time_out_or_run_out_of_buffers_and_then_only_closes() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (_, addr) = world.listener(server);
+    for (faults, error) in [
+        (Faults { timed_out: 1000, ..Faults::NONE }, Error::TimedOut),
+        (Faults { no_buffer: 1000, ..Faults::NONE }, Error::NoBufferSpace),
+    ] {
+        let fd = world.socket(client);
+        world.sim.set_faults(faults);
+        assert_eq!(world.connect(client, fd, addr), Err(error));
+        world.sim.set_faults(Faults::NONE);
+        world.close(client, fd);
+    }
+    world.settled(client);
+}
+
+#[test]
+fn a_connect_waiting_for_room_times_out_at_the_syn_timeout() {
+    let syn_timeout = Duration::from_secs(3);
+    let mut world = World::new(1, Config { syn_timeout, ..Config::calm() });
+    let (client, server) = (world.spawn(), world.spawn());
+    let listener = world.socket(server);
+    let addr = world.bind(server, listener, local(0)).unwrap();
+    assert_eq!(world.call(server, Op::Listen { fd: listener, backlog: 1 }).result, Ok(Done::Nothing));
+    let (first, second) = (world.socket(client), world.socket(client));
+    assert_eq!(world.connect(client, first, addr), Ok(Done::Nothing));
+    let waiting = world.submit(client, Op::Connect { fd: second, addr });
+    assert_eq!(world.sim.next_due(), Some(Time::ZERO.saturating_add(syn_timeout)), "the SYN timeout");
+    assert!(world.sim.advance());
+    assert_eq!(world.reap_one(client, waiting).result, Err(Error::TimedOut));
+    world.accept(server, listener);
+    assert!(world.reap(client).is_empty(), "the timed-out connect no longer waits");
+    world.close(client, second);
+}
+
+#[test]
+fn a_connect_that_gets_room_cancels_its_syn_timeout() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let listener = world.socket(server);
+    let addr = world.bind(server, listener, local(0)).unwrap();
+    assert_eq!(world.call(server, Op::Listen { fd: listener, backlog: 1 }).result, Ok(Done::Nothing));
+    let (first, second) = (world.socket(client), world.socket(client));
+    assert_eq!(world.connect(client, first, addr), Ok(Done::Nothing));
+    let waiting = world.submit(client, Op::Connect { fd: second, addr });
+    world.accept(server, listener);
+    assert_eq!(world.reap_one(client, waiting).result, Ok(Done::Nothing));
+    assert_eq!(world.sim.next_due(), None, "nothing left to time out: the world is idle");
+}
+
+#[test]
+fn past_the_descriptor_limit_socket_and_accept_fail_and_accept_takes_no_connection() {
+    let mut world = World::new(1, Config { max_fds: 2, ..Config::calm() });
+    let (client, server) = (world.spawn(), world.spawn());
+    let (listener, addr) = world.listener(server);
+    let fd = world.socket(client);
+    assert_eq!(world.connect(client, fd, addr), Ok(Done::Nothing));
+    let spare = world.socket(server);
+    assert_eq!(world.call(server, Op::Socket { family: Family::Ipv4 }).result, Err(Error::TooManyOpenFiles));
+    assert_eq!(world.call(server, Op::Accept { fd: listener }).result, Err(Error::TooManyOpenFiles));
+    world.close(server, spare);
+    let (accepted, peer) = world.accept(server, listener);
+    assert_eq!(peer.ip(), Ipv4Addr::LOCALHOST, "the connection waited");
+    assert_eq!(world.send(client, fd, b"hi"), Ok(Done::Count(2)));
+    assert_eq!(world.recv(server, accepted, 8), Ok(b"hi".to_vec()));
+}
+
+#[test]
+fn out_of_buffers_an_operation_fails_having_done_nothing() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (listener, addr) = world.listener(server);
+    let fd = world.socket(client);
+    assert_eq!(world.connect(client, fd, addr), Ok(Done::Nothing));
+    world.sim.set_faults(Faults { no_buffer: 1000, ..Faults::NONE });
+    assert_eq!(world.call(server, Op::Socket { family: Family::Ipv4 }).result, Err(Error::NoBufferSpace));
+    assert_eq!(world.call(server, Op::Accept { fd: listener }).result, Err(Error::NoBufferSpace));
+    world.sim.set_faults(Faults::NONE);
+    let (accepted, _) = world.accept(server, listener);
+    assert_eq!(world.send(client, fd, b"hi"), Ok(Done::Count(2)));
+    world.sim.set_faults(Faults { no_buffer: 1000, ..Faults::NONE });
+    assert_eq!(world.recv(server, accepted, 8), Err(Error::NoBufferSpace));
+    assert_eq!(world.send(server, accepted, b"x"), Err(Error::NoBufferSpace));
+    world.sim.set_faults(Faults::NONE);
+    assert_eq!(world.recv(server, accepted, 8), Ok(b"hi".to_vec()), "the bytes are still there");
 }
 
 #[test]
 fn the_wall_clock_starts_where_configured_and_moves_with_time() {
     let world = World::calm();
     assert_eq!(world.sim.wall(), Config::calm().wall);
-    assert_eq!(world.sim.now(), skein_lib::Time::ZERO);
+    assert_eq!(world.sim.now(), Time::ZERO);
 }

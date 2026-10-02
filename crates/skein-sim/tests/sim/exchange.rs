@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, Submit};
 use skein_lib::{Queue, Rng, Token};
-use skein_sim::{Config, Entry, Pid, Sim};
+use skein_sim::{Config, Entry, Event, Fault, Pid, Sim};
 
 use crate::support::local;
 
@@ -36,6 +36,9 @@ enum Role {
 
 #[expect(clippy::struct_excessive_bools, reason = "a script's flags, read one at a time")]
 struct Actor {
+    seed: u64,
+    /// The script's own choices: when to cancel a waiting receive.
+    rng: Rng,
     pid: Pid,
     role: Role,
     next: u64,
@@ -44,6 +47,8 @@ struct Actor {
     listener: Option<Fd>,
     conn: Option<Fd>,
     accept: Option<Token>,
+    /// The `Recv` in flight.
+    receiving: Option<Token>,
     /// Where the client connects, once the server has bound.
     target: Option<Addr>,
     message: Box<[u8]>,
@@ -62,8 +67,10 @@ struct Actor {
 }
 
 impl Actor {
-    fn new(pid: Pid, role: Role, message: Box<[u8]>) -> Actor {
+    fn new(seed: u64, pid: Pid, role: Role, message: Box<[u8]>) -> Actor {
         Actor {
+            seed,
+            rng: Rng::new(seed ^ u64::from(pid.raw())),
             pid,
             role,
             next: 1,
@@ -72,6 +79,7 @@ impl Actor {
             listener: None,
             conn: None,
             accept: None,
+            receiving: None,
             target: None,
             message,
             sent: 0,
@@ -128,7 +136,7 @@ impl Actor {
 
     fn recv(&mut self) {
         let fd = self.conn.expect("a connection");
-        self.submit(Purpose::Recv, Op::Recv { fd, buf: vec![0; 97].into_boxed_slice() });
+        self.receiving = Some(self.submit(Purpose::Recv, Op::Recv { fd, buf: vec![0; 97].into_boxed_slice() }));
     }
 
     fn send(&mut self) {
@@ -163,9 +171,16 @@ impl Actor {
 
     /// Reacts to one completion; answers the bound address, for the client.
     fn on(&mut self, complete: Complete) -> Option<Addr> {
+        let seed = self.seed;
         let purpose = self.flights.remove(&complete.op).expect("a completion of an operation in flight");
+        if self.receiving == Some(complete.op) {
+            self.receiving = None;
+        }
         let mut bound = None;
         match (purpose, complete.kind, complete.result) {
+            (Purpose::Socket, kind, Err(Error::NoBufferSpace)) => {
+                self.submit(Purpose::Socket, kind);
+            }
             (Purpose::Socket, _, Ok(Done::Fd(fd))) => match self.role {
                 Role::Server => {
                     self.listener = Some(fd);
@@ -185,6 +200,9 @@ impl Actor {
                 let fd = self.listener.expect("a listener");
                 self.accept = Some(self.submit(Purpose::Accept, Op::Accept { fd }));
             }
+            (Purpose::Accept, kind, Err(Error::NoBufferSpace)) => {
+                self.accept = Some(self.submit(Purpose::Accept, kind));
+            }
             (Purpose::Accept, _, result) => {
                 self.accept = None;
                 let listener = self.listener.take().expect("a listener");
@@ -198,52 +216,23 @@ impl Actor {
                         self.broken = true;
                         self.done_unless_closing();
                     }
-                    other => panic!("an accept: {other:?}"),
+                    other => panic!("seed {seed}: an accept: {other:?}"),
                 }
             }
             (Purpose::Connect, _, Ok(Done::Nothing)) => self.stream(),
             (Purpose::Connect, _, Err(error)) => {
-                assert_eq!(error, Error::Refused, "a loopback connect fails only as refused");
+                assert!(
+                    matches!(error, Error::Refused | Error::NoBufferSpace | Error::TimedOut),
+                    "seed {seed}: a connect fails as refused, out of buffers or timed out: {error:?}"
+                );
                 self.broken = true;
                 self.gave_up = true;
                 let fd = self.conn.expect("a socket");
                 self.closing = true;
                 self.submit(Purpose::Close, Op::Close { fd });
             }
-            (Purpose::Recv, Op::Recv { buf, .. }, Ok(Done::Count(0))) => {
-                drop(buf);
-                self.reading = false;
-            }
-            (Purpose::Recv, Op::Recv { buf, .. }, Ok(Done::Count(n))) => {
-                self.received.extend_from_slice(&buf[..usize::try_from(n).unwrap()]);
-                self.recv();
-            }
-            (Purpose::Recv, _, Err(error)) => {
-                assert_eq!(error, Error::Reset, "a receive fails only by a reset here");
-                self.broken = true;
-                self.reading = false;
-            }
-            (Purpose::Send, _, Ok(Done::Count(n))) => {
-                self.sent = self.sent.checked_add(n).unwrap();
-                if usize::try_from(self.sent).unwrap() < self.message.len() {
-                    self.send();
-                } else {
-                    let fd = self.conn.expect("a connection");
-                    self.submit(Purpose::Shutdown, Op::Shutdown { fd });
-                }
-            }
-            (Purpose::Send, _, Err(error)) => {
-                assert!(matches!(error, Error::Reset | Error::BrokenPipe), "a send fails by a reset: {error:?}");
-                self.broken = true;
-                self.writing = false;
-            }
-            (Purpose::Shutdown, _, result) => {
-                match result {
-                    Ok(Done::Nothing) => {}
-                    Err(Error::NotConnected) => self.broken = true,
-                    other => panic!("a shutdown: {other:?}"),
-                }
-                self.writing = false;
+            (purpose @ (Purpose::Recv | Purpose::Send | Purpose::Shutdown), kind, result) => {
+                self.on_stream(purpose, kind, result);
             }
             (Purpose::Close, _, Ok(Done::Nothing)) => {
                 if self.closing {
@@ -253,12 +242,78 @@ impl Actor {
                 }
             }
             (Purpose::Cancel, _, result) => {
-                assert!(matches!(result, Ok(Done::Nothing) | Err(Error::TooLate)), "a cancel: {result:?}");
+                assert!(
+                    matches!(result, Ok(Done::Nothing) | Err(Error::TooLate | Error::Other(_))),
+                    "seed {seed}: a cancel: {result:?}"
+                );
             }
-            (purpose, kind, result) => panic!("{purpose:?} answered {kind:?} with {result:?}"),
+            (purpose, kind, result) => panic!("seed {seed}: {purpose:?} answered {kind:?} with {result:?}"),
         }
         self.maybe_close();
         bound
+    }
+
+    /// Reacts to the completion of a receive, a send or a shutdown.
+    fn on_stream(&mut self, purpose: Purpose, kind: Op, result: Result<Done, Error>) {
+        let seed = self.seed;
+        match (purpose, kind, result) {
+            (Purpose::Recv, Op::Recv { buf, .. }, Ok(Done::Count(0))) => {
+                drop(buf);
+                self.reading = false;
+            }
+            (Purpose::Recv, Op::Recv { buf, .. }, Ok(Done::Count(n))) => {
+                self.received.extend_from_slice(&buf[..usize::try_from(n).unwrap()]);
+                self.recv();
+            }
+            (Purpose::Recv, _, Err(Error::NoBufferSpace | Error::Cancelled)) => self.recv(),
+            (Purpose::Recv, _, Err(error)) => {
+                assert!(
+                    matches!(error, Error::Reset | Error::TimedOut),
+                    "seed {seed}: a receive fails by a reset or a timeout: {error:?}"
+                );
+                self.broken = true;
+                self.reading = false;
+            }
+            (Purpose::Send, _, Ok(Done::Count(n))) => {
+                self.maybe_cancel_recv();
+                self.sent = self.sent.checked_add(n).unwrap();
+                if usize::try_from(self.sent).unwrap() < self.message.len() {
+                    self.send();
+                } else {
+                    let fd = self.conn.expect("a connection");
+                    self.submit(Purpose::Shutdown, Op::Shutdown { fd });
+                }
+            }
+            (Purpose::Send, _, Err(Error::NoBufferSpace)) => self.send(),
+            (Purpose::Send, _, Err(error)) => {
+                assert!(
+                    matches!(error, Error::Reset | Error::BrokenPipe | Error::TimedOut),
+                    "seed {seed}: a send fails by a reset or a timeout: {error:?}"
+                );
+                self.broken = true;
+                self.writing = false;
+            }
+            (Purpose::Shutdown, _, result) => {
+                match result {
+                    Ok(Done::Nothing) => {}
+                    Err(Error::NotConnected) => self.broken = true,
+                    other => panic!("seed {seed}: a shutdown: {other:?}"),
+                }
+                self.writing = false;
+            }
+            (purpose, kind, result) => panic!("seed {seed}: {purpose:?} answered {kind:?} with {result:?}"),
+        }
+    }
+
+    /// Now and then, cancels the waiting receive, as io does on a deadline.
+    fn maybe_cancel_recv(&mut self) {
+        let cancelling = self.flights.values().any(|purpose| *purpose == Purpose::Cancel);
+        if let Some(recv) = self.receiving
+            && !cancelling
+            && self.rng.chance(100)
+        {
+            self.submit(Purpose::Cancel, Op::Cancel { target: recv });
+        }
     }
 
     fn done_unless_closing(&mut self) {
@@ -323,8 +378,8 @@ fn message(rng: &mut Rng, most: u64) -> Box<[u8]> {
 pub fn run(seed: u64, config: Config) -> Outcome {
     let mut sim = Sim::new(seed, config);
     let mut rng = Rng::new(seed ^ 0x5eed);
-    let mut server = Actor::new(sim.spawn_process(), Role::Server, message(&mut rng, 3000));
-    let mut client = Actor::new(sim.spawn_process(), Role::Client, message(&mut rng, 3000));
+    let mut server = Actor::new(seed, sim.spawn_process(), Role::Server, message(&mut rng, 3000));
+    let mut client = Actor::new(seed, sim.spawn_process(), Role::Client, message(&mut rng, 3000));
     server.start();
     client.submit(Purpose::Socket, Op::Socket { family: Family::Ipv4 });
     let mut steps = 0_u32;
@@ -374,16 +429,71 @@ fn a_calm_exchange_delivers_every_byte_both_ways() {
     }
 }
 
+/// Whether a process reaped a completion of an operation submitted before
+/// one it had already reaped.
+fn reordered(trace: &[Entry]) -> bool {
+    let mut submitted = BTreeMap::new();
+    let mut latest = BTreeMap::new();
+    for (index, entry) in trace.iter().enumerate() {
+        match entry.event {
+            Event::Submit { op, .. } => {
+                submitted.insert((entry.pid, op), index);
+            }
+            Event::Complete { op, .. } => {
+                let at = submitted[&(entry.pid, op)];
+                let last = latest.entry(entry.pid).or_insert(at);
+                if at < *last {
+                    return true;
+                }
+                *last = at;
+            }
+            Event::Fault(_) => {}
+        }
+    }
+    false
+}
+
 #[test]
 fn a_chaotic_exchange_keeps_every_invariant_for_many_seeds() {
     let mut broken = 0_u32;
+    let mut reorders = 0_u32;
+    let mut faults = BTreeMap::new();
+    let mut errors = BTreeMap::new();
     for seed in 0..200_u64 {
-        if run(seed, Config::chaos()).broken {
+        let outcome = run(seed, Config::chaos());
+        if outcome.broken {
             broken = broken.checked_add(1).unwrap();
+        }
+        if reordered(&outcome.trace) {
+            reorders = reorders.checked_add(1).unwrap();
+        }
+        for entry in &outcome.trace {
+            match entry.event {
+                Event::Fault(fault) => *faults.entry(fault).or_insert(0_u32) += 1,
+                Event::Complete { result: Err(error), .. } => *errors.entry(error).or_insert(0_u32) += 1,
+                Event::Submit { .. } | Event::Complete { .. } => {}
+            }
         }
     }
     assert!(broken > 0, "chaos breaks some connections");
     assert!(broken < 100, "and most of them deliver everything: {broken}");
+    assert!(reorders > 0, "completions arrive out of order");
+    for fault in [
+        Fault::Latency,
+        Fault::ShortRecv,
+        Fault::ShortSend,
+        Fault::Reset,
+        Fault::Refuse,
+        Fault::NoBuffer,
+        Fault::TimedOut,
+        Fault::CancelRace,
+        Fault::CancelUnsubmitted,
+    ] {
+        assert!(faults.contains_key(&fault), "{fault:?} fell in some seed: {faults:?}");
+    }
+    for error in [Error::Reset, Error::Refused, Error::NoBufferSpace, Error::TimedOut, Error::Cancelled] {
+        assert!(errors.contains_key(&error), "some operation failed with {error:?}: {errors:?}");
+    }
 }
 
 #[test]

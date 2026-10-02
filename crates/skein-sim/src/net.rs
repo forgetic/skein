@@ -4,7 +4,7 @@
 use alloc::collections::VecDeque;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use skein_io::kernel::{Addr, Family, Fd};
+use skein_io::kernel::{Addr, Error, Family, Fd};
 use skein_lib::Token;
 
 use crate::sim::Pid;
@@ -77,11 +77,13 @@ pub(crate) struct Stream {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Fate {
     Open,
-    /// Reset, to be reported to the next `Recv` (once the bytes already
-    /// received are read) or `Send`.
-    Reset,
-    /// Reset and reported, or broken after the peer closed: a `Recv` gives
-    /// what is left then 0, a `Send` fails with `BrokenPipe`.
+    /// Broke with `Reset` or `TimedOut`, to be reported to the next `Send`,
+    /// or to the next `Recv` once the bytes already received are read.
+    Failing(Error),
+    /// Broke and reported, or broke after the peer's end of stream arrived
+    /// (never reported), or after the peer closed: a `Recv` gives what is
+    /// left then 0, a `Send` fails with `BrokenPipe`, a `Shutdown` with
+    /// `NotConnected`.
     Dead,
 }
 

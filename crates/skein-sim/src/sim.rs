@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::net::{
     EPHEMERAL_FIRST, EPHEMERAL_LAST, Fate, Listener, Socket, SocketId, State, Stream, bindable, loopback, overlaps,
 };
-use crate::trace::{self, Entry, Event, Summary};
+use crate::trace::{self, Entry, Event, Fault, Summary};
 
 /// A simulated process: a plain handle, from [`Sim::spawn_process`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -40,6 +40,10 @@ const FIRST_FD: i32 = 3;
 /// How many trace entries a failure prints.
 const TAIL: usize = 24;
 
+/// The code of a `Cancel` the backend could not submit: `EAGAIN`, as for a
+/// full submission queue.
+const UNSUBMITTED: i32 = 11;
+
 #[derive(Debug)]
 struct Process {
     /// The next descriptor number: numbers are never reused.
@@ -63,6 +67,8 @@ struct Flight {
     held: Option<Op>,
     /// Its completion was made.
     done: bool,
+    /// The SYN timeout of a waiting `Connect`, in the schedule.
+    timer: Option<(Time, u64)>,
 }
 
 /// Something the world will do at a later time.
@@ -72,6 +78,8 @@ enum Due {
     Post { pid: Pid, complete: Complete },
     /// A raced `Cancel` reaches its target.
     Land { pid: Pid, cancel: Token, target: Token, serial: u64 },
+    /// A `Connect` waiting for room gives up.
+    Expire { pid: Pid, connect: Token },
 }
 
 /// The simulated kernel (overview.md, section 9), for every process of one
@@ -96,6 +104,7 @@ pub struct Sim {
 impl Sim {
     #[must_use]
     pub fn new(seed: u64, config: Config) -> Sim {
+        assert!(config.buffer >= 1, "a socket buffer holds at least one byte");
         Sim {
             seed,
             config,
@@ -120,6 +129,12 @@ impl Sim {
     #[must_use]
     pub const fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// Changes the faults from now on, for a test that wants one at a given
+    /// moment.
+    pub const fn set_faults(&mut self, faults: crate::Faults) {
+        self.config.faults = faults;
     }
 
     /// The monotonic time of the world.
@@ -167,7 +182,9 @@ impl Sim {
             let Some(flight) = self.process_mut(pid).flights.remove(&complete.op) else {
                 self.fail(pid, &format!("a completion of {:?}, which is not in flight", complete.op));
             };
-            assert!(flight.done, "a delivered completion was made");
+            if !flight.done {
+                self.fail(pid, &format!("a completion of {:?} delivered before it was made", complete.op));
+            }
             let event = Event::Complete { op: complete.op, kind: flight.kind, result: complete.result };
             self.record(pid, event);
             completions.push(complete);
@@ -201,7 +218,9 @@ impl Sim {
     }
 
     /// Moves time to [`Sim::next_due`] and does what was due then. False, and
-    /// time unmoved, when the world is idle.
+    /// time unmoved, when the world is idle. A world that hosts services
+    /// moves instead to the earlier of `next_due` and their earliest
+    /// deadline, with [`Sim::advance_to`].
     pub fn advance(&mut self) -> bool {
         match self.next_due() {
             Some(at) => {
@@ -215,7 +234,9 @@ impl Sim {
     /// Moves time to `at`, doing everything due until then, in order: for a
     /// process's own deadline. Time never moves back.
     pub fn advance_to(&mut self, at: Time) {
-        assert!(at >= self.now, "time moves forward only");
+        if at < self.now {
+            self.bug(&format!("time moved back, to {} ns", at.as_nanos()));
+        }
         while let Some(entry) = self.schedule.first_entry() {
             let (when, _) = *entry.key();
             if when > at {
@@ -227,7 +248,16 @@ impl Sim {
                 Due::Post { pid, complete } => self.process_mut(pid).ready.push_back(complete),
                 Due::Land { pid, cancel, target, serial } => {
                     let op = self.unpark(pid, cancel);
-                    self.land(pid, cancel, op, target, serial);
+                    self.land(pid, cancel, op, target, serial, true);
+                    self.settle();
+                }
+                Due::Expire { pid, connect } => {
+                    if let Some(flight) = self.process_mut(pid).flights.get_mut(&connect) {
+                        flight.timer = None;
+                    }
+                    let op = self.unpark(pid, connect);
+                    self.withdraw(pid, connect, &op);
+                    self.complete(pid, connect, op, Err(Error::TimedOut));
                     self.settle();
                 }
             }
@@ -282,7 +312,7 @@ impl Sim {
         let socket = self.check(pid, summary);
         let serial = self.next_serial;
         self.next_serial = serial.checked_add(1).expect("fewer than 2^64 submissions");
-        let flight = Flight { serial, kind: summary, held: None, done: false };
+        let flight = Flight { serial, kind: summary, held: None, done: false, timer: None };
         self.process_mut(pid).flights.insert(token, flight);
         match kind {
             Op::Socket { family } => self.socket(pid, token, kind, family),
@@ -333,6 +363,13 @@ impl Sim {
                 Some("an address of another family than its socket's")
             }
             Summary::Connect { .. } if !on_fd.is_empty() => Some("a Connect beside another operation in flight"),
+            Summary::Connect { .. } if !matches!(socket.state, State::Fresh) => {
+                Some("a Connect on a socket that is not fresh")
+            }
+            Summary::Listen { .. } if socket.local.is_none() => Some("a Listen on an unbound socket"),
+            Summary::Shutdown { .. } if matches!(socket.state, State::Fresh | State::Listening(_)) => {
+                Some("a Shutdown on a socket with no connection")
+            }
             Summary::Recv { .. } if count(|kind| matches!(kind, Summary::Recv { .. })) > 0 => {
                 Some("a second Recv in flight")
             }
@@ -367,6 +404,14 @@ impl Sim {
 // The operations.
 impl Sim {
     fn socket(&mut self, pid: Pid, token: Token, op: Op, family: Family) {
+        if self.fds_full(pid) {
+            self.complete(pid, token, op, Err(Error::TooManyOpenFiles));
+            return;
+        }
+        if self.fault(pid, self.config.faults.no_buffer, Fault::NoBuffer) {
+            self.complete(pid, token, op, Err(Error::NoBufferSpace));
+            return;
+        }
         let id = self.new_socket(family, None, State::Fresh);
         let fd = self.open_fd(pid, id);
         self.complete(pid, token, op, Ok(Done::Fd(fd)));
@@ -415,10 +460,8 @@ impl Sim {
                 self.pokes.push_back(id);
                 Ok(Done::Nothing)
             }
-            // Linux binds an unbound socket to an ephemeral port here; io
-            // always binds first, so the simulator refuses it rather than
-            // guess at the address.
-            (State::Fresh, None) | (State::Connecting { .. } | State::Connected(_), _) => Err(Error::InvalidArgument),
+            (State::Fresh, None) => self.bug("a Listen on an unbound socket passed the checks"),
+            (State::Connecting { .. } | State::Connected(_), _) => Err(Error::InvalidArgument),
         };
         self.complete(pid, token, op, result);
     }
@@ -434,13 +477,17 @@ impl Sim {
     }
 
     fn connect(&mut self, pid: Pid, token: Token, op: Op, id: SocketId, to: Addr) {
-        match self.connecting(id, to) {
+        match self.connecting(pid, id, to) {
             Ok(listener) => {
                 if let State::Listening(waiting) = &mut self.socket_mut(listener).state {
                     waiting.connects.push_back((pid, token, id));
                 }
                 self.socket_mut(id).state = State::Connecting { listener, to };
                 self.park(pid, token, op);
+                let timer = self.schedule(self.config.syn_timeout.as_nanos(), Due::Expire { pid, connect: token });
+                if let Some(flight) = self.process_mut(pid).flights.get_mut(&token) {
+                    flight.timer = Some(timer);
+                }
                 self.pokes.push_back(listener);
             }
             Err(error) => {
@@ -452,11 +499,8 @@ impl Sim {
 
     /// The listener a `Connect` from `id` to `to` waits on, with the socket
     /// bound to its source address; or why it failed.
-    fn connecting(&mut self, id: SocketId, to: Addr) -> Result<SocketId, Error> {
+    fn connecting(&mut self, pid: Pid, id: SocketId, to: Addr) -> Result<SocketId, Error> {
         let socket = self.sockets.get(&id).expect("checked at submit");
-        let State::Fresh = socket.state else {
-            return Err(Error::InvalidArgument);
-        };
         if !to.ip().is_loopback() {
             return Err(Error::Unreachable);
         }
@@ -471,34 +515,48 @@ impl Sim {
             None => self.ephemeral(family).ok_or(Error::AddressNotAvailable)?,
         };
         self.socket_mut(id).local = Some(SocketAddr::new(ip, port));
+        if self.fault(pid, self.config.faults.no_buffer, Fault::NoBuffer) {
+            return Err(Error::NoBufferSpace);
+        }
         let Some(listener) = self.listener_for(family, to) else {
             return Err(Error::Refused);
         };
-        if self.rng.chance(self.config.faults.refuse) {
+        if self.fault(pid, self.config.faults.refuse, Fault::Refuse) {
             return Err(Error::Refused);
+        }
+        if self.fault(pid, self.config.faults.timed_out, Fault::TimedOut) {
+            return Err(Error::TimedOut);
         }
         Ok(listener)
     }
 
     fn recv(&mut self, pid: Pid, token: Token, op: Op, id: SocketId) {
-        let State::Connected(stream) = &mut self.socket_mut(id).state else {
+        let State::Connected(_) = &self.socket_mut(id).state else {
             self.complete(pid, token, op, Err(Error::NotConnected));
             return;
         };
-        stream.receiver = Some(token);
+        if self.fault(pid, self.config.faults.no_buffer, Fault::NoBuffer) {
+            self.complete(pid, token, op, Err(Error::NoBufferSpace));
+            return;
+        }
+        self.stream_mut(id).receiver = Some(token);
         self.park(pid, token, op);
-        self.maybe_reset(id);
+        self.maybe_break(pid, id);
         self.pokes.push_back(id);
     }
 
     fn send(&mut self, pid: Pid, token: Token, op: Op, id: SocketId) {
-        let State::Connected(stream) = &mut self.socket_mut(id).state else {
+        let State::Connected(_) = &self.socket_mut(id).state else {
             self.complete(pid, token, op, Err(Error::BrokenPipe));
             return;
         };
-        stream.sender = Some(token);
+        if self.fault(pid, self.config.faults.no_buffer, Fault::NoBuffer) {
+            self.complete(pid, token, op, Err(Error::NoBufferSpace));
+            return;
+        }
+        self.stream_mut(id).sender = Some(token);
         self.park(pid, token, op);
-        self.maybe_reset(id);
+        self.maybe_break(pid, id);
         self.pokes.push_back(id);
     }
 
@@ -506,7 +564,7 @@ impl Sim {
         let mut peer = None;
         let result = match &mut self.socket_mut(id).state {
             State::Connected(stream) => match stream.fate {
-                Fate::Reset | Fate::Dead => Err(Error::NotConnected),
+                Fate::Failing(_) | Fate::Dead => Err(Error::NotConnected),
                 Fate::Open if stream.shut && stream.ended => Err(Error::NotConnected),
                 Fate::Open => {
                     stream.shut = true;
@@ -514,7 +572,9 @@ impl Sim {
                     Ok(Done::Nothing)
                 }
             },
-            State::Fresh | State::Connecting { .. } | State::Listening(_) => Err(Error::NotConnected),
+            State::Fresh | State::Connecting { .. } | State::Listening(_) => {
+                self.bug("a Shutdown on a socket with no connection passed the checks")
+            }
         };
         if let Some(peer) = peer {
             self.stream_mut(peer).ended = true;
@@ -528,15 +588,17 @@ impl Sim {
         let socket = self.sockets.remove(&id).expect("checked at submit");
         match socket.state {
             State::Fresh => {}
-            State::Connecting { .. } => unreachable!("a Close beside a Connect fails the world at submit"),
+            State::Connecting { .. } => self.bug("a Close beside a Connect passed the checks"),
             State::Listening(listener) => {
-                assert!(listener.accepter.is_none(), "a Close beside an Accept fails the world at submit");
+                if listener.accepter.is_some() {
+                    self.bug("a Close beside an Accept passed the checks");
+                }
                 for waiting in listener.queue {
                     let server = self.sockets.remove(&waiting).expect("a queued connection is a socket");
                     if let State::Connected(stream) = server.state
                         && let Some(client) = stream.peer
                     {
-                        self.reset_end(client);
+                        self.break_end(client, Error::Reset);
                     }
                 }
                 for (client_pid, client_token, client) in listener.connects {
@@ -555,7 +617,7 @@ impl Sim {
                         end.ended = true;
                         self.pokes.push_back(peer);
                     } else {
-                        self.reset_end(peer);
+                        self.break_end(peer, Error::Reset);
                     }
                 }
             }
@@ -564,6 +626,10 @@ impl Sim {
     }
 
     fn cancel(&mut self, pid: Pid, token: Token, op: Op, target: Token) {
+        if self.fault(pid, self.config.faults.cancel_unsubmitted, Fault::CancelUnsubmitted) {
+            self.complete(pid, token, op, Err(Error::Other(UNSUBMITTED)));
+            return;
+        }
         let waiting = match self.process(pid).flights.get(&target) {
             Some(flight) if flight.held.is_some() => Some(flight.serial),
             Some(_) | None => None,
@@ -572,18 +638,20 @@ impl Sim {
             self.complete(pid, token, op, Err(Error::TooLate));
             return;
         };
-        if self.rng.chance(self.config.faults.cancel_race) {
+        if self.fault(pid, self.config.faults.cancel_race, Fault::CancelRace) {
             let late = self.rng.between(1, self.config.faults.latency_max.as_nanos().max(1));
             self.park(pid, token, op);
             self.schedule(late, Due::Land { pid, cancel: token, target, serial });
         } else {
-            self.land(pid, token, op, target, serial);
+            self.land(pid, token, op, target, serial, false);
         }
     }
 
     /// A `Cancel` reaches its target: it wins if the target still waits,
-    /// and is too late otherwise.
-    fn land(&mut self, pid: Pid, token: Token, op: Op, target: Token, serial: u64) {
+    /// and is too late otherwise. A raced one that finds its target waiting
+    /// may instead interrupt it, as the kernel does an operation it can no
+    /// longer stop: `TooLate`, and the target `Cancelled`.
+    fn land(&mut self, pid: Pid, token: Token, op: Op, target: Token, serial: u64, raced: bool) {
         let wins = match self.process(pid).flights.get(&target) {
             Some(flight) => flight.serial == serial && flight.held.is_some(),
             None => false,
@@ -594,11 +662,12 @@ impl Sim {
         }
         let stopped = self.unpark(pid, target);
         self.withdraw(pid, target, &stopped);
+        let answer = if raced && self.rng.chance(500) { Err(Error::TooLate) } else { Ok(Done::Nothing) };
         if self.rng.chance(500) {
             self.complete(pid, target, stopped, Err(Error::Cancelled));
-            self.complete(pid, token, op, Ok(Done::Nothing));
+            self.complete(pid, token, op, answer);
         } else {
-            self.complete(pid, token, op, Ok(Done::Nothing));
+            self.complete(pid, token, op, answer);
             self.complete(pid, target, stopped, Err(Error::Cancelled));
         }
     }
@@ -614,7 +683,7 @@ impl Sim {
             | Op::Listen { .. }
             | Op::Shutdown { .. }
             | Op::Close { .. }
-            | Op::Cancel { .. } => unreachable!("only accepts, connects, receives and sends wait"),
+            | Op::Cancel { .. } => self.bug("only accepts, connects, receives and sends wait"),
         };
         let socket = self.socket_mut(id);
         match (&mut socket.state, op) {
@@ -635,7 +704,10 @@ impl Sim {
                     waiting.connects = kept;
                 }
             }
-            (state, op) => unreachable!("a waiting {op:?} on a socket in state {state:?}"),
+            (state, op) => {
+                let what = format!("a waiting {op:?} on a socket in state {state:?}");
+                self.bug(&what);
+            }
         }
     }
 }
@@ -689,16 +761,29 @@ impl Sim {
     fn accept_one(&mut self, id: SocketId) {
         let owner = self.sockets.get(&id).expect("a listener").owner;
         let (pid, _) = owner.expect("a listener has a descriptor");
-        let State::Listening(listener) = &mut self.socket_mut(id).state else {
-            unreachable!("accepting on a listener");
+        // A failed accept takes no waiting connection.
+        let failed = if self.fds_full(pid) {
+            Some(Error::TooManyOpenFiles)
+        } else if self.fault(pid, self.config.faults.no_buffer, Fault::NoBuffer) {
+            Some(Error::NoBufferSpace)
+        } else {
+            None
         };
-        let server = listener.queue.pop_front().expect("a connection waits");
+        let State::Listening(listener) = &mut self.socket_mut(id).state else {
+            self.bug("accepting on a listener");
+        };
         let token = listener.accepter.take().expect("an accept waits");
+        if let Some(error) = failed {
+            let op = self.unpark(pid, token);
+            self.complete(pid, token, op, Err(error));
+            return;
+        }
+        let server = listener.queue.pop_front().expect("a connection waits");
         let fd = self.open_fd(pid, server);
         let socket = self.socket_mut(server);
         socket.owner = Some((pid, fd));
         let State::Connected(stream) = &socket.state else {
-            unreachable!("a queued connection is connected");
+            self.bug("a queued connection is connected");
         };
         let peer = stream.remote;
         let op = self.unpark(pid, token);
@@ -707,12 +792,12 @@ impl Sim {
 
     fn establish(&mut self, id: SocketId) {
         let State::Listening(listener) = &mut self.socket_mut(id).state else {
-            unreachable!("establishing on a listener");
+            self.bug("establishing on a listener");
         };
         let (pid, token, client) = listener.connects.pop_front().expect("a connect waits");
         let socket = self.sockets.get(&client).expect("a waiting connect's socket");
         let (State::Connecting { to, .. }, Some(source)) = (&socket.state, socket.local) else {
-            unreachable!("a waiting connect is connecting from its source address");
+            self.bug("a waiting connect is connecting from its source address");
         };
         let to = *to;
         let family = socket.family;
@@ -739,13 +824,14 @@ impl Sim {
         };
         let flight = held(&mut self.processes, pid, token);
         let Some(Op::Recv { buf, .. }) = flight else {
-            unreachable!("a socket's receiver is a waiting Recv");
+            self.bug("a socket's receiver is a waiting Recv");
         };
+        let mut cut_short = false;
         let result = if stream.inbox.is_empty() {
             match stream.fate {
-                Fate::Reset => {
+                Fate::Failing(error) => {
                     stream.fate = Fate::Dead;
-                    Err(Error::Reset)
+                    Err(error)
                 }
                 Fate::Dead => Ok(Done::Count(0)),
                 Fate::Open if stream.ended => Ok(Done::Count(0)),
@@ -754,7 +840,8 @@ impl Sim {
         } else {
             let mut n = stream.inbox.len().min(buf.len());
             if n > 1 && self.rng.chance(short) {
-                n = usize_from(self.rng.between(1, u64_of(n)));
+                n = usize_from(self.rng.between(1, u64_of(n.saturating_sub(1))));
+                cut_short = true;
             }
             for slot in buf.iter_mut().take(n) {
                 *slot = stream.inbox.pop_front().expect("n is at most the bytes received");
@@ -764,6 +851,9 @@ impl Sim {
         stream.receiver = None;
         if let (Ok(Done::Count(1..)), Some(peer)) = (result, stream.peer) {
             self.pokes.push_back(peer);
+        }
+        if cut_short {
+            self.record(pid, Event::Fault(Fault::ShortRecv));
         }
         let op = self.unpark(pid, token);
         self.complete(pid, token, op, result);
@@ -781,13 +871,14 @@ impl Sim {
         };
         let (fate, shut, peer) = (stream.fate, stream.shut, stream.peer);
         let Some(Op::Send { bytes, from, .. }) = held(&mut self.processes, pid, token) else {
-            unreachable!("a socket's sender is a waiting Send");
+            self.bug("a socket's sender is a waiting Send");
         };
         let left = bytes.get(usize_from(u64::from(*from))..).expect("a valid Send has bytes left");
+        let mut cut_short = false;
         let result = match (fate, peer) {
-            (Fate::Reset, _) => {
+            (Fate::Failing(error), _) => {
                 self.stream_mut(id).fate = Fate::Dead;
-                Err(Error::Reset)
+                Err(error)
             }
             (Fate::Dead, _) => Err(Error::BrokenPipe),
             (Fate::Open, _) if shut => Err(Error::BrokenPipe),
@@ -795,7 +886,9 @@ impl Sim {
             // accepted, the peer answers with a reset, and the next Send
             // fails. Nothing reads them.
             (Fate::Open, None) => {
-                let n = cut(&mut self.rng, self.config.faults.short_send, left.len().min(usize_of(self.config.buffer)));
+                let most = left.len().min(usize_of(self.config.buffer));
+                let (n, short) = cut(&mut self.rng, self.config.faults.short_send, most);
+                cut_short = short;
                 self.stream_mut(id).fate = Fate::Dead;
                 Ok(Done::Count(u32::try_from(n).expect("a Send's length fits a u32")))
             }
@@ -803,18 +896,19 @@ impl Sim {
                 let buffer = usize_of(self.config.buffer);
                 let other = self.sockets.get(&peer).expect("a linked peer exists");
                 let State::Connected(end) = &other.state else {
-                    unreachable!("a linked peer is connected");
+                    self.bug("a linked peer is connected");
                 };
                 let room = buffer.saturating_sub(end.inbox.len());
                 if room == 0 {
                     return;
                 }
-                let n = cut(&mut self.rng, self.config.faults.short_send, left.len().min(room));
+                let (n, short) = cut(&mut self.rng, self.config.faults.short_send, left.len().min(room));
+                cut_short = short;
                 let sent = left.get(..n).expect("n is at most the bytes left");
                 let end = match &mut self.sockets.get_mut(&peer).expect("a linked peer exists").state {
                     State::Connected(end) => end,
                     State::Fresh | State::Connecting { .. } | State::Listening(_) => {
-                        unreachable!("a linked peer is connected")
+                        self.bug("a linked peer is connected")
                     }
                 };
                 end.inbox.extend(sent.iter().copied());
@@ -823,26 +917,36 @@ impl Sim {
             }
         };
         self.stream_mut(id).sender = None;
+        if cut_short {
+            self.record(pid, Event::Fault(Fault::ShortSend));
+        }
         let op = self.unpark(pid, token);
         self.complete(pid, token, op, result);
     }
 
-    /// The reset fault: the connection of `id` breaks, on both ends.
-    fn maybe_reset(&mut self, id: SocketId) {
+    /// The reset and timeout faults, on a live connection whose peer's end
+    /// of stream has not arrived: both ends reset, or this one times out and
+    /// the peer is reset.
+    fn maybe_break(&mut self, pid: Pid, id: SocketId) {
         let stream = self.stream_mut(id);
-        let (Fate::Open, Some(peer)) = (stream.fate, stream.peer) else {
+        let (Fate::Open, Some(peer), false) = (stream.fate, stream.peer, stream.ended) else {
             return;
         };
-        if self.rng.chance(self.config.faults.reset) {
-            self.reset_end(id);
-            self.reset_end(peer);
+        if self.fault(pid, self.config.faults.reset, Fault::Reset) {
+            self.break_end(id, Error::Reset);
+            self.break_end(peer, Error::Reset);
+        } else if self.fault(pid, self.config.faults.timed_out, Fault::TimedOut) {
+            self.break_end(id, Error::TimedOut);
+            self.break_end(peer, Error::Reset);
         }
     }
 
-    /// This end of a connection is reset: its next `Recv` (once the bytes
-    /// already received are read) or `Send` hears of it. The link to the peer
-    /// is cut, from this side.
-    fn reset_end(&mut self, id: SocketId) {
+    /// This end of a connection breaks with `error` (`Reset` or `TimedOut`):
+    /// its next `Send`, or its next `Recv` once the bytes already received
+    /// are read, hears of it. An end whose peer's end of stream already
+    /// arrived hears nothing, as Linux reports no reset in `CLOSE_WAIT`. The
+    /// link to the peer is cut, from this side.
+    fn break_end(&mut self, id: SocketId, error: Error) {
         let stream = self.stream_mut(id);
         if let Some(peer) = stream.peer.take()
             && let Some(Socket { state: State::Connected(end), .. }) = self.sockets.get_mut(&peer)
@@ -851,7 +955,7 @@ impl Sim {
         }
         let stream = self.stream_mut(id);
         if stream.fate == Fate::Open {
-            stream.fate = Fate::Reset;
+            stream.fate = if stream.ended { Fate::Dead } else { Fate::Failing(error) };
         }
         self.pokes.push_back(id);
     }
@@ -871,7 +975,7 @@ impl Sim {
             self.fail(pid, &format!("a second completion of {token:?}"));
         }
         flight.done = true;
-        let latency = self.latency();
+        let latency = self.latency(pid);
         if latency == 0 {
             self.process_mut(pid).ready.push_back(complete);
         } else {
@@ -879,19 +983,36 @@ impl Sim {
         }
     }
 
-    fn latency(&mut self) -> u64 {
+    fn latency(&mut self, pid: Pid) -> u64 {
         let faults = self.config.faults;
-        if faults.latency_max.as_nanos() == 0 || !self.rng.chance(faults.latency) {
+        if faults.latency_max.as_nanos() == 0 || !self.fault(pid, faults.latency, Fault::Latency) {
             return 0;
         }
         self.rng.between(1, faults.latency_max.as_nanos())
     }
 
-    fn schedule(&mut self, after: u64, due: Due) {
+    /// Draws a fault, and traces it when it falls.
+    fn fault(&mut self, pid: Pid, chance: u32, fault: Fault) -> bool {
+        let falls = self.rng.chance(chance);
+        if falls {
+            self.record(pid, Event::Fault(fault));
+        }
+        falls
+    }
+
+    fn fds_full(&self, pid: Pid) -> bool {
+        match u32::try_from(self.process(pid).fds.len()) {
+            Ok(open) => open >= self.config.max_fds,
+            Err(_) => true,
+        }
+    }
+
+    fn schedule(&mut self, after: u64, due: Due) -> (Time, u64) {
         let at = self.now.checked_add(Duration::from_nanos(after)).expect("time does not run out");
         let order = self.next_due;
         self.next_due = order.checked_add(1).expect("fewer than 2^64 events");
         self.schedule.insert((at, order), due);
+        (at, order)
     }
 
     fn park(&mut self, pid: Pid, token: Token, op: Op) {
@@ -901,7 +1022,11 @@ impl Sim {
 
     fn unpark(&mut self, pid: Pid, token: Token) -> Op {
         let flight = self.process_mut(pid).flights.get_mut(&token).expect("unparked while in flight");
-        flight.held.take().expect("a waiting operation holds its record")
+        let op = flight.held.take().expect("a waiting operation holds its record");
+        if let Some(timer) = flight.timer.take() {
+            self.schedule.remove(&timer);
+        }
+        op
     }
 
     fn new_socket(&mut self, family: Family, local: Option<Addr>, state: State) -> SocketId {
@@ -995,11 +1120,20 @@ impl Sim {
     }
 
     /// Fails the world, loudly, with the seed and the end of the trace.
-    #[expect(clippy::panic, reason = "the simulator fails the world on a broken invariant (overview.md, 9)")]
     fn fail(&self, pid: Pid, what: &str) -> ! {
+        self.die(&format!("{pid}: {what}"));
+    }
+
+    /// Fails the world on a bug of the simulator itself.
+    fn bug(&self, what: &str) -> ! {
+        self.die(&format!("a bug of the simulator: {what}"));
+    }
+
+    #[expect(clippy::panic, reason = "the simulator fails the world on a broken invariant (overview.md, 9)")]
+    fn die(&self, what: &str) -> ! {
         let from = self.trace.len().saturating_sub(TAIL);
         let tail = trace::render(self.seed, self.trace.get(from..).unwrap_or_default());
-        panic!("skein-sim: {pid} at {} ns: {what}\n{tail}", self.now.as_nanos());
+        panic!("skein-sim at {} ns, {what}\n{tail}", self.now.as_nanos());
     }
 }
 
@@ -1014,9 +1148,14 @@ fn held(processes: &mut [Process], pid: Pid, token: Token) -> Option<&mut Op> {
     process.flights.get_mut(&token)?.held.as_mut()
 }
 
-/// `n`, or with the fault, a random count from 1 to `n`.
-fn cut(rng: &mut Rng, chance: u32, n: usize) -> usize {
-    if n > 1 && rng.chance(chance) { usize_from(rng.between(1, u64_of(n))) } else { n }
+/// `n`, or with the fault a random count from 1 to `n - 1`; and whether the
+/// fault fell.
+fn cut(rng: &mut Rng, chance: u32, n: usize) -> (usize, bool) {
+    if n > 1 && rng.chance(chance) {
+        (usize_from(rng.between(1, u64_of(n.saturating_sub(1)))), true)
+    } else {
+        (n, false)
+    }
 }
 
 fn usize_of(n: u32) -> usize {

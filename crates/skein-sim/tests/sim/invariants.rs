@@ -234,3 +234,54 @@ fn a_failure_names_the_seed_and_the_trace() {
     assert!(message.contains("seed 77"), "{message}");
     assert!(message.contains("Close"), "{message}");
 }
+
+#[test]
+#[should_panic(expected = "a Listen on an unbound socket")]
+fn a_listen_on_an_unbound_socket() {
+    let mut world = World::calm();
+    let pid = world.spawn();
+    let fd = world.socket(pid);
+    world.submit(pid, Op::Listen { fd, backlog: 1 });
+}
+
+#[test]
+#[should_panic(expected = "a Connect on a socket that is not fresh")]
+fn a_connect_on_a_listener() {
+    let mut world = World::calm();
+    let pid = world.spawn();
+    let (listener, addr) = world.listener(pid);
+    world.submit(pid, Op::Connect { fd: listener, addr });
+}
+
+#[test]
+#[should_panic(expected = "a Connect on a socket that is not fresh")]
+fn a_connect_on_a_connected_socket() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (c, _) = world.pair(client, server);
+    world.submit(client, Op::Connect { fd: c, addr: local(80) });
+}
+
+#[test]
+#[should_panic(expected = "a Shutdown on a socket with no connection")]
+fn a_shutdown_on_a_fresh_socket() {
+    let mut world = World::calm();
+    let pid = world.spawn();
+    let fd = world.socket(pid);
+    world.submit(pid, Op::Shutdown { fd });
+}
+
+#[test]
+#[should_panic(expected = "a Shutdown on a socket with no connection")]
+fn a_shutdown_on_a_listener() {
+    let mut world = World::calm();
+    let pid = world.spawn();
+    let (listener, _) = world.listener(pid);
+    world.submit(pid, Op::Shutdown { fd: listener });
+}
+
+#[test]
+#[should_panic(expected = "at least one byte")]
+fn a_world_with_no_socket_buffer() {
+    drop(skein_sim::Sim::new(1, skein_sim::Config { buffer: 0, ..skein_sim::Config::calm() }));
+}

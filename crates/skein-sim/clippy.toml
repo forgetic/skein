@@ -12,6 +12,8 @@ allow-indexing-slicing-in-tests = true
 disallowed-types = [
     { path = "std::time::Instant", reason = "the simulator owns time: Sim::now" },
     { path = "std::time::SystemTime", reason = "the simulator owns time: Sim::wall" },
+    { path = "std::collections::HashMap", reason = "iteration order depends on a random seed: BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order depends on a random seed: BTreeSet" },
     { path = "std::hash::RandomState", reason = "iteration order would depend on a random seed: BTreeMap" },
     { path = "std::sync::Arc", reason = "one thread, one owner" },
     { path = "std::sync::Mutex", reason = "one thread" },

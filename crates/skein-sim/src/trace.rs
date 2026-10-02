@@ -23,6 +23,22 @@ pub enum Event {
     Submit { op: Token, kind: Summary },
     /// A completion reaped by its process.
     Complete { op: Token, kind: Summary, result: Result<Done, Error> },
+    /// A fault drawn from the seed, in the process it affects.
+    Fault(Fault),
+}
+
+/// The faults of [`crate::Faults`], as the trace names them.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Fault {
+    Latency,
+    ShortRecv,
+    ShortSend,
+    Reset,
+    Refuse,
+    NoBuffer,
+    TimedOut,
+    CancelRace,
+    CancelUnsubmitted,
 }
 
 /// An operation without its buffers: their lengths stand in for them.
