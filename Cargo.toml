@@ -1,0 +1,98 @@
+# Profiles and lints follow docs/design/programming-style.md, 9.4.
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace.dependencies]
+skein-lib = { path = "crates/skein-lib" }
+
+# Panics are fail-stop and overflow traps, in every profile. (The test harness
+# needs unwinding, so cargo ignores `panic` for test targets.)
+[profile.dev]
+panic = "abort"
+overflow-checks = true
+
+[profile.release]
+panic = "abort"
+overflow-checks = true
+
+# The lints for the step crates (lib and every model, protocol and io layer).
+# Disallowed types, macros and methods are listed in clippy.toml. Ordinary Rust
+# (simulators, test harnesses) declares its own [lints] table.
+[workspace.lints.rust]
+unsafe_code = "deny"                  # and forbid at every step crate's root
+elided_lifetimes_in_paths = "deny"    # a type that borrows says so: Reader<'_>
+unused_must_use = "deny"
+non_ascii_idents = "deny"
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+unit_bindings = "deny"
+let_underscore_drop = "deny"          # drop explicitly, or bind a name
+missing_debug_implementations = "deny" # state is inspectable in tests and traces
+unused_lifetimes = "deny"
+redundant_lifetimes = "deny"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints that fight the model.
+module_name_repetitions = "allow"     # llm::LlmX reads fine next to agent::X
+missing_errors_doc = "allow"          # errors are enum values, documented on the enum
+missing_panics_doc = "allow"          # panics are assertions, named by expect("...")
+needless_pass_by_value = "allow"      # cell handlers take the source state by value
+single_match_else = "allow"           # a two-armed match on Option is as clear as if let
+
+# programming-style.md, 9.4.
+wildcard_enum_match_arm = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+as_conversions = "deny"
+float_arithmetic = "deny"
+unwrap_used = "deny"
+let_underscore_must_use = "deny"
+mem_forget = "deny"
+todo = "deny"
+unimplemented = "deny"
+impl_trait_in_params = "deny"
+allow_attributes_without_reason = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+disallowed_types = "deny"
+disallowed_macros = "deny"
+
+# Beyond 9.4: the rest of what the subset leaves out (programming-style.md, section 9).
+disallowed_methods = "deny"           # closure-taking combinators, panicking slice ops, ...
+allow_attributes = "deny"             # #[expect(.., reason = "..")], which fails once it is stale
+match_wildcard_for_single_variants = "deny"
+enum_glob_use = "deny"                # a variant is named with its enum
+wildcard_imports = "deny"
+panic = "deny"                        # assert!, unreachable!("why") or expect("invariant")
+missing_assert_message = "deny"       # an assertion names what it relies on
+assertions_on_result_states = "deny"
+unused_result_ok = "deny"
+let_underscore_untyped = "deny"
+mixed_read_write_in_expression = "deny"  # one side effect per statement
+infinite_loop = "deny"
+empty_drop = "deny"
+exit = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+use_debug = "deny"
+host_endian_bytes = "deny"            # byte order is chosen, not inherited from the host
+fn_to_numeric_cast_any = "deny"
+default_numeric_fallback = "deny"     # every integer has a stated width
+std_instead_of_core = "deny"
+std_instead_of_alloc = "deny"
+alloc_instead_of_core = "deny"
+partial_pub_fields = "deny"           # a struct is plain data or opaque, not both
+mod_module_files = "deny"
+tests_outside_test_module = "deny"
+iter_over_hash_type = "deny"
