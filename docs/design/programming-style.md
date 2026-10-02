@@ -699,7 +699,7 @@ layer, model and `iterate`) uses:
 - From lib: `Id<T>`, `Slab<T>`, `Token`, `ReplyTo`, `Queue<T>`,
   `List<T>`, `Map<K, V>` and `Set<K>` (bounded and ordered, over
   B-trees), `Stack<T>`, `stream`, `Intake`, `Reader`, `Writer` (sized),
-  `bytes::copy_of`, the byte search `bytes::find`, `find_from` and
+  `Decimal` (the digits of a count, for text protocols), `bytes::copy_of`, the byte search `bytes::find`, `find_from` and
   `count` (linear time, no allocation), `Deadlines`, `Time`, `Duration`,
   `Rng`, `Env<L>`.
 
@@ -817,9 +817,11 @@ disallowed-macros = [
   (unit tests get std) and `#![forbid(unsafe_code)]`, and lib's does the
   same. The shell allows `unsafe` in its ring adapter module only, with
   the reason stated.
-- lib, the shell and the simulator have their own `clippy.toml`; clippy
-  reads the one nearest the crate, so lib may use `Vec` inside its
-  containers.
+- lib is held to the root `clippy.toml` too. Where it builds a container
+  on a type that is out (`Vec`, `VecDeque`, `PhantomData`), the module
+  says so with a scoped `#[expect(clippy::disallowed_types, reason =
+  "...")]`, which fails the build once it is stale. The shell and the
+  simulator are ordinary Rust, with a `clippy.toml` of their own.
 - Warnings are errors: `cargo clippy --all-targets -- -D warnings` in CI.
 - Stable Rust, edition 2024. Nightly is used only for the fuzz targets.
 
