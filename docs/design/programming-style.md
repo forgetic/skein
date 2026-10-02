@@ -701,7 +701,7 @@ layer, model and `iterate`) uses:
   B-trees), `Stack<T>`, `stream`, `Intake`, `Reader`, `Writer` (sized),
   `Decimal` (the digits of a count, for text protocols), `bytes::copy_of`, the byte search `bytes::find`, `find_from` and
   `count` (linear time, no allocation), `Deadlines`, `Time`, `Duration`,
-  `Rng`, `Env<L>`.
+  `Wall` (wall-clock time, never a deadline), `Rng`, `Env<L>`.
 
 lib uses the same, plus generic types, lifetime parameters on its cursors,
 hand-written impls of std traits for its own types, `Vec` inside its

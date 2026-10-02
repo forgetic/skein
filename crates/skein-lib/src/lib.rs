@@ -38,6 +38,6 @@ pub use queue::Queue;
 pub use rng::Rng;
 pub use set::Set;
 pub use slab::Slab;
-pub use time::{Duration, Time};
+pub use time::{Duration, Time, Wall};
 pub use token::{ReplyTo, Token};
 pub use writer::{Overflow, Writer};

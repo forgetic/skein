@@ -1,5 +1,6 @@
 //! Time is data (section 8): nanoseconds on a monotonic clock that the shell or
-//! the simulator reads, never a step.
+//! the simulator reads, never a step; and wall time, a separate type, for
+//! things about the world.
 
 /// A point in time, in nanoseconds since an arbitrary origin.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -8,6 +9,37 @@ pub struct Time(u64);
 /// A span of time, in nanoseconds.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Duration(u64);
+
+/// A point in wall-clock time, in nanoseconds since the Unix epoch, read by
+/// the shell or the simulator beside [`Time`] (section 8).
+///
+/// It is for things about the world: a certificate's validity, a timestamp a
+/// peer will read. It is a type of its own, with no arithmetic on spans, so
+/// it is never confused with a monotonic `Time` and never arms a deadline:
+/// the wall clock can jump.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Wall(u64);
+
+impl Wall {
+    /// The Unix epoch, 1970-01-01T00:00:00Z.
+    pub const EPOCH: Wall = Wall(0);
+
+    #[must_use]
+    pub const fn from_nanos(nanos: u64) -> Wall {
+        Wall(nanos)
+    }
+
+    #[must_use]
+    pub const fn as_nanos(self) -> u64 {
+        self.0
+    }
+
+    /// Whole seconds since the epoch, as certificates and HTTP dates count.
+    #[must_use]
+    pub const fn as_secs(self) -> u64 {
+        self.0.div_euclid(1_000_000_000)
+    }
+}
 
 impl Time {
     /// The origin.
@@ -92,7 +124,7 @@ impl Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::{Duration, Time};
+    use super::{Duration, Time, Wall};
 
     #[test]
     fn arithmetic_is_checked_or_saturating() {
@@ -102,5 +134,14 @@ mod tests {
         assert_eq!(Time::ZERO.saturating_since(end), Duration::ZERO);
         assert_eq!(Duration::from_secs(u64::MAX).as_nanos(), u64::MAX);
         assert_eq!(Duration::from_millis(3).as_nanos(), 3_000_000);
+    }
+
+    #[test]
+    fn wall_time_counts_from_the_epoch() {
+        assert_eq!(Wall::EPOCH.as_nanos(), 0);
+        let wall = Wall::from_nanos(1_700_000_000_999_999_999);
+        assert_eq!(wall.as_secs(), 1_700_000_000);
+        assert_eq!(wall.as_nanos(), 1_700_000_000_999_999_999);
+        assert!(Wall::EPOCH < wall);
     }
 }
