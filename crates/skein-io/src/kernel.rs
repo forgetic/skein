@@ -5,59 +5,87 @@
 //!
 //! # The contract
 //!
-//! - **Every submission completes exactly once,** cancelled or not. A
-//!   [`Submit`] goes down, and one [`Complete`] with the same `op` token comes
-//!   up, after any number of reaps. io never has two operations in flight
-//!   under the same token.
-//! - **The completion hands back the operation.** [`Complete::kind`] is the
-//!   [`Op`] that was submitted, moved back with every buffer inside it,
-//!   whatever the result: on success, on an error and on a cancel. A `Box`
-//!   that went down always comes back up; the backend never drops, copies or
-//!   replaces one (programming-style.md, 5.3). A `Recv` comes back with
-//!   `buf[..n]` filled, a `Send` with its `bytes` untouched.
-//! - **Each operation has one success shape** ([`Shape`]): the [`Done`] of
-//!   an `Ok` matches its [`Op`], as [`Op::shape`] lists. An error says the
-//!   operation did nothing the layer above can use: a failed `Socket` or
+//! Records:
+//!
+//! - **Every submission completes exactly once,** cancelled or not, with the
+//!   [`Submit`]'s `op` token on its [`Complete`].
+//! - **The completion hands back the operation:** [`Complete::kind`] is the
+//!   submitted [`Op`], every buffer inside it, whatever the result. The
+//!   backend never drops, copies or replaces a `Box` (programming-style.md,
+//!   5.3). A `Recv` comes back with `buf[..n]` filled, a `Send` with its
+//!   `bytes` untouched.
+//! - **One success shape per operation** ([`Shape`], tabled on [`Op`]). An
+//!   error means the operation did nothing usable: a failed `Socket` or
 //!   `Accept` made no descriptor.
-//! - **A cancelled operation completes as `Err(Cancelled)` or with what it
-//!   did** before the cancel landed, which may be a success or another error.
-//!   io keeps the entity *settling* until then (programming-style.md, 4.3).
-//! - **`Cancel` completes too,** separately from its target and in either
-//!   order: `Ok(Done::Nothing)` if it found the target in flight, and
-//!   `Err(TooLate)` if the target had already completed or could no longer be
-//!   stopped. Either way the target's own completion says what it did. It may
-//!   also complete with `Err(InvalidArgument)` or `Err(Other)`, when the
-//!   backend failed to submit it; the target is then not stopped. The
-//!   simulator randomises the order of a `Cancel` and its target's
-//!   completion. A `Cancel` is never itself the target of a `Cancel`.
-//! - **A `Bind` answers with the address bound** ([`Done::Bound`]), its port
-//!   resolved when it asked for port 0. The backend learns it from its kernel
-//!   (`getsockname`); only the plain [`Addr`] crosses.
-//! - **A `Recv` of zero bytes means the peer ended** its sending direction.
-//!   That is why a `Recv` buffer is never empty ([`Op::recv`]).
-//! - **A `Send` sends from `from` onwards,** and its count is how many bytes
-//!   past `from` went out: at least one, and no more than were left. A short
-//!   send is continued by io with a new `Send` of the same `bytes` from
+//! - **Single-shot only:** one submission, one completion. Every `Cancel`
+//!   takes an operation slot of its own, so a completion queue sized from
+//!   io's operation slab cannot overflow.
+//! - **Completions arrive in any order,** even on one descriptor.
+//! - **Plain values only cross.** Kernel structures stay in the backend's
+//!   in-flight table; error numbers map onto [`Error`], per operation.
+//!
+//! Cancelling:
+//!
+//! - **A cancelled operation completes** as `Err(Cancelled)`, or with what it
+//!   did before the cancel landed. io keeps the entity *settling* until then
+//!   (programming-style.md, 4.3).
+//! - **A `Cancel` completes on its own,** before or after its target (the
+//!   simulator randomises which): `Ok(Nothing)` if it found the target in
+//!   flight, `Err(TooLate)` if the target had completed or could no longer be
+//!   stopped, `Err(InvalidArgument)` or `Err(Other)` if the backend could not
+//!   submit it, the target then not stopped. The target's own completion says
+//!   what it did.
+//!
+//! Sockets:
+//!
+//! - **`Bind` answers with the address bound** ([`Done::Bound`]), port 0
+//!   resolved; the backend reads it with `getsockname`. `AddressInUse` comes
+//!   from `Bind` only against a listening socket or one bound without
+//!   `SO_REUSEADDR`; two sockets bound to one address both bind, and the
+//!   second `Listen` fails.
+//! - **`Listen`'s backlog is a hint** the backend may clamp; at least one
+//!   connection can always wait. A full accept queue delays a `Connect` and
+//!   never refuses it: `Refused` means nothing listens there.
+//! - **A failed `Accept`** (`TooManyOpenFiles`, `NoBufferSpace`) consumed no
+//!   waiting connection. A connection reset while waiting is still accepted,
+//!   and its first `Recv` fails with `Reset`.
+//! - **A `Recv` of zero bytes means the stream ended:** the peer shut down or
+//!   closed, or a reset was already reported. It does not prove a graceful
+//!   close. A `Recv` buffer is never empty ([`Op::recv`]).
+//! - **A `Send`'s count is bytes the kernel accepted** past `from`, at least
+//!   one and no more than were left. io continues a short send from
 //!   `from + n` (overview.md, 5.1).
-//! - **Single-shot only:** one submission, one completion. There is no
-//!   multishot operation, so the completion queue is sized from io's
-//!   operation slab and cannot overflow.
-//! - **Completions may arrive in any order,** whatever the order of
-//!   submission, including two operations on the same descriptor.
-//! - **An [`Fd`] is closed only by `Close`.** No error, cancel or reset
-//!   closes one, and nothing closes on drop. A `Close` releases the
-//!   descriptor whatever its result. io closes a descriptor only once no
-//!   other operation on it is in flight, and never names it again after.
-//!   A `Close` with operations on its descriptor still in flight is a broken
-//!   invariant: the simulator fails the world, and the ring backend's
-//!   behaviour is unspecified.
-//! - **Socket options are backend defaults, not records,** until a service
-//!   pulls one: every descriptor is close-on-exec, a socket that binds gets
-//!   `SO_REUSEADDR`, and connected and accepted TCP sockets get
-//!   `TCP_NODELAY`.
-//! - **Plain values only cross.** Kernel structures (socket addresses, for
-//!   one) stay in the backend's in-flight table and are decoded before they
-//!   go up; kernel error numbers are mapped onto [`Error`].
+//! - **`Shutdown` ends this side's sending:** it completes `Ok` once the end
+//!   is queued, behind the bytes of every completed `Send`, and a second
+//!   `Shutdown` is `Ok` too. `Recv` keeps working after it.
+//! - **A reset is reported to exactly one operation,** as `Reset`. After it,
+//!   a `Recv` gives `Ok(Count(0))`, a `Send` fails with `BrokenPipe` and a
+//!   `Shutdown` with `NotConnected`.
+//! - **An [`Fd`] is closed only by `Close`,** which releases it whatever its
+//!   result. A `Close` with received data unread makes the peer see `Reset`;
+//!   closing a listener resets the connections waiting on it.
+//!
+//! Broken invariants, which io never commits and backends may assume never
+//! happen. The simulator fails the world on each; the ring asserts the first
+//! two at submit, and is otherwise unspecified:
+//!
+//! - a record that is not [`Op::is_valid`];
+//! - a token already in flight;
+//! - a `Cancel` whose target is a `Cancel`;
+//! - a `Bind` or `Connect` address of another family than its socket's;
+//! - per descriptor, more than one `Recv`, one `Send` or one `Accept` in
+//!   flight, or anything in flight beside a `Connect`;
+//! - after a `Connect` that failed or was cancelled, any operation on its
+//!   descriptor but `Close`;
+//! - a `Shutdown` while a `Send` on its descriptor is in flight;
+//! - a `Close` while any other operation on its descriptor is in flight, or
+//!   any operation on a descriptor after its `Close`.
+//!
+//! Backend defaults, not records, until a service pulls one: every
+//! descriptor is close-on-exec; a socket that binds gets `SO_REUSEADDR`;
+//! every IPv6 socket gets `IPV6_V6ONLY`, so families never mix; connected
+//! and accepted sockets get `TCP_NODELAY`; a `Send` never raises `SIGPIPE`
+//! (`MSG_NOSIGNAL`).
 
 use alloc::boxed::Box;
 use core::net::SocketAddr;
@@ -147,7 +175,8 @@ pub enum Op {
         fd: Fd,
         addr: Addr,
     },
-    /// The backlog is a hint, which the backend may clamp to its kernel's.
+    /// The backlog is a hint, which the backend may clamp to its kernel's; at
+    /// least one connection can always wait.
     Listen {
         fd: Fd,
         backlog: u32,
@@ -214,48 +243,61 @@ pub enum Shape {
 }
 
 /// The errors io handles by name. Each backend maps its kernel's error numbers
-/// onto these (the Linux names are given for the ring adapter) and anything
-/// else onto `Other`.
+/// onto these, per operation (the Linux names are given for the ring
+/// adapter), and anything else onto `Other`.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Error {
-    /// `Connect`: nothing listens at the address (`ECONNREFUSED`).
+    /// `Connect`: nothing listens at the address (`ECONNREFUSED`). A full
+    /// accept queue delays a `Connect`, never refuses it.
     Refused,
-    /// `Recv`, `Send`, `Connect`, `Accept`: the peer reset the connection, or
-    /// a connection waiting on a listener was reset before it was accepted
-    /// (`ECONNRESET`, `ECONNABORTED`).
+    /// `Recv`, `Send`, `Connect`: the peer reset the connection
+    /// (`ECONNRESET`), reported to one operation only. `Accept`:
+    /// `ECONNABORTED`, not seen on Linux, where a connection reset while it
+    /// waits is still accepted and its first `Recv` fails with this.
     Reset,
-    /// `Send`: the connection can send no more, after a reset or this side's
-    /// own `Shutdown` (`EPIPE`).
+    /// `Send`: the connection can send no more, after a reset was reported or
+    /// after this side's own `Shutdown` (`EPIPE`).
     BrokenPipe,
-    /// `Bind`, `Listen`: another socket holds the address (`EADDRINUSE`).
+    /// `Shutdown`: the socket is not connected, as after a reset was reported
+    /// (`ENOTCONN`).
+    NotConnected,
+    /// `Bind`: a listening socket holds the address, or a socket bound without
+    /// `SO_REUSEADDR`. `Listen`: another socket listens on it; two sockets
+    /// bound to one address both bind, and the second `Listen` fails
+    /// (`EADDRINUSE`).
     AddressInUse,
-    /// `Bind`: the address is not this host's; `Connect`: no local port is
+    /// `Bind`: the address is not this host's. `Connect`: no local port is
     /// free (`EADDRNOTAVAIL`).
     AddressNotAvailable,
-    /// `Connect`, `Send`: no route to the network or the host (`ENETUNREACH`,
-    /// `EHOSTUNREACH`).
+    /// `Connect`, `Recv`, `Send`: no route to the network or the host
+    /// (`ENETUNREACH`, `EHOSTUNREACH`).
     Unreachable,
     /// `Connect`, `Recv`, `Send`: the kernel's own timeout, such as a connect
     /// that was never answered or retransmissions that went unacknowledged
     /// (`ETIMEDOUT`). io's own deadlines are not this: they end in a `Cancel`.
     TimedOut,
     /// `Socket`, `Accept`: the process or the system has no descriptor left
-    /// (`EMFILE`, `ENFILE`).
+    /// (`EMFILE`, `ENFILE`). A failed `Accept` consumed no waiting connection.
     TooManyOpenFiles,
-    /// Any operation: the kernel is out of memory for buffers or sockets
-    /// (`ENOBUFS`, `ENOMEM`).
+    /// Any operation but `Cancel`: the kernel is out of memory for buffers or
+    /// sockets (`ENOBUFS`, `ENOMEM`). A failed `Accept` consumed no waiting
+    /// connection.
     NoBufferSpace,
     /// Any operation but `Cancel`: a `Cancel` stopped it before it did
-    /// anything (`ECANCELED`).
+    /// anything (`ECANCELED`, and `EINTR` on an operation io cancelled).
     Cancelled,
     /// `Cancel` only: the target had already completed, or was too far along
-    /// to stop (`ENOENT`, `EALREADY`). Its own completion says what it did.
+    /// to stop (`ENOENT`, `EALREADY`; on any other operation those are
+    /// `Other`). Its own completion says what it did.
     TooLate,
     /// Any operation: the record was one the kernel refuses, such as `Listen`
-    /// on a connected socket (`EINVAL`). A bug in io, reported rather than
-    /// asserted, since the kernel judged it.
+    /// on a connected socket (`EINVAL`, `EAFNOSUPPORT`). A bug in io, reported
+    /// rather than asserted, since the kernel judged it. On a `Cancel`, the
+    /// backend could not submit it, and the target was not stopped.
     InvalidArgument,
-    /// Anything else, with the backend's own code, for diagnostics only.
+    /// Anything else, with the backend's own code, for diagnostics only. On a
+    /// `Cancel`, the backend could not submit it, and the target was not
+    /// stopped.
     Other(i32),
 }
 
@@ -327,40 +369,66 @@ impl Done {
 impl Complete {
     /// Whether a backend kept the contract with this completion, given that the
     /// operation was valid: a success of the operation's shape, with a count
-    /// its buffer allows or the address its `Bind` asked for, and `TooLate`
-    /// only for a `Cancel`. Any other error may answer any operation. For the
-    /// simulator and the conformance suite to check; io trusts its backend.
+    /// its buffer allows or the address its `Bind` asked for; for a `Cancel`,
+    /// only `TooLate`, `InvalidArgument` or `Other` as an error, and for every
+    /// other operation any error but `TooLate`. For the simulator and the
+    /// conformance suite to check; io trusts its backend.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        match &self.result {
-            Ok(done) => done.shape() == self.kind.shape() && fits(&self.kind, done),
-            Err(error) => match error {
-                Error::TooLate => match &self.kind {
-                    Op::Cancel { .. } => true,
-                    Op::Socket { .. }
-                    | Op::Bind { .. }
-                    | Op::Listen { .. }
-                    | Op::Accept { .. }
-                    | Op::Connect { .. }
-                    | Op::Recv { .. }
-                    | Op::Send { .. }
-                    | Op::Shutdown { .. }
-                    | Op::Close { .. } => false,
-                },
-                Error::Refused
-                | Error::Reset
-                | Error::BrokenPipe
-                | Error::AddressInUse
-                | Error::AddressNotAvailable
-                | Error::Unreachable
-                | Error::TimedOut
-                | Error::TooManyOpenFiles
-                | Error::NoBufferSpace
-                | Error::Cancelled
-                | Error::InvalidArgument
-                | Error::Other(_) => true,
-            },
+        let error = match &self.result {
+            Ok(done) => return done.shape() == self.kind.shape() && fits(&self.kind, done),
+            Err(error) => *error,
+        };
+        match &self.kind {
+            Op::Cancel { .. } => fails_a_cancel(error),
+            Op::Socket { .. }
+            | Op::Bind { .. }
+            | Op::Listen { .. }
+            | Op::Accept { .. }
+            | Op::Connect { .. }
+            | Op::Recv { .. }
+            | Op::Send { .. }
+            | Op::Shutdown { .. }
+            | Op::Close { .. } => !fails_a_cancel_only(error),
         }
+    }
+}
+
+/// Whether `error` may answer a `Cancel`.
+fn fails_a_cancel(error: Error) -> bool {
+    match error {
+        Error::TooLate | Error::InvalidArgument | Error::Other(_) => true,
+        Error::Refused
+        | Error::Reset
+        | Error::BrokenPipe
+        | Error::NotConnected
+        | Error::AddressInUse
+        | Error::AddressNotAvailable
+        | Error::Unreachable
+        | Error::TimedOut
+        | Error::TooManyOpenFiles
+        | Error::NoBufferSpace
+        | Error::Cancelled => false,
+    }
+}
+
+/// Whether `error` answers a `Cancel` and nothing else.
+fn fails_a_cancel_only(error: Error) -> bool {
+    match error {
+        Error::TooLate => true,
+        Error::Refused
+        | Error::Reset
+        | Error::BrokenPipe
+        | Error::NotConnected
+        | Error::AddressInUse
+        | Error::AddressNotAvailable
+        | Error::Unreachable
+        | Error::TimedOut
+        | Error::TooManyOpenFiles
+        | Error::NoBufferSpace
+        | Error::Cancelled
+        | Error::InvalidArgument
+        | Error::Other(_) => false,
     }
 }
 
@@ -577,6 +645,17 @@ mod tests {
         assert!(complete(Op::Cancel { target: Token::new(2) }, Ok(Done::Nothing)).is_valid());
         assert!(!complete(Op::Accept { fd: FD }, Err(Error::TooLate)).is_valid());
         assert!(complete(Op::Accept { fd: FD }, Err(Error::Cancelled)).is_valid());
+    }
+
+    #[test]
+    fn a_cancel_fails_only_as_too_late_or_unsubmitted() {
+        let cancel = || Op::Cancel { target: Token::new(2) };
+        for error in [Error::Cancelled, Error::Reset, Error::NoBufferSpace, Error::NotConnected] {
+            assert!(!complete(cancel(), Err(error)).is_valid(), "not an answer to a cancel");
+        }
+        for error in [Error::TooLate, Error::InvalidArgument, Error::Other(5)] {
+            assert!(complete(cancel(), Err(error)).is_valid(), "an answer to a cancel");
+        }
     }
 
     #[test]
