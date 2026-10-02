@@ -75,8 +75,15 @@ impl World {
     }
 
     fn reap(&mut self) {
-        self.kernel.reap(&mut self.completions);
-        while let Some(complete) = self.completions.pop() {
+        let mut completions = std::mem::replace(&mut self.completions, Queue::with_capacity(0));
+        self.kernel.reap(&mut completions);
+        self.check(&mut completions);
+        self.completions = completions;
+    }
+
+    /// Checks the completions reaped into `completions`, and keeps them.
+    fn check(&mut self, completions: &mut Queue<Complete>) {
+        while let Some(complete) = completions.pop() {
             assert!(complete.is_valid(), "the ring kept the contract: {complete:?}");
             assert!(self.outstanding.remove(&complete.op), "one completion per submission: {complete:?}");
             self.arrived.insert(complete.op, complete);
@@ -550,4 +557,79 @@ fn a_kernel_dropped_with_operations_in_flight_leaves_their_memory_to_the_kernel(
         after.close(fd);
     }
     after.settle();
+}
+
+#[test]
+fn a_wait_forever_returns_with_a_completion() {
+    let mut world = World::new(4);
+    let socket = world.start(Op::Socket { family: Family::Ipv4 });
+    world.kernel.submit(&mut world.submissions, Wait::Forever);
+    world.reap();
+    let Some(Complete { result: Ok(Done::Fd(fd)), .. }) = world.arrived.remove(&socket) else {
+        panic!("the socket completed before the wait returned")
+    };
+    world.close(fd);
+    world.settle();
+}
+
+#[test]
+#[should_panic(expected = "waiting forever with nothing in flight never returns")]
+fn a_wait_forever_with_nothing_in_flight_is_refused() {
+    let mut world = World::new(4);
+    world.kernel.submit(&mut world.submissions, Wait::Forever);
+}
+
+#[test]
+fn a_record_the_adapter_completes_itself_arrives_at_the_next_reap_and_cannot_be_cancelled() {
+    let mut world = World::new(4);
+    // SO_REUSEADDR, set before the Bind goes to the ring, fails on a
+    // descriptor that does not exist, so the Bind never reaches the ring.
+    let bind = world.token();
+    let cancel = world.token();
+    world.submissions.push(Submit { op: bind, kind: Op::Bind { fd: Fd::new(-1), addr: v4(0) } });
+    world.submissions.push(Submit { op: cancel, kind: Op::Cancel { target: bind } });
+    world.kernel.submit(&mut world.submissions, Wait::No);
+    world.outstanding.extend([bind, cancel]);
+    assert_eq!(world.wait(bind).result, Err(Error::Other(libc::EBADF)), "the backend's own failure");
+    assert_eq!(world.wait(cancel).result, Err(Error::TooLate), "nothing in the ring to stop");
+    world.settle();
+}
+
+#[test]
+fn a_reap_takes_only_what_fits_and_the_rest_waits_without_blocking() {
+    let mut world = World::new(4);
+    let sockets = [world.token(), world.token(), world.token()];
+    for op in sockets {
+        world.submissions.push(Submit { op, kind: Op::Socket { family: Family::Ipv4 } });
+    }
+    world.kernel.submit(&mut world.submissions, Wait::No);
+    world.outstanding.extend(sockets);
+
+    let mut one = Queue::with_capacity(1);
+    let deadline = world.later(PATIENCE);
+    while one.is_empty() {
+        world.kernel.submit(&mut world.submissions, Wait::Until(deadline));
+        world.kernel.reap(&mut one);
+    }
+    assert_eq!(world.kernel.in_flight(), 2, "two completions wait");
+    for _ in 0..2 {
+        // Completions are waiting, so a wait with a far deadline returns at once.
+        let before = world.clock.now().now;
+        world.kernel.submit(&mut world.submissions, Wait::Until(deadline));
+        let after = world.clock.now().now;
+        assert!(
+            after < before.checked_add(Duration::from_millis(500)).expect("in reach"),
+            "no wait while completions are queued"
+        );
+        world.check(&mut one);
+        world.kernel.reap(&mut one);
+        assert_eq!(one.len(), 1, "one more, as much as fits");
+    }
+    world.check(&mut one);
+    assert_eq!(world.kernel.in_flight(), 0, "all three reaped");
+    for op in sockets {
+        let Ok(Done::Fd(fd)) = world.wait(op).result else { panic!("a socket") };
+        world.close(fd);
+    }
+    world.settle();
 }

@@ -24,10 +24,14 @@
 //! - **Pushing an entry** hands the kernel pointers into the slot (the
 //!   address and its length) and into the record's buffer. Both stay valid
 //!   and unmoved until the entry's completion is reaped: the slot is not
-//!   freed, moved or touched by Rust code until then (only its token's
-//!   entry in the map is read), and the record's `Box` stays in the slot.
-//!   A `Recv` buffer is written by the kernel only; a `Send` buffer and a
-//!   `Bind` or `Connect` address are only read.
+//!   freed or moved until then, and no Rust code reads or writes it (only
+//!   its token's entry in the map is read). The address and its length sit
+//!   in `UnsafeCell`s: the kernel gets the cells' raw pointers, and Rust
+//!   reaches their contents through `get_mut` only before the entry is
+//!   pushed and after its completion has moved the operation out of its
+//!   slot. The record's `Box` stays in the slot; a `Recv` buffer is written
+//!   by the kernel, a `Send` buffer only read. Reaching a free slot borrows
+//!   the table's slice for a moment, which touches no byte of a busy slot.
 //! - **Entering the ring** passes the count of pushed entries and, for a
 //!   deadline, an argument that lives across the call.
 //! - **Socket addresses** are cast between `sockaddr_storage` and the
@@ -36,8 +40,9 @@
 //! - **The synchronous calls** (`setsockopt`, `getsockname`, `close`,
 //!   `clock_gettime`, `getrandom`) are given pointers to locals that live
 //!   across the call, with their true sizes.
-//! - **Dropping a [`Kernel`]** with operations in flight leaks the table, so
-//!   the kernel never writes into freed memory while the ring winds down.
+//! - **Dropping a [`Kernel`]** with operations in flight leaks the table
+//!   through `Box::into_raw`, creating no reference to it, so the kernel
+//!   never writes into freed memory while the ring winds down.
 //!
 //! The completion queue holds as many entries as the table has slots, and
 //! every slot has at most one entry in the kernel (single-shot operations
@@ -48,9 +53,11 @@
     reason = "the ring adapter is the one place in skein that hands memory to the kernel (overview.md, 7.1; programming-style.md, 9.2)"
 )]
 
+use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::io;
+use std::marker::PhantomData;
 use std::mem::{self, size_of};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::ptr;
@@ -78,7 +85,8 @@ pub enum Wait {
     /// [`Time`] read from the [`Clock`](crate::Clock): the earliest deadline
     /// over every layer (programming-style.md, section 8).
     Until(Time),
-    /// Block until a completion arrives: no deadline is armed.
+    /// Block until a completion arrives: no deadline is armed. Asserts that
+    /// something is in flight or ready, since otherwise it never returns.
     Forever,
 }
 
@@ -89,8 +97,9 @@ pub enum OpenError {
     NoOperations,
     /// The ring could not be set up, with the error number: io_uring is
     /// missing, disabled (`io_uring_disabled`) or refused by a seccomp
-    /// profile (`ENOSYS`, `EPERM`), or the config is past the ring's sizes
-    /// (`EINVAL`).
+    /// profile (`ENOSYS`, `EPERM`), or `EINVAL`: the config is past the
+    /// ring's sizes, or the kernel is below the floor and does not know
+    /// `SINGLE_ISSUER`, `DEFER_TASKRUN` or `SUBMIT_ALL`.
     Setup(i32),
     /// The kernel is below the floor, 6.12: its ring lacks this operation.
     Missing(&'static str),
@@ -120,6 +129,9 @@ impl std::error::Error for OpenError {}
 pub struct Kernel {
     ring: IoUring,
     table: Table,
+    /// Neither `Send` nor `Sync`: `SINGLE_ISSUER` and `DEFER_TASKRUN` bind
+    /// the ring to the thread that opened it.
+    thread: PhantomData<*const ()>,
 }
 
 impl fmt::Debug for Kernel {
@@ -159,8 +171,10 @@ struct Flight {
     kind: Op,
     /// The address a `Bind` or `Connect` asks for, the peer an `Accept`
     /// writes, the address a `Bind` reads back with `getsockname`.
-    addr: libc::sockaddr_storage,
-    addr_len: libc::socklen_t,
+    /// In a cell: the kernel holds a pointer to it while the operation is in
+    /// flight (see the module documentation).
+    addr: UnsafeCell<libc::sockaddr_storage>,
+    addr_len: UnsafeCell<libc::socklen_t>,
     /// The result, for an operation the adapter completed itself.
     ready: Option<Result<Done, Error>>,
 }
@@ -226,7 +240,7 @@ impl Kernel {
             ring.params().sq_entries() >= operations && ring.params().cq_entries() >= operations,
             "the kernel sizes each ring at least as asked"
         );
-        Ok(Kernel { ring, table: Table::new(operations) })
+        Ok(Kernel { ring, table: Table::new(operations), thread: PhantomData })
     }
 
     /// How many operations are in flight, those completed but not yet reaped
@@ -248,7 +262,9 @@ impl Kernel {
     /// `wait` says. A record that finds no free slot stays in `records`.
     ///
     /// Panics on the contract's broken invariants that the ring checks: a
-    /// record that is not [`Op::is_valid`], and a token already in flight.
+    /// record that is not [`Op::is_valid`], and a token already in flight;
+    /// and on [`Wait::Forever`] with nothing in flight or ready, which would
+    /// never return.
     pub fn submit(&mut self, records: &mut Queue<Submit>, wait: Wait) {
         while !self.table.free.is_empty() {
             let Some(record) = records.pop() else {
@@ -267,7 +283,7 @@ impl Kernel {
             let Some(index) = self.table.ready.pop_front() else {
                 break;
             };
-            let flight = self.table.retire(index);
+            let (flight, _cancelled) = self.table.retire(index);
             let result = flight.ready.expect("a ready slot holds its result");
             out.push(Complete { op: flight.op, kind: flight.kind, result });
         }
@@ -370,7 +386,7 @@ impl Drop for Kernel {
             return;
         }
         let slots = mem::take(&mut self.table.slots);
-        let _leaked: &mut [Slot] = Box::leak(slots);
+        let _leaked: *mut [Slot] = Box::into_raw(slots);
     }
 }
 
@@ -394,15 +410,16 @@ impl Table {
 
     /// Takes the operation out of its slot, and frees the slot for the next
     /// one under a new generation.
-    fn retire(&mut self, index: u32) -> Flight {
+    /// Also says whether a `Cancel` was submitted for it.
+    fn retire(&mut self, index: u32) -> (Flight, bool) {
         let slot = self.slots.get_mut(slot_index(index)).expect("an index in flight names a slot");
         let flight = slot.flight.take().expect("a slot in flight holds its operation");
         slot.generation = slot.generation.wrapping_add(1);
         self.free.push(index);
         let removed = self.tokens.remove(&flight.op);
         assert!(removed.is_some(), "an operation in flight has its token");
-        let _was_cancelled: bool = self.cancelled.remove(&flight.op);
-        flight
+        let cancelled = self.cancelled.remove(&flight.op);
+        (flight, cancelled)
     }
 
     /// The completion of the ring entry named `user_data`, its result `res`
@@ -414,11 +431,7 @@ impl Table {
             slot.generation == generation && slot.flight.is_some(),
             "every completion names an operation in flight, once"
         );
-        let cancelled = match &slot.flight {
-            Some(flight) => self.cancelled.contains(&flight.op),
-            None => false,
-        };
-        let mut flight = self.retire(index);
+        let (mut flight, cancelled) = self.retire(index);
         let result = decode(&mut flight, res, cancelled);
         Complete { op: flight.op, kind: flight.kind, result }
     }
@@ -426,7 +439,7 @@ impl Table {
 
 impl Flight {
     fn new(op: Token, kind: Op) -> Flight {
-        Flight { op, kind, addr: zeroed_storage(), addr_len: 0, ready: None }
+        Flight { op, kind, addr: UnsafeCell::new(zeroed_storage()), addr_len: UnsafeCell::new(0), ready: None }
     }
 }
 
@@ -447,8 +460,9 @@ fn prepare(flight: &mut Flight, tokens: &BTreeMap<Token, u64>, cancelled: &mut B
             if let Err(errno) = set_option(fd.raw(), libc::SOL_SOCKET, libc::SO_REUSEADDR) {
                 return Prepared::Done(Err(error(kind, errno, false)));
             }
-            *addr_len = encode(&to, addr);
-            opcode::Bind::new(types::Fd(fd.raw()), ptr::from_ref(addr).cast(), *addr_len).build()
+            let len = encode(&to, addr.get_mut());
+            *addr_len.get_mut() = len;
+            opcode::Bind::new(types::Fd(fd.raw()), addr.get().cast_const().cast(), len).build()
         }
         Op::Listen { fd, backlog } => {
             // The backlog is a hint, clamped by the kernel to somaxconn.
@@ -456,14 +470,15 @@ fn prepare(flight: &mut Flight, tokens: &BTreeMap<Token, u64>, cancelled: &mut B
             opcode::Listen::new(types::Fd(fd.raw()), backlog).build()
         }
         Op::Accept { fd } => {
-            *addr_len = socklen_of::<libc::sockaddr_storage>();
-            opcode::Accept::new(types::Fd(fd.raw()), ptr::from_mut(addr).cast(), ptr::from_mut(addr_len))
+            *addr_len.get_mut() = socklen_of::<libc::sockaddr_storage>();
+            opcode::Accept::new(types::Fd(fd.raw()), addr.get().cast(), addr_len.get())
                 .flags(libc::SOCK_CLOEXEC)
                 .build()
         }
         Op::Connect { fd, addr: to } => {
-            *addr_len = encode(to, addr);
-            opcode::Connect::new(types::Fd(fd.raw()), ptr::from_ref(addr).cast(), *addr_len).build()
+            let len = encode(to, addr.get_mut());
+            *addr_len.get_mut() = len;
+            opcode::Connect::new(types::Fd(fd.raw()), addr.get().cast_const().cast(), len).build()
         }
         Op::Recv { fd, buf } => {
             let len = u32::try_from(buf.len()).expect("a valid Recv buffer's length is a count");
@@ -495,6 +510,7 @@ fn prepare(flight: &mut Flight, tokens: &BTreeMap<Token, u64>, cancelled: &mut B
 /// the address bound back with `getsockname`.
 fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error> {
     let Flight { kind, addr, addr_len, .. } = flight;
+    let (addr, addr_len) = (addr.get_mut(), addr_len.get_mut());
     if res < 0 {
         return Err(error(kind, 0_i32.saturating_sub(res), cancelled));
     }
@@ -506,25 +522,22 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
             }
             match configured {
                 Ok(()) => Ok(Done::Fd(Fd::new(res))),
+                // Not the operation's own error, so not mapped as one: an
+                // EINVAL here is no bug of io's record.
                 Err(errno) => {
                     close(res);
-                    Err(error(kind, errno, false))
+                    Err(Error::Other(errno))
                 }
             }
         }
         Op::Accept { .. } => {
+            // Both are kernel answers that cannot happen on a TCP socket the
+            // kernel just accepted; failing here would take a connection
+            // the contract says a failed Accept leaves waiting.
             let configured = set_option(res, libc::IPPROTO_TCP, libc::TCP_NODELAY);
-            match (configured, decode_addr(addr, *addr_len)) {
-                (Ok(()), Some(peer)) => Ok(Done::Accepted { fd: Fd::new(res), peer }),
-                (Err(errno), _) => {
-                    close(res);
-                    Err(error(kind, errno, false))
-                }
-                (Ok(()), None) => {
-                    close(res);
-                    Err(Error::Other(libc::EAFNOSUPPORT))
-                }
-            }
+            assert!(configured.is_ok(), "TCP_NODELAY applies to every accepted TCP socket: {configured:?}");
+            let peer = decode_addr(addr, *addr_len).expect("an accepted TCP socket's peer is IPv4 or IPv6");
+            Ok(Done::Accepted { fd: Fd::new(res), peer })
         }
         Op::Bind { fd, .. } => {
             let fd = *fd;
