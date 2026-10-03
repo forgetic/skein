@@ -366,9 +366,9 @@ with, or an `Error`), so every record comes back up whatever happened.
   translates.
 - **Socket options are backend defaults, not records,** until a service
   pulls one: every descriptor is close-on-exec, a socket that binds gets
-  `SO_REUSEADDR`, an IPv6 socket gets `IPV6_V6ONLY` (families never mix),
-  connected and accepted sockets get `TCP_NODELAY`, and a send never
-  raises `SIGPIPE`.
+  `SO_REUSEADDR`, an IPv6 socket gets `IPV6_V6ONLY` (families never mix:
+  it neither binds nor reaches an IPv4-mapped address), connected and
+  accepted sockets get `TCP_NODELAY`, and a send never raises `SIGPIPE`.
 - **Errors cross as a skein enum:** the errors io handles by name, plus
   an `Other` code. Each backend maps its kernel's error numbers onto it,
   per operation: the same number can mean different things on a cancel

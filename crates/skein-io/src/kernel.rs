@@ -108,9 +108,10 @@
 //!
 //! Backend defaults, not records, until a service pulls one: every
 //! descriptor is close-on-exec; a socket that binds gets `SO_REUSEADDR`;
-//! every IPv6 socket gets `IPV6_V6ONLY`, so families never mix; connected
-//! and accepted sockets get `TCP_NODELAY`; a `Send` never raises `SIGPIPE`
-//! (`MSG_NOSIGNAL`).
+//! every IPv6 socket gets `IPV6_V6ONLY`, so families never mix: its `Bind`
+//! of an IPv4-mapped address fails with `InvalidArgument`, its `Connect`
+//! to one with `Unreachable`; connected and accepted sockets get
+//! `TCP_NODELAY`; a `Send` never raises `SIGPIPE` (`MSG_NOSIGNAL`).
 
 use alloc::boxed::Box;
 use core::net::SocketAddr;
@@ -300,7 +301,8 @@ pub enum Error {
     /// free (`EADDRNOTAVAIL`).
     AddressNotAvailable,
     /// `Connect`, `Recv`, `Send`: no route to the network or the host
-    /// (`ENETUNREACH`, `EHOSTUNREACH`).
+    /// (`ENETUNREACH`, `EHOSTUNREACH`), as from an IPv6 socket to an
+    /// IPv4-mapped address.
     Unreachable,
     /// `Connect`, `Recv`, `Send`: the kernel's own timeout, such as a connect
     /// that was never answered or retransmissions that went unacknowledged

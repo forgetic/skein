@@ -108,6 +108,15 @@ pub(crate) fn bindable(ip: IpAddr) -> bool {
     ip.is_loopback() || ip.is_unspecified()
 }
 
+/// Whether `ip` is an IPv4-mapped IPv6 address, which an IPv6 socket,
+/// `IPV6_V6ONLY` by default, can neither bind nor reach.
+pub(crate) const fn mapped(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some(),
+        IpAddr::V4(_) => false,
+    }
+}
+
 /// Whether two bound addresses can meet the same connection.
 pub(crate) fn overlaps(a: IpAddr, b: IpAddr) -> bool {
     a == b || a.is_unspecified() || b.is_unspecified()

@@ -13,7 +13,8 @@ use skein_lib::{Duration, Queue, Rng, Time, Token, Wall};
 
 use crate::config::Config;
 use crate::net::{
-    EPHEMERAL_FIRST, EPHEMERAL_LAST, Fate, Listener, Socket, SocketId, State, Stream, bindable, loopback, overlaps,
+    EPHEMERAL_FIRST, EPHEMERAL_LAST, Fate, Listener, Socket, SocketId, State, Stream, bindable, loopback, mapped,
+    overlaps,
 };
 use crate::trace::{self, Entry, Event, Fault, Summary};
 
@@ -427,6 +428,11 @@ impl Sim {
         let (State::Fresh, None) = (&socket.state, socket.local) else {
             return Err(Error::InvalidArgument);
         };
+        // IPV6_V6ONLY: an IPv6 socket binds no IPv4 address, which Linux
+        // refuses as invalid rather than not this host's.
+        if mapped(addr.ip()) {
+            return Err(Error::InvalidArgument);
+        }
         if !bindable(addr.ip()) {
             return Err(Error::AddressNotAvailable);
         }
