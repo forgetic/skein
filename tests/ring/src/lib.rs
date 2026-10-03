@@ -22,8 +22,8 @@ pub struct World {
     pub kernel: Kernel,
     pub clock: Clock,
     pub submissions: Queue<Submit>,
-    pub completions: Queue<Complete>,
-    pub next: u64,
+    completions: Queue<Complete>,
+    next: u64,
     /// Submitted, not yet completed: each completes exactly once.
     pub outstanding: BTreeSet<Token>,
     /// Completed, not yet looked at by the test.
