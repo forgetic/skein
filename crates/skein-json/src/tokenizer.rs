@@ -253,7 +253,7 @@ pub fn up(tokenizer: &mut Tokenizer, env: &Env<Limits>, ev: Up, above: &mut Queu
             Up::Room => unreachable!("the tokenizer asks for no room"),
         },
     };
-    demand(tokenizer.state, limits, below);
+    demand(state, tokenizer.state, limits, below);
 }
 
 /// A request from the side above. Emits at most [`DOWN_MAX_OUT`].
@@ -274,9 +274,9 @@ pub fn down(
             State::Over => unreachable!("a Next after the document's outcome"),
             State::Closed => unreachable!("a Next after Closed"),
         },
-        Request::Close => close(document, state, above, below),
+        Request::Close => close(document, state, above),
     };
-    demand(tokenizer.state, limits, below);
+    demand(state, tokenizer.state, limits, below);
 }
 
 /// What the tokenizer is doing about the side above's demand.
@@ -411,16 +411,23 @@ fn text_capacity(limits: &Limits) -> u32 {
     limits.string.max(limits.number)
 }
 
-/// States the demand of a state that reads (programming-model.md, 5.4).
-/// Every transition into one follows a delivery that met the last demand,
-/// or leaves `Idle`, which has none: so a reading state always states one,
-/// and no other state needs to.
-fn demand(state: State, limits: &Limits, below: &mut Queue<Down>) {
-    let read = match state {
+/// States what the state `after` a transition demands below, in one place
+/// after every transition (programming-model.md, 5.4).
+///
+/// A reading state states its demand: every transition into one follows a
+/// delivery that met the last demand, or leaves `Idle`, which has none. A
+/// close withdraws what the state `before` it demanded. No other state has
+/// anything outstanding below.
+fn demand(before: State, after: State, limits: &Limits, below: &mut Queue<Down>) {
+    let read = match after {
         State::Reading(Reading::Byte | Reading::Number(_)) => Read::Fill(1),
         State::Reading(Reading::Literal(literal)) => Read::Fill(literal.len()),
         State::Reading(Reading::String { .. }) => Read::Scan { until: QUOTE, max: limits.chunk },
-        State::Idle(_) | State::Over | State::Closed => return,
+        State::Closed => match before {
+            State::Reading(_) => Read::Nothing,
+            State::Idle(_) | State::Over | State::Closed => return,
+        },
+        State::Idle(_) | State::Over => return,
     };
     below.push(Down::Demand { read, room: 0 });
 }
@@ -446,11 +453,11 @@ fn next(document: &mut Document, limits: &Limits, held: Held, above: &mut Queue<
     }
 }
 
-/// `Close`, in any state.
-fn close(document: &mut Document, state: State, above: &mut Queue<Event>, below: &mut Queue<Down>) -> State {
+/// `Close`, in any state: what was demanded below is withdrawn by
+/// `demand`.
+fn close(document: &mut Document, state: State, above: &mut Queue<Event>) -> State {
     match state {
-        State::Reading(_) => below.push(Down::Demand { read: Read::Nothing, room: 0 }),
-        State::Idle(_) | State::Over => {}
+        State::Idle(_) | State::Reading(_) | State::Over => {}
         State::Closed => unreachable!("a Close after Closed"),
     }
     document.text.clear();
@@ -619,10 +626,12 @@ fn start(document: &mut Document, container: Container) -> Step {
 
 /// The end of an object or an array, which must be the innermost open.
 fn end(document: &mut Document, container: Container) -> Step {
-    if document.open.top() != Some(&container) {
-        return Step::Fail(Error::Unexpected);
+    // A document that fails is over, so a pop that does not match is not
+    // undone.
+    match document.open.pop() {
+        Some(top) if top == container => {}
+        Some(_) | None => return Step::Fail(Error::Unexpected),
     }
-    let _: Option<Container> = document.open.pop();
     after_value(document);
     let token = match container {
         Container::Object => Token::ObjectEnd,

@@ -349,8 +349,8 @@ impl Encoder {
                 unreachable!("an end follows its container's start or a member")
             }
         }
-        assert!(self.open.top() == Some(&container), "an end is the innermost container's");
-        let _: Option<Container> = self.open.pop();
+        let innermost = self.open.pop();
+        assert!(innermost == Some(container), "an end is the innermost container's");
         self.put(match container {
             Container::Object => b"}",
             Container::Array => b"]",
