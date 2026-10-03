@@ -1,0 +1,6 @@
+# Sixty bytes of escapes, ten once unescaped: within a limit of ten.
+limits string 10
+array
+string "AAAAAAAAAA"
+end array
+done

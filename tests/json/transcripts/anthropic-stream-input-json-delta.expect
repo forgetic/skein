@@ -1,0 +1,18 @@
+# Written by hand after the published format of Anthropic's Messages API:
+# no real answer can be captured offline. Drafted by the reference parser,
+# then checked by hand.
+# The data of a content_block_delta event: a fragment of a tool's input, as JSON in a string.
+object
+key "type"
+string "content_block_delta"
+key "index"
+number 1
+key "delta"
+object
+key "type"
+string "input_json_delta"
+key "partial_json"
+string "{\"path\": \"src/ma"
+end object
+end object
+done

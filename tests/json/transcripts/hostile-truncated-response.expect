@@ -1,0 +1,13 @@
+# A response cut short in the middle of a string.
+object
+key "id"
+string "msg_01"
+key "type"
+string "message"
+key "content"
+array
+object
+key "type"
+string "text"
+key "text"
+failed truncated

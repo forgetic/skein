@@ -1,0 +1,21 @@
+# Written by hand after the published format of Anthropic's Messages API:
+# no real answer can be captured offline. Drafted by the reference parser,
+# then checked by hand.
+# The data of a stream's message_delta event.
+object
+key "type"
+string "message_delta"
+key "delta"
+object
+key "stop_reason"
+string "tool_use"
+key "stop_sequence"
+null
+end object
+key "usage"
+object
+key "output_tokens"
+number 89
+end object
+end object
+done

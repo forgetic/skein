@@ -1,0 +1,379 @@
+# Written by hand after the published format of Forgejo's API (GET /repos/{owner}/{repo}/pulls/{index}):
+# no real answer can be captured offline. Drafted by the reference parser,
+# then checked by hand.
+# Compact, as Go's encoder writes it: UTF-8 as it is, and <, >, & escaped as \u003c, \u003e, \u0026.
+object
+key "id"
+number 4127
+key "url"
+string "https://git.example.org/ai/temper/pulls/58"
+key "number"
+number 58
+key "user"
+object
+key "id"
+number 7
+key "login"
+string "agent"
+key "login_name"
+string ""
+key "source_id"
+number 0
+key "full_name"
+string "Agent Smith"
+key "email"
+string "agent@noreply.git.example.org"
+key "avatar_url"
+string "https://git.example.org/avatars/9b2a5f3c4e1d0a8b7c6e5f4d3c2b1a09"
+key "html_url"
+string "https://git.example.org/agent"
+key "language"
+string "en-US"
+key "is_admin"
+true
+key "last_login"
+string "2026-10-02T21:14:09+02:00"
+key "created"
+string "2025-11-04T09:30:00+01:00"
+key "restricted"
+false
+key "active"
+true
+key "prohibit_login"
+false
+key "location"
+string ""
+key "pronouns"
+string ""
+key "website"
+string ""
+key "description"
+string ""
+key "visibility"
+string "public"
+key "followers_count"
+number 0
+key "following_count"
+number 0
+key "starred_repos_count"
+number 3
+key "username"
+string "agent"
+end object
+key "title"
+string "Add the JSON tokenizer & writer"
+key "body"
+string "Builds the tokenizer and the writer.\r\n\r\n<details>\r\n<summary>Tests</summary>\r\n\r\n- 45 step tests & 8 worlds\r\n- naïve reference — checked against it\r\n</details>\r\n\r\nFixes #12 🚀"
+key "labels"
+array
+object
+key "id"
+number 3
+key "name"
+string "kind/feature"
+key "exclusive"
+false
+key "is_archived"
+false
+key "color"
+string "0288d1"
+key "description"
+string "New functionality"
+key "url"
+string "https://git.example.org/api/v1/repos/ai/temper/labels/3"
+end object
+end array
+key "milestone"
+null
+key "assignee"
+null
+key "assignees"
+null
+key "requested_reviewers"
+array
+end array
+key "requested_reviewers_teams"
+array
+end array
+key "state"
+string "open"
+key "draft"
+false
+key "is_locked"
+false
+key "comments"
+number 2
+key "review_comments"
+number 5
+key "additions"
+number 2841
+key "deletions"
+number 12
+key "changed_files"
+number 19
+key "html_url"
+string "https://git.example.org/ai/temper/pulls/58"
+key "diff_url"
+string "https://git.example.org/ai/temper/pulls/58.diff"
+key "patch_url"
+string "https://git.example.org/ai/temper/pulls/58.patch"
+key "mergeable"
+true
+key "merged"
+false
+key "merged_at"
+null
+key "merge_commit_sha"
+null
+key "merged_by"
+null
+key "allow_maintainer_edit"
+false
+key "base"
+object
+key "label"
+string "main"
+key "ref"
+string "main"
+key "sha"
+string "ad1941d3c0f7e8b2a4d5c6e7f8091a2b3c4d5e6f"
+key "repo_id"
+number 12
+key "repo"
+object
+key "id"
+number 12
+key "owner"
+object
+key "id"
+number 2
+key "login"
+string "ai"
+key "login_name"
+string ""
+key "source_id"
+number 0
+key "full_name"
+string ""
+key "email"
+string ""
+key "avatar_url"
+string "https://git.example.org/avatars/3c2b1a09f8e7d6c5b4a39281706f5e4d"
+key "html_url"
+string "https://git.example.org/ai"
+key "language"
+string ""
+key "is_admin"
+false
+key "last_login"
+string "0001-01-01T00:00:00Z"
+key "created"
+string "2025-10-01T08:00:00+02:00"
+key "restricted"
+false
+key "active"
+false
+key "prohibit_login"
+false
+key "location"
+string ""
+key "pronouns"
+string ""
+key "website"
+string ""
+key "description"
+string ""
+key "visibility"
+string "public"
+key "followers_count"
+number 0
+key "following_count"
+number 0
+key "starred_repos_count"
+number 0
+key "username"
+string "ai"
+end object
+key "name"
+string "temper"
+key "full_name"
+string "ai/temper"
+key "description"
+string "An engine of coding agents"
+key "empty"
+false
+key "private"
+false
+key "fork"
+false
+key "template"
+false
+key "parent"
+null
+key "mirror"
+false
+key "size"
+number 4310
+key "language"
+string "Rust"
+key "languages_url"
+string "https://git.example.org/api/v1/repos/ai/temper/languages"
+key "html_url"
+string "https://git.example.org/ai/temper"
+key "url"
+string "https://git.example.org/api/v1/repos/ai/temper"
+key "link"
+string ""
+key "ssh_url"
+string "git@git.example.org:ai/temper.git"
+key "clone_url"
+string "https://git.example.org/ai/temper.git"
+key "original_url"
+string ""
+key "website"
+string ""
+key "stars_count"
+number 1
+key "forks_count"
+number 0
+key "watchers_count"
+number 2
+key "open_issues_count"
+number 4
+key "open_pr_counter"
+number 1
+key "release_counter"
+number 0
+key "default_branch"
+string "main"
+key "archived"
+false
+key "created_at"
+string "2025-10-01T08:12:44+02:00"
+key "updated_at"
+string "2026-10-03T10:05:31+02:00"
+key "archived_at"
+string "1970-01-01T01:00:00+01:00"
+key "permissions"
+object
+key "admin"
+true
+key "push"
+true
+key "pull"
+true
+end object
+key "has_issues"
+true
+key "internal_tracker"
+object
+key "enable_time_tracker"
+true
+key "allow_only_contributors_to_track_time"
+true
+key "enable_issue_dependencies"
+true
+end object
+key "has_wiki"
+false
+key "wiki_branch"
+string "main"
+key "globally_editable_wiki"
+false
+key "has_pull_requests"
+true
+key "has_projects"
+false
+key "has_releases"
+true
+key "has_packages"
+false
+key "has_actions"
+true
+key "ignore_whitespace_conflicts"
+false
+key "allow_merge_commits"
+true
+key "allow_rebase"
+true
+key "allow_rebase_explicit"
+true
+key "allow_squash_merge"
+true
+key "allow_fast_forward_only_merge"
+true
+key "allow_rebase_update"
+true
+key "default_delete_branch_after_merge"
+true
+key "default_merge_style"
+string "merge"
+key "default_allow_maintainer_edit"
+false
+key "default_update_style"
+string "merge"
+key "avatar_url"
+string ""
+key "internal"
+false
+key "mirror_interval"
+string ""
+key "object_format_name"
+string "sha1"
+key "mirror_updated"
+string "0001-01-01T00:00:00Z"
+key "repo_transfer"
+null
+key "topics"
+array
+string "agents"
+string "rust"
+end array
+end object
+end object
+key "head"
+object
+key "label"
+string "task-10-json"
+key "ref"
+string "task-10-json"
+key "sha"
+string "a3bd2b9e1f0c7d6b5a4938271605f4e3d2c1b0a9"
+key "repo_id"
+number 12
+key "repo"
+object
+key "id"
+number 12
+key "name"
+string "temper"
+key "full_name"
+string "ai/temper"
+key "private"
+false
+key "fork"
+false
+key "default_branch"
+string "main"
+key "size"
+number 4310
+key "stars_count"
+number 1
+end object
+end object
+key "merge_base"
+string "ad1941d3c0f7e8b2a4d5c6e7f8091a2b3c4d5e6f"
+key "due_date"
+null
+key "created_at"
+string "2026-10-03T10:02:17+02:00"
+key "updated_at"
+string "2026-10-03T10:05:31+02:00"
+key "closed_at"
+null
+key "pin_order"
+number 0
+key "flow"
+number 0
+end object
+done

@@ -1,0 +1,13 @@
+[package]
+name = "skein-json"
+description = "A bounded JSON tokenizer, pulled by demand, and a sized writer, for a connection's stack of protocol machines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+
+[lints]
+workspace = true

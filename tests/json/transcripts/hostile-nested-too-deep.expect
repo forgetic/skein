@@ -1,0 +1,20 @@
+# Forty arrays deep, against a depth of sixteen: refused at the
+# seventeenth, with a token for each of the sixteen before it.
+limits depth 16
+array
+array
+array
+array
+array
+array
+array
+array
+array
+array
+array
+array
+array
+array
+array
+array
+failed too-deep

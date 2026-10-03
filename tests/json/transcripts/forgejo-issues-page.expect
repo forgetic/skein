@@ -1,0 +1,249 @@
+# Written by hand after the published format of Forgejo's API (GET /repos/{owner}/{repo}/issues):
+# no real answer can be captured offline. Drafted by the reference parser,
+# then checked by hand.
+# A page of two issues, one a pull request.
+array
+object
+key "id"
+number 311
+key "url"
+string "https://git.example.org/api/v1/repos/ai/skein/issues/14"
+key "html_url"
+string "https://git.example.org/ai/skein/issues/14"
+key "number"
+number 14
+key "user"
+object
+key "id"
+number 1
+key "login"
+string "free"
+key "full_name"
+string ""
+key "email"
+string "free@noreply.git.example.org"
+key "avatar_url"
+string "https://git.example.org/avatars/5f4e3d2c1b0a99887766554433221100"
+key "username"
+string "free"
+end object
+key "original_author"
+string ""
+key "original_author_id"
+number 0
+key "title"
+string "Tokenizer: refuse a lone surrogate"
+key "body"
+string "A `\\ud800` alone must fail as `Surrogate`, not decode to U+FFFD.\n\n```json\n[\"\\ud800\"]\n```"
+key "ref"
+string ""
+key "assets"
+array
+end array
+key "labels"
+array
+object
+key "id"
+number 5
+key "name"
+string "kind/bug"
+key "exclusive"
+false
+key "is_archived"
+false
+key "color"
+string "ee0701"
+key "description"
+string "Something is not working"
+key "url"
+string "https://git.example.org/api/v1/repos/ai/skein/labels/5"
+end object
+object
+key "id"
+number 9
+key "name"
+string "priority/high"
+key "exclusive"
+true
+key "is_archived"
+false
+key "color"
+string "b60205"
+key "description"
+string ""
+key "url"
+string "https://git.example.org/api/v1/repos/ai/skein/labels/9"
+end object
+end array
+key "milestone"
+object
+key "id"
+number 2
+key "title"
+string "temper's LLM client"
+key "description"
+string "What the agent's client pulls"
+key "state"
+string "open"
+key "open_issues"
+number 3
+key "closed_issues"
+number 11
+key "created_at"
+string "2026-09-01T10:00:00+02:00"
+key "updated_at"
+string "2026-10-02T16:42:10+02:00"
+key "closed_at"
+null
+key "due_on"
+string "2026-10-31T23:59:59+01:00"
+end object
+key "assignee"
+null
+key "assignees"
+null
+key "state"
+string "open"
+key "is_locked"
+false
+key "comments"
+number 0
+key "created_at"
+string "2026-10-02T16:42:10+02:00"
+key "updated_at"
+string "2026-10-02T16:42:10+02:00"
+key "closed_at"
+null
+key "due_date"
+null
+key "pull_request"
+null
+key "repository"
+object
+key "id"
+number 13
+key "name"
+string "skein"
+key "owner"
+string "ai"
+key "full_name"
+string "ai/skein"
+end object
+key "pin_order"
+number 0
+end object
+object
+key "id"
+number 298
+key "url"
+string "https://git.example.org/api/v1/repos/ai/skein/issues/9"
+key "html_url"
+string "https://git.example.org/ai/skein/pulls/9"
+key "number"
+number 9
+key "user"
+object
+key "id"
+number 7
+key "login"
+string "agent"
+key "full_name"
+string "Agent Smith"
+key "email"
+string "agent@noreply.git.example.org"
+key "avatar_url"
+string "https://git.example.org/avatars/9b2a5f3c4e1d0a8b7c6e5f4d3c2b1a09"
+key "username"
+string "agent"
+end object
+key "original_author"
+string ""
+key "original_author_id"
+number 0
+key "title"
+string "Merge task 07: tests out of crates/"
+key "body"
+string "Moves the worlds under tests/, in two suites:\n\n| suite | budget |\n|---|---|\n| focused | 15 s |\n| fuzzy | 60 s |\n\nTimings: 2.31 s and 2.72 s, idle."
+key "ref"
+string ""
+key "assets"
+array
+end array
+key "labels"
+array
+end array
+key "milestone"
+null
+key "assignee"
+object
+key "id"
+number 1
+key "login"
+string "free"
+key "full_name"
+string ""
+key "email"
+string "free@noreply.git.example.org"
+key "avatar_url"
+string "https://git.example.org/avatars/5f4e3d2c1b0a99887766554433221100"
+key "username"
+string "free"
+end object
+key "assignees"
+array
+object
+key "id"
+number 1
+key "login"
+string "free"
+key "full_name"
+string ""
+key "email"
+string "free@noreply.git.example.org"
+key "avatar_url"
+string "https://git.example.org/avatars/5f4e3d2c1b0a99887766554433221100"
+key "username"
+string "free"
+end object
+end array
+key "state"
+string "closed"
+key "is_locked"
+false
+key "comments"
+number 4
+key "created_at"
+string "2026-09-28T09:15:00+02:00"
+key "updated_at"
+string "2026-10-01T18:20:45+02:00"
+key "closed_at"
+string "2026-10-01T18:20:45+02:00"
+key "due_date"
+null
+key "pull_request"
+object
+key "merged"
+true
+key "merged_at"
+string "2026-10-01T18:20:45+02:00"
+key "draft"
+false
+key "html_url"
+string "https://git.example.org/ai/skein/pulls/9"
+end object
+key "repository"
+object
+key "id"
+number 13
+key "name"
+string "skein"
+key "owner"
+string "ai"
+key "full_name"
+string "ai/skein"
+end object
+key "pin_order"
+number 0
+end object
+end array
+done

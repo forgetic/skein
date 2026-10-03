@@ -96,7 +96,7 @@ the live heap against the sum of the worst cases of the services it hosts
 ## 6. Layout
 
 ```
-crates/*/src/tests.rs           step tests; lib's in a module per area, under src/tests/
+crates/*/src/tests.rs           step tests; lib's and JSON's in a module per area, under src/tests/
 testing/skein-conformance       the conformance suite: the backend interface, the scenarios, the driver, the checks
 testing/skein-heap              the counting allocator, and the meter that checks a step against its worst case
 tests/heap                      the counting allocator's own tests, skein-heap-tests
@@ -105,6 +105,8 @@ tests/sim                       the simulator's own tests, skein-sim-tests
 tests/ring                      the ring adapter's own tests, skein-ring-tests
 tests/conformance/sim           the suite against the simulator, skein-conformance-sim
 tests/conformance/ring          the suite against the ring, skein-conformance-ring
+tests/json                      the JSON tokenizer's machine worlds, the writer against it, and their worst cases against the counting allocator, skein-json-world
+tests/json/transcripts          its transcripts, each with what it must decode to
 tests/**/tests/*.rs             a crate's focused tests
 tests/**/tests/fuzzy_*.rs       its fuzzy tests: sweeps over many seeds
 tests/clippy.toml               what the crates under tests/ may not use
@@ -117,7 +119,8 @@ in `src/`, and whatever drives it from outside is a crate under `tests/`,
 named by its path. Such a crate is ordinary Rust (programming-model.md,
 10.2): what its test binaries share is its library, in `src/` (the
 simulator's harness and its scripted exchange, a backend of the suite,
-the naive functions lib is compared with),
+the naive functions lib is compared with, a machine's world and the
+reference parser it is checked against),
 and each file in its `tests/` is a test binary of its own, a fuzzy one
 when its name starts with `fuzzy_`. `tests/clippy.toml` bans what would
 make a run unrepeatable: hash maps with a random seed, the system clocks,
@@ -139,9 +142,10 @@ place, with a scoped
 `#[expect(unsafe_code, reason = "…")]` and a `SAFETY` comment on each
 block.
 
-The io worlds with the minimal machine, the machine worlds with their
-transcripts, and the protocol worlds find their homes under `tests/` when
-the first of each is built. `scripts/check.sh` runs what CI runs:
+A machine's worlds are a crate of their own, `tests/<machine>`, with its
+transcripts in `transcripts/` beside its tests. The io worlds with the
+minimal machine, and the protocol worlds, find their homes under `tests/`
+when the first of each is built. `scripts/check.sh` runs what CI runs:
 formatting, the lints as errors, then the focused suite and the fuzzy
 suite, with nextest (section 7).
 
@@ -151,8 +155,8 @@ As of 2026-10-03.
 
 | Tier | Built |
 |---|---|
-| step tests | lib: every container and value type; io: the kernel records' rules |
-| machine worlds | none: no machine exists |
+| step tests | lib: every container and value type; io: the kernel records' rules; JSON: the tokenizer and the writer |
+| machine worlds | JSON: the tokenizer, with its transcripts, and the writer against it |
 | protocol worlds | none |
 | io worlds | none: no io yet |
 | simulated worlds | none: no examples |
@@ -176,6 +180,17 @@ of chaos, and the fuzzy suite over 200 of chaos, counting the pairings
 each race shows over them; against the ring, each runs once, in the
 focused suite.
 
+The JSON tokenizer runs in a machine world between a stream below that
+cuts the peer's bytes at random, ends early, idle or not, and fails, and
+a user above that demands slowly, stops, and closes in every state,
+checking the machine's contracts as it goes; every run is checked
+against a reference parser (json.md, 6). Its transcripts, nine in the
+shape of an LLM provider's and a forge's answers and thirty hostile ones,
+decode to their expectations in the focused suite, with the writer
+reading back what it writes. The fuzzy suite runs 20,000 generated and mutated
+documents and 5,000 cut and mutated transcripts under neighbours drawn
+from each seed, and writes 5,000 documents and reads them back.
+
 The two suites of testing-strategy.md, section 8, are
 `.config/nextest.toml`'s profiles, each with its budget as a global
 timeout: the focused suite by default, within 15 seconds, and the fuzzy
@@ -184,13 +199,15 @@ lib's comparisons of the byte search with a naive one and of the intake
 with a plain reference run 300 random cases as step tests, and 20,000
 from the same seeds in the fuzzy suite.
 
-Replay: a seed replays to the same trace of submissions and completions.
-No state digest yet.
+Replay: a seed replays to the same trace of submissions and completions,
+and a JSON world to the same run. No state digest yet.
 
 Memory: the counting allocator is temper's heap meter, ported with its
 own tests. Each of lib's containers is checked against its worst case
-(lib.md, 10), in the focused suite. No world of skein's checks memory
-yet: its io worlds and simulated worlds are not built (section 8).
+(lib.md, 10), in the focused suite, and so are the JSON tokenizer's and
+writer's, a call of an entry point at a time (json.md, 6). No world of
+skein's checks memory yet: its io worlds and simulated worlds are not
+built (section 8).
 
 ## 8. Not built yet
 
@@ -202,9 +219,10 @@ By tier, in the order temper pulls the parts (README.md):
 - **Conformance** for files and processes, with a scratch directory as
   the root, when io pulls them; against the readiness backend when it
   exists.
-- **Machine worlds** for HTTP, server-sent events and JSON, with their
-  transcripts and fuzz targets, and **protocol worlds** once two of them
-  stack.
+- **Machine worlds** for HTTP and server-sent events, with their
+  transcripts; **fuzz targets** for every machine, JSON's included, when a
+  nightly toolchain is installed; and **protocol worlds** once two of the
+  machines stack.
 - **TLS's own tests,** when the TLS client is built.
 - **Simulated worlds and the real loop,** with the examples.
 

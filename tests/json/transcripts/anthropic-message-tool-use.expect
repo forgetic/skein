@@ -1,0 +1,78 @@
+# Written by hand after the published format of Anthropic's Messages API:
+# no real answer can be captured offline. Drafted by the reference parser,
+# then checked by hand.
+# A response that ends in two tool calls, pretty-printed.
+object
+key "id"
+string "msg_01XFDUDYJgAACzvnptvVoYEL"
+key "type"
+string "message"
+key "role"
+string "assistant"
+key "model"
+string "claude-sonnet-4-5-20250929"
+key "content"
+array
+object
+key "type"
+string "text"
+key "text"
+string "I'll read the parser first, to see where the nesting is held.\n\nThen I'll run the tests."
+end object
+object
+key "type"
+string "tool_use"
+key "id"
+string "toolu_01A09q90qw90lq917835lq9"
+key "name"
+string "read_file"
+key "input"
+object
+key "path"
+string "crates/skein-json/src/tokenizer.rs"
+key "offset"
+number 0
+key "limit"
+number 200
+end object
+end object
+object
+key "type"
+string "tool_use"
+key "id"
+string "toolu_01VLwhzN8bh3Wa6JhwZUpQ2K"
+key "name"
+string "shell"
+key "input"
+object
+key "command"
+string "cargo nextest run -p skein-json -E 'test(/escape/)'"
+key "timeout_ms"
+number 120000
+key "env"
+object
+key "RUST_BACKTRACE"
+string "1"
+end object
+end object
+end object
+end array
+key "stop_reason"
+string "tool_use"
+key "stop_sequence"
+null
+key "usage"
+object
+key "input_tokens"
+number 2095
+key "cache_creation_input_tokens"
+number 0
+key "cache_read_input_tokens"
+number 18432
+key "output_tokens"
+number 503
+key "service_tier"
+string "standard"
+end object
+end object
+done

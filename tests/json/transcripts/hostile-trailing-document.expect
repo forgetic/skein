@@ -1,0 +1,6 @@
+# A second document after the first: one document is one stream.
+object
+key "ok"
+true
+end object
+failed trailing

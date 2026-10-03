@@ -1,0 +1,98 @@
+# Written by hand after the published format of OpenAI's Chat Completions API:
+# no real answer can be captured offline. Drafted by the reference parser,
+# then checked by hand.
+# Two tool calls, their arguments JSON in a string, with \u escapes and a surrogate pair.
+object
+key "id"
+string "chatcmpl-AJ2fnTdJ9Hq7rVxYc3iPzQb1kWm8e"
+key "object"
+string "chat.completion"
+key "created"
+number 1759493821
+key "model"
+string "gpt-4o-2024-08-06"
+key "choices"
+array
+object
+key "index"
+number 0
+key "message"
+object
+key "role"
+string "assistant"
+key "content"
+null
+key "tool_calls"
+array
+object
+key "id"
+string "call_9pw1qnYScqvGrCH58HWCvFH6"
+key "type"
+string "function"
+key "function"
+object
+key "name"
+string "edit_file"
+key "arguments"
+string "{\"path\":\"README.md\",\"old\":\"café \\\"menu\\\"\",\"new\":\"Café \\\"menu\\\" 🚀\\n\"}"
+end object
+end object
+object
+key "id"
+string "call_RzkG0zL3Pb3NqL6xBW0aX9Ue"
+key "type"
+string "function"
+key "function"
+object
+key "name"
+string "search"
+key "arguments"
+string "{\"pattern\":\"fn up\\\\(\",\"max_results\":20}"
+end object
+end object
+end array
+key "refusal"
+null
+key "annotations"
+array
+end array
+end object
+key "logprobs"
+null
+key "finish_reason"
+string "tool_calls"
+end object
+end array
+key "usage"
+object
+key "prompt_tokens"
+number 1187
+key "completion_tokens"
+number 96
+key "total_tokens"
+number 1283
+key "prompt_tokens_details"
+object
+key "cached_tokens"
+number 1024
+key "audio_tokens"
+number 0
+end object
+key "completion_tokens_details"
+object
+key "reasoning_tokens"
+number 0
+key "audio_tokens"
+number 0
+key "accepted_prediction_tokens"
+number 0
+key "rejected_prediction_tokens"
+number 0
+end object
+end object
+key "service_tier"
+string "default"
+key "system_fingerprint"
+string "fp_f33640a400"
+end object
+done

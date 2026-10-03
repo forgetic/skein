@@ -1,0 +1,4 @@
+# The high half of a pair, then the end of the string.
+object
+key "emoji"
+failed surrogate

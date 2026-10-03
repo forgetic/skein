@@ -9,6 +9,7 @@ members = [
     "tests/conformance/ring",
     "tests/conformance/sim",
     "tests/heap",
+    "tests/json",
     "tests/lib",
     "tests/ring",
     "tests/sim",
@@ -23,6 +24,7 @@ publish = false
 [workspace.dependencies]
 skein-lib = { path = "crates/skein-lib" }
 skein-io = { path = "crates/skein-io" }
+skein-json = { path = "crates/skein-json" }
 skein-shell = { path = "crates/skein-shell" }
 skein-sim = { path = "crates/skein-sim" }
 skein-conformance = { path = "testing/skein-conformance" }
