@@ -3,8 +3,7 @@
 use skein_io::kernel::{Done, Family, Op};
 use skein_lib::{Duration, Time};
 use skein_sim::{Config, Faults};
-
-use crate::support::World;
+use skein_sim_tests::World;
 
 fn slow() -> Config {
     let faults = Faults { latency: 1000, latency_max: Duration::from_millis(10), ..Faults::NONE };

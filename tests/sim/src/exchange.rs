@@ -1,17 +1,16 @@
 //! A client and a server, each a process, scripted as small state machines
 //! that react to completions the way io will: bind port 0, listen, connect,
 //! accept, exchange bytes both ways with short sends continued from where
-//! they stopped, half-close, close. Run calm, and under chaos for many seeds.
+//! they stopped, half-close, close. The exchange tests run it calm and
+//! replay it; the fuzzy ones under chaos for many seeds.
 
-use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
+use std::collections::BTreeMap;
 
 use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, Submit};
 use skein_lib::{Queue, Rng, Token};
-use skein_sim::{Config, Entry, Event, Fault, Pid, Sim};
+use skein_sim::{Config, Entry, Pid, Sim};
 
-use crate::support::local;
+use crate::local;
 
 /// What an operation in flight was for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -96,7 +95,7 @@ impl Actor {
 
     fn submit(&mut self, purpose: Purpose, op: Op) -> Token {
         let token = Token::new(self.next);
-        self.next = self.next.checked_add(1).unwrap();
+        self.next = self.next.checked_add(1).expect("tokens never run out");
         self.flights.insert(token, purpose);
         self.out.push(Submit { op: token, kind: op });
         token
@@ -262,7 +261,7 @@ impl Actor {
                 self.reading = false;
             }
             (Purpose::Recv, Op::Recv { buf, .. }, Ok(Done::Count(n))) => {
-                self.received.extend_from_slice(&buf[..usize::try_from(n).unwrap()]);
+                self.received.extend_from_slice(&buf[..usize::try_from(n).expect("a u32 fits a usize")]);
                 self.recv();
             }
             (Purpose::Recv, _, Err(Error::NoBufferSpace | Error::Cancelled)) => self.recv(),
@@ -276,8 +275,8 @@ impl Actor {
             }
             (Purpose::Send, _, Ok(Done::Count(n))) => {
                 self.maybe_cancel_recv();
-                self.sent = self.sent.checked_add(n).unwrap();
-                if usize::try_from(self.sent).unwrap() < self.message.len() {
+                self.sent = self.sent.checked_add(n).expect("no more than the message");
+                if usize::try_from(self.sent).expect("a u32 fits a usize") < self.message.len() {
                     self.send();
                 } else {
                     let fd = self.conn.expect("a connection");
@@ -338,7 +337,7 @@ impl Actor {
         if self.out.is_empty() {
             return;
         }
-        let mut queue = Queue::with_capacity(u32::try_from(self.out.len()).unwrap());
+        let mut queue = Queue::with_capacity(u32::try_from(self.out.len()).expect("a few records"));
         for submit in self.out.drain(..) {
             queue.push(submit);
         }
@@ -365,16 +364,17 @@ pub struct Outcome {
 }
 
 fn message(rng: &mut Rng, most: u64) -> Box<[u8]> {
-    let len = usize::try_from(rng.below(most.checked_add(1).unwrap())).unwrap();
+    let len = usize::try_from(rng.below(most.checked_add(1).expect("a short message"))).expect("a short message");
     let mut bytes = vec![0_u8; len];
     for byte in &mut bytes {
-        *byte = u8::try_from(rng.below(256)).unwrap();
+        *byte = u8::try_from(rng.below(256)).expect("below 256");
     }
     bytes.into_boxed_slice()
 }
 
 /// Runs the exchange to its end and checks it: what each side received is
 /// what the other sent, or a prefix of it when the connection broke.
+#[must_use]
 pub fn run(seed: u64, config: Config) -> Outcome {
     let mut sim = Sim::new(seed, config);
     let mut rng = Rng::new(seed ^ 0x5eed);
@@ -384,7 +384,7 @@ pub fn run(seed: u64, config: Config) -> Outcome {
     client.submit(Purpose::Socket, Op::Socket { family: Family::Ipv4 });
     let mut steps = 0_u32;
     loop {
-        steps = steps.checked_add(1).unwrap();
+        steps = steps.checked_add(1).expect("bounded by the assertion below");
         assert!(steps < 200_000, "the exchange ends\n{}", sim.render_trace());
         server.flush(&mut sim);
         client.flush(&mut sim);
@@ -419,92 +419,4 @@ pub fn run(seed: u64, config: Config) -> Outcome {
         }
     }
     Outcome { trace: sim.trace().to_vec(), to_server: server.received, to_client: client.received, broken }
-}
-
-#[test]
-fn a_calm_exchange_delivers_every_byte_both_ways() {
-    for seed in 0..20_u64 {
-        let outcome = run(seed, Config::calm());
-        assert!(!outcome.broken, "nothing breaks in a calm world");
-    }
-}
-
-/// Whether a process reaped a completion of an operation submitted before
-/// one it had already reaped.
-fn reordered(trace: &[Entry]) -> bool {
-    let mut submitted = BTreeMap::new();
-    let mut latest = BTreeMap::new();
-    for (index, entry) in trace.iter().enumerate() {
-        match entry.event {
-            Event::Submit { op, .. } => {
-                submitted.insert((entry.pid, op), index);
-            }
-            Event::Complete { op, .. } => {
-                let at = submitted[&(entry.pid, op)];
-                let last = latest.entry(entry.pid).or_insert(at);
-                if at < *last {
-                    return true;
-                }
-                *last = at;
-            }
-            Event::Fault(_) => {}
-        }
-    }
-    false
-}
-
-#[test]
-fn a_chaotic_exchange_keeps_every_invariant_for_many_seeds() {
-    let mut broken = 0_u32;
-    let mut reorders = 0_u32;
-    let mut faults = BTreeMap::new();
-    let mut errors = BTreeMap::new();
-    for seed in 0..200_u64 {
-        let outcome = run(seed, Config::chaos());
-        if outcome.broken {
-            broken = broken.checked_add(1).unwrap();
-        }
-        if reordered(&outcome.trace) {
-            reorders = reorders.checked_add(1).unwrap();
-        }
-        for entry in &outcome.trace {
-            match entry.event {
-                Event::Fault(fault) => *faults.entry(fault).or_insert(0_u32) += 1,
-                Event::Complete { result: Err(error), .. } => *errors.entry(error).or_insert(0_u32) += 1,
-                Event::Submit { .. } | Event::Complete { .. } => {}
-            }
-        }
-    }
-    assert!(broken > 0, "chaos breaks some connections");
-    assert!(broken < 100, "and most of them deliver everything: {broken}");
-    assert!(reorders > 0, "completions arrive out of order");
-    for fault in [
-        Fault::Latency,
-        Fault::ShortRecv,
-        Fault::ShortSend,
-        Fault::Reset,
-        Fault::Refuse,
-        Fault::NoBuffer,
-        Fault::TimedOut,
-        Fault::CancelRace,
-        Fault::CancelUnsubmitted,
-    ] {
-        assert!(faults.contains_key(&fault), "{fault:?} fell in some seed: {faults:?}");
-    }
-    for error in [Error::Reset, Error::Refused, Error::NoBufferSpace, Error::TimedOut, Error::Cancelled] {
-        assert!(errors.contains_key(&error), "some operation failed with {error:?}: {errors:?}");
-    }
-}
-
-#[test]
-fn the_same_seed_replays_to_the_same_trace() {
-    for seed in [3_u64, 17, 4242] {
-        let first = run(seed, Config::chaos());
-        let second = run(seed, Config::chaos());
-        assert!(first.trace == second.trace, "seed {seed} replays");
-        assert_eq!((first.to_server, first.to_client), (second.to_server, second.to_client));
-    }
-    let a = run(1, Config::chaos()).trace;
-    let b = run(2, Config::chaos()).trace;
-    assert!(a != b, "another seed, another run");
 }

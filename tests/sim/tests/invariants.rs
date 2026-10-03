@@ -1,12 +1,10 @@
 //! Each broken invariant of the contract fails the world, as do the checks
 //! the simulator adds at quiescence.
 
-use alloc::boxed::Box;
-use core::net::{Ipv6Addr, SocketAddr};
+use std::net::{Ipv6Addr, SocketAddr};
 
 use skein_io::kernel::{Done, Fd, Op};
-
-use crate::support::{World, local, recv_op};
+use skein_sim_tests::{World, local, recv_op};
 
 #[test]
 #[should_panic(expected = "an invalid record")]

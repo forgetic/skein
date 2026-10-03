@@ -1,13 +1,11 @@
 //! Sockets and the network in a calm world, one rule of the contract a test.
 
-use alloc::boxed::Box;
-use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use skein_io::kernel::{Done, Error, Family, Op};
 use skein_lib::{Duration, Time};
 use skein_sim::{Config, Faults};
-
-use crate::support::{World, local, received, recv_op};
+use skein_sim_tests::{World, local, received, recv_op};
 
 #[test]
 fn bytes_flow_both_ways_and_a_half_close_ends_one_direction() {

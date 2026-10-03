@@ -1,9 +1,7 @@
 //! A small harness over the simulator: one token counter per world, and calls
 //! that submit one record and reap what came of it.
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
-use core::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 
 use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, Submit};
 use skein_lib::{Queue, Token};
@@ -18,10 +16,12 @@ pub struct World {
 }
 
 impl World {
+    #[must_use]
     pub fn new(seed: u64, config: Config) -> World {
         World { sim: Sim::new(seed, config), next: 1 }
     }
 
+    #[must_use]
     pub fn calm() -> World {
         World::new(1, Config::calm())
     }
@@ -33,7 +33,7 @@ impl World {
     /// A fresh token.
     pub fn token(&mut self) -> Token {
         let token = Token::new(self.next);
-        self.next = self.next.checked_add(1).unwrap();
+        self.next = self.next.checked_add(1).expect("tokens never run out");
         token
     }
 
@@ -74,7 +74,7 @@ impl World {
     pub fn reap_one(&mut self, pid: Pid, token: Token) -> Complete {
         let mut got = self.reap(pid);
         assert_eq!(got.len(), 1, "one completion, of the operation just submitted");
-        let complete = got.pop().unwrap();
+        let complete = got.pop().expect("the one completion");
         assert_eq!(complete.op, token, "the completion carries its own token");
         complete
     }
@@ -108,7 +108,7 @@ impl World {
     /// A listener on `127.0.0.1`, on a port of the simulator's choice.
     pub fn listener(&mut self, pid: Pid) -> (Fd, Addr) {
         let fd = self.socket(pid);
-        let addr = self.bind(pid, fd, local(0)).unwrap();
+        let addr = self.bind(pid, fd, local(0)).expect("port 0 on loopback binds");
         assert_eq!(self.listen(pid, fd), Ok(Done::Nothing));
         (fd, addr)
     }
@@ -164,17 +164,21 @@ impl World {
 /// The bytes a `Recv` completion received, or its error.
 pub fn received(complete: Complete) -> Result<Vec<u8>, Error> {
     match (complete.kind, complete.result) {
-        (Op::Recv { buf, .. }, Ok(Done::Count(n))) => Ok(buf[..usize::try_from(n).unwrap()].to_vec()),
+        (Op::Recv { buf, .. }, Ok(Done::Count(n))) => {
+            Ok(buf[..usize::try_from(n).expect("a u32 fits a usize")].to_vec())
+        }
         (_, Err(error)) => Err(error),
         (kind, result) => panic!("not a receive: {kind:?}, {result:?}"),
     }
 }
 
 /// `127.0.0.1:port`.
+#[must_use]
 pub fn local(port: u16) -> Addr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }
 
+#[must_use]
 pub fn recv_op(fd: Fd, len: usize) -> Op {
     Op::Recv { fd, buf: vec![0; len].into_boxed_slice() }
 }

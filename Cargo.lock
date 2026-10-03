@@ -43,6 +43,16 @@ name = "skein-lib"
 version = "0.0.0"
 
 [[package]]
+name = "skein-ring-tests"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "skein-io",
+ "skein-lib",
+ "skein-shell",
+]
+
+[[package]]
 name = "skein-shell"
 version = "0.0.0"
 dependencies = [
@@ -59,4 +69,13 @@ version = "0.0.0"
 dependencies = [
  "skein-io",
  "skein-lib",
+]
+
+[[package]]
+name = "skein-sim-tests"
+version = "0.0.0"
+dependencies = [
+ "skein-io",
+ "skein-lib",
+ "skein-sim",
 ]

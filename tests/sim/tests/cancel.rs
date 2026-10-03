@@ -4,8 +4,7 @@
 use skein_io::kernel::{Complete, Done, Error, Op};
 use skein_lib::{Duration, Token};
 use skein_sim::{Config, Faults};
-
-use crate::support::{World, received, recv_op};
+use skein_sim_tests::{World, received, recv_op};
 
 /// Every completion delivered a millisecond late: decided, but in flight.
 const SLOW: Faults = Faults { latency: 1000, latency_max: Duration::from_millis(1), ..Faults::NONE };
@@ -14,8 +13,8 @@ const SLOW: Faults = Faults { latency: 1000, latency_max: Duration::from_millis(
 fn both(world: &mut World, pid: skein_sim::Pid, cancel: Token, target: Token) -> (Complete, Complete, bool) {
     let mut got = world.reap(pid);
     assert_eq!(got.len(), 2, "the cancel and its target both complete");
-    let second = got.pop().unwrap();
-    let first = got.pop().unwrap();
+    let second = got.pop().expect("two completions");
+    let first = got.pop().expect("two completions");
     let cancel_first = first.op == cancel;
     let (of_cancel, of_target) = if cancel_first { (first, second) } else { (second, first) };
     assert_eq!((of_cancel.op, of_target.op), (cancel, target));
@@ -127,7 +126,7 @@ fn a_cancelled_connect_leaves_only_close() {
     let mut world = World::calm();
     let (client, server) = (world.spawn(), world.spawn());
     let listener = world.socket(server);
-    let addr = world.bind(server, listener, crate::support::local(0)).unwrap();
+    let addr = world.bind(server, listener, skein_sim_tests::local(0)).unwrap();
     assert_eq!(world.call(server, Op::Listen { fd: listener, backlog: 1 }).result, Ok(Done::Nothing));
     let (first, second) = (world.socket(client), world.socket(client));
     assert_eq!(world.connect(client, first, addr), Ok(Done::Nothing));
