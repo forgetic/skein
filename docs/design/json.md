@@ -202,7 +202,7 @@ fn encode(json: &mut Encoder, call: &Call) {
 
 let mut measure = Encoder::measure(&limits);
 encode(&mut measure, &call);
-let len = measure.measured()?;           // Refusal, before anything is allocated
+let len = measure.measured()?;           // Refusal, before the document is allocated
 let mut write = Encoder::write(len, &limits);
 encode(&mut write, &call);
 let body = write.finish();               // exactly len bytes
@@ -216,7 +216,7 @@ let body = write.finish();               // exactly len bytes
   pass: `Text` (not UTF-8), `Number`, `TooDeep`, `TooLong`; the first one
   met, and the length last. What only its code gets wrong (a key outside
   an object, an end that closes nothing, a second value, a writing pass
-  unlike its measuring pass) is a bug, asserted.
+  of another length than its measuring pass) is a bug, asserted.
 - **`Limits { depth, length }`**, and `worst_case`: the stack and the
   document, which the writing pass holds until `finish` hands it over.
 - **Compact:** no whitespace. A string escapes `"`, `\` and the control
@@ -316,10 +316,10 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   failure while the tokenizer waited for each thing and after the end;
   a delivery after the close; a stall that filled the stream; and a close
   in every state. Then 5,000 generated documents written and read back;
-  and 20,000 of each of texts and numbers drawn at random, which the
-  writer writes exactly when the standard library and the grammar accept
-  them. It
-  stands in for the fuzz target until a nightly toolchain is installed.
+  and texts and numbers drawn at random, 20,000 of each, which the writer
+  writes exactly when the standard library and the grammar accept them.
+  It stands in for the fuzz target until a nightly toolchain is
+  installed.
 
 ## 7. Decisions
 

@@ -17,7 +17,7 @@
 //!
 //! let mut measure = Encoder::measure(&limits);
 //! encode(&mut measure, &call);
-//! let len = measure.measured()?;    // refused here, before anything is allocated
+//! let len = measure.measured()?;    // refused here, before the document is allocated
 //! let mut write = Encoder::write(len, &limits);
 //! encode(&mut write, &call);
 //! let body = write.finish();        // exactly `len` bytes
@@ -27,7 +27,8 @@
 //! [`Refusal`]: text that is not UTF-8, a number's text that is not a
 //! number, a document past the limits. What only its code can get wrong (a
 //! key outside an object, an end that closes nothing, a second value, a
-//! writing pass that differs from its measuring pass) is a bug, asserted.
+//! writing pass of another length than its measuring pass) is a bug,
+//! asserted.
 //!
 //! The document is compact, with no whitespace. A string escapes `"`, `\`
 //! and the control characters, the common ones in their short forms and the
@@ -49,8 +50,8 @@ pub struct Limits {
     /// with [`Refusal::TooDeep`].
     pub depth: u32,
     /// The longest document, in bytes. A longer one is refused with
-    /// [`Refusal::TooLong`] once measured, before anything is allocated for
-    /// it.
+    /// [`Refusal::TooLong`] once measured, before the document is
+    /// allocated.
     pub length: u32,
 }
 
