@@ -34,6 +34,7 @@ pub const fn limits(sockets: u32) -> Limits {
         accepts: 1,
         backlog: 2,
         close_timeout: Duration::from_secs(1),
+        retry: Duration::from_millis(10),
     }
 }
 

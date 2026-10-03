@@ -84,7 +84,7 @@ impl Proc {
         }
         while self.io.is_due(now) && self.room(MAX_OUT_FIRE) {
             let mark = self.marks();
-            skein_io::fire(&mut self.io, &self.env, &mut self.subs);
+            skein_io::fire(&mut self.io, &self.env, &mut self.events, &mut self.subs);
             self.within(mark, MAX_OUT_FIRE, "fire");
         }
         // The owner's stage.

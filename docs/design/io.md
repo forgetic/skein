@@ -65,8 +65,8 @@ it or rejects it (programming-model.md, 4.2).
 
 The loop drives io through four entry points, each declaring its
 `MAX_OUT` (programming-model.md, section 2): `resume` takes one entry of
-the ready list, `up` one completion, `fire` one expired close deadline,
-and `down` one request. io's stage in the up pass is `resume` until the
+the ready list, `up` one completion, `fire` one expired deadline (a
+graceful close's, or a retry's), and `down` one request. io's stage in the up pass is `resume` until the
 ready list is empty, then `up` for each completion, then `fire` while a
 deadline is due; the loop hands io no completion while the ready list
 holds something, so what the down pass made is told first. Requests to
@@ -94,8 +94,16 @@ kernel.
   (reset, timed out, unreachable, the pipe broken), `Other` otherwise.
 - **io has no connect timeout.** That is policy above
   (programming-model.md, 4): the connection's deadline lives in the
-  protocol layer, which aborts the connect. io keeps only the close
-  deadline of a graceful close.
+  protocol layer, which aborts the connect. io keeps only the mechanics'
+  deadlines: a graceful close's, and a retry's.
+- **What found the kernel out of buffers or descriptors is retried after
+  `Limits::retry`,** not at once: a receive, a send, a half-close or an
+  accept that failed for want of a buffer, an accept that failed with an
+  error the kernel gave no name, and an accept out of descriptors, which
+  may be the system's (`ENFILE`), given back by another process. Retried
+  at once, each would spin the loop for as long as the shortage lasts.
+  The retry deadline sits in io's own table beside the close deadlines,
+  one of each per entity.
 - **Listeners and streams share one slab of sockets,** whose capacity is
   the admission limit: one namespace of tokens, so that `Close` and
   `Abort` name either.
@@ -180,9 +188,9 @@ kernel.
 The accept, in `Listening`, is `Armed` (an `Accept` in flight),
 `Answering` (a socket announced and not yet bound or rejected: the owner
 has no room until it answers, and holds its answer while it has none),
-`Idle` (on the ready list for the next iteration's accept batch, or among
-the starved, for a socket slot or a descriptor), or `Stopped` (an error io
-cannot retry, told as `Failed`). Arming it takes a free socket slot, no
+`Idle` (on the ready list for the next iteration's accept batch, among
+the starved for a socket slot or a descriptor, or waiting for its retry
+deadline), or `Stopped` (an error io cannot retry, told as `Failed`). Arming it takes a free socket slot, no
 discard in flight, and room in the accept batch, which counts the accepts
 armed in an iteration over every listener. The starved are woken when io
 retires an entity or closes a discarded socket.
@@ -193,8 +201,10 @@ retires an entity or closes a discarded socket.
 | Binding | `Bind` ok / error | Arming, `Listen` / Releasing: `Failed`, `Close` |
 | Arming | `Listen` ok / error | Listening: `Listening`, arm / Releasing: `Failed`, `Close` |
 | Listening | `Accept` ok | Answering: `Accepted`; with no slot left, the socket discarded and Idle, starved |
-| Listening | `Accept`: no descriptor | Idle, starved |
-| Listening | `Accept`: no buffer, or the connection's own error | Idle, retried in the next iteration |
+| Listening | `Accept`: no descriptor | Idle, starved, and its retry deadline armed |
+| Listening | `Accept`: no buffer, or an error with no name | Idle, its retry deadline armed |
+| Listening | `Accept`: the connection's own error | Idle, retried in the next iteration |
+| Listening | the retry deadline | arm |
 | Listening | `Accept`: any other error | Stopped: `Failed` |
 | Listening | a discard done | the starved woken |
 | Listening | its socket answered; resumed or woken while Idle | arm |
@@ -204,6 +214,7 @@ retires an entity or closes a discarded socket.
 | Settling | nothing left in flight | Releasing: `Close` |
 | Releasing | `Close` done | Closed: `Closed` |
 | Settling, Releasing, Closed | `Close`, `Abort` | ignored |
+| any but Listening and Idle | the retry deadline | impossible: cancelled once the accept leaves Idle |
 | Socket, Binding, Arming | `Close`, `Abort` | impossible: the owner has no token yet |
 | any | `Bind`, `Reject`, `Stream` | impossible: the layer above's bug |
 
@@ -235,10 +246,13 @@ it.
 - **Opening** is a connect whose `Connecting` is not told yet. It is on
   the ready list, which the loop drains before it hands io completions.
 - **Open's reader** is `Receiving` (a `Recv` in flight), `Full` (the
-  intake is), `Ended` (the peer ended, `End` not told yet) or `Told`.
-  **Its writer** is `Idle`, `Sending`, `Finishing` (sending, then the
-  half-close), `Shutting` or `Shut`. **Closing's drain** is a `Recv` in
-  flight, or done; **its flush** is `Sending`, `Shutting`, or done.
+  intake is), `Stalled` (no buffer: waiting for the retry deadline),
+  `Ended` (the peer ended, `End` not told yet) or `Told`. **Its writer**
+  is `Idle`, `Sending` (finishing or not: the half-close follows the last
+  of the output), `Stalled` (holding the send's box and offset), `Shutting`,
+  `Unshut` (a half-close that found no buffer) or `Shut`. **Closing's
+  drain** is a `Recv` in flight, `Stalled`, or done; **its flush** is
+  `Sending`, `Stalled`, `Shutting`, `Unshut`, or done.
 
 | State | Event | Next, and what it does |
 |---|---|---|
@@ -250,7 +264,8 @@ it.
 | Open | `Recv` of 0 | reader Ended; delivered |
 | Open | `Send` of n | the same box from its new offset, or the next, or the half-close when finishing; delivered |
 | Open | `Shutdown` ok | writer Shut |
-| Open | `Recv`, `Send`, `Shutdown`: no buffer | the same again |
+| Open | `Recv`, `Send`, `Shutdown`: no buffer | that side stalls, the same again at the retry deadline |
+| Open | the retry deadline | what stalled submitted again |
 | Open | `Recv`, `Send`, `Shutdown`: any other error | Broken: `Failed` |
 | Open | `Demand` | stored; on the ready list |
 | Open | `Send` | queued; sent at once by an idle writer |
@@ -261,7 +276,9 @@ it.
 | Closing | `Recv` | discarded; again, until 0 or an error |
 | Closing | `Send`, `Shutdown` | flushed, then half-closed; an error ends the flush |
 | Closing | drained and flushed | Releasing: `Close`, the deadline cancelled |
-| Closing | the close deadline | Settling: `Cancel`s |
+| Closing | `Recv`, `Send`, `Shutdown`: no buffer | that side stalls, the same again at the retry deadline |
+| Closing | the retry deadline | what stalled submitted again |
+| Closing | the close deadline | Settling: `Cancel`s; what stalled is dropped |
 | Socket, Connecting, Broken | `Close` | as `Abort`: there is nothing to flush |
 | Socket, Connecting, Open, Broken, Closing | `Abort` | Settling: `Cancel`s; Releasing if nothing is in flight |
 | Closing | `Close` | ignored |
@@ -274,9 +291,10 @@ it.
 | any | `Bind`, `Reject` but Announced | impossible: the layer above's bug |
 | any but Settling | a completion `Cancelled` | impossible: io cancels only when settling |
 
-**Delivered** is one function of Open, applied after every transition of
-Open in the up pass, and by `resume` after a request in the down pass
-(programming-model.md, 2):
+**Delivered** is one function of Open, applied once after every
+transition in the up pass (a completion, a deadline), whatever cell made
+it, and by `resume` after a request in the down pass
+(programming-model.md, 2 and 5.4):
 
 1. the demand's answer, if there is one: `Bytes`, if the intake meets its
    read (never after `End`); or else `Room`, if it asks for room, the
@@ -318,14 +336,18 @@ Open in the up pass, and by `resume` after a request in the down pass
   `Recv` and `Send`. `Socket`, `Bind`, `Listen`, `Shutdown` and `Close`
   are waited for.
 - **No buffer is not a failure.** A `Recv`, `Send` or `Shutdown` that
-  fails for want of kernel buffers did nothing, and is submitted again.
+  fails for want of kernel buffers did nothing: its side *stalls*, a
+  stalled send keeping its box and offset, and is submitted again once
+  the retry deadline passes. The deadlines a state implies are one
+  function of it, applied after every transition: the close deadline runs
+  only while closing, the retry deadline only while a side stalls.
 
 ### 3.4 Memory
 
 Per socket: the entity in its slab; an intake of `Limits::intake`; a
 receive buffer of at most `Limits::receive`; the output, at most
 `Limits::output` bytes in at most `Limits::sends` boxes; and a slot in the
-ready lists and the close deadlines. An entity has at most four
+ready lists, and two in the deadlines. An entity has at most four
 operations in flight (a `Recv`, a `Send` and a cancel of each), so
 `operations(limits)` is four per socket, the ring's size (kernel.md, 5);
 the operation table holds twice that, as an operation retired in an

@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 
 use skein_lib::{Deadlines, Duration, Id, Intake, Queue, Set, Slab, Token};
 
-use crate::layer::{Entity, Flight};
+use crate::layer::{Entity, Flight, Timer};
 
 /// io's limits: the admission limits of its entities, and the caps on each
 /// stream's bytes (programming-model.md, section 7).
@@ -35,6 +35,10 @@ pub struct Limits {
     pub backlog: u32,
     /// How long a graceful close may take before it aborts.
     pub close_timeout: Duration,
+    /// How long io waits before it tries again what found the kernel out of
+    /// buffers or descriptors: a receive, a send, a half-close, an accept
+    /// (io.md, 3.2 and 3.3). Never zero, or io would spin.
+    pub retry: Duration,
 }
 
 impl Limits {
@@ -55,8 +59,8 @@ impl Limits {
     }
 
     /// Whether io can run under these limits: a refusal held, a byte of
-    /// intake, of receive and of output, a send queued, and an accept per
-    /// iteration, at least.
+    /// intake, of receive and of output, a send queued, an accept per
+    /// iteration and a retry that waits, at least.
     #[must_use]
     pub const fn is_usable(&self) -> bool {
         self.refusals > 0
@@ -65,6 +69,7 @@ impl Limits {
             && self.output > 0
             && self.sends > 0
             && self.accepts > 0
+            && self.retry.as_nanos() > 0
     }
 }
 
@@ -77,6 +82,11 @@ const PER_SOCKET: u32 = 4;
 #[must_use]
 pub fn operations(limits: &Limits) -> Option<u32> {
     limits.sockets.checked_mul(PER_SOCKET)
+}
+
+/// The deadline table's room: a graceful close's and a retry's per socket.
+pub(crate) fn timers(limits: &Limits) -> Option<u32> {
+    limits.sockets.checked_mul(2)
 }
 
 /// The slots of the operation table: twice the most in flight, as an
@@ -94,7 +104,7 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     let sockets = limits.sockets;
     let tables = Slab::<Entity>::worst_case(sockets)?
         .checked_add(Slab::<Flight>::worst_case(flights(limits)?)?)?
-        .checked_add(Deadlines::<Id<Entity>>::worst_case(sockets)?)?
+        .checked_add(Deadlines::<(Id<Entity>, Timer)>::worst_case(timers(limits)?)?)?
         .checked_add(Set::<Id<Entity>>::worst_case(sockets)?.checked_mul(3)?)?
         .checked_add(Queue::<Token>::worst_case(limits.refusals)?)?;
     let stream = Intake::worst_case(limits.intake)?
@@ -123,8 +133,10 @@ pub const MAX_OUT_RESUME: MaxOut = MaxOut { events: 2, submissions: 1 };
 /// completed, and a receive the intake has room for again.
 pub const MAX_OUT_UP: MaxOut = MaxOut { events: 2, submissions: 2 };
 
-/// `fire`: the cancels of a closing stream's receive and send.
-pub const MAX_OUT_FIRE: MaxOut = MaxOut { events: 0, submissions: 2 };
+/// `fire`: the cancels of a closing stream's receive and send; or a stream's
+/// receive and send or half-close tried again, and whatever its demand is
+/// then answered with (`Bytes` or `Room`, and `End`); or a listener's accept.
+pub const MAX_OUT_FIRE: MaxOut = MaxOut { events: 2, submissions: 2 };
 
 /// `down`: a bound socket's receive and its listener's next accept; a close's
 /// discarding receive and half-close; an abort's two cancels.

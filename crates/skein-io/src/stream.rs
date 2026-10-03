@@ -9,7 +9,7 @@ use skein_lib::stream::{Down, Fault, Read, Up};
 use skein_lib::{Env, Id, Intake, Queue, Token, bytes};
 
 use crate::kernel::{self, Addr, Done, Fd, Op, Submit};
-use crate::layer::{self, Entity, Flight, Landed, Purpose, Tables};
+use crate::layer::{self, Entity, Flight, Landed, Purpose, Tables, Timer};
 use crate::limits::Limits;
 use crate::records::{self, Event};
 
@@ -66,43 +66,55 @@ pub(crate) struct Open {
 
 /// What the owner's state needs (lib.md, 7): a read and output room, answered
 /// once, by the bytes or the room, which ends both.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct Demand {
     read: Read,
     room: u32,
 }
 
 /// The receiving side of an open stream.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Debug)]
 enum Reader {
     /// A `Recv` in flight.
     Receiving(Id<Flight>),
-    /// No `Recv` in flight: the intake is full, or one failed for want of a
-    /// buffer.
+    /// No `Recv` in flight: the intake is full.
     Full,
+    /// No `Recv` in flight: the last found no buffer, and waits for the retry
+    /// deadline.
+    Stalled,
     /// The peer ended the stream; `End` is not told yet.
     Ended,
     /// `End` told.
     Told,
 }
 
-/// The sending side of an open stream.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// The sending side of an open stream. `finishing` is `Finish` asked for:
+/// the half-close follows the last of the output.
+#[derive(Debug)]
 enum Writer {
     Idle,
     /// A `Send` in flight; more may be queued.
-    Sending(Id<Flight>),
-    /// A `Send` in flight, and `Finish` asked for: the half-close follows the
-    /// last of the output.
-    Finishing(Id<Flight>),
+    Sending {
+        flight: Id<Flight>,
+        finishing: bool,
+    },
+    /// A `Send` that found no buffer, its bytes held for the retry deadline.
+    Stalled {
+        bytes: Box<[u8]>,
+        from: u32,
+        finishing: bool,
+    },
     /// The half-close in flight.
     Shutting(Id<Flight>),
+    /// A half-close that found no buffer, for the retry deadline.
+    Unshut,
     /// Half-closed.
     Shut,
 }
 
 /// The output: the `Send`s queued behind the one in flight, and the bytes of
-/// all of them, the one in flight included until all of it is sent.
+/// all of them, the one in flight (or stalled) included until all of it is
+/// sent.
 #[derive(Debug)]
 struct Output {
     queue: Queue<Box<[u8]>>,
@@ -110,10 +122,26 @@ struct Output {
 }
 
 /// An operation of the sending side in flight.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, Debug)]
 enum Writing {
     Send(Id<Flight>),
     Shutdown(Id<Flight>),
+}
+
+/// The `Send` among what the sending side has in flight.
+const fn sending(write: Option<Writing>) -> Option<Id<Flight>> {
+    match write {
+        Some(Writing::Send(flight)) => Some(flight),
+        Some(Writing::Shutdown(_)) | None => None,
+    }
+}
+
+/// The half-close among what the sending side has in flight.
+const fn shutting(write: Option<Writing>) -> Option<Id<Flight>> {
+    match write {
+        Some(Writing::Shutdown(flight)) => Some(flight),
+        Some(Writing::Send(_)) | None => None,
+    }
 }
 
 /// A stream that failed, `Failed` told: what it still had in flight finishes,
@@ -132,17 +160,33 @@ pub(crate) struct Broken {
 pub(crate) struct Closing {
     owner: Token,
     fd: Fd,
-    /// The discarding `Recv` in flight, until the peer ends or it fails.
-    drain: Option<Id<Flight>>,
+    drain: Drain,
     flush: Flush,
     /// The `Send`s still to flush.
     queue: Queue<Box<[u8]>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// What a graceful close discards.
+#[derive(Clone, Copy, Debug)]
+enum Drain {
+    /// A discarding `Recv` in flight.
+    Receiving(Id<Flight>),
+    /// The last found no buffer: retried at the retry deadline.
+    Stalled,
+    /// The peer ended, or the receive failed: nothing more to discard.
+    Done,
+}
+
+/// What a graceful close flushes.
+#[derive(Debug)]
 enum Flush {
     Sending(Id<Flight>),
+    Stalled {
+        bytes: Box<[u8]>,
+        from: u32,
+    },
     Shutting(Id<Flight>),
+    Unshut,
     /// Half-closed, or the flush failed: nothing more is sent.
     Done,
 }
@@ -220,12 +264,54 @@ impl Stream {
     }
 }
 
+impl Open {
+    /// Whether a side waits for the retry deadline.
+    const fn stalled(&self) -> bool {
+        let reader = match self.reader {
+            Reader::Stalled => true,
+            Reader::Receiving(_) | Reader::Full | Reader::Ended | Reader::Told => false,
+        };
+        let writer = match self.writer {
+            Writer::Stalled { .. } | Writer::Unshut => true,
+            Writer::Idle | Writer::Sending { .. } | Writer::Shutting(_) | Writer::Shut => false,
+        };
+        reader || writer
+    }
+}
+
+impl Closing {
+    /// Whether a side waits for the retry deadline.
+    const fn stalled(&self) -> bool {
+        let drain = match self.drain {
+            Drain::Stalled => true,
+            Drain::Receiving(_) | Drain::Done => false,
+        };
+        let flush = match self.flush {
+            Flush::Stalled { .. } | Flush::Unshut => true,
+            Flush::Sending(_) | Flush::Shutting(_) | Flush::Done => false,
+        };
+        drain || flush
+    }
+
+    /// Whether it is drained and flushed.
+    const fn done(&self) -> bool {
+        match self.drain {
+            Drain::Done => match self.flush {
+                Flush::Done => true,
+                Flush::Sending(_) | Flush::Stalled { .. } | Flush::Shutting(_) | Flush::Unshut => false,
+            },
+            Drain::Receiving(_) | Drain::Stalled => false,
+        }
+    }
+}
+
 impl Writer {
     /// Whether the owner may still send: not after `Finish`.
-    const fn takes_sends(self) -> bool {
+    const fn takes_sends(&self) -> bool {
         match self {
-            Writer::Idle | Writer::Sending(_) => true,
-            Writer::Finishing(_) | Writer::Shutting(_) | Writer::Shut => false,
+            Writer::Idle => true,
+            Writer::Sending { finishing, .. } | Writer::Stalled { finishing, .. } => !*finishing,
+            Writer::Shutting(_) | Writer::Unshut | Writer::Shut => false,
         }
     }
 }
@@ -253,6 +339,7 @@ pub(crate) fn landed(
     let happened = decode(landed);
     let state = mem::replace(stream, Stream::Closed);
     *stream = step(state, id, happened, env, tables, up, subs);
+    follow(stream, id, env, tables, up, subs);
 }
 
 /// The stream `id` was on the ready list: a connect is told `Connecting`; an
@@ -265,23 +352,23 @@ pub(crate) fn resume(
     up: &mut Queue<Event>,
     subs: &mut Queue<Submit>,
 ) {
-    match stream {
+    match *stream {
         Stream::Opening { owner, addr } => {
-            let (owner, addr) = (*owner, *addr);
             up.push(Event::Connecting { owner, socket: id.token() });
             *stream = Stream::Socket { owner, addr };
         }
-        Stream::Open(open) => deliver(open, id, env, tables, up, subs),
-        // Readied, then moved on: nothing to deliver.
+        // Readied, then moved on; or open, and delivered below.
         Stream::Socket { .. }
         | Stream::Connecting { .. }
         | Stream::Announced { .. }
+        | Stream::Open(_)
         | Stream::Broken(_)
         | Stream::Closing(_)
         | Stream::Settling(_)
         | Stream::Releasing { .. }
         | Stream::Closed => {}
     }
+    follow(stream, id, env, tables, up, subs);
 }
 
 /// `Bind` (`owner`) or `Reject` (none) of an announced socket; answers the
@@ -311,10 +398,12 @@ pub(crate) fn answer(
         Some(owner) => Stream::Open(open(owner, fd, id, env, tables, subs)),
         None => release(None, fd, id, tables, subs),
     };
+    tidy(stream, id, tables);
     listener
 }
 
-/// A request in the stream vocabulary (lib.md, 7).
+/// A request in the stream vocabulary (lib.md, 7). Whatever it makes due up
+/// is told by `resume`, from the ready list.
 pub(crate) fn request(
     stream: &mut Stream,
     id: Id<Entity>,
@@ -336,6 +425,7 @@ pub(crate) fn request(
         }
         Stream::Announced { .. } => unreachable!("a stream request comes once the socket is bound"),
     }
+    tidy(stream, id, tables);
 }
 
 /// `Close` (graceful) or `Abort`.
@@ -377,7 +467,7 @@ pub(crate) fn close(
         }
         Stream::Open(open) => {
             if abort {
-                let (recv, write) = in_flight(open.reader, open.writer);
+                let (recv, write) = in_flight(open.reader, &open.writer);
                 wind_down(open.owner, open.fd, recv, write, id, tables, subs)
             } else {
                 close_open(open, id, env, tables, subs)
@@ -387,7 +477,6 @@ pub(crate) fn close(
         Stream::Broken(broken) => wind_down(broken.owner, broken.fd, broken.recv, broken.write, id, tables, subs),
         Stream::Closing(closing) => {
             if abort {
-                tables.closing.cancel(id);
                 abort_closing(closing, id, tables, subs)
             } else {
                 Stream::Closing(closing)
@@ -398,10 +487,18 @@ pub(crate) fn close(
         Stream::Opening { .. } => unreachable!("a connect is named above only once it is told Connecting"),
         Stream::Announced { .. } => unreachable!("an announced socket is bound or rejected, not closed"),
     };
+    tidy(stream, id, tables);
 }
 
 /// The close deadline of a graceful close passed: it aborts.
-pub(crate) fn expired(stream: &mut Stream, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) {
+pub(crate) fn expired(
+    stream: &mut Stream,
+    id: Id<Entity>,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    up: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
     let state = mem::replace(stream, Stream::Closed);
     *stream = match state {
         Stream::Closing(closing) => abort_closing(closing, id, tables, subs),
@@ -415,6 +512,112 @@ pub(crate) fn expired(stream: &mut Stream, id: Id<Entity>, tables: &mut Tables, 
         | Stream::Releasing { .. }
         | Stream::Closed => unreachable!("a close deadline runs only while closing gracefully"),
     };
+    follow(stream, id, env, tables, up, subs);
+}
+
+/// The retry deadline passed: what found no buffer is submitted again.
+pub(crate) fn retried(
+    stream: &mut Stream,
+    id: Id<Entity>,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    up: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    match stream {
+        Stream::Open(open) => {
+            // A stalled reader receives again when it is delivered, below.
+            open.reader = match open.reader {
+                Reader::Stalled => Reader::Full,
+                reader @ (Reader::Receiving(_) | Reader::Full | Reader::Ended | Reader::Told) => reader,
+            };
+            open.writer = match mem::replace(&mut open.writer, Writer::Idle) {
+                Writer::Stalled { bytes, from, finishing } => {
+                    Writer::Sending { flight: send(open.fd, bytes, from, id, tables, subs), finishing }
+                }
+                Writer::Unshut => Writer::Shutting(shutdown(open.fd, id, tables, subs)),
+                writer @ (Writer::Idle | Writer::Sending { .. } | Writer::Shutting(_) | Writer::Shut) => writer,
+            };
+        }
+        Stream::Closing(closing) => {
+            closing.drain = match closing.drain {
+                Drain::Stalled => Drain::Receiving(receive(closing.fd, env.limits.receive, id, tables, subs)),
+                drain @ (Drain::Receiving(_) | Drain::Done) => drain,
+            };
+            closing.flush = match mem::replace(&mut closing.flush, Flush::Done) {
+                Flush::Stalled { bytes, from } => Flush::Sending(send(closing.fd, bytes, from, id, tables, subs)),
+                Flush::Unshut => Flush::Shutting(shutdown(closing.fd, id, tables, subs)),
+                flush @ (Flush::Sending(_) | Flush::Shutting(_) | Flush::Done) => flush,
+            };
+        }
+        Stream::Opening { .. }
+        | Stream::Socket { .. }
+        | Stream::Connecting { .. }
+        | Stream::Announced { .. }
+        | Stream::Broken(_)
+        | Stream::Settling(_)
+        | Stream::Releasing { .. }
+        | Stream::Closed => unreachable!("a retry deadline runs only while an open or closing stream stalls"),
+    }
+    follow(stream, id, env, tables, up, subs);
+}
+
+/// What follows every transition in the up pass, in one place
+/// (programming-model.md, 5.4): an open stream delivered what its demand asks
+/// for, and the deadlines its state no longer needs cancelled.
+fn follow(
+    stream: &mut Stream,
+    id: Id<Entity>,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    up: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    match stream {
+        Stream::Open(open) => deliver(open, id, env, tables, up, subs),
+        Stream::Opening { .. }
+        | Stream::Socket { .. }
+        | Stream::Connecting { .. }
+        | Stream::Announced { .. }
+        | Stream::Broken(_)
+        | Stream::Closing(_)
+        | Stream::Settling(_)
+        | Stream::Releasing { .. }
+        | Stream::Closed => {}
+    }
+    tidy(stream, id, tables);
+}
+
+/// The deadlines a state implies, an exhaustive function of it: the close
+/// deadline runs only while closing gracefully, the retry deadline only while
+/// a side stalls. Each is armed where its state begins, and cancelled here
+/// once its state is left.
+fn tidy(stream: &Stream, id: Id<Entity>, tables: &mut Tables) {
+    let (closing, stalled) = match stream {
+        Stream::Open(open) => (false, open.stalled()),
+        Stream::Closing(closing) => (true, closing.stalled()),
+        Stream::Opening { .. }
+        | Stream::Socket { .. }
+        | Stream::Connecting { .. }
+        | Stream::Announced { .. }
+        | Stream::Broken(_)
+        | Stream::Settling(_)
+        | Stream::Releasing { .. }
+        | Stream::Closed => (false, false),
+    };
+    if !closing {
+        tables.deadlines.cancel((id, Timer::Close));
+    }
+    if !stalled {
+        tables.deadlines.cancel((id, Timer::Retry));
+    }
+}
+
+/// A side found no buffer: it is tried again once the retry deadline passes,
+/// rather than at once (io.md, 3.3).
+fn stall(id: Id<Entity>, env: &Env<Limits>, tables: &mut Tables) {
+    let at = env.now.saturating_add(env.limits.retry);
+    tables.deadlines.arm((id, Timer::Retry), at).expect("a retry deadline for every socket");
 }
 
 /// What a completion means to the stream.
@@ -530,9 +733,9 @@ fn step(
         },
         Stream::Announced { .. } => unreachable!("an announced socket has nothing in flight"),
         Stream::Open(open) => match happened {
-            Happened::Received(received) => open_received(open, received, id, env, tables, up, subs),
+            Happened::Received(received) => open_received(open, received, id, env, tables, up),
             Happened::Sent(sent) => open_sent(open, sent, id, env, tables, up, subs),
-            Happened::Shut { flight, result } => open_shut(open, flight, result, id, tables, up, subs),
+            Happened::Shut { flight, result } => open_shut(open, flight, result, id, env, tables, up),
             Happened::Socket(_) | Happened::Connected { .. } | Happened::Released | Happened::Cancelled { .. } => {
                 unreachable!("an open stream has only its receive and its send in flight")
             }
@@ -540,8 +743,8 @@ fn step(
         Stream::Broken(broken) => Stream::Broken(broken_landed(broken, happened)),
         Stream::Closing(closing) => match happened {
             Happened::Received(received) => closing_received(closing, received, id, env, tables, subs),
-            Happened::Sent(sent) => closing_sent(closing, sent, id, tables, subs),
-            Happened::Shut { flight, result } => closing_shut(closing, flight, result, id, tables, subs),
+            Happened::Sent(sent) => closing_sent(closing, sent, id, env, tables, subs),
+            Happened::Shut { flight, result } => closing_shut(closing, flight, result, id, env, tables, subs),
             Happened::Socket(_) | Happened::Connected { .. } | Happened::Released | Happened::Cancelled { .. } => {
                 unreachable!("a stream closing gracefully has only its receive and its send in flight")
             }
@@ -641,7 +844,7 @@ fn deliver(
     // not; what the intake still holds is dropped with it.
     let bytes = match open.reader {
         Reader::Told => None,
-        Reader::Receiving(_) | Reader::Full | Reader::Ended => open.intake.meet(open.demand.read),
+        Reader::Receiving(_) | Reader::Full | Reader::Stalled | Reader::Ended => open.intake.meet(open.demand.read),
     };
     if let Some(bytes) = bytes {
         up.push(Event::Stream { owner, up: Up::Bytes(bytes) });
@@ -653,16 +856,27 @@ fn deliver(
     }
     // With a read outstanding, the end comes once it can never be met; with
     // none, once nothing is held that a demand could take.
-    if open.reader == Reader::Ended && (open.demand.read != Read::Nothing || open.intake.is_empty()) {
+    let end = match open.reader {
+        Reader::Ended => match open.demand.read {
+            Read::Nothing => open.intake.is_empty(),
+            Read::Fill(_) | Read::Scan { .. } => true,
+        },
+        Reader::Receiving(_) | Reader::Full | Reader::Stalled | Reader::Told => false,
+    };
+    if end {
         up.push(Event::Stream { owner, up: Up::End });
         open.reader = Reader::Told;
     }
-    if open.reader == Reader::Full && open.intake.room() > 0 {
-        let len = open.intake.room().min(env.limits.receive);
-        open.reader = Reader::Receiving(receive(open.fd, len, id, tables, subs));
-    }
+    open.reader = match open.reader {
+        Reader::Full if open.intake.room() > 0 => {
+            let len = open.intake.room().min(env.limits.receive);
+            Reader::Receiving(receive(open.fd, len, id, tables, subs))
+        }
+        reader @ (Reader::Receiving(_) | Reader::Full | Reader::Stalled | Reader::Ended | Reader::Told) => reader,
+    };
 }
 
+/// A `Demand`, met, if it can be, from the ready list.
 fn demand(open: &mut Open, read: Read, room: u32, id: Id<Entity>, env: &Env<Limits>, tables: &mut Tables) {
     let cap = env.limits.intake;
     match read {
@@ -696,14 +910,14 @@ fn queue(
     let len = u32::try_from(bytes.len()).expect("a Send within the room granted, under a u32 cap");
     let queued = open.output.bytes.checked_add(len).expect("a Send within the room granted, under a u32 cap");
     assert!(queued <= env.limits.output, "a Send within the room granted: no more than the output cap");
-    open.writer = match open.writer {
-        Writer::Idle => Writer::Sending(send(open.fd, bytes, 0, id, tables, subs)),
-        Writer::Sending(flight) => {
+    open.writer = match mem::replace(&mut open.writer, Writer::Idle) {
+        Writer::Idle => Writer::Sending { flight: send(open.fd, bytes, 0, id, tables, subs), finishing: false },
+        writer @ (Writer::Sending { .. } | Writer::Stalled { .. }) => {
             assert!(open.output.queue.room() > 0, "a Send within the room granted: no more than Limits::sends");
             open.output.queue.push(bytes);
-            Writer::Sending(flight)
+            writer
         }
-        Writer::Finishing(_) | Writer::Shutting(_) | Writer::Shut => unreachable!("no Send after Finish"),
+        Writer::Shutting(_) | Writer::Unshut | Writer::Shut => unreachable!("no Send after Finish"),
     };
     open.output.bytes = queued;
 }
@@ -712,10 +926,11 @@ fn queue(
 /// already on its way.
 fn finish(open: &mut Open, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) {
     open.demand.room = 0;
-    open.writer = match open.writer {
+    open.writer = match mem::replace(&mut open.writer, Writer::Idle) {
         Writer::Idle => Writer::Shutting(shutdown(open.fd, id, tables, subs)),
-        Writer::Sending(flight) => Writer::Finishing(flight),
-        writer @ (Writer::Finishing(_) | Writer::Shutting(_) | Writer::Shut) => writer,
+        Writer::Sending { flight, finishing: _ } => Writer::Sending { flight, finishing: true },
+        Writer::Stalled { bytes, from, finishing: _ } => Writer::Stalled { bytes, from, finishing: true },
+        writer @ (Writer::Shutting(_) | Writer::Unshut | Writer::Shut) => writer,
     };
 }
 
@@ -726,10 +941,14 @@ fn open_received(
     env: &Env<Limits>,
     tables: &mut Tables,
     up: &mut Queue<Event>,
-    subs: &mut Queue<Submit>,
 ) -> Stream {
     let Received { flight, buf, result } = received;
-    assert!(open.reader == Reader::Receiving(flight), "the receive that completed is the one in flight");
+    match open.reader {
+        Reader::Receiving(receiving) => assert!(receiving == flight, "the receive that completed is the one in flight"),
+        Reader::Full | Reader::Stalled | Reader::Ended | Reader::Told => {
+            unreachable!("a receive completes while one is in flight")
+        }
+    }
     open.reader = Reader::Full;
     match result {
         Ok(0) => open.reader = Reader::Ended,
@@ -737,15 +956,17 @@ fn open_received(
             let bytes = buf.get(..index(n)).expect("a receive counts no more than its buffer");
             open.intake.append(bytes).expect("a receive asks for no more than the intake has room for");
         }
-        // It did nothing: received again below, as the intake has room.
-        Err(kernel::Error::NoBufferSpace) => {}
+        // It did nothing: received again once the retry deadline passes.
+        Err(kernel::Error::NoBufferSpace) => {
+            stall(id, env, tables);
+            open.reader = Reader::Stalled;
+        }
         Err(kernel::Error::Cancelled) => unreachable!("io cancels a receive only when settling"),
         Err(error) => return broken(open, records::stream_fault(error), up),
     }
-    // Freed before the next receive's is made: one buffer per stream at once
-    // (io.md, 3.4).
+    // Freed before the next receive's is made, when the stream is delivered:
+    // one buffer per stream at once (io.md, 3.4).
     drop(buf);
-    deliver(&mut open, id, env, tables, up, subs);
     Stream::Open(open)
 }
 
@@ -759,15 +980,13 @@ fn open_sent(
     subs: &mut Queue<Submit>,
 ) -> Stream {
     let finishing = match open.writer {
-        Writer::Sending(flight) => {
+        Writer::Sending { flight, finishing } => {
             assert!(flight == sent.flight, "the send that completed is the one in flight");
-            false
+            finishing
         }
-        Writer::Finishing(flight) => {
-            assert!(flight == sent.flight, "the send that completed is the one in flight");
-            true
+        Writer::Idle | Writer::Stalled { .. } | Writer::Shutting(_) | Writer::Unshut | Writer::Shut => {
+            unreachable!("a send completes while one is in flight")
         }
-        Writer::Idle | Writer::Shutting(_) | Writer::Shut => unreachable!("a send completes while one is in flight"),
     };
     let Sent { flight: _, bytes, from, result } = sent;
     open.writer = match result {
@@ -775,22 +994,26 @@ fn open_sent(
             let from = from.checked_add(n).expect("a send counts no more than was left");
             if index(from) < bytes.len() {
                 // A short send: the rest from the same box, never copied.
-                sending(finishing, send(open.fd, bytes, from, id, tables, subs))
+                Writer::Sending { flight: send(open.fd, bytes, from, id, tables, subs), finishing }
             } else {
                 let len = u32::try_from(bytes.len()).expect("queued output fits its u32 cap");
                 open.output.bytes = open.output.bytes.checked_sub(len).expect("the output counts its send in flight");
                 drop(bytes);
-                next_send(open.fd, &mut open.output.queue, finishing, id, tables, subs)
+                next_writer(open.fd, &mut open.output.queue, finishing, id, tables, subs)
             }
         }
-        Err(kernel::Error::NoBufferSpace) => sending(finishing, send(open.fd, bytes, from, id, tables, subs)),
+        // It did nothing: sent again, from the same offset, once the retry
+        // deadline passes.
+        Err(kernel::Error::NoBufferSpace) => {
+            stall(id, env, tables);
+            Writer::Stalled { bytes, from, finishing }
+        }
         Err(kernel::Error::Cancelled) => unreachable!("io cancels a send only when settling"),
         Err(error) => {
             open.writer = Writer::Idle;
             return broken(open, records::stream_fault(error), up);
         }
     };
-    deliver(&mut open, id, env, tables, up, subs);
     Stream::Open(open)
 }
 
@@ -799,14 +1022,23 @@ fn open_shut(
     flight: Id<Flight>,
     result: Result<(), kernel::Error>,
     id: Id<Entity>,
+    env: &Env<Limits>,
     tables: &mut Tables,
     up: &mut Queue<Event>,
-    subs: &mut Queue<Submit>,
 ) -> Stream {
-    assert!(open.writer == Writer::Shutting(flight), "the half-close that completed is the one in flight");
+    match open.writer {
+        Writer::Shutting(shutting) => assert!(shutting == flight, "the half-close that completed is the one in flight"),
+        Writer::Idle | Writer::Sending { .. } | Writer::Stalled { .. } | Writer::Unshut | Writer::Shut => {
+            unreachable!("a half-close completes while one is in flight")
+        }
+    }
     open.writer = match result {
         Ok(()) => Writer::Shut,
-        Err(kernel::Error::NoBufferSpace) => Writer::Shutting(shutdown(open.fd, id, tables, subs)),
+        // It did nothing: asked again once the retry deadline passes.
+        Err(kernel::Error::NoBufferSpace) => {
+            stall(id, env, tables);
+            Writer::Unshut
+        }
         Err(kernel::Error::Cancelled) => unreachable!("io never cancels a half-close"),
         Err(error) => {
             open.writer = Writer::Shut;
@@ -819,20 +1051,20 @@ fn open_shut(
 /// The stream failed: told at once, the intake and the output dropped.
 fn broken(open: Open, fault: Fault, up: &mut Queue<Event>) -> Stream {
     up.push(Event::Stream { owner: open.owner, up: Up::Failed(fault) });
-    let (recv, write) = in_flight(open.reader, open.writer);
+    let (recv, write) = in_flight(open.reader, &open.writer);
     Stream::Broken(Broken { owner: open.owner, fd: open.fd, recv, write })
 }
 
 /// What an open stream's two sides have in flight.
-const fn in_flight(reader: Reader, writer: Writer) -> (Option<Id<Flight>>, Option<Writing>) {
+const fn in_flight(reader: Reader, writer: &Writer) -> (Option<Id<Flight>>, Option<Writing>) {
     let recv = match reader {
         Reader::Receiving(flight) => Some(flight),
-        Reader::Full | Reader::Ended | Reader::Told => None,
+        Reader::Full | Reader::Stalled | Reader::Ended | Reader::Told => None,
     };
     let write = match writer {
-        Writer::Sending(flight) | Writer::Finishing(flight) => Some(Writing::Send(flight)),
-        Writer::Shutting(flight) => Some(Writing::Shutdown(flight)),
-        Writer::Idle | Writer::Shut => None,
+        Writer::Sending { flight, .. } => Some(Writing::Send(*flight)),
+        Writer::Shutting(flight) => Some(Writing::Shutdown(*flight)),
+        Writer::Idle | Writer::Stalled { .. } | Writer::Unshut | Writer::Shut => None,
     };
     (recv, write)
 }
@@ -845,11 +1077,11 @@ fn broken_landed(broken: Broken, happened: Happened) -> Broken {
             Broken { recv: None, ..broken }
         }
         Happened::Sent(sent) => {
-            assert!(broken.write == Some(Writing::Send(sent.flight)), "the send that completed is the one in flight");
+            assert!(sending(broken.write) == Some(sent.flight), "the send that completed is the one in flight");
             Broken { write: None, ..broken }
         }
         Happened::Shut { flight, result: _ } => {
-            assert!(broken.write == Some(Writing::Shutdown(flight)), "the half-close that completed is in flight");
+            assert!(shutting(broken.write) == Some(flight), "the half-close that completed is in flight");
             Broken { write: None, ..broken }
         }
         Happened::Socket(_) | Happened::Connected { .. } | Happened::Released | Happened::Cancelled { .. } => {
@@ -865,22 +1097,26 @@ fn close_open(open: Open, id: Id<Entity>, env: &Env<Limits>, tables: &mut Tables
     // Discarding starts now, so a peer blocked on its upload drains, then
     // reads what is flushed to it.
     let drain = match reader {
-        Reader::Receiving(flight) => Some(flight),
-        Reader::Full => Some(receive(fd, env.limits.receive, id, tables, subs)),
-        Reader::Ended | Reader::Told => None,
+        Reader::Receiving(flight) => Drain::Receiving(flight),
+        Reader::Full => Drain::Receiving(receive(fd, env.limits.receive, id, tables, subs)),
+        Reader::Stalled => Drain::Stalled,
+        Reader::Ended | Reader::Told => Drain::Done,
     };
     let flush = match writer {
         Writer::Idle => Flush::Shutting(shutdown(fd, id, tables, subs)),
-        Writer::Sending(flight) | Writer::Finishing(flight) => Flush::Sending(flight),
+        Writer::Sending { flight, finishing: _ } => Flush::Sending(flight),
+        Writer::Stalled { bytes, from, finishing: _ } => Flush::Stalled { bytes, from },
         Writer::Shutting(flight) => Flush::Shutting(flight),
+        Writer::Unshut => Flush::Unshut,
         Writer::Shut => Flush::Done,
     };
-    if drain.is_none() && flush == Flush::Done {
+    let closing = Closing { owner, fd, drain, flush, queue: output.queue };
+    if closing.done() {
         return release(Some(owner), fd, id, tables, subs);
     }
     let at = env.now.saturating_add(env.limits.close_timeout);
-    tables.closing.arm(id, at).expect("a close deadline for every socket");
-    Stream::Closing(Closing { owner, fd, drain, flush, queue: output.queue })
+    tables.deadlines.arm((id, Timer::Close), at).expect("a close deadline for every socket");
+    Stream::Closing(closing)
 }
 
 fn closing_received(
@@ -892,16 +1128,23 @@ fn closing_received(
     subs: &mut Queue<Submit>,
 ) -> Stream {
     let Received { flight, buf, result } = received;
-    assert!(closing.drain == Some(flight), "the receive that completed is the one in flight");
+    match closing.drain {
+        Drain::Receiving(receiving) => assert!(receiving == flight, "the receive that completed is the one in flight"),
+        Drain::Stalled | Drain::Done => unreachable!("a receive completes while one is in flight"),
+    }
     // Freed before the next receive's is made: one buffer per stream at once
     // (io.md, 3.4).
     drop(buf);
     let drain = match result {
-        Ok(0) => None,
-        Ok(_) | Err(kernel::Error::NoBufferSpace) => Some(receive(closing.fd, env.limits.receive, id, tables, subs)),
+        Ok(0) => Drain::Done,
+        Ok(_) => Drain::Receiving(receive(closing.fd, env.limits.receive, id, tables, subs)),
+        Err(kernel::Error::NoBufferSpace) => {
+            stall(id, env, tables);
+            Drain::Stalled
+        }
         Err(kernel::Error::Cancelled) => unreachable!("io cancels a receive only when settling"),
         // The peer is gone: nothing more to discard.
-        Err(_failed) => None,
+        Err(_failed) => Drain::Done,
     };
     closed_if_done(Closing { drain, ..closing }, id, tables, subs)
 }
@@ -910,10 +1153,16 @@ fn closing_sent(
     mut closing: Closing,
     sent: Sent,
     id: Id<Entity>,
+    env: &Env<Limits>,
     tables: &mut Tables,
     subs: &mut Queue<Submit>,
 ) -> Stream {
-    assert!(closing.flush == Flush::Sending(sent.flight), "the send that completed is the one in flight");
+    match closing.flush {
+        Flush::Sending(sending) => assert!(sending == sent.flight, "the send that completed is the one in flight"),
+        Flush::Stalled { .. } | Flush::Shutting(_) | Flush::Unshut | Flush::Done => {
+            unreachable!("a send completes while one is in flight")
+        }
+    }
     let Sent { flight: _, bytes, from, result } = sent;
     closing.flush = match result {
         Ok(n) => {
@@ -921,16 +1170,17 @@ fn closing_sent(
             if index(from) < bytes.len() {
                 Flush::Sending(send(closing.fd, bytes, from, id, tables, subs))
             } else {
-                match next_send(closing.fd, &mut closing.queue, true, id, tables, subs) {
-                    Writer::Finishing(flight) => Flush::Sending(flight),
-                    Writer::Shutting(flight) => Flush::Shutting(flight),
-                    Writer::Idle | Writer::Sending(_) | Writer::Shut => {
-                        unreachable!("a flush sends the next, or half-closes")
-                    }
+                drop(bytes);
+                match closing.queue.pop() {
+                    Some(next) => Flush::Sending(send(closing.fd, next, 0, id, tables, subs)),
+                    None => Flush::Shutting(shutdown(closing.fd, id, tables, subs)),
                 }
             }
         }
-        Err(kernel::Error::NoBufferSpace) => Flush::Sending(send(closing.fd, bytes, from, id, tables, subs)),
+        Err(kernel::Error::NoBufferSpace) => {
+            stall(id, env, tables);
+            Flush::Stalled { bytes, from }
+        }
         Err(kernel::Error::Cancelled) => unreachable!("io cancels a send only when settling"),
         // The peer is gone: nothing more to flush.
         Err(_failed) => Flush::Done,
@@ -943,12 +1193,21 @@ fn closing_shut(
     flight: Id<Flight>,
     result: Result<(), kernel::Error>,
     id: Id<Entity>,
+    env: &Env<Limits>,
     tables: &mut Tables,
     subs: &mut Queue<Submit>,
 ) -> Stream {
-    assert!(closing.flush == Flush::Shutting(flight), "the half-close that completed is the one in flight");
+    match closing.flush {
+        Flush::Shutting(shutting) => assert!(shutting == flight, "the half-close that completed is the one in flight"),
+        Flush::Sending(_) | Flush::Stalled { .. } | Flush::Unshut | Flush::Done => {
+            unreachable!("a half-close completes while one is in flight")
+        }
+    }
     let flush = match result {
-        Err(kernel::Error::NoBufferSpace) => Flush::Shutting(shutdown(closing.fd, id, tables, subs)),
+        Err(kernel::Error::NoBufferSpace) => {
+            stall(id, env, tables);
+            Flush::Unshut
+        }
         Err(kernel::Error::Cancelled) => unreachable!("io never cancels a half-close"),
         Ok(()) => Flush::Done,
         // The connection is gone: nothing more to flush either.
@@ -957,24 +1216,28 @@ fn closing_shut(
     closed_if_done(Closing { flush, ..closing }, id, tables, subs)
 }
 
-/// Drained and flushed: the close deadline cancelled, and the socket closed.
+/// Drained and flushed: the socket closed, its deadlines cancelled as it
+/// leaves `Closing`.
 fn closed_if_done(closing: Closing, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) -> Stream {
-    if closing.drain.is_some() || closing.flush != Flush::Done {
+    if !closing.done() {
         return Stream::Closing(closing);
     }
-    tables.closing.cancel(id);
     release(Some(closing.owner), closing.fd, id, tables, subs)
 }
 
 /// The deadline passed, or the owner aborted: what the close still had in
-/// flight is cancelled.
+/// flight is cancelled, and what stalled is dropped.
 fn abort_closing(closing: Closing, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) -> Stream {
+    let recv = match closing.drain {
+        Drain::Receiving(flight) => Some(flight),
+        Drain::Stalled | Drain::Done => None,
+    };
     let write = match closing.flush {
         Flush::Sending(flight) => Some(Writing::Send(flight)),
         Flush::Shutting(flight) => Some(Writing::Shutdown(flight)),
-        Flush::Done => None,
+        Flush::Stalled { .. } | Flush::Unshut | Flush::Done => None,
     };
-    wind_down(closing.owner, closing.fd, closing.drain, write, id, tables, subs)
+    wind_down(closing.owner, closing.fd, recv, write, id, tables, subs)
 }
 
 /// Closes at once: cancels what waits, and settles.
@@ -1035,11 +1298,11 @@ fn settling_landed(
             settling.recv = None;
         }
         Happened::Sent(sent) => {
-            assert!(settling.write == Some(Writing::Send(sent.flight)), "the send that completed is the one in flight");
+            assert!(sending(settling.write) == Some(sent.flight), "the send that completed is the one in flight");
             settling.write = None;
         }
         Happened::Shut { flight, result: _ } => {
-            assert!(settling.write == Some(Writing::Shutdown(flight)), "the half-close that completed is in flight");
+            assert!(shutting(settling.write) == Some(flight), "the half-close that completed is in flight");
             settling.write = None;
         }
         Happened::Cancelled { target, result } => {
@@ -1048,7 +1311,7 @@ fn settling_landed(
             // the target still waits (kernel.md, 5).
             let waiting = settling.connect == Some(target)
                 || settling.recv == Some(target)
-                || settling.write == Some(Writing::Send(target));
+                || sending(settling.write) == Some(target);
             if layer::unsubmitted(result) && waiting {
                 tables.cancel(subs, id, target);
                 settling.cancels = settling.cancels.checked_add(1).expect("one cancel per target");
@@ -1097,7 +1360,7 @@ fn release(owner: Option<Token>, fd: Fd, id: Id<Entity>, tables: &mut Tables, su
 
 /// The next queued `Send`, or, the output flushed, the half-close when
 /// finishing.
-fn next_send(
+fn next_writer(
     fd: Fd,
     queue: &mut Queue<Box<[u8]>>,
     finishing: bool,
@@ -1106,14 +1369,10 @@ fn next_send(
     subs: &mut Queue<Submit>,
 ) -> Writer {
     match queue.pop() {
-        Some(bytes) => sending(finishing, send(fd, bytes, 0, id, tables, subs)),
+        Some(bytes) => Writer::Sending { flight: send(fd, bytes, 0, id, tables, subs), finishing },
         None if finishing => Writer::Shutting(shutdown(fd, id, tables, subs)),
         None => Writer::Idle,
     }
-}
-
-const fn sending(finishing: bool, flight: Id<Flight>) -> Writer {
-    if finishing { Writer::Finishing(flight) } else { Writer::Sending(flight) }
 }
 
 fn receive(fd: Fd, len: u32, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) -> Id<Flight> {

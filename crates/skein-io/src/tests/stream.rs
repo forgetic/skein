@@ -6,7 +6,7 @@
 use alloc::boxed::Box;
 
 use skein_lib::stream::{Delimiter, Down, Fault, Read, Up};
-use skein_lib::{Time, Token};
+use skein_lib::{Duration, Time, Token};
 
 use super::{Kind, Out, Rig, buffer, connected, filled, kind, limits, local, owner};
 use crate::kernel::{Done, Error as Kernel, Fd, Op, Submit};
@@ -139,9 +139,31 @@ fn the_end_is_told_once_behind_what_the_intake_holds() {
     assert_eq!(rig.next().events, [bytes(b"a")], "a byte is still held: no end yet");
     ask(&mut rig, socket, Read::Fill(2), 0).nothing();
     assert_eq!(rig.next().events, [up(Up::End)], "a demand that cannot be met any more");
-    ask(&mut rig, socket, Read::Fill(1), 0).nothing();
+    assert!(rig.next().events.is_empty(), "it stays outstanding, never met, and End is not told again");
+}
+
+#[test]
+fn a_read_that_crosses_the_end_is_never_met() {
+    let mut rig = Rig::new(limits());
+    let (socket, recv) = connected(&mut rig, owner(1), FD);
+    let recv = filled(&mut rig, recv, b"ab").take(Kind::Recv);
+    filled(&mut rig, recv, b"").nothing();
+    ask(&mut rig, socket, Read::Fill(3), 0).nothing();
+    assert_eq!(rig.next().events, [up(Up::End)]);
+    // Withdrawn, as a closing reader does, then nothing more.
+    ask(&mut rig, socket, Read::Nothing, 0).nothing();
     rig.next().nothing();
-    assert!(rig.next().events.is_empty(), "a demand after the end is never answered, and End is not told again");
+}
+
+#[test]
+fn room_is_still_granted_after_the_end() {
+    let mut rig = Rig::new(limits());
+    let (socket, recv) = connected(&mut rig, owner(1), FD);
+    assert_eq!(filled(&mut rig, recv, b"").events, [up(Up::End)]);
+    ask(&mut rig, socket, Read::Fill(1), 4).nothing();
+    assert_eq!(rig.next().events, [up(Up::Room)], "the peer half-closed: the stream may still send");
+    let send = give(&mut rig, socket, b"late").take(Kind::Send);
+    sent(&mut rig, send, 4).nothing();
 }
 
 #[test]
@@ -291,20 +313,56 @@ fn a_stream_request_before_connected_is_the_owner_s_bug() {
     let _ask = ask(&mut rig, socket, Read::Fill(1), 0);
 }
 
+/// When a retry falls due, `ms` milliseconds from the start.
+fn retry_at(ms: u64) -> Time {
+    Time::ZERO.saturating_add(Duration::from_millis(ms)).saturating_add(limits().retry)
+}
+
 #[test]
-fn no_buffer_is_retried_not_failed() {
+fn no_buffer_is_retried_at_the_retry_deadline_not_failed() {
     let mut rig = Rig::new(limits());
     let (socket, recv) = connected(&mut rig, owner(1), FD);
-    let mut out = rig.complete(recv, Err(Kernel::NoBufferSpace));
-    assert!(out.events.is_empty(), "not a failure");
-    let _recv = out.take(Kind::Recv);
+    let out = rig.complete(recv, Err(Kernel::NoBufferSpace));
+    assert!(out.events.is_empty() && out.subs.is_empty(), "not a failure, and not again at once");
+    let mut out = rig.at(retry_at(0));
+    assert_eq!(asks(&out.take(Kind::Recv)), 4, "received again at the deadline");
     let send = give(&mut rig, socket, b"abc").take(Kind::Send);
     let send = sent(&mut rig, send, 1).take(Kind::Send);
-    let again = rig.complete(send, Err(Kernel::NoBufferSpace)).take(Kind::Send);
-    assert_eq!(sends(&again), (&b"abc"[..], 1), "the same box, from the same offset");
+    rig.at(Time::from_nanos(20_000_000));
+    assert!(rig.complete(send, Err(Kernel::NoBufferSpace)).subs.is_empty(), "the send waits for its deadline");
     rig.down(Request::Stream { stream: socket, down: Down::Finish }).nothing();
+    let mut out = rig.at(retry_at(20));
+    let again = out.take(Kind::Send);
+    assert_eq!(sends(&again), (&b"abc"[..], 1), "the same box, from the same offset");
     let shutdown = sent(&mut rig, again, 2).take(Kind::Shutdown);
-    let _shutdown = rig.complete(shutdown, Err(Kernel::NoBufferSpace)).take(Kind::Shutdown);
+    rig.at(Time::from_nanos(40_000_000));
+    assert!(rig.complete(shutdown, Err(Kernel::NoBufferSpace)).subs.is_empty(), "the half-close waits too");
+    let _shutdown = rig.at(retry_at(40)).take(Kind::Shutdown);
+}
+
+#[test]
+fn a_graceful_close_retries_what_found_no_buffer_and_its_abort_drops_it() {
+    let mut rig = Rig::new(limits());
+    let (socket, recv) = connected(&mut rig, owner(1), FD);
+    let send = give(&mut rig, socket, b"abc").take(Kind::Send);
+    rig.complete(recv, Err(Kernel::NoBufferSpace)).nothing();
+    rig.complete(send, Err(Kernel::NoBufferSpace)).nothing();
+    // Closing with both sides stalled: they wait for their retry, under the
+    // close deadline.
+    rig.down(Request::Close { entity: socket }).nothing();
+    let mut out = rig.at(retry_at(0));
+    let recv = out.take(Kind::Recv);
+    let send = out.take(Kind::Send);
+    assert_eq!(sends(&send), (&b"abc"[..], 0));
+    // A stall again, then the abort: the stalled send is dropped, the
+    // receive in flight cancelled.
+    rig.complete(send, Err(Kernel::NoBufferSpace)).nothing();
+    let cancel = rig.down(Request::Abort { entity: socket }).take(Kind::Cancel);
+    assert_eq!(rig.io.next_deadline(), None, "no deadline left once settling");
+    rig.complete(recv, Err(Kernel::Cancelled)).nothing();
+    let close = rig.complete(cancel, Ok(Done::Nothing)).take(Kind::Close);
+    assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner: owner(1) }]);
+    rig.empty();
 }
 
 #[test]
@@ -418,9 +476,22 @@ fn answer(target: Result<Done, Kernel>) -> Result<Done, Kernel> {
     if target == Err(Kernel::Cancelled) { Ok(Done::Nothing) } else { Err(Kernel::TooLate) }
 }
 
+/// What a target and its cancel complete with, the cancel's answer the one
+/// the target's result implies.
+fn race(target: Result<Done, Kernel>) -> Race {
+    (target, answer(target))
+}
+
+/// A cancel too late, whose target the kernel interrupted anyway: the target
+/// completes `Cancelled` all the same (kernel.md, 5).
+const INTERRUPTED: Race = (Err(Kernel::Cancelled), Err(Kernel::TooLate));
+
+/// What a target completes with, and what its cancel answers.
+type Race = (Result<Done, Kernel>, Result<Done, Kernel>);
+
 /// An abort with a receive and a send in flight, then their completions and
 /// their cancels' in `order`: each outcome a cancel may have (kernel.md, 5).
-fn abort_in_order(order: [usize; 4], recv_result: Result<Done, Kernel>, send_result: Result<Done, Kernel>) {
+fn abort_in_order(order: [usize; 4], (recv_result, cancel_recv_result): Race, (send_result, cancel_send_result): Race) {
     let mut rig = Rig::new(limits());
     let (socket, recv) = connected(&mut rig, owner(1), FD);
     let send = give(&mut rig, socket, b"abc").take(Kind::Send);
@@ -431,8 +502,8 @@ fn abort_in_order(order: [usize; 4], recv_result: Result<Done, Kernel>, send_res
     let mut pending = [
         Some((recv, recv_result)),
         Some((send, send_result)),
-        Some((cancel_recv, answer(recv_result))),
-        Some((cancel_send, answer(send_result))),
+        Some((cancel_recv, cancel_recv_result)),
+        Some((cancel_send, cancel_send_result)),
     ];
     let mut close = None;
     for at in order {
@@ -451,15 +522,17 @@ fn abort_in_order(order: [usize; 4], recv_result: Result<Done, Kernel>, send_res
 #[test]
 fn an_abort_cancels_what_waits_and_settles_every_outcome_in_every_order() {
     let outcomes = [
-        (Err(Kernel::Cancelled), Err(Kernel::Cancelled)),
-        (Ok(Done::Count(2)), Ok(Done::Count(3))),
-        (Ok(Done::Count(0)), Err(Kernel::Cancelled)),
-        (Err(Kernel::Reset), Err(Kernel::BrokenPipe)),
+        (race(Err(Kernel::Cancelled)), race(Err(Kernel::Cancelled))),
+        (race(Ok(Done::Count(2))), race(Ok(Done::Count(3)))),
+        (race(Ok(Done::Count(0))), race(Err(Kernel::Cancelled))),
+        (race(Err(Kernel::Reset)), race(Err(Kernel::BrokenPipe))),
+        (INTERRUPTED, INTERRUPTED),
+        (INTERRUPTED, race(Ok(Done::Count(1)))),
     ];
     let orders = [[0, 1, 2, 3], [2, 3, 0, 1], [0, 2, 1, 3], [3, 1, 2, 0]];
-    for (recv_result, send_result) in outcomes {
+    for (recv, send) in outcomes {
         for order in orders {
-            abort_in_order(order, recv_result, send_result);
+            abort_in_order(order, recv, send);
         }
     }
 }

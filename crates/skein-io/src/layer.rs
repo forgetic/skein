@@ -32,8 +32,8 @@ pub(crate) enum Entity {
 pub(crate) struct Tables {
     /// The operations in flight, each for its entity.
     pub(crate) flights: Slab<Flight>,
-    /// The close deadline of each stream closing gracefully.
-    pub(crate) closing: Deadlines<Id<Entity>>,
+    /// Each entity's deadlines: a graceful close's, and a retry's.
+    pub(crate) deadlines: Deadlines<(Id<Entity>, Timer)>,
     pub(crate) ready: Ready,
     /// The owners of the `Listen`s and `Connect`s refused for want of a
     /// socket slot, oldest first, until `resume` tells them.
@@ -64,6 +64,15 @@ pub(crate) enum Purpose {
     Close,
     Discard,
     Cancel(Id<Flight>),
+}
+
+/// What an entity's deadline is for: a stream's graceful close (io.md, 3), or
+/// a retry of what found the kernel out of buffers or descriptors (io.md,
+/// 3.2 and 3.3). An entity has at most one of each.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(crate) enum Timer {
+    Close,
+    Retry,
 }
 
 /// A completion, as an entity's handlers take it: the operation's record
@@ -101,7 +110,7 @@ impl Io {
             entities: Slab::with_capacity(limits.sockets),
             tables: Tables {
                 flights: Slab::with_capacity(flights),
-                closing: Deadlines::with_capacity(limits.sockets),
+                deadlines: Deadlines::with_capacity(limits::timers(limits).expect("two timers a socket fit a u32")),
                 ready: Ready::with_capacity(limits.sockets),
                 refused: Queue::with_capacity(limits.refusals),
                 armed: 0,
@@ -125,17 +134,18 @@ impl Io {
         !self.tables.refused.is_empty() || self.tables.ready.is_ready()
     }
 
-    /// When the earliest close deadline falls due.
+    /// When the earliest deadline falls due: a graceful close's, or a
+    /// retry's.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Time> {
-        self.tables.closing.next()
+        self.tables.deadlines.next()
     }
 
-    /// Whether a close deadline is due at `now`. While one is, the loop calls
+    /// Whether a deadline is due at `now`. While one is, the loop calls
     /// `fire`, after the completions.
     #[must_use]
     pub fn is_due(&self, now: Time) -> bool {
-        match self.tables.closing.next() {
+        match self.tables.deadlines.next() {
             Some(at) => at <= now,
             None => false,
         }
@@ -160,7 +170,7 @@ impl Io {
     pub fn is_empty(&self) -> bool {
         self.entities.is_empty()
             && self.tables.flights.is_empty()
-            && self.tables.closing.is_empty()
+            && self.tables.deadlines.is_empty()
             && self.tables.refused.is_empty()
             && self.tables.ready.is_empty()
     }
@@ -297,16 +307,23 @@ pub fn up(io: &mut Io, env: &Env<Limits>, complete: Complete, up: &mut Queue<Eve
     conclude(io, entity);
 }
 
-/// Fires the earliest close deadline due at `env.now`, if one is, emitting at
-/// most [`MAX_OUT_FIRE`](crate::MAX_OUT_FIRE): the graceful close it bounded
-/// becomes an abort.
-pub fn fire(io: &mut Io, env: &Env<Limits>, subs: &mut Queue<Submit>) {
-    let Some(id) = io.tables.closing.expire(env.now) else {
+/// Fires the earliest deadline due at `env.now`, if one is, emitting at most
+/// [`MAX_OUT_FIRE`](crate::MAX_OUT_FIRE): a graceful close it bounded becomes
+/// an abort; what waited for a retry is submitted again.
+pub fn fire(io: &mut Io, env: &Env<Limits>, up: &mut Queue<Event>, subs: &mut Queue<Submit>) {
+    let Some((id, timer)) = io.tables.deadlines.expire(env.now) else {
         return;
     };
-    match io.entities.get_mut(id).expect("leaving Closing cancels the close deadline") {
-        Entity::Stream(stream) => stream::expired(stream, id, &mut io.tables, subs),
-        Entity::Listener(_) => unreachable!("only a stream closes gracefully"),
+    let room = !io.entities.is_full();
+    match io.entities.get_mut(id).expect("an entity's deadlines are cancelled when it is retired") {
+        Entity::Stream(stream) => match timer {
+            Timer::Close => stream::expired(stream, id, env, &mut io.tables, up, subs),
+            Timer::Retry => stream::retried(stream, id, env, &mut io.tables, up, subs),
+        },
+        Entity::Listener(listener) => match timer {
+            Timer::Retry => listener::retried(listener, id, room, env, &mut io.tables, subs),
+            Timer::Close => unreachable!("only a stream closes gracefully"),
+        },
     }
     conclude(io, id);
 }
@@ -405,7 +422,8 @@ pub(crate) fn conclude(io: &mut Io, id: Id<Entity>) {
     }
     io.entities.retire(id);
     io.tables.ready.forget(id);
-    io.tables.closing.cancel(id);
+    io.tables.deadlines.cancel((id, Timer::Close));
+    io.tables.deadlines.cancel((id, Timer::Retry));
     io.tables.ready.wake();
 }
 

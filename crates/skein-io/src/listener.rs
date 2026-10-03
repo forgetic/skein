@@ -7,7 +7,7 @@ use core::mem;
 use skein_lib::{Env, Id, Queue, Slab, Token};
 
 use crate::kernel::{self, Addr, Done, Fd, Op, Submit};
-use crate::layer::{self, Entity, Flight, Io, Landed, Purpose, Tables};
+use crate::layer::{self, Entity, Flight, Io, Landed, Purpose, Tables, Timer};
 use crate::limits::Limits;
 use crate::records::{self, Error, Event};
 use crate::stream;
@@ -113,10 +113,15 @@ enum Outcome {
     NoSlot(Fd),
     /// A socket the owner no longer wants, the listener closing.
     Unwanted(Fd),
-    /// No descriptor left.
+    /// No descriptor left: tried again when io gives one back, or at the
+    /// retry deadline, as another process may give one back first.
     Starved,
-    /// The connection's own error, or no buffer: try again.
-    Retry,
+    /// The kernel out of buffers, or an error it gave no name: tried again at
+    /// the retry deadline, so that an error that stays does not spin.
+    Backoff,
+    /// The named network error of the connection it took (accept(2)): the
+    /// next accept takes the next one, in the next iteration.
+    Again,
     /// Stopped by io's cancel.
     Cancelled,
     /// An error the listener cannot retry.
@@ -163,6 +168,7 @@ pub(crate) fn landed(io: &mut Io, env: &Env<Limits>, landed: Landed, up: &mut Qu
     let me = Me { id, owner: listener.owner, room };
     let state = mem::replace(&mut listener.state, State::Closed);
     listener.state = step(state, me, happened, env, &mut io.tables, up, subs);
+    tidy(listener, id, &mut io.tables);
 }
 
 /// The listener `id` was on the ready list, or woken: an idle accept is armed.
@@ -188,6 +194,62 @@ pub(crate) fn resume(
         | State::Releasing
         | State::Closed => {}
     }
+    tidy(listener, id, tables);
+}
+
+/// The retry deadline passed: an accept that found no buffer or descriptor
+/// is armed again, if it can be.
+pub(crate) fn retried(
+    listener: &mut Listener,
+    id: Id<Entity>,
+    room: bool,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    subs: &mut Queue<Submit>,
+) {
+    let me = Me { id, owner: listener.owner, room };
+    match &mut listener.state {
+        State::Listening(listening) => match listening.accept {
+            Accept::Idle => listening.accept = arm(listening.fd, listening.discards, me, env, tables, subs),
+            Accept::Armed(_) | Accept::Answering(_) | Accept::Stopped => {
+                unreachable!("a listener's retry deadline runs only while its accept is idle")
+            }
+        },
+        State::Socket { .. }
+        | State::Binding { .. }
+        | State::Arming { .. }
+        | State::Settling(_)
+        | State::Releasing
+        | State::Closed => unreachable!("a listener's retry deadline runs only while it listens"),
+    }
+    tidy(listener, id, tables);
+}
+
+/// The retry deadline a listener's state implies: it runs only while its
+/// accept is idle. Armed where an accept fails, and cancelled here once the
+/// accept is armed again or the listener closes.
+fn tidy(listener: &Listener, id: Id<Entity>, tables: &mut Tables) {
+    let idle = match &listener.state {
+        State::Listening(listening) => match listening.accept {
+            Accept::Idle => true,
+            Accept::Armed(_) | Accept::Answering(_) | Accept::Stopped => false,
+        },
+        State::Socket { .. }
+        | State::Binding { .. }
+        | State::Arming { .. }
+        | State::Settling(_)
+        | State::Releasing
+        | State::Closed => false,
+    };
+    if !idle {
+        tables.deadlines.cancel((id, Timer::Retry));
+    }
+}
+
+/// The accept is tried again once the retry deadline passes.
+fn back_off(id: Id<Entity>, env: &Env<Limits>, tables: &mut Tables) {
+    let at = env.now.saturating_add(env.limits.retry);
+    tables.deadlines.arm((id, Timer::Retry), at).expect("a retry deadline for every socket");
 }
 
 /// The owner answered the socket this listener announced: it has room again.
@@ -217,6 +279,7 @@ pub(crate) fn answered(
             unreachable!("a listener announces sockets only once it listens")
         }
     }
+    tidy(listener, id, tables);
 }
 
 /// `Close` or `Abort`: a listener has nothing to flush, so both stop its
@@ -245,6 +308,7 @@ pub(crate) fn close(listener: &mut Listener, id: Id<Entity>, tables: &mut Tables
             unreachable!("a listener is named above only once it listens")
         }
     };
+    tidy(listener, id, tables);
 }
 
 fn borrow(entities: &mut Slab<Entity>, id: Id<Entity>) -> &mut Listener {
@@ -314,15 +378,9 @@ fn outcome(io: &mut Io, listener: Id<Entity>, result: Result<Done, kernel::Error
         }
         Err(kernel::Error::TooManyOpenFiles) => Outcome::Starved,
         // A failed accept on Linux may carry the network error of the
-        // connection it took (accept(2)), or the kernel was out of buffers:
-        // the next one may do.
-        Err(
-            kernel::Error::NoBufferSpace
-            | kernel::Error::Reset
-            | kernel::Error::TimedOut
-            | kernel::Error::Unreachable
-            | kernel::Error::Other(_),
-        ) => Outcome::Retry,
+        // connection it took (accept(2)): the next may do.
+        Err(kernel::Error::Reset | kernel::Error::TimedOut | kernel::Error::Unreachable) => Outcome::Again,
+        Err(kernel::Error::NoBufferSpace | kernel::Error::Other(_)) => Outcome::Backoff,
         Err(kernel::Error::Cancelled) => Outcome::Cancelled,
         Err(
             kernel::Error::Refused
@@ -480,11 +538,19 @@ fn accept_done(
             discards = discards.checked_add(1).expect("one discard per accept");
             arm(fd, discards, me, env, tables, subs)
         }
+        // Woken when io gives a descriptor back; but the descriptors may be
+        // the system's, which another process gives back (ENFILE): retried
+        // at the deadline too.
         Outcome::Starved => {
             tables.ready.starve(me.id);
+            back_off(me.id, env, tables);
             Accept::Idle
         }
-        Outcome::Retry => {
+        Outcome::Backoff => {
+            back_off(me.id, env, tables);
+            Accept::Idle
+        }
+        Outcome::Again => {
             tables.ready.mark(me.id);
             Accept::Idle
         }
@@ -536,7 +602,9 @@ fn settle_accept(
             let _discard: Id<Flight> = tables.submit(subs, me.id, Purpose::Discard, Op::Close { fd: socket });
             settling.discards.checked_add(1).expect("one discard per accept")
         }
-        Outcome::Starved | Outcome::Retry | Outcome::Cancelled | Outcome::Stopped => settling.discards,
+        Outcome::Starved | Outcome::Backoff | Outcome::Again | Outcome::Cancelled | Outcome::Stopped => {
+            settling.discards
+        }
         Outcome::Announced { .. } | Outcome::NoSlot(_) => unreachable!("a closing listener announces nothing"),
     };
     settle(Settling { accept: None, discards, ..settling }, me.id, tables, subs)

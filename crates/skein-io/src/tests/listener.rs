@@ -5,7 +5,7 @@
 
 use alloc::boxed::Box;
 
-use skein_lib::Token;
+use skein_lib::{Time, Token};
 
 use super::{Kind, Rig, limits, listening, local, owner};
 use crate::kernel::{Done, Error as Kernel, Fd, Op};
@@ -136,14 +136,56 @@ fn accepts_out_of_descriptors_wait_for_one_to_be_given_back() {
 }
 
 #[test]
-fn accepts_that_fail_for_a_connection_or_a_buffer_are_retried_next_iteration() {
-    for error in [Kernel::NoBufferSpace, Kernel::Reset, Kernel::TimedOut, Kernel::Unreachable, Kernel::Other(71)] {
+fn a_starved_listener_tries_again_at_its_retry_deadline_if_no_descriptor_comes_back() {
+    // Out of descriptors, which io may never give back: the system's may
+    // come back from another process (ENFILE).
+    let mut rig = Rig::new(Limits { sockets: 3, ..limits() });
+    let (_listener, _addr, accept) = listening(&mut rig, owner(1), LISTENER);
+    rig.complete(accept, Err(Kernel::TooManyOpenFiles)).nothing();
+    rig.next().nothing();
+    let retry = Time::ZERO.saturating_add(limits().retry);
+    assert_eq!(rig.io.next_deadline(), Some(retry), "a retry deadline armed");
+    let mut out = rig.at(retry);
+    assert_eq!(out.take(Kind::Accept).kind, Op::Accept { fd: LISTENER }, "tried again");
+    assert_eq!(rig.io.next_deadline(), None, "armed: no retry deadline left");
+}
+
+#[test]
+fn accepts_that_fail_for_their_connection_are_tried_again_next_iteration() {
+    for error in [Kernel::Reset, Kernel::TimedOut, Kernel::Unreachable] {
         let mut rig = Rig::new(limits());
         let (_listener, _addr, accept) = listening(&mut rig, owner(1), LISTENER);
         rig.complete(accept, Err(error)).nothing();
+        assert_eq!(rig.io.next_deadline(), None, "{error:?}: the connection's own error, no backoff");
         let mut out = rig.next();
         assert_eq!(out.take(Kind::Accept).kind, Op::Accept { fd: LISTENER }, "{error:?} is retried");
     }
+}
+
+#[test]
+fn accepts_that_fail_for_a_buffer_or_an_unnamed_error_back_off() {
+    for error in [Kernel::NoBufferSpace, Kernel::Other(71)] {
+        let mut rig = Rig::new(limits());
+        let (_listener, _addr, accept) = listening(&mut rig, owner(1), LISTENER);
+        rig.complete(accept, Err(error)).nothing();
+        rig.next().nothing();
+        rig.next().nothing();
+        let retry = Time::ZERO.saturating_add(limits().retry);
+        rig.at(Time::from_nanos(retry.as_nanos() - 1)).nothing();
+        let mut out = rig.at(retry);
+        assert_eq!(out.take(Kind::Accept).kind, Op::Accept { fd: LISTENER }, "{error:?} is retried at the deadline");
+    }
+}
+
+#[test]
+fn closing_a_listener_that_backs_off_cancels_its_retry() {
+    let mut rig = Rig::new(limits());
+    let (listener, _addr, accept) = listening(&mut rig, owner(1), LISTENER);
+    rig.complete(accept, Err(Kernel::NoBufferSpace)).nothing();
+    let close = rig.down(Request::Close { entity: listener }).take(Kind::Close);
+    assert_eq!(rig.io.next_deadline(), None, "no retry once closing");
+    assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner: owner(1) }]);
+    rig.empty();
 }
 
 #[test]

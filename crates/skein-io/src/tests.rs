@@ -31,6 +31,7 @@ pub(crate) const fn limits() -> Limits {
         accepts: 1,
         backlog: 4,
         close_timeout: Duration::from_secs(1),
+        retry: Duration::from_millis(10),
     }
 }
 
@@ -190,9 +191,9 @@ impl Rig {
         self.env.now = now;
         let mut out = Out::new();
         while self.io.is_due(now) {
-            let mut up = Queue::with_capacity(0);
+            let mut up = Queue::with_capacity(MAX_OUT_FIRE.events);
             let mut subs = Queue::with_capacity(MAX_OUT_FIRE.submissions);
-            crate::fire(&mut self.io, &self.env, &mut subs);
+            crate::fire(&mut self.io, &self.env, &mut up, &mut subs);
             out.drain(&mut up, &mut subs);
         }
         out

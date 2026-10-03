@@ -356,6 +356,7 @@ fn io_never_holds_more_than_its_worst_case_filled_to_its_limits() {
             accepts: 1,
             backlog: 2,
             close_timeout: Duration::from_secs(1),
+            retry: Duration::from_millis(10),
         },
         Limits {
             sockets: 8,
@@ -367,6 +368,7 @@ fn io_never_holds_more_than_its_worst_case_filled_to_its_limits() {
             accepts: 2,
             backlog: 16,
             close_timeout: Duration::from_secs(1),
+            retry: Duration::from_millis(10),
         },
         Limits {
             sockets: 33,
@@ -378,6 +380,7 @@ fn io_never_holds_more_than_its_worst_case_filled_to_its_limits() {
             accepts: 1,
             backlog: 8,
             close_timeout: Duration::from_secs(1),
+            retry: Duration::from_millis(10),
         },
         // Receive buffers that dwarf the rest: a receive's buffer is freed
         // before the next is made, never both held at once.
@@ -391,6 +394,7 @@ fn io_never_holds_more_than_its_worst_case_filled_to_its_limits() {
             accepts: 1,
             backlog: 2,
             close_timeout: Duration::from_secs(1),
+            retry: Duration::from_millis(10),
         },
     ] {
         let (most, bound) = fill_and_drain(limits);
