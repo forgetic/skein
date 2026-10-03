@@ -4,7 +4,8 @@
 //! - **The side below** receives the peer's bytes in pieces cut at random,
 //!   late, into an intake under its cap, and meets each demand exactly,
 //!   at most once. It ends when the peer's bytes run out, early when the
-//!   settings cut them, sometimes with nothing demanded; or it fails.
+//!   settings cut them, sometimes with nothing demanded; or it fails,
+//!   before its end or after it.
 //! - **The side above** asks for one token at a time, when it feels like
 //!   it, stops asking for a while, and closes: after the outcome, or at a
 //!   moment the settings draw, whatever the tokenizer is doing then.
@@ -324,16 +325,18 @@ impl World<'_> {
             below.intake.append(arrived).expect("within the room");
             below.unsent = rest;
         }
-        if below.over {
-            return;
-        }
+        // A failure may come after the end too (json.md, 3.2), once.
         if let Some((at, fault)) = self.settings.failure
             && self.iteration >= at
+            && below.failed.is_none()
         {
             below.over = true;
             below.demand = None;
             below.failed = Some(fault);
             self.up(Up::Failed(fault));
+            return;
+        }
+        if below.over {
             return;
         }
         match below.demand {

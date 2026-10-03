@@ -152,6 +152,26 @@ fn a_byte_held_after_a_number_is_read_before_an_end_held_after_it() {
 }
 
 #[test]
+fn a_failure_after_the_end_overrides_what_was_held() {
+    let mut machine = Machine::new(LIMITS);
+    assert_eq!(machine.down(Request::Next), (None, demand(Read::Fill(1))));
+    assert_eq!(machine.bytes(b"["), (Some(Event::Token(Token::ArrayStart)), None));
+    assert_eq!(machine.down(Request::Next), (None, demand(Read::Fill(1))));
+    assert_eq!(machine.bytes(b"3"), (None, demand(Read::Fill(1))));
+    assert_eq!(machine.bytes(b"]"), (Some(Event::Token(number(b"3"))), None), "the ] is held");
+    assert_eq!(machine.up(Up::End), (None, None));
+    assert_eq!(machine.up(Up::Failed(Fault::Reset)), (None, None));
+    assert_eq!(machine.down(Request::Next), (Some(Event::Failed(Error::Stream(Fault::Reset))), None));
+
+    let mut machine = Machine::new(LIMITS);
+    assert_eq!(machine.down(Request::Next), (None, demand(Read::Fill(1))));
+    assert_eq!(machine.bytes(b"{"), (Some(Event::Token(Token::ObjectStart)), None));
+    assert_eq!(machine.up(Up::End), (None, None));
+    assert_eq!(machine.up(Up::Failed(Fault::Other)), (None, None));
+    assert_eq!(machine.down(Request::Next), (Some(Event::Failed(Error::Stream(Fault::Other))), None));
+}
+
+#[test]
 fn the_stream_failing_fails_the_document_in_any_reading() {
     for prefix in [&b""[..], b"[", b"[\"ab", b"[1", b"[t"] {
         let mut machine = Machine::new(LIMITS);

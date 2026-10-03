@@ -117,20 +117,32 @@ past the document:
 | a number | `Fill(1)` per byte; the byte that ends it is held for the next token |
 
 It sends nothing down, so it asks for no room. It relies on the stream's
-contract, which lib.md, 7 leaves open and the worlds check:
+contract, which lib.md, 7 leaves open and the worlds check; every side
+below the tokenizer is held to it, io's included when it is built:
 
-- **A demand is met at most once,** with exactly the bytes demanded, and
-  the tokenizer states a new one for each delivery it wants, from its
-  state alone, after every transition (programming-model.md, 5.4).
-- **`End` and `Failed` may come at any time,** a demand outstanding or
-  not. Idle, the tokenizer holds them for the next `Next`. A failure
-  fails the document whatever was read before it.
+- **A demand is met at most once,** with exactly the bytes demanded. The
+  tokenizer states a new one for each delivery it wants, in one place
+  after every transition (programming-model.md, 5.4), which also
+  withdraws what it demanded when it closes.
+- **`End` comes once the side below holds nothing a demand could take:**
+  while the tokenizer reads, when its demand can never be met; while it
+  is idle, only with nothing buffered. An idle tokenizer holds it for the
+  next `Next`, which reads nothing more. A side below that reported the
+  end with bytes still buffered would cut a whole document short.
+- **`Failed` may come at any time,** a demand outstanding or not, before
+  or after `End`. It fails a document whose outcome has not gone up,
+  whatever was read before it; idle, the tokenizer holds it for the next
+  `Next`.
 - **`Bytes` never come without a demand,** nor `Room` without room asked
   for: asserted. The exception is a delivery already on its way when a
   `Close` withdrew the demand it meets, which a closed tokenizer drops.
 
-What a scan does not deliver before the end of the stream is never seen:
-a string cut short is `Truncated`, whatever its last bytes hold.
+A scan that meets no quote within its maximum delivers the maximum; for
+the tokenizer that is one piece of a string longer than a scan, and it
+reads on, where lib.md, 7 has the side above of a line or a head treat it
+as a framing error. What a scan does not deliver before the end of the
+stream is never seen: a string cut short is `Truncated`, whatever its
+last bytes hold.
 
 ### 3.3 Limits
 
@@ -157,8 +169,10 @@ pub struct Limits {
   the cap of the side below: a demand past that cap could never be met,
   and the side below asserts it (lib.md, 7).
 - **`UP_MAX_OUT` and `DOWN_MAX_OUT`** are one event above and one request
-  below each. A `Close` uses both, `Closed` and the demand withdrawn; any
-  other call emits one or the other.
+  below each: a call emits at most one of each. Only a `Close` of a
+  reading tokenizer emits both, `Closed` and the demand withdrawn; an end
+  or a failure while idle, and anything after the outcome or the close,
+  emit nothing.
 
 ### 3.4 Text
 
@@ -171,8 +185,10 @@ pub struct Limits {
   cut anywhere, so a character may span two of them, and the check keeps
   its place between them.
 - **The limit is decided at a character's first byte,** for the whole
-  character, and at an escape's last, for what it spells: whether a
-  string is too long never waits on whether its next bytes are valid.
+  character, so whether a raw character fits never waits on whether its
+  next bytes are valid; and at an escape's last byte, once it is known to
+  spell a character, for what it spells. A surrogate pair cut by a bad
+  digit is then an `Escape`, whatever the room left.
 
 ### 3.5 Numbers
 
@@ -311,11 +327,12 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   for, and each entry point emits at most one event up.
 - **A stream carries one document,** read to its end. Several documents
   in one stream (concatenated, or JSON lines) wait for a user.
-- **One text buffer, allocated at the limit,** with the tokenizer: a
-  string's length is not known until its closing quote, and its pieces
-  must be joined. A short string then costs the whole limit while it is
-  read; the capped buffer that grows by doubling, proposed in temper's
-  performance.md, would make it cost only its length.
+- **One text buffer, allocated at the limit,** with the tokenizer, and
+  held for its life, idle too: a string's length is not known until its
+  closing quote, and its pieces must be joined. A tokenizer then costs the
+  whole limit from the start; the capped buffer that grows by doubling,
+  proposed in temper's performance.md, would make a string cost only its
+  length, and only while it is read.
 - **UTF-8 is checked by the tokenizer's own code,** not by
   `core::str::from_utf8` under a scoped `#[expect]`. A string arrives in
   scans cut anywhere, so a character may span two of them; the check
@@ -323,9 +340,9 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   the limit, and needs no exemption from the subset. The writer checks
   its text with the same code.
 - **Errors at the same byte are decided in a fixed order,** so that an
-  outcome does not depend on how the bytes were cut: a byte's validity
-  before the limit it would pass, and a character's room at its first
-  byte.
+  outcome does not depend on how the bytes were cut: a delivery's length
+  before its bytes, a byte's validity before the limit it would pass, and
+  a character's room at its first byte.
 
 ## 8. Open questions
 
@@ -341,8 +358,9 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
 
 - **The fuzz target** (`fuzz/`, fed `Bytes` under every demand), which
   waits for a nightly toolchain; the fuzzy suite stands in for it.
-- **The memory check** of each `worst_case` against the counting
-  allocator, when it lands.
+- **The memory check** of the tokenizer's and the writer's `worst_case`
+  against the counting allocator (`skein-heap`, testing.md, 5): a
+  `tests/memory.rs` in `tests/json`, as lib's in `tests/lib`.
 - **Writing in pieces:** temper's performance.md asks for a body measured
   whole and encoded a piece at a time, as io grants room. The writer
   writes a document whole.

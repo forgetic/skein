@@ -14,10 +14,16 @@
 //!
 //! - a demand is met at most once, with exactly the bytes demanded, and
 //!   the tokenizer states a new one for every delivery it wants;
-//! - `End` and `Failed` may come at any time, a demand outstanding or not;
+//! - `End` comes once the side below holds nothing a demand could take:
+//!   while the tokenizer reads, when its demand can never be met; while it
+//!   is idle, only with nothing buffered;
+//! - `Failed` may come at any time, before or after `End`;
 //! - `Bytes` never come without a demand, nor `Room` without room asked
 //!   for, except a delivery already on its way when a close withdrew the
 //!   demand it meets.
+//!
+//! A scan that meets no quote within its maximum is one piece of a long
+//! string, not the framing error it is for a line (lib.md, 7).
 //!
 //! Above, the service's decoder ([`Request`] down, [`Event`] up):
 //!
