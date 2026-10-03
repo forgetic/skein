@@ -9,10 +9,14 @@ allow-unwrap-in-tests = true
 disallowed-types = [
     { path = "std::collections::HashMap", reason = "iteration order depends on a random seed: BTreeMap" },
     { path = "std::collections::HashSet", reason = "iteration order depends on a random seed: BTreeSet" },
+    { path = "std::hash::RandomState", reason = "iteration order would depend on a random seed: BTreeMap" },
     { path = "std::time::Instant", reason = "the simulator owns time (Sim::now); on the ring, skein_shell::Clock" },
     { path = "std::time::SystemTime", reason = "the simulator owns time (Sim::wall); on the ring, skein_shell::Clock" },
 ]
 
 disallowed-methods = [
     { path = "std::thread::spawn", reason = "one thread, one loop, so that a run replays" },
+    { path = "std::thread::Builder::spawn", reason = "one thread, one loop, so that a run replays" },
+    { path = "std::thread::scope", reason = "one thread, one loop, so that a run replays" },
+    { path = "std::env::var", reason = "a run's settings come from its code, not the environment" },
 ]
