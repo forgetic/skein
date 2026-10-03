@@ -71,6 +71,19 @@ fn a_step_is_checked_at_the_most_it_held_of_its_own_not_at_its_peak() {
     meter.check(measured, 1099, &"a step");
 }
 
+#[test]
+#[should_panic(expected = "a step is checked once it has ended, before the next starts")]
+fn a_step_that_allocates_nothing_is_not_checked_after_the_next() {
+    // Both start at the same allocation; the step counter tells them apart.
+    let meter = Meter::new();
+    meter.start();
+    let first = meter.end();
+    meter.start();
+    let second = meter.end();
+    assert_eq!(meter.check(second, 0, &"the second step"), 0);
+    meter.check(first, 0, &"the first step");
+}
+
 /// A step that hands out 1000 blocks of 10 bytes, each a new high, more than
 /// the meter keeps, then uses 500 for a while: at most, it held 500 of its
 /// own at once.

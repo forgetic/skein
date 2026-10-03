@@ -67,6 +67,9 @@ struct High {
 /// more than the heap its moments span.
 #[derive(Debug)]
 struct Highs {
+    /// The steps started on this thread, which names the last: a step that
+    /// allocates nothing has the same first high as the next.
+    step: u64,
     len: usize,
     at: [High; KEPT],
 }
@@ -153,7 +156,7 @@ fn broken() -> ! {
 }
 
 impl Highs {
-    const NONE: Highs = Highs { len: 0, at: [High { made: 0, low: 0, live: 0, handed: 0 }; KEPT] };
+    const NONE: Highs = Highs { step: 0, len: 0, at: [High { made: 0, low: 0, live: 0, handed: 0 }; KEPT] };
 
     fn kept(&self) -> &[High] {
         let Some(kept) = self.at.get(..self.len) else { broken() };
@@ -163,12 +166,6 @@ impl Highs {
     fn kept_mut(&mut self) -> &mut [High] {
         let Some(kept) = self.at.get_mut(..self.len) else { broken() };
         kept
-    }
-
-    /// The number of the last allocation made before the step began, which
-    /// names it.
-    fn started(&self) -> Option<u64> {
-        Some(self.kept().first()?.made)
     }
 
     fn push(&mut self, high: High) {
@@ -288,8 +285,8 @@ unsafe impl GlobalAlloc for Counting {
 pub struct Measured {
     peak: u64,
     held: u64,
-    /// The allocations made before it started, which names it.
-    started: u64,
+    /// The steps started on its thread by its own start, which names it.
+    step: u64,
 }
 
 impl Measured {
@@ -335,6 +332,7 @@ impl Meter {
         let (made, live) = (MADE.get(), LIVE.get());
         PEAK.set(live);
         HIGHS.with_borrow_mut(|highs| {
+            highs.step = highs.step.wrapping_add(1);
             highs.len = 0;
             highs.push(High { made, low: live, live, handed: 0 });
         });
@@ -348,9 +346,9 @@ impl Meter {
     pub fn end(&self) -> Measured {
         assert!(PHASE.get() == Phase::Stepping, "a step ends after it starts");
         PHASE.set(Phase::Handing { before: self.before });
-        let started = HIGHS.with_borrow(Highs::started).expect("a step's first high is its start");
+        let step = HIGHS.with_borrow(|highs| highs.step);
         let peak = self.since(PEAK.get()).expect("nothing freed that was not allocated since the base");
-        Measured { peak, held: self.held(), started }
+        Measured { peak, held: self.held(), step }
     }
 
     /// Checks `step` against `bound`, a worst case, and returns the most it
@@ -360,9 +358,9 @@ impl Meter {
     /// the test frees nothing else in between, and checks before the next
     /// step starts. `what` names the step if it fails.
     pub fn check(&self, step: Measured, bound: u64, what: &dyn Debug) -> u64 {
-        let started = HIGHS.with_borrow(Highs::started);
+        let last = HIGHS.with_borrow(|highs| highs.step);
         assert!(
-            started == Some(step.started) && PHASE.get() != Phase::Stepping,
+            last == step.step && PHASE.get() != Phase::Stepping,
             "a step is checked once it has ended, before the next starts"
         );
         let own = HIGHS.with_borrow(|highs| highs.own(self));
