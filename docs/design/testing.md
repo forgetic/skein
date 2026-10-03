@@ -151,7 +151,7 @@ As of 2026-10-03.
 
 | Tier | Built |
 |---|---|
-| step tests | lib: every container and value type; io: the kernel records' rules |
+| step tests | lib: every container and value type; io: the kernel records' rules; JSON: the tokenizer and the writer |
 | machine worlds | none: no machine exists |
 | protocol worlds | none |
 | io worlds | none: no io yet |
