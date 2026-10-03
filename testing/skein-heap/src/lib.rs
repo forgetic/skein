@@ -32,13 +32,15 @@
 //! A global allocator is an `unsafe impl`: beside the ring adapter, the one
 //! `unsafe` in skein, allowed because this crate is test-only and never
 //! linked into a service (testing.md, 6). It only counts; `System`
-//! allocates.
+//! allocates. On an allocation's path it never panics: where an invariant of
+//! its own breaks, it aborts, as a global allocator must not unwind.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::{Cell, RefCell};
 use core::fmt::Debug;
 use core::ptr;
 use std::alloc::System;
+use std::process;
 
 /// The allocator: System's, counted.
 #[derive(Debug)]
@@ -88,10 +90,9 @@ enum Phase {
     },
 }
 
-// Const-initialised and without a destructor: reaching them never allocates,
-// so the allocator can use them. Nothing panics while it borrows the highs,
-// but on a broken invariant of its own: a panic allocates, and the allocator
-// would find them borrowed.
+// Const-initialised and without a destructor: reaching them never allocates
+// and never fails, so the allocator can use them. Nothing allocates while it
+// borrows the highs.
 thread_local! {
     static LIVE: Cell<i64> = const { Cell::new(0) };
     static PEAK: Cell<i64> = const { Cell::new(0) };
@@ -113,7 +114,7 @@ fn allocated(layout: Layout) -> u64 {
     if live > PEAK.get() {
         PEAK.set(live);
         if PHASE.get() == Phase::Stepping {
-            HIGHS.with_borrow_mut(|highs| highs.push(High { made, low: live, live, handed: 0 }));
+            with_highs(|highs| highs.push(High { made, low: live, live, handed: 0 }));
         }
     }
     made
@@ -127,7 +128,7 @@ fn freed(layout: Layout, number: u64) {
     };
     if number > before {
         let bytes = u64::try_from(layout.size()).unwrap_or(u64::MAX);
-        HIGHS.with_borrow_mut(|highs| highs.hand(number, bytes));
+        with_highs(|highs| highs.hand(number, bytes));
     }
 }
 
@@ -135,11 +136,33 @@ fn size(layout: Layout) -> i64 {
     i64::try_from(layout.size()).unwrap_or(i64::MAX)
 }
 
+/// The highs, on the allocator's paths. They are never borrowed already, as
+/// nothing allocates while it borrows them.
+fn with_highs<F: FnOnce(&mut Highs)>(change: F) {
+    HIGHS.with(|highs| match highs.try_borrow_mut() {
+        Ok(mut highs) => change(&mut highs),
+        Err(_) => broken(),
+    });
+}
+
+/// Where an invariant of the allocator's own breaks: it aborts. A global
+/// allocator must not unwind, which is undefined behaviour, and a test target
+/// unwinds on a panic; a panic would allocate besides.
+fn broken() -> ! {
+    process::abort()
+}
+
 impl Highs {
     const NONE: Highs = Highs { len: 0, at: [High { made: 0, low: 0, live: 0, handed: 0 }; KEPT] };
 
     fn kept(&self) -> &[High] {
-        self.at.get(..self.len).expect("no more highs than room for them")
+        let Some(kept) = self.at.get(..self.len) else { broken() };
+        kept
+    }
+
+    fn kept_mut(&mut self) -> &mut [High] {
+        let Some(kept) = self.at.get_mut(..self.len) else { broken() };
+        kept
     }
 
     /// The number of the last allocation made before the step began, which
@@ -152,9 +175,10 @@ impl Highs {
         if self.len == KEPT {
             self.merge();
         }
-        let slot = self.at.get_mut(self.len).expect("room for a high, made by merging");
+        let Some(slot) = self.at.get_mut(self.len) else { broken() };
         *slot = high;
-        self.len = self.len.checked_add(1).expect("no more highs than room for them");
+        let Some(len) = self.len.checked_add(1) else { broken() };
+        self.len = len;
     }
 
     /// Makes room: two adjacent highs become one.
@@ -162,27 +186,28 @@ impl Highs {
         let mut first = 0;
         let mut least = i64::MAX;
         for (at, pair) in self.kept().windows(2).enumerate() {
-            let [earlier, later] = pair else {
-                unreachable!("a window of two highs");
-            };
+            let [earlier, later] = pair else { broken() };
             let span = later.live.saturating_sub(earlier.low);
             if span < least {
                 (first, least) = (at, span);
             }
         }
-        let later = first.checked_add(1).expect("a pair of highs");
-        let live = self.at.get(later).expect("a pair of highs").live;
-        self.at.get_mut(first).expect("a pair of highs").live = live;
-        let rest = later.checked_add(1).expect("a pair of highs");
-        self.at.copy_within(rest..self.len, later);
-        self.len = self.len.checked_sub(1).expect("a pair of highs");
+        let Some(from) = self.kept_mut().get_mut(first..) else { broken() };
+        let [earlier, later, ..] = from else { broken() };
+        earlier.live = later.live;
+        // The later goes: turned to the end of the highs kept, which then
+        // end before it.
+        let Some(after) = from.get_mut(1..) else { broken() };
+        after.rotate_left(1);
+        let Some(len) = self.len.checked_sub(1) else { broken() };
+        self.len = len;
     }
 
     /// The block numbered `number`, of `bytes`, was handed out: by each high
     /// it was allocated by, from the first on, as the highs are in the order
     /// of their numbers.
     fn hand(&mut self, number: u64, bytes: u64) {
-        let kept = self.at.get_mut(..self.len).expect("no more highs than room for them");
+        let kept = self.kept_mut();
         let first = kept.partition_point(|high| high.made < number);
         if let Some(high) = kept.get_mut(first) {
             high.handed = high.handed.saturating_add(bytes);
