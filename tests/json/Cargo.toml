@@ -10,6 +10,10 @@ publish.workspace = true
 skein-lib.workspace = true
 skein-json.workspace = true
 
+# The counting allocator, for tests/memory.rs only.
+[dev-dependencies]
+skein-heap.workspace = true
+
 # Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.
 # tests/clippy.toml bans what would make a run unrepeatable.
 [lints.rust]

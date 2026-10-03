@@ -161,9 +161,10 @@ pub struct Limits {
   peer could hold one `Next` unanswered for ever with whitespace.
 - **`worst_case(&limits)`** is the stack of open containers and one
   buffer for the text being read, the longer of `string` and `number`,
-  both allocated with the tokenizer. A delivery is dropped within the step
-  that receives it, and a token's box is the side above's to count once
-  emitted. `None` for a `chunk` of zero.
+  both allocated with the tokenizer, and the delivery it reads, at most
+  `largest_demand`: a delivery is its receiver's to count (lib.md, 7),
+  held for the step that reads it. A token's box is the side above's to
+  count once emitted. `None` for a `chunk` of zero.
 - **`largest_demand(&limits)`** is the larger of `chunk` and 4 (the rest
   of `false`). Whoever stacks the tokenizer checks at startup that it fits
   the cap of the side below: a demand past that cap could never be met,
@@ -311,6 +312,18 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   generated documents, written and read back the same through the world;
   every byte a string may hold; and what the tokenizer refuses, the writer
   refuses to write.
+- **Memory** (`tests/json/tests/memory.rs`, with the counting allocator,
+  testing.md, 5): every call of an entry point is a step of the meter, and
+  what the tokenizer or the encoder held of its own is never more than its
+  `worst_case`. The connection's queues and stream are made before the
+  meter; each delivery is made between steps and counts from when it is
+  handed over; what a step emits is handed out. First the case that showed
+  the delivery counts: a string at its limit and the delivery that closes
+  it, held at once. Then a string, a key and a number at their limits,
+  nesting at its depth and past it, the longest literal, escapes, failures,
+  each closed and failed after every step; generated documents under tiny
+  limits; and the writer's two passes for documents at their own depth and
+  length.
 - **The fuzzy suite** (`tests/json/tests/fuzzy_*.rs`): 20,000 generated
   documents, most of them mutated, and 5,000 transcripts cut and mutated,
   under limits and neighbours drawn from each seed, each against the
@@ -358,9 +371,6 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
 
 - **The fuzz target** (`fuzz/`, fed `Bytes` under every demand), which
   waits for a nightly toolchain; the fuzzy suite stands in for it.
-- **The memory check** of the tokenizer's and the writer's `worst_case`
-  against the counting allocator (`skein-heap`, testing.md, 5): a
-  `tests/memory.rs` in `tests/json`, as lib's in `tests/lib`.
 - **Writing in pieces:** temper's performance.md asks for a body measured
   whole and encoded a piece at a time, as io grants room. The writer
   writes a document whole.

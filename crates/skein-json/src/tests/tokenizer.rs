@@ -423,10 +423,11 @@ fn the_largest_demand_is_the_chunk_or_a_literal() {
 }
 
 #[test]
-fn the_worst_case_is_the_stack_and_the_longest_text() {
+fn the_worst_case_is_the_stack_the_longest_text_and_the_largest_delivery() {
     let limits = Limits { depth: 10, string: 100, number: 40, chunk: 16, length: 1 << 20 };
-    assert_eq!(json::worst_case(&limits), Some(10 + 100), "a container is a byte");
-    assert_eq!(json::worst_case(&Limits { number: 200, ..limits }), Some(10 + 200));
+    assert_eq!(json::worst_case(&limits), Some(10 + 100 + 16), "a container is a byte");
+    assert_eq!(json::worst_case(&Limits { number: 200, ..limits }), Some(10 + 200 + 16));
+    assert_eq!(json::worst_case(&Limits { chunk: 1, ..limits }), Some(10 + 100 + 4), "the rest of false");
     assert_eq!(json::worst_case(&Limits { chunk: 0, ..limits }), None, "a scan of nothing");
 }
 

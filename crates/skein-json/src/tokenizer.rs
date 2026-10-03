@@ -95,9 +95,10 @@ pub fn largest_demand(limits: &Limits) -> u32 {
 /// limits cannot be honoured: a [`Limits::chunk`] of zero.
 ///
 /// It is the stack of open objects and arrays and the text of the string or
-/// number being read, both allocated when the tokenizer is made. A delivery
-/// from below is dropped within the step that receives it, and a token's
-/// box is the side above's to count from when it is emitted.
+/// number being read, both allocated when the tokenizer is made, and the
+/// delivery it reads: a delivery is its receiver's to count (lib.md, 7),
+/// held for the step that reads it, and at most [`largest_demand`] bytes. A
+/// token's box is the side above's to count from when it is emitted.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
     if limits.chunk == 0 {
@@ -105,7 +106,7 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     }
     let open = Stack::<Container>::worst_case(limits.depth)?;
     let text = List::<u8>::worst_case(text_capacity(limits))?;
-    open.checked_add(text)
+    open.checked_add(text)?.checked_add(u64::from(largest_demand(limits)))
 }
 
 /// The most an entry point emits in one call, into each of its two queues.

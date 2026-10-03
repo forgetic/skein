@@ -105,7 +105,7 @@ tests/sim                       the simulator's own tests, skein-sim-tests
 tests/ring                      the ring adapter's own tests, skein-ring-tests
 tests/conformance/sim           the suite against the simulator, skein-conformance-sim
 tests/conformance/ring          the suite against the ring, skein-conformance-ring
-tests/json                      the JSON tokenizer's machine worlds and the writer against it, skein-json-world
+tests/json                      the JSON tokenizer's machine worlds, the writer against it, and their worst cases against the counting allocator, skein-json-world
 tests/json/transcripts          its transcripts, each with what it must decode to
 tests/**/tests/*.rs             a crate's focused tests
 tests/**/tests/fuzzy_*.rs       its fuzzy tests: sweeps over many seeds
@@ -204,9 +204,10 @@ and a JSON world to the same run. No state digest yet.
 
 Memory: the counting allocator is temper's heap meter, ported with its
 own tests. Each of lib's containers is checked against its worst case
-(lib.md, 10), in the focused suite. No world of skein's checks memory
-yet: the JSON machine world does not (json.md, 9), and its io worlds and
-simulated worlds are not built (section 8).
+(lib.md, 10), in the focused suite, and so are the JSON tokenizer's and
+writer's, a call of an entry point at a time (json.md, 6). No world of
+skein's checks memory yet: its io worlds and simulated worlds are not
+built (section 8).
 
 ## 8. Not built yet
 
@@ -225,10 +226,9 @@ By tier, in the order temper pulls the parts (README.md):
 - **TLS's own tests,** when the TLS client is built.
 - **Simulated worlds and the real loop,** with the examples.
 
-By check: memory in the JSON machine world (json.md, 9), and at every
-iteration of a simulated world, with the world harness that runs it
-(simulator.md, 5); state digests for replay, transition coverage,
-fuzzing.
+By check: memory at every iteration of a simulated world, with the world
+harness that runs it (simulator.md, 5); state digests for replay,
+transition coverage, fuzzing.
 
 ## 9. Open questions
 

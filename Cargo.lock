@@ -89,6 +89,7 @@ dependencies = [
 name = "skein-json-world"
 version = "0.0.0"
 dependencies = [
+ "skein-heap",
  "skein-json",
  "skein-lib",
 ]
