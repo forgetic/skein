@@ -68,8 +68,10 @@ The loop drives io through four entry points, each declaring its
 the ready list, `up` one completion, `fire` one expired close deadline,
 and `down` one request. io's stage in the up pass is `resume` until the
 ready list is empty, then `up` for each completion, then `fire` while a
-deadline is due. Requests to the kernel go out as `Submit` records into
-the queue the loop hands the kernel.
+deadline is due; the loop hands io no completion while the ready list
+holds something, so what the down pass made is told first. Requests to
+the kernel go out as `Submit` records into the queue the loop hands the
+kernel.
 
 **Decisions.**
 
@@ -208,6 +210,13 @@ retires an entity or closes a discarded socket.
 A socket accepted after the owner closed the listener is discarded by
 io, unannounced: the owner asked for no more.
 
+**Accept errors.** Out of descriptors, the listener starves until io
+gives one back. Out of buffers, or with the network error of the
+connection it took (a reset, a timeout, no route, or an error the kernel
+gave no name: accept(2) has these retried), it tries again in the next
+iteration. Any other error says the socket no longer listens, and stops
+it.
+
 ### 3.3 The stream
 
 | State | Holds | In flight | Serves | Deadline |
@@ -276,6 +285,20 @@ Open in the up pass, and by `resume` after a request in the down pass
    no read demand, once the intake is empty;
 4. a `Recv`, if none is in flight and the intake has room again.
 
+- **Each demand is met at most once,** against the demand io holds when
+  it delivers; io holds no delivery made for an earlier one. A delivery
+  told in the up pass reaches the layer above in that same pass, before
+  any demand the layer makes there reaches io, in the down pass. So a
+  delivery the layer reads after it changed its demand in that pass, on
+  an event told before it, was met against the demand before: a `Room`
+  grants the room io held when the pass began, not room asked for since.
+  Dropping such a delivery, or sending only within that room, is the
+  layer above's (the worlds' owner does the latter).
+- **`End` comes after what a demand could take,** and `Bytes` may follow
+  it: `End` says that nothing more will arrive, and a later demand the
+  intake can still meet is met. A read past the end is never met, so a
+  reader that must take every byte caps its demands by what it expects,
+  as a protocol's framing does.
 - **Room grants one more `Send`** of up to that many bytes, and the
   output counts a `Send` in flight until all of it is sent. A `Send` past
   the output cap or `Limits::sends`, or after `Finish`, is the layer
@@ -371,15 +394,39 @@ Files and processes go to skein's minimal fake machine: a few files
 beneath a root, a program that echoes its input, one that exits with a
 given status, one that never exits.
 
+Built, for sockets:
+
+- **Step tests** (`crates/skein-io/src/tests/`): each cell of both
+  machines driven by hand, the refusals at a full slab, stale tokens
+  dropped going down and asserted going up, every outcome of a cancel in
+  every order, each call with exactly its `MAX_OUT` of room.
+- **io worlds** (`tests/io`, `skein-io-world`): a loop over the
+  simulator drives each process's io and a scripted owner, which runs
+  each connection by a plan of sends within the room granted and demands
+  of every kind; a referee holds each scenario's expectations; the harness
+  checks `MAX_OUT` at each call, io's contract with the owner in a ledger,
+  the invariants once settled, and replay. Nine scenarios: accept, bind
+  and reject; connects made, refused for a slot and by the peer; connects
+  waiting on a full backlog, cancelled; an exchange both ways; backpressure
+  through io; a refusal mid-upload that still reaches the peer; abort; the
+  close deadline; closes and aborts at random moments. A few seeds each,
+  calm and chaotic, in the focused suite; 150 of each in the fuzzy one,
+  which asserts that every fault fell and that a cancel of each operation
+  io cancels was seen to stop it, to come too late, and to go
+  unsubmitted.
+- **One exchange over the real ring**, in the focused suite.
+- **Memory:** io driven by hand to its limits and back, every call
+  checked against `worst_case` with the counting allocator.
+
 ## 9. Not built yet
 
-All of io's step layer. The records of the kernel boundary below it are
-built, for sockets. The order follows what temper pulls:
+Sockets are built, with their io worlds. The order follows what temper
+pulls:
 
-1. sockets, with io worlds over the simulator, for the agent's LLM
-   client;
-2. processes, pipes and files, with the minimal fake machine and the
+1. processes, pipes and files, with the minimal fake machine and the
    simulator's machine seam, for the worker;
-3. signals to the service, with the shell's startup.
+2. signals to the service, with the shell's startup.
 
 File streams and datagram sockets come when a user needs them.
+Transition coverage of the handlers (testing-strategy.md, 6) waits for
+`cargo llvm-cov`, which is not installed.
