@@ -311,13 +311,15 @@ The checks:
   of processes, each with its own descriptors, a loopback network with
   bounded buffers, a descriptor limit, its own clock, and faults drawn
   from the seed and traced (latency, short receives and sends, resets,
-  timeouts, refused connects, buffer exhaustion, cancel races and
-  cancels the backend cannot submit). As on the ring, a process's waiting
-  operations are decided when it enters the kernel. It
-  fails the world on each broken invariant of `skein_io::kernel`, checks
-  every completion it makes, and checks quiescence on request. Its own
-  tests (`crates/skein-sim/tests/sim/`) submit records by hand: each rule
-  of the contract, each broken invariant, and a client and a server
+  timeouts, refused connects, buffer exhaustion, cancel races, cancels
+  the backend cannot submit, and late resets). As on the ring, a
+  process's waiting operations, a made connection's `Connect` among them,
+  are decided when it enters the kernel, at its submit (its reap stands
+  in for the loop's wait), while what the network does happens at once.
+  It fails the world on each broken invariant of `skein_io::kernel`,
+  checks every completion it makes, and checks quiescence on request. Its
+  own tests (`crates/skein-sim/tests/sim/`) submit records by hand: each
+  rule of the contract, each broken invariant, and a client and a server
   exchanging bytes, calm and under chaos for 200 seeds, which asserts
   that every fault fell.
 - **Replay:** a seed replays to the same trace of submissions and
@@ -325,33 +327,43 @@ The checks:
   for it.
 - **Memory, coverage and fuzzing:** none yet.
 - **Conformance** (section 5), for sockets: `skein_sim::conformance`
-  holds scripted scenarios over a small backend interface (open a process,
-  submit, reap, let time pass). Each returns what it saw, and its check
-  names the contract's rule behind each assertion. A driver checks every
-  completion on the way: valid for its operation, one per submission,
-  the record handed back, and every descriptor closed at the end. The
-  scenarios cover a connection's lifecycle over IPv4 and IPv6, graceful
-  close, a send after the peer closed, refused connects, where
-  `AddressInUse` comes from, IPv6-only sockets, the wrong-state records
-  the contract answers, a full accept queue, closes with bytes unread,
-  a reset after the end of stream, a client closed before accept,
-  backpressure, and cancels of a waiting or racing `Accept`, `Recv` and
-  `Connect`. They run against the simulator
-  (`crates/skein-sim/tests/conformance/`), each over 16 calm seeds and
-  200 with the chaos loopback can show: latency, short receives and
-  sends, raced cancels, small buffers. The cancel scenarios also run with
-  cancels the backend cannot submit. They also run against the ring on
-  the real kernel, one `Kernel` per process
-  (`crates/skein-shell/tests/conformance.rs`), where they fail, saying
-  so, if io_uring is not usable (a seccomp
-  profile, `io_uring_disabled`). The descriptor limit runs on the
-  simulator only. The other faults beyond loopback are the simulator's
-  own tests'. Socket options the contract makes defaults but no record
-  can observe (close-on-exec, `TCP_NODELAY`) are not checked;
-  `SO_REUSEADDR` and `IPV6_V6ONLY` are, by their effects. The ring's own
-  tests (`crates/skein-shell/tests/ring.rs`) keep what is the adapter's:
-  its slots and waits, a large transfer through short sends, what it
-  completes itself, the invariants it asserts, and dropping it.
+  holds scripted scenarios over a small backend interface (open a
+  process, submit, reap, enter, let time pass). Each returns what it saw,
+  and its check names the contract's rule behind each assertion; an
+  answer that waits on the peer's reset or acknowledgement is retried
+  until it changes. A driver checks every completion on the way: valid
+  for its operation, one per submission, the record handed back with its
+  buffer in the same `Box` (a `Send`'s untouched, a `Recv`'s past its
+  count), and every descriptor closed at the end. The scenarios cover a
+  connection's lifecycle over IPv4 and IPv6, graceful close, a send after
+  the peer closed, refused connects, where `AddressInUse` comes from,
+  IPv6-only sockets, the wrong-state records the contract answers, a full
+  accept queue, closes with bytes unread, a reset after the end of
+  stream, a client closed before accept, a listener closing on waiting
+  connections, backpressure, and cancels: of a waiting `Accept`, `Recv`
+  and `Connect`; of a `Recv` or an `Accept` racing what it waits for
+  (cancelled first, or after it arrived, the process away or entered);
+  and of a `Connect` established while its client was away.
+  - They run against the simulator (`crates/skein-sim/tests/conformance/`),
+    each over 16 calm seeds and 200 with the chaos loopback can show:
+    latency, short receives and sends, raced cancels, late resets, small
+    buffers. The cancel scenarios also run with cancels the backend
+    cannot submit. Every pairing of a cancel and its target the contract
+    allows must appear over the seeds (an interrupted target only where
+    it waits for nothing), and a calm world must pair each race as the
+    ring does.
+  - They run against the ring on the real kernel, one `Kernel` per
+    process (`crates/skein-shell/tests/conformance.rs`), each once, where
+    they fail, saying so, if io_uring is not usable (a seccomp profile,
+    `io_uring_disabled`).
+  - The descriptor limit runs on the simulator only. The other faults
+    beyond loopback are the simulator's own tests'. Socket options the
+    contract makes defaults but no record can observe (close-on-exec,
+    `TCP_NODELAY`) are not checked; `SO_REUSEADDR` and `IPV6_V6ONLY` are,
+    by their effects. The ring's own tests
+    (`crates/skein-shell/tests/ring.rs`) keep what is the adapter's: its
+    slots and waits, a large transfer through short sends, what it
+    completes itself, the invariants it asserts, and dropping it.
 - `scripts/check.sh` runs formatting, the lints as errors, and the tests
   with nextest, as CI will.
 
