@@ -13,7 +13,9 @@
 //! flight, its output full with a send in flight and its queue of sends
 //! full, room asked for and refused; the refusals held; half the sockets
 //! closing gracefully, their deadlines armed. Then every socket aborted, and
-//! every operation completed, until io holds nothing.
+//! every operation completed, until io holds nothing. And a listener's life:
+//! sockets announced, rejected and bound until the slab is full, one
+//! discarded for want of a slot, then everything closed.
 
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -39,6 +41,10 @@ struct Driver {
     flights: Vec<Submit>,
     /// io's tokens for its sockets, as `Connecting` told them.
     sockets: Vec<Token>,
+    /// io's tokens for the sockets a listener announced.
+    accepted: Vec<Token>,
+    /// io's token for its listener, as `Listening` told it.
+    listener: Option<Token>,
     next_fd: i32,
     /// The most io held of its own in a step.
     most: u64,
@@ -62,6 +68,8 @@ impl Driver {
             subs: Queue::with_capacity(64),
             flights: Vec::with_capacity(ROOM),
             sockets: Vec::with_capacity(ROOM),
+            accepted: Vec::with_capacity(ROOM),
+            listener: None,
             next_fd: 3,
             most: 0,
         };
@@ -80,12 +88,19 @@ impl Driver {
     /// receiver's, and what io held of its own is checked.
     fn end(&mut self, what: &str) {
         let measured = self.meter.end();
-        let mut connecting = None;
+        let (mut connecting, mut accepted) = (None, None);
         while let Some(event) = self.up.pop() {
-            if let Event::Connecting { socket, .. } = event {
-                connecting = Some(socket);
+            match event {
+                Event::Connecting { socket, .. } => connecting = Some(socket),
+                Event::Accepted { socket, .. } => accepted = Some(socket),
+                Event::Listening { listener, .. } => self.listener = Some(listener),
+                other @ (Event::Connected { .. }
+                | Event::Stream { .. }
+                | Event::Failed { .. }
+                | Event::Closed { .. }) => {
+                    drop(other);
+                }
             }
-            drop(event);
         }
         let own = self.meter.check(measured, self.bound, &(what, self.limits));
         self.most = self.most.max(own);
@@ -93,9 +108,8 @@ impl Driver {
             assert!(self.flights.len() < ROOM, "room for every operation in flight");
             self.flights.push(submit);
         }
-        if let Some(socket) = connecting {
-            self.sockets.push(socket);
-        }
+        self.sockets.extend(connecting);
+        self.accepted.extend(accepted);
     }
 
     fn down(&mut self, request: Request) {
@@ -156,18 +170,39 @@ fn is_recv(op: &Op) -> bool {
     matches!(op, Op::Recv { .. })
 }
 
+fn is_bind(op: &Op) -> bool {
+    matches!(op, Op::Bind { .. })
+}
+
+fn is_listen(op: &Op) -> bool {
+    matches!(op, Op::Listen { .. })
+}
+
+fn is_accept(op: &Op) -> bool {
+    matches!(op, Op::Accept { .. })
+}
+
+fn is_close(op: &Op) -> bool {
+    matches!(op, Op::Close { .. })
+}
+
 fn anything(_op: &Op) -> bool {
     true
 }
 
-/// A kernel that does what it is asked: a new descriptor, a connection, a
-/// receive that fills its buffer, a send that sends nothing yet (never
-/// called), a close, a cancel that stops its target.
+/// A kernel that does what it is asked: a new descriptor, a connection, an
+/// accepted socket, a receive that fills its buffer, a send that sends all
+/// that was left, a close, a cancel that stops its target.
+#[expect(clippy::unnecessary_wraps, reason = "an answer of the kernel's shape, as stopped gives")]
 fn succeed(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
     match op {
         Op::Socket { .. } => {
             *fd += 1;
             Ok(Done::Fd(Fd::new(*fd)))
+        }
+        Op::Accept { .. } => {
+            *fd += 1;
+            Ok(Done::Accepted { fd: Fd::new(*fd), peer: SocketAddr::from((Ipv4Addr::LOCALHOST, 50000)) })
         }
         Op::Recv { buf, .. } => {
             buf.fill(7);
@@ -175,7 +210,6 @@ fn succeed(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         }
         Op::Send { bytes, from, .. } => Ok(Done::Count(u32::try_from(bytes.len()).expect("a send's length") - *from)),
         Op::Bind { addr, .. } => Ok(Done::Bound(*addr)),
-        Op::Accept { .. } => Err(Error::Cancelled),
         Op::Listen { .. } | Op::Connect { .. } | Op::Shutdown { .. } | Op::Close { .. } | Op::Cancel { .. } => {
             Ok(Done::Nothing)
         }
@@ -241,6 +275,13 @@ fn fill_and_drain(limits: Limits) -> (u64, u64) {
         let socket = driver.sockets[n];
         driver.down(Request::Abort { entity: socket });
     }
+    drain(&mut driver);
+    (driver.most, driver.bound)
+}
+
+/// Completes every operation in flight, cancels stopping their targets,
+/// until io holds nothing.
+fn drain(driver: &mut Driver) {
     for _ in 0..64 {
         if driver.flights.is_empty() {
             break;
@@ -251,6 +292,54 @@ fn fill_and_drain(limits: Limits) -> (u64, u64) {
     assert!(driver.flights.is_empty(), "every operation completed");
     driver.next();
     assert!(driver.io().is_empty(), "io holds nothing, every socket closed");
+}
+
+/// A listener's life: its first socket rejected, the next bound until one
+/// slot is left, which a connect takes while an accept is in flight, so that
+/// the socket it accepts is discarded; then the listener and every socket
+/// closed. Returns the most io held of its own in a step, and its worst
+/// case.
+fn listen_accept_and_discard(limits: Limits) -> (u64, u64) {
+    assert!(limits.sockets >= 2, "a listener and the connect that takes the last slot");
+    let mut driver = Driver::new(limits);
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 80));
+    driver.down(Request::Listen { owner: Token::new(0), addr });
+    driver.complete_all(is_socket, succeed);
+    driver.complete_all(is_bind, succeed);
+    driver.complete_all(is_listen, succeed);
+    // The first socket rejected, and closed.
+    driver.complete_all(is_accept, succeed);
+    let rejected = *driver.accepted.last().expect("a socket announced");
+    driver.down(Request::Reject { socket: rejected });
+    driver.complete_all(is_close, succeed);
+    driver.next();
+    // The next bound, until one slot is left.
+    for n in 0..limits.sockets - 2 {
+        driver.complete_all(is_accept, succeed);
+        let socket = *driver.accepted.last().expect("a socket announced");
+        driver.down(Request::Bind { socket, owner: Token::new(u64::from(n) + 1) });
+        driver.next();
+    }
+    // A connect takes the last slot while an accept is in flight: the socket
+    // it accepts has no slot, and is discarded.
+    driver.down(Request::Connect { owner: Token::new(1000), addr });
+    let announced = driver.accepted.len();
+    driver.complete_all(is_accept, succeed);
+    assert_eq!(driver.accepted.len(), announced, "no slot, so the socket is not announced");
+    assert!(driver.flights.iter().any(|submit| is_close(&submit.kind)), "it is discarded");
+    driver.complete_all(is_close, succeed);
+    driver.next();
+    // Everything closed: the listener's close, the sockets' aborts.
+    for n in 0..driver.accepted.len() {
+        let socket = driver.accepted[n];
+        driver.down(Request::Abort { entity: socket });
+    }
+    for n in 0..driver.sockets.len() {
+        let socket = driver.sockets[n];
+        driver.down(Request::Abort { entity: socket });
+    }
+    driver.down(Request::Close { entity: driver.listener.expect("told Listening") });
+    drain(&mut driver);
     (driver.most, driver.bound)
 }
 
@@ -290,8 +379,23 @@ fn io_never_holds_more_than_its_worst_case_filled_to_its_limits() {
             backlog: 8,
             close_timeout: Duration::from_secs(1),
         },
+        // Receive buffers that dwarf the rest: a receive's buffer is freed
+        // before the next is made, never both held at once.
+        Limits {
+            sockets: 2,
+            refusals: 1,
+            intake: 32768,
+            receive: 16384,
+            output: 64,
+            sends: 1,
+            accepts: 1,
+            backlog: 2,
+            close_timeout: Duration::from_secs(1),
+        },
     ] {
         let (most, bound) = fill_and_drain(limits);
         assert!(most * 10 >= bound * 7, "{limits:?}: filled, io held {most} of its worst case of {bound}");
+        let (most, bound) = listen_accept_and_discard(limits);
+        assert!(most <= bound, "{limits:?}: a listener's life held {most} of {bound}");
     }
 }

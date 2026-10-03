@@ -728,12 +728,13 @@ fn open_received(
     up: &mut Queue<Event>,
     subs: &mut Queue<Submit>,
 ) -> Stream {
-    assert!(open.reader == Reader::Receiving(received.flight), "the receive that completed is the one in flight");
+    let Received { flight, buf, result } = received;
+    assert!(open.reader == Reader::Receiving(flight), "the receive that completed is the one in flight");
     open.reader = Reader::Full;
-    match received.result {
+    match result {
         Ok(0) => open.reader = Reader::Ended,
         Ok(n) => {
-            let bytes = received.buf.get(..index(n)).expect("a receive counts no more than its buffer");
+            let bytes = buf.get(..index(n)).expect("a receive counts no more than its buffer");
             open.intake.append(bytes).expect("a receive asks for no more than the intake has room for");
         }
         // It did nothing: received again below, as the intake has room.
@@ -741,6 +742,9 @@ fn open_received(
         Err(kernel::Error::Cancelled) => unreachable!("io cancels a receive only when settling"),
         Err(error) => return broken(open, records::stream_fault(error), up),
     }
+    // Freed before the next receive's is made: one buffer per stream at once
+    // (io.md, 3.4).
+    drop(buf);
     deliver(&mut open, id, env, tables, up, subs);
     Stream::Open(open)
 }
@@ -887,8 +891,12 @@ fn closing_received(
     tables: &mut Tables,
     subs: &mut Queue<Submit>,
 ) -> Stream {
-    assert!(closing.drain == Some(received.flight), "the receive that completed is the one in flight");
-    let drain = match received.result {
+    let Received { flight, buf, result } = received;
+    assert!(closing.drain == Some(flight), "the receive that completed is the one in flight");
+    // Freed before the next receive's is made: one buffer per stream at once
+    // (io.md, 3.4).
+    drop(buf);
+    let drain = match result {
         Ok(0) => None,
         Ok(_) | Err(kernel::Error::NoBufferSpace) => Some(receive(closing.fd, env.limits.receive, id, tables, subs)),
         Err(kernel::Error::Cancelled) => unreachable!("io cancels a receive only when settling"),
