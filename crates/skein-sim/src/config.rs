@@ -1,5 +1,5 @@
 //! The world's knobs: sizes, limits, the wall clock's start, and the faults,
-//! each a probability drawn from the seed (overview.md, section 9).
+//! each a probability drawn from the seed (simulator.md, 4).
 
 use skein_lib::{Duration, Wall};
 

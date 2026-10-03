@@ -1,4 +1,4 @@
-//! Typed handles (4.1).
+//! Typed handles (programming-model.md, 5.1).
 
 #![expect(
     clippy::disallowed_types,

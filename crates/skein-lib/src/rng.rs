@@ -1,4 +1,4 @@
-//! Randomness is injected state (section 8).
+//! Randomness is injected state (programming-model.md, section 9).
 
 /// A deterministic pseudo-random generator (`SplitMix64`), seeded by the shell or
 /// by the simulator and kept in its layer's state. Not for secrets.

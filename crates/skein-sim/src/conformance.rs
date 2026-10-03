@@ -1,5 +1,5 @@
-//! The conformance suite (overview.md, section 9; testing-pyramid.md,
-//! section 5): scripted sequences of `skein_io::kernel` records that run
+//! The conformance suite (kernel.md, 8; testing-strategy.md,
+//! 5): scripted sequences of `skein_io::kernel` records that run
 //! against any [`Backend`], each returning what it saw, and a [`Check`] of
 //! that against the rules of the contract.
 //!

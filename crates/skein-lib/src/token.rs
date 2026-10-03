@@ -1,4 +1,4 @@
-//! The names that cross layer boundaries (3.1; consumers.md, 6.1).
+//! The names that cross layer boundaries (programming-model.md, 4.2 and 4.4).
 
 /// An opaque name for an entity of another layer, or of this layer as another
 /// layer knows it.

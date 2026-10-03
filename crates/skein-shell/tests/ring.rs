@@ -1,5 +1,5 @@
-//! The ring adapter against the real kernel, on loopback (testing-pyramid.md,
-//! sections 2.6 and 8): records submitted directly, as io will, and every
+//! The ring adapter against the real kernel, on loopback (shell.md,
+//! 9): records submitted directly, as io will, and every
 //! completion checked against the contract of `skein_io::kernel` as it
 //! arrives. What is the adapter's own: its slots and waits, a large transfer
 //! through short sends, what it completes itself, the broken invariants it

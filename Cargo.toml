@@ -1,4 +1,4 @@
-# Profiles and lints follow docs/design/programming-style.md, 9.4.
+# Profiles and lints follow docs/foundation/programming-model.md, 10.1.
 
 [workspace]
 resolver = "3"
@@ -17,7 +17,7 @@ skein-shell = { path = "crates/skein-shell" }
 skein-sim = { path = "crates/skein-sim" }
 
 # The only dependencies from outside the workspace, with rustls later
-# (programming-style.md, 9.2): the shell's, for the ring adapter.
+# (programming-model.md, 2.1): the shell's, for the ring adapter.
 io-uring = "0.7.15"
 libc = "0.2.186"
 
@@ -31,7 +31,7 @@ overflow-checks = true
 panic = "abort"
 overflow-checks = true
 
-# The lints for the step crates (lib and every model, protocol and io layer).
+# The lints for the step crates (lib and every domain, protocol and io layer).
 # Disallowed types, macros and methods are listed in clippy.toml. Ordinary Rust
 # (simulators, test harnesses) declares its own [lints] table.
 [workspace.lints.rust]
@@ -57,7 +57,7 @@ missing_panics_doc = "allow"          # panics are assertions, named by expect("
 needless_pass_by_value = "allow"      # cell handlers take the source state by value
 single_match_else = "allow"           # a two-armed match on Option is as clear as if let
 
-# programming-style.md, 9.4.
+# programming-model.md, 10.3.
 wildcard_enum_match_arm = "deny"
 indexing_slicing = "deny"
 arithmetic_side_effects = "deny"
@@ -75,7 +75,7 @@ multiple_unsafe_ops_per_block = "deny"
 disallowed_types = "deny"
 disallowed_macros = "deny"
 
-# Beyond 9.4: the rest of what the subset leaves out (programming-style.md, section 9).
+# The rest of what the subset leaves out (programming-model.md, 10.3).
 disallowed_methods = "deny"           # closure-taking combinators, panicking slice ops, ...
 allow_attributes = "deny"             # #[expect(.., reason = "..")], which fails once it is stale
 match_wildcard_for_single_variants = "deny"

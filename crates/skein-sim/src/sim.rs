@@ -86,7 +86,7 @@ enum Due {
     Expire { pid: Pid, connect: Token },
 }
 
-/// The simulated kernel (overview.md, section 9), for every process of one
+/// The simulated kernel (simulator.md), for every process of one
 /// world, deterministic from its seed. See the crate documentation.
 #[derive(Debug)]
 pub struct Sim {
@@ -308,7 +308,7 @@ impl Sim {
     }
 
     /// Fails the world unless `pid` has nothing in flight: every operation
-    /// completed, and every completion reaped (testing-pyramid.md, 5).
+    /// completed, and every completion reaped (testing-strategy.md, 5).
     pub fn assert_quiescent(&self, pid: Pid) {
         let process = self.process(pid);
         if let Some((token, flight)) = process.flights.first_key_value() {
@@ -1241,7 +1241,7 @@ impl Sim {
         self.die(&format!("a bug of the simulator: {what}"));
     }
 
-    #[expect(clippy::panic, reason = "the simulator fails the world on a broken invariant (overview.md, 9)")]
+    #[expect(clippy::panic, reason = "the simulator fails the world on a broken invariant (simulator.md, 5)")]
     fn die(&self, what: &str) -> ! {
         let from = self.trace.len().saturating_sub(TAIL);
         let tail = trace::render(self.seed, self.trace.get(from..).unwrap_or_default());

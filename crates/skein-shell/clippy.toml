@@ -1,5 +1,5 @@
 # What the shell may not use. It is ordinary Rust, with the two rules of its
-# own in programming-style.md, 9.2: `unsafe` in the ring adapter only (the
+# own in programming-model.md, 2.1: `unsafe` in the ring adapter only (the
 # lints in Cargo.toml), and no std handle types that close on drop (here).
 
 # Tests run against the real kernel and may assert by panicking.
@@ -16,8 +16,8 @@ disallowed-types = [
     { path = "std::net::TcpStream", reason = "a descriptor is closed by a Close record, not on drop" },
     { path = "std::net::TcpListener", reason = "a descriptor is closed by a Close record, not on drop" },
     { path = "std::net::UdpSocket", reason = "a descriptor is closed by a Close record, not on drop" },
-    { path = "std::process::Child", reason = "std::process is not used (overview.md, 5.3)" },
-    { path = "std::process::Command", reason = "std::process is not used (overview.md, 5.3)" },
+    { path = "std::process::Child", reason = "std::process is not used (io.md, 6)" },
+    { path = "std::process::Command", reason = "std::process is not used (io.md, 6)" },
     # Time is the Clock's: CLOCK_MONOTONIC as a skein_lib::Time, which the
     # ring's wait takes as an absolute deadline.
     { path = "std::time::Instant", reason = "skein_shell::Clock, a skein_lib::Time" },

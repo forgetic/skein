@@ -1,4 +1,4 @@
-//! Bounds-checked reading (programming-style.md, 3.3 and section 7): the
+//! Bounds-checked reading (programming-model.md, 4.3 and section 8): the
 //! bytes a stream delivered, decoded without trusting any length in them.
 
 /// A cursor over bytes, read from the front.

@@ -1,4 +1,4 @@
-//! The building blocks every step crate shares (programming-style.md, 9.2):
+//! The building blocks every step crate shares (programming-model.md, 10.2):
 //! typed handles and the slabs that issue them, bounded queues, lists, maps,
 //! sets and stacks, the per-layer deadline table, the stream vocabulary and
 //! the intake that meets its demands, a reader and a writer for sized bytes

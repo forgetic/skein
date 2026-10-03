@@ -1,4 +1,4 @@
-# The simulator is ordinary Rust (programming-style.md, 9.2, last part): std,
+# The simulator is ordinary Rust (programming-model.md, 10.2): std,
 # Vec, String, closures and formatting are in, since none of it runs in a
 # service. What stays out is what would break replay or the lifecycle: a
 # clock, threads, OS randomness, hash maps with a random seed, and std handles
@@ -18,12 +18,12 @@ disallowed-types = [
     { path = "std::sync::Arc", reason = "one thread, one owner" },
     { path = "std::sync::Mutex", reason = "one thread" },
     { path = "std::sync::RwLock", reason = "one thread" },
-    { path = "std::fs::File", reason = "closes on drop (programming-style.md, 9.2)" },
+    { path = "std::fs::File", reason = "closes on drop (programming-model.md, 2.1)" },
     { path = "std::net::TcpStream", reason = "the simulator plays the network" },
     { path = "std::net::TcpListener", reason = "the simulator plays the network" },
     { path = "std::net::UdpSocket", reason = "the simulator plays the network" },
-    { path = "std::os::fd::OwnedFd", reason = "closes on drop (programming-style.md, 9.2)" },
-    { path = "std::process::Child", reason = "std::process is not used (overview.md, 5.3)" },
+    { path = "std::os::fd::OwnedFd", reason = "closes on drop (programming-model.md, 2.1)" },
+    { path = "std::process::Child", reason = "std::process is not used (io.md, 6)" },
 ]
 
 disallowed-methods = [

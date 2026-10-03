@@ -1,5 +1,5 @@
-//! The byte vocabulary every stream boundary shares (programming-style.md,
-//! 3.3; overview.md, section 4): reading is a demand, writing is a move.
+//! The byte vocabulary every stream boundary shares (programming-model.md,
+//! 4.3; lib.md, 7): reading is a demand, writing is a move.
 //!
 //! The side above says what it needs with a [`Down::Demand`] and moves its
 //! output down in [`Down::Send`]; the side below answers with [`Up`]. The side
@@ -63,7 +63,7 @@ pub enum Fault {
 }
 
 /// The bytes a scan ends at: one to four of them, held inline so that a
-/// demand is a plain value (programming-style.md, 3.2).
+/// demand is a plain value (programming-model.md, 4.4).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Delimiter {
     /// The delimiter's bytes, then zeros.

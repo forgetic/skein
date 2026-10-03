@@ -1,12 +1,12 @@
 //! The conformance suite against the ring on the real kernel, on loopback
-//! (testing-pyramid.md, sections 5 and 8): every scenario of
+//! (kernel.md, 8): every scenario of
 //! `skein_sim::conformance` that loopback can provoke, each process of a
 //! scenario a `Kernel` of its own. The same scenarios run against the
 //! simulator in `skein-sim`'s tests.
 //!
 //! Not here: a failed `Accept` past the descriptor limit, which needs the
 //! process's limit lowered, and so `unsafe` outside the ring adapter
-//! (programming-style.md, 9.2); it runs on the simulator only.
+//! (programming-model.md, 2.1); it runs on the simulator only.
 //!
 //! A machine without io_uring fails every test here, saying so.
 

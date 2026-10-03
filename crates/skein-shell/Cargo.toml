@@ -12,11 +12,11 @@ skein-io.workspace = true
 io-uring.workspace = true
 libc.workspace = true
 
-# The conformance suite, run against the ring (testing-pyramid.md, 8).
+# The conformance suite, run against the ring (kernel.md, 8).
 [dev-dependencies]
 skein-sim.workspace = true
 
-# Ordinary Rust (programming-style.md, 9.2), with the lints that keep the one
+# Ordinary Rust (programming-model.md, 10.2), with the lints that keep the one
 # module allowed `unsafe` small and documented (9.4), and the subset's checks
 # that matter next to the syscalls: no silent casts, overflow or panicking
 # indexing.

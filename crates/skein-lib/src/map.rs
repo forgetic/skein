@@ -1,4 +1,5 @@
-//! Bounded ordered maps (5.1): domain tables keyed by value, up to a limit.
+//! Bounded ordered maps (programming-model.md, 6.1): domain tables keyed by
+//! value, up to a limit.
 
 use alloc::collections::BTreeMap;
 use alloc::collections::btree_map::{self, Entry};
@@ -14,8 +15,9 @@ use crate::btree;
 /// Lookups take the key borrowed, so a map keyed by `Box<[u8]>` is queried
 /// with a `&[u8]`.
 ///
-/// The capacity bounds the map, but unlike a slab or a list it is not
-/// allocated up front: the B-tree allocates nodes as it fills (5.1), and
+/// The capacity bounds the map, but unlike a slab or a list it is not allocated
+/// up front: the B-tree allocates nodes as it fills (programming-model.md,
+/// 6.1), and
 /// [`Map::worst_case`] counts those nodes.
 #[derive(Debug)]
 pub struct Map<K, V> {

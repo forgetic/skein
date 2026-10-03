@@ -1,4 +1,5 @@
-//! Bounded ordered sets (5.1): a [`Map`](crate::Map) without values.
+//! Bounded ordered sets (programming-model.md, 6.1): a [`Map`](crate::Map)
+//! without values.
 
 use alloc::collections::BTreeSet;
 use alloc::collections::btree_set;

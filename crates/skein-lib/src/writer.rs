@@ -1,4 +1,5 @@
-//! Sized writing (5.3, 7): bytes built into a box of a length computed first.
+//! Sized writing (programming-model.md, 6.2 and section 8): bytes built into a
+//! box of a length computed first.
 
 #![expect(clippy::disallowed_types, reason = "a writer fills a Vec allocated once, at its final length")]
 
@@ -12,8 +13,8 @@ use alloc::vec::Vec;
 /// The box is allocated once, at that length, and never grows; its bytes are
 /// the caller's to count, as any payload's. A put that does not fit what is
 /// left is refused whole and writes nothing. The length is the caller's own
-/// (7): a caller that computed it expects every put to fit, and finishing
-/// short is a bug, which [`Writer::finish`] asserts.
+/// (programming-model.md, section 8): a caller that computed it expects every
+/// put to fit, and finishing short is a bug, which [`Writer::finish`] asserts.
 #[derive(Debug)]
 pub struct Writer {
     bytes: Vec<u8>,

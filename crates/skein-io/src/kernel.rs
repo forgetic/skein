@@ -1,7 +1,7 @@
-//! The kernel boundary (overview.md, section 6): the records io submits to a
+//! The kernel boundary (kernel.md): the records io submits to a
 //! backend and the completions the backend hands back. The ring adapter, the
 //! simulator and any later backend implement exactly this, and the
-//! conformance suite (overview.md, section 9) holds each of them to it.
+//! conformance suite (kernel.md, 8) holds each of them to it.
 //!
 //! # The contract
 //!
@@ -11,8 +11,8 @@
 //!   [`Submit`]'s `op` token on its [`Complete`].
 //! - **The completion hands back the operation:** [`Complete::kind`] is the
 //!   submitted [`Op`], every buffer inside it, whatever the result. The
-//!   backend never drops, copies or replaces a `Box` (programming-style.md,
-//!   5.3). A `Recv` comes back with `buf[..n]` filled, a `Send` with its
+//!   backend never drops, copies or replaces a `Box` (programming-model.md,
+//!   6.2). A `Recv` comes back with `buf[..n]` filled, a `Send` with its
 //!   `bytes` untouched.
 //! - **One success shape per operation** ([`Shape`], tabled on [`Op`]). An
 //!   error means the operation did nothing usable: a failed `Socket` or
@@ -28,7 +28,7 @@
 //!
 //! - **A cancelled operation completes** as `Err(Cancelled)`, or with what it
 //!   did before the cancel landed. io keeps the entity *settling* until then
-//!   (programming-style.md, 4.3).
+//!   (programming-model.md, 5.3).
 //! - **A `Cancel` completes on its own,** before or after its target (the
 //!   simulator randomises which):
 //!   - `Ok(Nothing)`: it stopped the target, which completes
@@ -63,7 +63,7 @@
 //!   close. A `Recv` buffer is never empty ([`Op::recv`]).
 //! - **A `Send`'s count is bytes the kernel accepted** past `from`, at least
 //!   one and no more than were left. io continues a short send from
-//!   `from + n` (overview.md, 5.1).
+//!   `from + n` (io.md, 3).
 //! - **`Shutdown` ends this side's sending:** it completes `Ok` once the end
 //!   is queued, behind the bytes of every completed `Send`. A second
 //!   `Shutdown` is `Ok` while the connection lasts and `NotConnected` once it
@@ -150,7 +150,7 @@ impl Fd {
 ///
 /// `core::net`'s, which is plain data (no allocation, no lookup, no
 /// formatting needed) and passes the subset's lints. Names are resolved
-/// before io (overview.md, 10.5).
+/// before io (io.md, 4).
 pub type Addr = SocketAddr;
 
 /// The address family of a socket.
@@ -243,7 +243,7 @@ pub enum Op {
         fd: Fd,
     },
     // Files beneath a root, processes and the synchronous operations
-    // (overview.md, sections 5.2, 5.3 and 6) go here, when a user pulls them.
+    // (io.md, 5 and 6; kernel.md) go here, when a user pulls them.
     /// Asks the operation named `target` to stop early.
     Cancel {
         target: Token,

@@ -1,7 +1,7 @@
-//! io, the lowest step layer of every service (overview.md, section 5).
+//! io, the lowest step layer of every service (io.md).
 //!
 //! So far only the records of the kernel boundary below it, for sockets
-//! (overview.md, section 6): [`kernel`].
+//! (kernel.md): [`kernel`].
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]

@@ -1,5 +1,5 @@
 //! The trace: every submission and every completion reaped, as plain values,
-//! so a failing seed can be printed and replayed (testing-pyramid.md, 6).
+//! so a failing seed can be printed and replayed (testing-strategy.md, 6).
 
 use alloc::string::String;
 use core::fmt::Write;

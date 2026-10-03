@@ -1,6 +1,6 @@
-//! Time is data (section 8): nanoseconds on a monotonic clock that the shell or
-//! the simulator reads, never a step; and wall time, a separate type, for
-//! things about the world.
+//! Time is data (programming-model.md, section 9): nanoseconds on a monotonic
+//! clock that the shell or the simulator reads, never a step; and wall time, a
+//! separate type, for things about the world.
 
 /// A point in time, in nanoseconds since an arbitrary origin.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -10,8 +10,8 @@ pub struct Time(u64);
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Duration(u64);
 
-/// A point in wall-clock time, in nanoseconds since the Unix epoch, read by
-/// the shell or the simulator beside [`Time`] (section 8).
+/// A point in wall-clock time, in nanoseconds since the Unix epoch, read by the
+/// shell or the simulator beside [`Time`] (programming-model.md, section 9).
 ///
 /// It is for things about the world: a certificate's validity, a timestamp a
 /// peer will read. It is a type of its own, with no arithmetic on spans, so

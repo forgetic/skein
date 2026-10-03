@@ -1,5 +1,5 @@
-//! Entity storage (4.1, 5.1): a slab sized at startup, whose capacity is the
-//! admission limit for its entity kind.
+//! Entity storage (programming-model.md, 5.1 and 6.1): a slab sized at startup,
+//! whose capacity is the admission limit for its entity kind.
 
 #![expect(
     clippy::disallowed_types,

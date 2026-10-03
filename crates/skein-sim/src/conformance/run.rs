@@ -1,6 +1,6 @@
 //! The driver the scenarios run on: records submitted one at a time to a
 //! [`Backend`], and every completion checked as it is reaped, as the
-//! simulator checks its own (overview.md, section 9): a valid completion of
+//! simulator checks its own (simulator.md, 5): a valid completion of
 //! the operation's shape, one per submission, with the record handed back.
 
 use alloc::boxed::Box;

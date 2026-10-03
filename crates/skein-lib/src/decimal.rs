@@ -1,5 +1,5 @@
-//! Counts written as text (7): the decimal digits of a number, for a line a
-//! step writes into its own bytes without formatting.
+//! Counts written as text (programming-model.md, section 8): the decimal digits
+//! of a number, for a line a step writes into its own bytes without formatting.
 
 /// The decimal digits of a `u64`, without leading zeros, `0` for zero: what a
 /// step puts into a [`Writer`](crate::Writer) to write a count, after

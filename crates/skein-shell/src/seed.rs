@@ -1,4 +1,4 @@
-//! The seed (overview.md, section 8; programming-style.md, section 8).
+//! The seed (shell.md, 5; programming-model.md, section 9).
 
 use crate::ring;
 

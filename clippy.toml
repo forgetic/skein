@@ -1,4 +1,4 @@
-# What the step crates may not use: docs/design/programming-style.md, section 9.
+# What the step crates may not use: docs/foundation/programming-model.md, section 10.
 #
 # Applies to every crate below this directory that has no clippy.toml of its
 # own. skein-lib is held to it too; where lib builds a container on a type that
@@ -89,7 +89,7 @@ disallowed-macros = [
     { path = "core::debug_assert", reason = "assertions stay on in production: assert!" },
     { path = "core::debug_assert_eq", reason = "assertions stay on in production: assert!" },
     { path = "core::debug_assert_ne", reason = "assertions stay on in production: assert!" },
-    { path = "core::default::Default", reason = "only the derives in section 9.2; a default can be a live state" },
+    { path = "core::default::Default", reason = "only the derives of programming-model.md, 10.2; a default can be a live state" },
     { path = "core::include", reason = "code the reader cannot see" },
     { path = "core::include_str", reason = "data comes in events and limits" },
     { path = "core::include_bytes", reason = "data comes in events and limits" },
@@ -201,7 +201,7 @@ disallowed-methods = [
     { path = "slice::copy_from_slice", reason = "panics on a length mismatch: a Writer, or lengths checked first" },
     { path = "slice::clone_from_slice", reason = "panics on a length mismatch: a Writer, or lengths checked first" },
     { path = "slice::swap", reason = "panics out of range: get_mut" },
-    # The model never parses: bytes become typed values in the protocol layer.
+    # The domain never parses: bytes become typed values in the protocol layer.
     { path = "core::str::from_utf8", reason = "the protocol layer validates text" },
     { path = "core::str::from_utf8_mut", reason = "the protocol layer validates text" },
     { path = "str::parse", reason = "the protocol layer parses" },

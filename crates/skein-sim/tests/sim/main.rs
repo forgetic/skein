@@ -1,4 +1,4 @@
-//! The simulator's own tests (testing-pyramid.md, section 8): the records of
+//! The simulator's own tests (simulator.md, 6): the records of
 //! `skein_io::kernel`, submitted by hand, against what the contract allows.
 
 extern crate alloc;

@@ -1,4 +1,4 @@
-//! Bounded nesting (programming-style.md, section 7): what a parser keeps
+//! Bounded nesting (programming-model.md, section 8): what a parser keeps
 //! instead of recursing, since the depth of nested input is the peer's choice.
 
 #![expect(clippy::disallowed_types, reason = "a stack is a Vec allocated once, at its final capacity")]

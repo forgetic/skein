@@ -206,7 +206,7 @@ fn closing_a_listener_resets_the_connections_waiting_on_it() {
 }
 
 /// Simulator only: the ring's descriptor limit is the process's, which a
-/// test cannot lower without `unsafe` (programming-style.md, 9.2).
+/// test cannot lower without `unsafe` (programming-model.md, 2.1).
 #[test]
 fn an_accept_past_the_descriptor_limit() {
     let few = |config: Config| Config { max_fds: 4, ..config };

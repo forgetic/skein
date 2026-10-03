@@ -1,4 +1,5 @@
-//! The deadline table each layer keeps for its own timers (section 8).
+//! The deadline table each layer keeps for its own timers
+//! (programming-model.md, section 9).
 
 use crate::{Map, Set, Time};
 
@@ -14,7 +15,8 @@ use crate::{Map, Set, Time};
 ///
 /// The capacity bounds the table, but unlike a slab or a queue it is not
 /// allocated up front: its two indexes are B-trees that allocate nodes as they
-/// fill (5.1), and [`Deadlines::worst_case`] counts those nodes.
+/// fill (programming-model.md, 6.1), and [`Deadlines::worst_case`] counts those
+/// nodes.
 #[derive(Debug)]
 pub struct Deadlines<K> {
     by_time: Set<(Time, K)>,

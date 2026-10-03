@@ -1,13 +1,13 @@
-//! Owned bytes (5.1): a `Box<[u8]>` allocated at its final length, moved from
-//! owner to owner, never shared; and searching them.
+//! Owned bytes (programming-model.md, 6.1): a `Box<[u8]>` allocated at its
+//! final length, moved from owner to owner, never shared; and searching them.
 
 use alloc::boxed::Box;
 use core::cmp::Ordering;
 
 /// A copy of `bytes` in a box of exactly their length.
 ///
-/// This is "copy at emission" (5.3): data a layer keeps and also sends goes out
-/// as a copy made when the request is emitted.
+/// This is "copy at emission" (programming-model.md, 6.2): data a layer keeps
+/// and also sends goes out as a copy made when the request is emitted.
 #[must_use]
 pub fn copy_of(bytes: &[u8]) -> Box<[u8]> {
     Box::from(bytes)

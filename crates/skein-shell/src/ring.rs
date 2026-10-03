@@ -1,4 +1,4 @@
-//! The ring adapter (overview.md, 7.1): io's kernel records
+//! The ring adapter (shell.md, 3): io's kernel records
 //! (`skein_io::kernel`, whose module documentation is the contract kept
 //! here) on io_uring. It maps each record onto one submission entry, keeps
 //! the record in its in-flight table, and when the entry completes decodes
@@ -50,7 +50,7 @@
 
 #![expect(
     unsafe_code,
-    reason = "the ring adapter is the one place in skein that hands memory to the kernel (overview.md, 7.1; programming-style.md, 9.2)"
+    reason = "the ring adapter is the one place in skein that hands memory to the kernel (shell.md, 3; programming-model.md, 2.1)"
 )]
 
 use std::cell::UnsafeCell;
@@ -70,7 +70,7 @@ use skein_lib::{Queue, Time, Token};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Config {
     /// The most operations in flight at once, cancels included, as io's
-    /// operation slab counts them (overview.md, section 6). Both rings are
+    /// operation slab counts them (kernel.md, 5). Both rings are
     /// sized from it, so the completion queue cannot overflow, and
     /// [`Kernel::submit`] takes no record past it.
     pub operations: u32,
@@ -83,14 +83,14 @@ pub enum Wait {
     No,
     /// Block until a completion arrives or the deadline passes, a monotonic
     /// [`Time`] read from the [`Clock`](crate::Clock): the earliest deadline
-    /// over every layer (programming-style.md, section 8).
+    /// over every layer (programming-model.md, section 9).
     Until(Time),
     /// Block until a completion arrives: no deadline is armed. Asserts that
     /// something is in flight or ready, since otherwise it never returns.
     Forever,
 }
 
-/// Why [`Kernel::open`] refused: the shell does not start (overview.md, 7.1).
+/// Why [`Kernel::open`] refused: the shell does not start (shell.md, 4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OpenError {
     /// A config of no operations, which could never submit one.
@@ -125,7 +125,7 @@ impl fmt::Display for OpenError {
 impl std::error::Error for OpenError {}
 
 /// io's kernel, on io_uring: opened once, then submitted to and reaped from
-/// once per iteration (consumers.md, section 4).
+/// once per iteration (programming-model.md, section 2).
 pub struct Kernel {
     ring: IoUring,
     table: Table,
@@ -206,7 +206,7 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 impl Kernel {
     /// Sets up the ring for this thread alone: one issuer, and completions
-    /// processed only when the loop enters the ring (overview.md, 7.1).
+    /// processed only when the loop enters the ring (shell.md, 3).
     /// Probes the ring for every operation it uses, and refuses to open below
     /// the floor.
     pub fn open(config: Config) -> Result<Kernel, OpenError> {
@@ -741,8 +741,8 @@ fn decode_addr(storage: &libc::sockaddr_storage, len: libc::socklen_t) -> Option
 }
 
 // The synchronous calls: what is not a ring operation, done when the record
-// is submitted or completed (overview.md, section 6), and the clock and the
-// seed (overview.md, section 8).
+// is submitted or completed (kernel.md), and the clock and the
+// seed (shell.md, 5).
 
 /// Sets the integer socket option `name` at `level` to 1.
 fn set_option(fd: i32, level: i32, name: i32) -> Result<(), i32> {

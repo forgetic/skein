@@ -1,5 +1,5 @@
-//! The carry-over of a stream (programming-style.md, 3.3; overview.md,
-//! section 4): bytes received but not yet demanded, held by the side below
+//! The carry-over of a stream (programming-model.md, 4.3; lib.md,
+//! 7): bytes received but not yet demanded, held by the side below
 //! under its cap.
 
 #![expect(

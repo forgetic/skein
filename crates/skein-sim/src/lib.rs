@@ -1,8 +1,8 @@
-//! The simulated kernel (overview.md, sections 7.2 and 9): a backend that
+//! The simulated kernel (simulator.md): a backend that
 //! answers the records of `skein_io::kernel` as its contract allows, for
 //! every process of one world, with every choice drawn from one seed.
 //!
-//! Ordinary Rust (programming-style.md, 9.2, last part): std is in, but no
+//! Ordinary Rust (programming-model.md, 10.2): std is in, but no
 //! clock, no thread, no OS randomness and no hash map with a random seed, so
 //! a seed replays to the same [`trace`](Sim::trace).
 //!
@@ -36,7 +36,7 @@
 //! # Conformance
 //!
 //! [`conformance`] holds the simulator and the ring to the same contract
-//! (testing-pyramid.md, section 5): scenarios over a
+//! (kernel.md, 8; testing-strategy.md, 5): scenarios over a
 //! [`conformance::Backend`], which the simulator implements here and the
 //! ring in `skein-shell`'s tests.
 //!
