@@ -113,3 +113,50 @@ fn a_step_with_more_highs_than_the_meter_keeps_is_checked_soundly() {
     drop(handed);
     meter.check(measured, 499, &"a step");
 }
+
+/// A step whose peak, 101 bytes of its own, is a byte allocated right after
+/// 100: the narrowest span between two of its highs, so the first two the
+/// meter merges. It frees both, then hands out 400 blocks of 2 bytes, each a
+/// new high once past its peak: more than the meter keeps.
+fn narrow_peak(meter: &Meter) -> (Measured, Vec<Box<[u8]>>) {
+    let mut handed = black_box(Vec::with_capacity(400));
+    meter.start();
+    let hundred = black_box(vec![0_u8; 100]);
+    let one = black_box(Box::new(0_u8));
+    drop(one);
+    drop(hundred);
+    for _ in 0..400 {
+        handed.push(black_box(vec![0_u8; 2].into_boxed_slice()));
+    }
+    (meter.end(), handed)
+}
+
+#[test]
+#[should_panic(expected = "bytes held at the peak of a step, more than the worst case of 100")]
+fn a_narrow_peak_outlasts_the_merging_of_highs() {
+    let meter = Meter::new();
+    let (measured, handed) = narrow_peak(&meter);
+    drop(handed);
+    meter.check(measured, 100, &"a step");
+}
+
+#[test]
+fn a_narrow_peak_merged_is_checked_close() {
+    // Its high merges with the next, a block of 2 bytes later: the check errs
+    // by that block, and no more.
+    let meter = Meter::new();
+    let (measured, handed) = narrow_peak(&meter);
+    drop(handed);
+    assert_eq!(meter.check(measured, 102, &"a step"), 102);
+}
+
+#[test]
+fn a_realloc_holds_the_old_block_and_the_new_at_once() {
+    let meter = Meter::new();
+    let mut grown = black_box(Vec::<u8>::with_capacity(100));
+    meter.start();
+    grown.reserve_exact(200);
+    let measured = meter.end();
+    assert_eq!((measured.peak(), measured.held()), (300, 200));
+    assert_eq!(meter.check(measured, 300, &"a step"), 300);
+}
