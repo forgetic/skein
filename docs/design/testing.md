@@ -132,9 +132,10 @@ What a crate under `testing/` holds is shared by the tests of more than
 one crate, and is ordinary Rust held to the step crates' lints, each with
 a `clippy.toml` of its own. `skein-heap` holds the one `unsafe` in skein
 beside the ring adapter: a global allocator is an `unsafe impl`.
-programming-model.md (2.1, 10.2) confines `unsafe` to the ring adapter;
-the counting allocator is the exception, as a test-only crate never
-linked into a service. It allows its `unsafe` in place, with a scoped
+programming-model.md (1, 2.1, 10.2) confines `unsafe` to the ring adapter
+in code a service runs, and in tests to this `unsafe impl GlobalAlloc`: a
+test-only crate, never linked into a service. It allows its `unsafe` in
+place, with a scoped
 `#[expect(unsafe_code, reason = "…")]` and a `SAFETY` comment on each
 block.
 
