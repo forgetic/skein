@@ -1,0 +1,28 @@
+# The two test suites (docs/foundation/testing-strategy.md, section 8): the
+# focused one, every test but the fuzzy ones, within 15 seconds; and the fuzzy
+# one, the test binaries named fuzzy_* beside the focused tests of each crate
+# under tests/, within a minute. A suite past its budget fails, naming the
+# tests it stopped; a test past its slow period is flagged SLOW as it runs.
+
+[profile.default]
+default-filter = "not binary(/^fuzzy_/)"
+global-timeout = "15s"
+slow-timeout = { period = "3s" }
+
+# The tests under tests/ first, the longest, then the many short step tests
+# behind them, so that the run ends close to its total over the threads.
+[[profile.default.overrides]]
+filter = "kind(test)"
+priority = 10
+
+[profile.fuzzy]
+default-filter = "binary(/^fuzzy_/)"
+global-timeout = "60s"
+slow-timeout = { period = "20s" }
+
+# Measuring, not gating: no budget. With -j 1, each test's own time:
+#   cargo nextest run --workspace --profile measure -j 1
+#   cargo nextest run --workspace --profile measure -j 1 --ignore-default-filter -E 'binary(/^fuzzy_/)'
+[profile.measure]
+global-timeout = "1h"
+slow-timeout = { period = "60s" }
