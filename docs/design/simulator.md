@@ -91,9 +91,12 @@ small buffers so that sends are cut and stall.
   shape, each token completed once, every record handed back.
 - **At quiescence, on request:** nothing in flight, and every descriptor
   closed.
-- **With the counting allocator,** at every iteration: the live heap
-  within the worst case of the services it hosts (programming-model.md,
-  6.3).
+
+Memory is not the simulator's to check, though a simulated world checks it
+at every iteration (testing-strategy.md, 6): the world's harness, whose
+loop calls each service's `iterate` and which knows their worst cases,
+measures each with the counting allocator, `skein-heap` (testing.md, 5),
+against its worst case (programming-model.md, 6.3).
 
 ## 6. Testing
 
@@ -114,5 +117,10 @@ small buffers so that sends are cut and stall.
 
 - **Files and processes,** and with them the machine seam and hosting the
   services a spawn starts, when io pulls them. Sockets are built.
-- **The counting allocator,** and its check at every iteration.
 - **A state digest** in the trace, beside the records (lib.md, 11).
+
+The check of memory at every iteration is not the simulator's but the
+world harness's (section 5). The counting allocator it measures with is
+built, in `testing/skein-heap` (testing.md, 6); the check comes with the
+first simulated world that hosts a service, a service's own world or
+skein's examples (testing.md, 8).

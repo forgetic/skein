@@ -3,8 +3,9 @@
 Provisional, 2026-10-03. The design of `skein-shell`: what a service's
 `main` runs its loop on. The kernel (the io_uring backend of the kernel
 boundary, kernel.md), the clock and the seed; later, the readiness
-backend. It is ordinary Rust, and the only `unsafe` in skein lives here,
-in one module, the ring adapter.
+backend. It is ordinary Rust, and the only `unsafe` in skein that a
+service runs lives here, in one module, the ring adapter. (The counting
+allocator, test-only, has the other: testing.md, 6.)
 
 ## 1. In one page
 

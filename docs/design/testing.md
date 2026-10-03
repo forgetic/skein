@@ -72,9 +72,9 @@ machine is the service's.
 | Service tier | Real | What skein supplies |
 |---|---|---|
 | step tests | one of its step functions | lib |
-| domain worlds | one domain or child domain | lib |
-| system worlds | several of its domains, or several services' domains | lib |
-| protocol worlds | its protocol layer, over skein's machines | the machines, tested in skein's tiers |
+| domain worlds | one domain or child domain | lib, the counting allocator |
+| system worlds | several of its domains, or several services' domains | lib, the counting allocator |
+| protocol worlds | its protocol layer, over skein's machines | the machines, tested in skein's tiers; the counting allocator |
 | simulated worlds | every layer, `iterate` per process | the simulator, the counting allocator, the examples as a template |
 | real loop | the service as it ships | the shell kit |
 
@@ -83,12 +83,23 @@ simulator among them, and the scenarios its worlds run. A failure in a
 service's world that comes from io, a machine or the simulator is
 reproduced in skein's own tier, and fixed there.
 
+**The counting allocator** is `skein-heap`, in `testing/` (section 6): a
+global allocator that counts each thread's heap, and a meter that checks a
+step at the most it held of its own, less what it handed out in its
+requests, against its worst case (programming-model.md, 6.3). Every world
+that checks memory uses it, whatever its tier (testing-strategy.md, 6), in
+a test binary of its own that declares it. It measures; it runs no world.
+In a simulated world, the check at every iteration is the world harness's,
+which knows the worst cases of the services it hosts (simulator.md, 5).
+
 ## 6. Layout
 
 ```
 crates/*/src/tests.rs           step tests; lib's in a module per area, under src/tests/
 testing/skein-conformance       the conformance suite: the backend interface, the scenarios, the driver, the checks
-tests/lib                       lib's comparisons with naive functions, run long, skein-lib-tests
+testing/skein-heap              the counting allocator, and the meter that checks a step against its worst case
+tests/heap                      the counting allocator's own tests, skein-heap-tests
+tests/lib                       lib's comparisons with naive functions, run long, and its worst cases against the counting allocator, skein-lib-tests
 tests/sim                       the simulator's own tests, skein-sim-tests
 tests/ring                      the ring adapter's own tests, skein-ring-tests
 tests/conformance/sim           the suite against the simulator, skein-conformance-sim
@@ -110,7 +121,19 @@ and each file in its `tests/` is a test binary of its own, a fuzzy one
 when its name starts with `fuzzy_`. `tests/clippy.toml` bans what would
 make a run unrepeatable: hash maps with a random seed, the system clocks,
 threads. Each backend of the conformance suite is implemented beside the
-tests that run the suite against it.
+tests that run the suite against it. A crate's memory test is a binary of
+its own, `tests/memory.rs`, as the global allocator it declares is the
+binary's: its other tests, and every sweep, run on the system's.
+
+What a crate under `testing/` holds is shared by the tests of more than
+one crate, and is ordinary Rust held to the step crates' lints, each with
+a `clippy.toml` of its own. `skein-heap` holds the one `unsafe` in skein
+beside the ring adapter: a global allocator is an `unsafe impl`.
+programming-model.md (2.1, 10.2) confines `unsafe` to the ring adapter;
+the counting allocator is the exception, as a test-only crate never
+linked into a service. It allows its `unsafe` in place, with a scoped
+`#[expect(unsafe_code, reason = "…")]` and a `SAFETY` comment on each
+block.
 
 The io worlds with the minimal machine, the machine worlds with their
 transcripts, and the protocol worlds find their homes under `tests/` when
@@ -132,6 +155,7 @@ As of 2026-10-03.
 | real loop | not yet: no examples |
 | conformance | sockets, against the simulator and the ring |
 | the simulator's and the ring's own tests | sockets |
+| the counting allocator | built, with its own tests; lib's worst cases checked against it |
 
 The simulator plays the kernel for sockets, with every fault of
 simulator.md, 4. Its own tests submit records by hand, and a client and a
@@ -159,6 +183,11 @@ from the same seeds in the fuzzy suite.
 Replay: a seed replays to the same trace of submissions and completions.
 No state digest yet.
 
+Memory: the counting allocator is temper's heap meter, ported with its
+own tests. Each of lib's containers is checked against its worst case
+(lib.md, 10), in the focused suite. No world of skein's checks memory
+yet: its io worlds and simulated worlds are not built (section 8).
+
 ## 8. Not built yet
 
 By tier, in the order temper pulls the parts (README.md):
@@ -175,13 +204,15 @@ By tier, in the order temper pulls the parts (README.md):
 - **TLS's own tests,** when the TLS client is built.
 - **Simulated worlds and the real loop,** with the examples.
 
-By check: the counting allocator, state digests for replay, transition
-coverage, fuzzing.
+By check: memory at every iteration of a simulated world, with the world
+harness that runs it (simulator.md, 5); state digests for replay,
+transition coverage, fuzzing.
 
 ## 9. Open questions
 
 - **The world harness.** When a second service needs temper's schedule,
-  ledger, trace, heap and referee, whether they move into skein as a
-  crate of their own, and how much of it stays ordinary Rust.
+  ledger, trace and referee, whether they move into skein as a crate of
+  their own, and how much of it stays ordinary Rust. Its heap meter has
+  moved already: `skein-heap` (section 5).
 - The real loop in CI and sanitizers on the ring adapter are the shell's
   (shell.md, 10).

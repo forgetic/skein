@@ -13,8 +13,8 @@
 //! capacity, and hold exactly their worst case from the start. A map, a set
 //! and a deadline table allocate tree nodes as they fill, priced at the most
 //! nodes the tree can have, each as the larger kind: they are filled in
-//! order, which leaves full leaves of six behind, then thinned to leaves of
-//! five, the fewest a leaf holds, and driven at random.
+//! order, each leaf left behind holding six entries, then thinned to five a
+//! leaf, the fewest a leaf holds, and driven at random.
 
 use std::any::type_name;
 
