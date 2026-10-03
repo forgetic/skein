@@ -7,3 +7,8 @@ mod containers;
 mod handles;
 mod streams;
 mod time;
+
+/// The random cases a comparison with a naive function runs here. The
+/// fuzzy suite runs the same comparisons from the same seeds, over many
+/// more, in tests/lib (testing-strategy.md, 8).
+const ROUNDS: u32 = 300;

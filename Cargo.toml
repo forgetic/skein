@@ -7,6 +7,7 @@ members = [
     "testing/skein-conformance",
     "tests/conformance/ring",
     "tests/conformance/sim",
+    "tests/lib",
     "tests/ring",
     "tests/sim",
 ]

@@ -6,6 +6,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use super::ROUNDS;
 use crate::stream::{Delimiter, Read};
 use crate::{Intake, Overflow, Rng};
 
@@ -306,7 +307,7 @@ fn one_byte_at_a_time_meets_the_same_demands() {
 fn random_splits_demands_and_caps_meet_what_the_reference_meets() {
     let delimiters = [Delimiter::LF, Delimiter::CRLF, Delimiter::CRLF_CRLF, Delimiter::new(b"a\r").unwrap()];
     let mut rng = Rng::new(0x1_47A4E);
-    for _ in 0_u32..20_000 {
+    for _ in 0_u32..ROUNDS {
         let capacity = u32::try_from(rng.between(4, 24)).unwrap();
         let mut input = Vec::new();
         for _ in 0..rng.below(96) {
@@ -345,7 +346,7 @@ fn every_meet_takes_what_the_buffer_holds_demands_changing_or_not() {
     let delimiters: [&[u8]; 11] =
         [b"a", b"aa", b"aaa", b"aaaa", b"ab", b"aba", b"abab", b"aab", b"aaab", b"abaa", b"bab"];
     let mut rng = Rng::new(0x3E_E7);
-    for round in 0_u32..20_000 {
+    for round in 0_u32..ROUNDS {
         let capacity = u32::try_from(rng.between(0, 12)).unwrap();
         let cap = usize::try_from(capacity).unwrap();
         let mut intake = Intake::with_capacity(capacity);

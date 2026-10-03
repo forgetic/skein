@@ -3,6 +3,7 @@
 
 use alloc::boxed::Box;
 
+use super::ROUNDS;
 use crate::bytes::{count, find, find_from};
 use crate::{Decimal, List, Overflow, Reader, Rng, Writer};
 
@@ -109,7 +110,7 @@ fn the_search_agrees_with_a_naive_one() {
     let mut rng = Rng::new(0x5EA2_C4ED);
     let mut haystack_buffer = [0_u8; 64];
     let mut needle_buffer = [0_u8; 12];
-    for round in 0_u32..20_000 {
+    for round in 0_u32..ROUNDS {
         let letters = rng.between(1, 4);
         let len = up_to(&mut rng, haystack_buffer.len());
         fill(&mut rng, &mut haystack_buffer[..len], letters);

@@ -88,6 +88,7 @@ reproduced in skein's own tier, and fixed there.
 ```
 crates/*/src/tests.rs           step tests; lib's in a module per area, under src/tests/
 testing/skein-conformance       the conformance suite: the backend interface, the scenarios, the driver, the checks
+tests/lib                       lib's comparisons with naive functions, run long, skein-lib-tests
 tests/sim                       the simulator's own tests, skein-sim-tests
 tests/ring                      the ring adapter's own tests, skein-ring-tests
 tests/conformance/sim           the suite against the simulator, skein-conformance-sim
@@ -103,7 +104,8 @@ No crate under `crates/` has a `tests/` directory: its step tests are
 in `src/`, and whatever drives it from outside is a crate under `tests/`,
 named by its path. Such a crate is ordinary Rust (programming-model.md,
 10.2): what its test binaries share is its library, in `src/` (the
-simulator's harness and its scripted exchange, a backend of the suite),
+simulator's harness and its scripted exchange, a backend of the suite,
+the naive functions lib is compared with),
 and each file in its `tests/` is a test binary of its own, a fuzzy one
 when its name starts with `fuzzy_`. `tests/clippy.toml` bans what would
 make a run unrepeatable: hash maps with a random seed, the system clocks,
@@ -150,6 +152,9 @@ The two suites of testing-strategy.md, section 8, are
 `.config/nextest.toml`'s profiles, each with its budget as a global
 timeout: the focused suite by default, within 15 seconds, and the fuzzy
 suite, the `fuzzy_*` binaries, with `--profile fuzzy`, within a minute.
+lib's comparisons of the byte search with a naive one and of the intake
+with a plain reference run 300 random cases as step tests, and 20,000
+from the same seeds in the fuzzy suite.
 
 Replay: a seed replays to the same trace of submissions and completions.
 No state digest yet.
