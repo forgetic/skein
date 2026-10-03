@@ -1,0 +1,120 @@
+# skein
+
+skein is a kit for network services written in Rust as single-threaded
+step machines over Linux io_uring: one thread, one loop, no async. A
+service built on it writes only its domain, its own protocols and a short
+`main`; skein supplies the rest.
+
+Everyone who builds skein, or builds on it, reads the foundation first:
+
+- [`docs/foundation/programming-model.md`](docs/foundation/programming-model.md):
+  how the code is written, in skein and in every service built on it.
+- [`docs/foundation/testing-strategy.md`](docs/foundation/testing-strategy.md):
+  how it is tested.
+- [`docs/foundation/notes.md`](docs/foundation/notes.md): the questions
+  still open about both.
+
+`docs/design/` holds the design of each of skein's parts, one document per
+part, each the brief for the agent that builds it, and
+[`testing.md`](docs/design/testing.md): how skein itself is tested.
+
+## What skein holds
+
+| Part | Crate | What | Design |
+|---|---|---|---|
+| lib | `skein-lib` | handles, slabs, bounded containers, cursors, streams, deadlines, time | [lib.md](docs/design/lib.md) |
+| the kernel boundary | `skein-io` (`kernel`) | the records io submits to a backend and the completions it gets back | [kernel.md](docs/design/kernel.md) |
+| io | `skein-io` | sockets, pipes, files, processes, signals to the service | [io.md](docs/design/io.md) |
+| the shell kit | `skein-shell` | the io_uring backend, the clock, the seed, startup | [shell.md](docs/design/shell.md) |
+| the simulator | `skein-sim` | the simulated kernel, its faults, the conformance suite | [simulator.md](docs/design/simulator.md) |
+| HTTP | `skein-http` | HTTP/1.1 client and server, server-sent events | [http.md](docs/design/http.md) |
+| JSON | `skein-json` | a bounded tokenizer, a sized writer | [json.md](docs/design/json.md) |
+| TLS | `skein-tls` | a TLS stream over rustls | [tls.md](docs/design/tls.md) |
+
+```
+crate          depends on
+skein-lib      nothing
+skein-io       lib
+skein-http     lib
+skein-json     lib
+skein-tls      lib, rustls
+skein-shell    lib, io, io-uring, libc
+skein-sim      lib, io
+```
+
+- **A kit, not a framework.** skein has no service trait, no generic loop,
+  no scheduler and no callbacks. A service calls the parts by name, in
+  its own loop of about ten lines. Nothing in skein calls into a service,
+  not even the simulator.
+- **io_uring is the kernel interface.** io talks to the kernel in owned
+  records: an operation goes down carrying its memory, and its completion
+  comes back carrying the same memory. The ring backend maps each record
+  onto one submission; the simulator implements the same records; a
+  readiness backend (epoll, kqueue) may later implement them a third
+  time. Nothing above the records changes.
+- **Counted and bounded throughout.** Every part exports its `Limits` and
+  its `worst_case`, and a service adds them up.
+- **Built when pulled.** A part is built when its first user needs it,
+  and that user is its first test. temper is the first user, and what it
+  builds decides the order:
+
+  | temper builds | which pulls from skein |
+  |---|---|
+  | the agent's LLM client | io sockets, the ring, the simulator, the HTTP client, server-sent events, JSON, the TLS client |
+  | the fake LLM provider, as a service | the HTTP server, the server-sent events writer, the JSON writer |
+  | the worker's processes and workspaces | io processes, pipes and files |
+  | the engine's forge client and its webhooks | the HTTP client and server |
+
+## Not in skein
+
+- **Domains, and protocols only one application speaks:** an LLM
+  provider's API, a forge's API, temper's protocol between worker and
+  engine. They are built on skein's machines.
+- **A service's wiring:** its `iterate`, the sum of its worst cases, its
+  `main`.
+- **What a simulated program does.** The simulator plays the kernel; the
+  files and programs a scenario needs come from the service's own fake
+  machine, which plugs into the simulator.
+- **Schedulers, async and threads.** There is one loop per process. A
+  service that needs more cores runs more processes.
+
+## Building a service on skein
+
+| Part | Written by | Crate |
+|---|---|---|
+| lib, io, the machines for foreign protocols | skein | `skein-lib`, `skein-io`, `skein-http`, `skein-json`, `skein-tls` |
+| the protocol layer: its connections, its own machines and decoders | the service | `protocol` |
+| the domain, and its child domains | the service | `domain` |
+| `iterate`, and the sum of the worst cases | the service | `service` |
+| `main`: configuration, startup, the loop | the service | `shell`, on `skein-shell` |
+| the simulator | skein | `skein-sim` |
+| the worlds, the fakes, the fake machine | the service | its tests |
+| the lints and `clippy.toml` | copied from skein | the workspace |
+
+```
+crate      depends on
+domain     skein-lib                                  and its child domains
+protocol   skein-lib, skein-io, the skein machines it stacks, domain
+service    skein-lib, skein-io, protocol, domain
+shell      service, skein-shell
+tests      service, skein-sim
+```
+
+Before code:
+
+1. the wire protocol, sized, with every length and limit; or, for a
+   foreign protocol, the skein machines it stacks;
+2. the limits of each layer, and the worst case they imply;
+3. the entities of each layer, who owns each, and how they bind;
+4. the state machines: states, what each holds, the total transition
+   table, and the demands and deadlines of each state.
+
+Then, in order:
+
+1. the domain, with its step tests and domain worlds;
+2. the protocol layer, on skein's machines, its own machines fuzzed alone;
+3. the service and its `main` last, with the simulator standing in for
+   the kernel until then.
+
+What the service finds missing in skein along the way is added to skein,
+with the service as its first user and first test.
