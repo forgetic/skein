@@ -242,6 +242,43 @@ fn a_next_after_the_outcome_is_a_bug() {
 }
 
 #[test]
+#[should_panic(expected = "a scan holds the quote it ends at")]
+fn a_tokenizer_with_a_chunk_of_zero_is_a_bug() {
+    drop(Machine::new(Limits { chunk: 0, ..LIMITS }));
+}
+
+#[test]
+#[should_panic(expected = "a Close after Closed")]
+fn a_close_after_closed_is_a_bug() {
+    let mut machine = Machine::new(LIMITS);
+    drop(machine.down(Request::Close));
+    drop(machine.down(Request::Close));
+}
+
+#[test]
+#[should_panic(expected = "a Next after Closed")]
+fn a_next_after_closed_is_a_bug() {
+    let mut machine = Machine::new(LIMITS);
+    drop(machine.down(Request::Close));
+    drop(machine.down(Request::Next));
+}
+
+#[test]
+#[should_panic(expected = "bytes delivered without a read demand")]
+fn bytes_while_idle_are_the_side_belows_bug() {
+    let mut machine = Machine::new(LIMITS);
+    drop(machine.bytes(b"{"));
+}
+
+#[test]
+#[should_panic(expected = "the tokenizer asks for no room")]
+fn room_is_the_side_belows_bug() {
+    let mut machine = Machine::new(LIMITS);
+    drop(machine.down(Request::Next));
+    drop(machine.up(Up::Room));
+}
+
+#[test]
 fn nesting_past_the_depth_is_refused_at_the_first_container_past_it() {
     assert_eq!(tokens(b"[[{\"a\":[]}]]").len(), 9, "four deep is the limit");
     let events = read(b"[[{\"a\":[[]]}]]", LIMITS);
