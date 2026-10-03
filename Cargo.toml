@@ -14,6 +14,7 @@ publish = false
 skein-lib = { path = "crates/skein-lib" }
 skein-io = { path = "crates/skein-io" }
 skein-shell = { path = "crates/skein-shell" }
+skein-sim = { path = "crates/skein-sim" }
 
 # The only dependencies from outside the workspace, with rustls later
 # (programming-style.md, 9.2): the shell's, for the ring adapter.

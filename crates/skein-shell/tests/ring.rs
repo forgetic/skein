@@ -1,13 +1,16 @@
 //! The ring adapter against the real kernel, on loopback (testing-pyramid.md,
 //! sections 2.6 and 8): records submitted directly, as io will, and every
 //! completion checked against the contract of `skein_io::kernel` as it
-//! arrives. Where the conformance suite will run against the ring.
+//! arrives. What is the adapter's own: its slots and waits, a large transfer
+//! through short sends, what it completes itself, the broken invariants it
+//! asserts, dropping it. The sockets' behaviour is the conformance suite's,
+//! in `conformance.rs`.
 //!
 //! A machine without io_uring (a seccomp profile, `io_uring_disabled`) fails
 //! every test here, saying so, rather than passing them silently.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 
 use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, Submit};
 use skein_lib::{Duration, Queue, Time, Token};
@@ -169,19 +172,6 @@ impl World {
         sent.result
     }
 
-    /// What one receive of up to `len` bytes got.
-    fn recv(&mut self, fd: Fd, len: usize) -> Result<Box<[u8]>, Error> {
-        let received = self.run(Op::recv(fd, vec![0; len].into_boxed_slice()).expect("room to receive"));
-        match (received.result, received.kind) {
-            (Ok(Done::Count(n)), Op::Recv { buf, .. }) => Ok(Box::from(filled(&buf, n))),
-            (Err(error), Op::Recv { buf, .. }) => {
-                assert_eq!(buf.len(), len, "a failed receive hands its buffer back");
-                Err(error)
-            }
-            other => panic!("a receive: {other:?}"),
-        }
-    }
-
     fn close(&mut self, fd: Fd) {
         assert_eq!(self.run(Op::Close { fd }).result, Ok(Done::Nothing), "{fd:?} closes");
     }
@@ -203,10 +193,6 @@ fn v4(port: u16) -> Addr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, port))
 }
 
-fn v6(port: u16) -> Addr {
-    SocketAddr::from((Ipv6Addr::LOCALHOST, port))
-}
-
 /// Bytes no two offsets of a short span repeat in, to catch reordering.
 fn pattern(len: usize) -> Box<[u8]> {
     let mut bytes = vec![0_u8; len];
@@ -214,57 +200,6 @@ fn pattern(len: usize) -> Box<[u8]> {
         *byte = u8::try_from(at.wrapping_mul(31).wrapping_add(at >> 8) & 0xff).expect("masked to a byte");
     }
     bytes.into_boxed_slice()
-}
-
-#[test]
-fn a_connection_carries_bytes_both_ways_and_each_side_ends_its_sending() {
-    let mut world = World::new(8);
-    let (listener, addr) = world.listener(v4(0));
-    let (client, server, peer) = world.connection(listener, addr);
-    assert_eq!(peer.ip(), addr.ip(), "the peer is on loopback");
-    assert_ne!(peer.port(), 0, "the peer's port");
-
-    assert_eq!(world.send(client, b"hello"), Ok(Done::Count(5)));
-    assert_eq!(world.recv(server, 64).as_deref(), Ok(&b"hello"[..]));
-    assert_eq!(world.send(server, b"world!"), Ok(Done::Count(6)));
-    assert_eq!(world.recv(client, 64).as_deref(), Ok(&b"world!"[..]));
-
-    assert_eq!(world.run(Op::Shutdown { fd: client }).result, Ok(Done::Nothing));
-    assert_eq!(world.recv(server, 64).as_deref(), Ok(&b""[..]), "the client's end");
-    assert_eq!(world.run(Op::Shutdown { fd: client }).result, Ok(Done::Nothing), "a second shutdown");
-    assert_eq!(world.send(server, b"after"), Ok(Done::Count(5)), "the other direction still works");
-    assert_eq!(world.recv(client, 64).as_deref(), Ok(&b"after"[..]), "receiving works after a shutdown");
-    assert_eq!(world.run(Op::Shutdown { fd: server }).result, Ok(Done::Nothing));
-    assert_eq!(world.recv(client, 64).as_deref(), Ok(&b""[..]), "the server's end");
-
-    for fd in [client, server, listener] {
-        world.close(fd);
-    }
-    world.settle();
-}
-
-#[test]
-fn an_ipv6_connection_carries_bytes() {
-    let mut world = World::new(8);
-    let (listener, addr) = world.listener(v6(0));
-    let (client, server, peer) = world.connection(listener, addr);
-    assert_eq!(peer.ip(), addr.ip(), "the peer is on loopback");
-    assert_eq!(world.send(client, b"over six"), Ok(Done::Count(8)));
-    assert_eq!(world.recv(server, 64).as_deref(), Ok(&b"over six"[..]));
-    for fd in [client, server, listener] {
-        world.close(fd);
-    }
-    world.settle();
-}
-
-#[test]
-fn an_ipv6_socket_is_v6_only() {
-    let mut world = World::new(4);
-    let fd = world.socket(Family::Ipv6);
-    let mapped = SocketAddr::from((Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 0));
-    assert_eq!(world.bind(fd, mapped), Err(Error::InvalidArgument), "no IPv4-mapped address on a v6-only socket");
-    world.close(fd);
-    world.settle();
 }
 
 #[test]
@@ -323,44 +258,6 @@ fn a_large_transfer_takes_short_sends_and_many_receives() {
     world.settle();
 }
 
-#[test]
-fn a_connect_where_nothing_listens_is_refused() {
-    let mut world = World::new(4);
-    // A bound socket that does not listen holds the port.
-    let holder = world.socket(Family::Ipv4);
-    let addr = world.bind(holder, v4(0)).unwrap();
-    let client = world.socket(Family::Ipv4);
-    assert_eq!(world.run(Op::Connect { fd: client, addr }).result, Err(Error::Refused));
-    world.close(client);
-    world.close(holder);
-    world.settle();
-}
-
-#[test]
-fn a_bind_where_a_socket_listens_is_address_in_use() {
-    let mut world = World::new(4);
-    let (listener, addr) = world.listener(v4(0));
-    let other = world.socket(Family::Ipv4);
-    assert_eq!(world.bind(other, addr), Err(Error::AddressInUse));
-    world.close(other);
-    world.close(listener);
-    world.settle();
-}
-
-#[test]
-fn two_sockets_bind_one_address_and_the_second_listen_fails() {
-    let mut world = World::new(4);
-    let first = world.socket(Family::Ipv4);
-    let addr = world.bind(first, v4(0)).unwrap();
-    let second = world.socket(Family::Ipv4);
-    assert_eq!(world.bind(second, addr), Ok(addr), "both bind");
-    assert_eq!(world.listen(first), Ok(Done::Nothing));
-    assert_eq!(world.listen(second), Err(Error::AddressInUse));
-    world.close(second);
-    world.close(first);
-    world.settle();
-}
-
 /// The cancel lands, or loses the race; either way the target says what it
 /// did, and both complete once.
 fn cancel_answer(cancel: &Complete) {
@@ -368,35 +265,6 @@ fn cancel_answer(cancel: &Complete) {
         cancel.result == Ok(Done::Nothing) || cancel.result == Err(Error::TooLate),
         "a cancel finds its target or is too late: {cancel:?}"
     );
-}
-
-#[test]
-fn a_cancelled_accept_completes_once_as_cancelled() {
-    let mut world = World::new(4);
-    let (listener, _addr) = world.listener(v4(0));
-    let accept = world.start(Op::Accept { fd: listener });
-    let cancel = world.start(Op::Cancel { target: accept });
-    cancel_answer(&world.wait(cancel));
-    assert_eq!(world.wait(accept).result, Err(Error::Cancelled), "nothing connected");
-    world.close(listener);
-    world.settle();
-}
-
-#[test]
-fn a_cancelled_recv_completes_once_as_cancelled_with_its_buffer() {
-    let mut world = World::new(8);
-    let (listener, addr) = world.listener(v4(0));
-    let (client, server, _peer) = world.connection(listener, addr);
-    let recv = world.start(Op::recv(server, vec![0; 16].into_boxed_slice()).unwrap());
-    let cancel = world.start(Op::Cancel { target: recv });
-    cancel_answer(&world.wait(cancel));
-    let received = world.wait(recv);
-    assert_eq!(received.result, Err(Error::Cancelled), "nothing was sent");
-    assert_eq!(received.kind, Op::recv(server, vec![0; 16].into_boxed_slice()).unwrap(), "the buffer comes back");
-    for fd in [client, server, listener] {
-        world.close(fd);
-    }
-    world.settle();
 }
 
 #[test]
@@ -409,24 +277,6 @@ fn a_cancel_of_what_is_not_in_flight_is_too_late() {
     assert_eq!(world.wait(done).result, Ok(Done::Nothing));
     assert_eq!(world.run(Op::Cancel { target: done }).result, Err(Error::TooLate), "it completed");
     world.close(fd);
-    world.settle();
-}
-
-#[test]
-fn closing_with_unread_data_resets_the_peer_once() {
-    let mut world = World::new(8);
-    let (listener, addr) = world.listener(v4(0));
-    let (client, server, _peer) = world.connection(listener, addr);
-    assert_eq!(world.send(client, b"unread"), Ok(Done::Count(6)));
-    world.close(server);
-
-    assert_eq!(world.recv(client, 64), Err(Error::Reset), "the reset, reported once");
-    assert_eq!(world.recv(client, 64).as_deref(), Ok(&b""[..]), "then the end");
-    assert_eq!(world.send(client, b"more"), Err(Error::BrokenPipe));
-    assert_eq!(world.run(Op::Shutdown { fd: client }).result, Err(Error::NotConnected));
-
-    world.close(client);
-    world.close(listener);
     world.settle();
 }
 

@@ -31,6 +31,13 @@
 //! descriptor the process does not have open. Every completion it makes is
 //! checked with `Complete::is_valid`, and each token completes once.
 //!
+//! # Conformance
+//!
+//! [`conformance`] holds the simulator and the ring to the same contract
+//! (testing-pyramid.md, section 5): scenarios over a
+//! [`conformance::Backend`], which the simulator implements here and the
+//! ring in `skein-shell`'s tests.
+//!
 //! # Its choices, where the contract leaves one
 //!
 //! - **Descriptors** count up from 3 in each process and are never reused,
@@ -64,6 +71,7 @@
 extern crate alloc;
 
 mod config;
+pub mod conformance;
 mod net;
 mod sim;
 mod trace;

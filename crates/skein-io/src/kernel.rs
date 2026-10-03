@@ -52,9 +52,10 @@
 //!   never refuses it: `Refused` means nothing listened there when the
 //!   connect arrived. A `Connect` delayed too long fails with `TimedOut`.
 //! - **A failed `Accept`** (`TooManyOpenFiles`, `NoBufferSpace`) consumed no
-//!   waiting connection. A connection reset while waiting is still accepted;
-//!   its first `Send`, or its first `Recv` after the bytes already received,
-//!   fails with `Reset`.
+//!   waiting connection. A connection closed while waiting is still
+//!   accepted, and gives its bytes, then the end of the stream. One reset
+//!   while waiting is still accepted too; its first `Send`, or its first
+//!   `Recv` after the bytes already received, fails with `Reset`.
 //! - **A `Recv` of zero bytes means the stream ended:** the peer shut down or
 //!   closed, or a reset was already reported. It does not prove a graceful
 //!   close. A `Recv` buffer is never empty ([`Op::recv`]).
@@ -73,15 +74,18 @@
 //!   end of stream hears of no reset: its `Recv` drains to `Ok(Count(0))`,
 //!   its `Send` fails with `BrokenPipe`, its `Shutdown` with `NotConnected`.
 //! - **A `Send` after the peer closed** with nothing unread may succeed once,
-//!   its bytes lost; later ones fail with `BrokenPipe`, never `Reset`.
+//!   its bytes lost; later ones fail with `BrokenPipe`, never `Reset`. Then
+//!   a `Recv` gives `Ok(Count(0))` and a `Shutdown` fails with
+//!   `NotConnected`.
 //! - **An [`Fd`] is closed only by `Close`,** which releases it whatever its
 //!   result. A `Close` with received data unread makes the peer see `Reset`;
 //!   closing a listener resets the connections waiting on it.
 //! - **Records the kernel refuses for the socket's state** are bugs in io,
 //!   answered rather than assumed away: a `Recv` on a socket never connected
-//!   fails with `NotConnected`, a `Send` with `BrokenPipe`; a second `Bind`,
-//!   a `Bind` or `Listen` on a connected socket, and an `Accept` on one that
-//!   does not listen, with `InvalidArgument`.
+//!   (a listener among them) fails with `NotConnected`, a `Send` with
+//!   `BrokenPipe`; a second `Bind`, a `Bind` or `Listen` on a connected
+//!   socket, and an `Accept` on one that does not listen, with
+//!   `InvalidArgument`.
 //!
 //! Broken invariants, which io never commits and backends may assume never
 //! happen. The simulator fails the world on each; the ring asserts the first

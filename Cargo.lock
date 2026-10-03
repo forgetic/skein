@@ -50,6 +50,7 @@ dependencies = [
  "libc",
  "skein-io",
  "skein-lib",
+ "skein-sim",
 ]
 
 [[package]]
