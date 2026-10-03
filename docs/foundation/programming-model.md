@@ -57,7 +57,8 @@ is testing-strategy.md.
 - **A small Rust.** Structs, enums, `match`, functions, references, moves
   and a short list of library types. No `async`, closures, trait objects,
   user-defined traits or generics, `Rc` or `RefCell`, `Drop` impls, or
-  `unsafe` outside one module. Panics abort.
+  `unsafe` outside one module (in tests, also the counting allocator's:
+  skein's testing.md, section 6). Panics abort.
 
 ## 2. The loop
 
@@ -138,10 +139,12 @@ effects use the same request and event shapes as ring operations, so step
 code cannot tell them apart. Anything that can be a ring operation is one:
 accept, connect, read, write, open, close, waiting for a child.
 
-- **The ring adapter is the only `unsafe` code,** since it makes every
-  kernel call: ring operations through the `io-uring` crate, the other
-  syscalls through `libc`. With rustls in the TLS machine (section 3),
-  these are the only crates from outside skein and the service.
+- **The ring adapter is the only `unsafe` code a service runs,** since it
+  makes every kernel call: ring operations through the `io-uring` crate,
+  the other syscalls through `libc`. With rustls in the TLS machine
+  (section 3), these are the only crates from outside skein and the
+  service. In tests, the only `unsafe` is the counting allocator's `unsafe
+  impl GlobalAlloc` (skein's testing.md, section 6).
 - **No std handle types that close on drop.** `OwnedFd`, `File`,
   `TcpStream`, `TcpListener` and `std::process::Child` release kernel
   resources in their destructors, at a moment the lifecycle did not
@@ -795,7 +798,9 @@ container's capacity. It is written once and tested hard. Application code
 does not hand-roll data structures: what is missing goes into lib.
 
 The shell, the simulator and tests are ordinary Rust, with `unsafe`
-confined to the ring adapter.
+confined to the ring adapter in code a service runs, and in tests to the
+counting allocator's `unsafe impl GlobalAlloc` (skein's testing.md,
+section 6).
 
 ### 10.3 What is out
 

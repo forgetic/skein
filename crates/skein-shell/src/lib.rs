@@ -10,8 +10,9 @@
 //! skein provides no `run`: the loop belongs to the service.
 //!
 //! This is ordinary Rust (programming-model.md, 10.2), and the only `unsafe`
-//! in skein lives here, in one module, the ring adapter: the crate's lints
-//! deny it everywhere else.
+//! in skein that a service runs lives here, in one module, the ring adapter:
+//! the crate's lints deny it everywhere else. (The counting allocator,
+//! test-only, has the other: testing.md, 6.)
 
 mod clock;
 mod ring;

@@ -1,0 +1,16 @@
+[package]
+name = "skein-heap"
+description = "The counting allocator: the heap of each thread counted, and a meter that checks a step at the most it held of its own against its worst case"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Ordinary Rust (programming-model.md, 10.2), held to the step crates' lints
+# as the simulator and the conformance suite are: its own clippy.toml lets in
+# the std it needs, and the subset's other checks stay on, which an allocator
+# wants (no silent casts, overflow or panicking indexing). Its unsafe impl is
+# allowed in place, the one exception beside the ring adapter: a test-only
+# crate, never linked into a service (testing.md, 6).
+[lints]
+workspace = true

@@ -27,6 +27,7 @@ part, each the brief for the agent that builds it, and
 | io | `skein-io` | sockets, pipes, files, processes, signals to the service | [io.md](docs/design/io.md) |
 | the shell kit | `skein-shell` | the io_uring backend, the clock, the seed, startup | [shell.md](docs/design/shell.md) |
 | the simulator | `skein-sim` | the simulated kernel and its faults; beside it, the conformance suite (`skein-conformance`) | [simulator.md](docs/design/simulator.md) |
+| the counting allocator | `skein-heap` | for tests: the heap counted, and each step checked against its worst case | [testing.md](docs/design/testing.md) |
 | HTTP | `skein-http` | HTTP/1.1 client and server, server-sent events | [http.md](docs/design/http.md) |
 | JSON | `skein-json` | a bounded tokenizer, a sized writer | [json.md](docs/design/json.md) |
 | TLS | `skein-tls` | a TLS stream over rustls | [tls.md](docs/design/tls.md) |
@@ -88,6 +89,7 @@ skein-sim      lib, io
 | `iterate`, and the sum of the worst cases | the service | `service` |
 | `main`: configuration, startup, the loop | the service | `shell`, on `skein-shell` |
 | the simulator | skein | `skein-sim` |
+| the counting allocator, for memory tests | skein | `skein-heap` |
 | the worlds, the fakes, the fake machine | the service | its tests |
 | the lints and `clippy.toml` | copied from skein | the workspace |
 
@@ -97,7 +99,7 @@ domain     skein-lib                                  and its child domains
 protocol   skein-lib, skein-io, the skein machines it stacks, domain
 service    skein-lib, skein-io, protocol, domain
 shell      service, skein-shell
-tests      service, skein-sim
+tests      service, skein-sim, skein-heap
 ```
 
 Before code:

@@ -155,8 +155,7 @@ and its layer's `limits: L`. A step gets it behind a shared borrow.
 Step tests drive each container through its operations, at and past its
 capacity: a full queue, a stale handle, a slot whose generation would
 wrap, a refusal at the entrance, a deadline that fires as it is
-cancelled, a scan cut at every byte. Each `worst_case` is checked
-against the counting allocator. The step tests are `src/tests.rs`, a
+cancelled, a scan cut at every byte. The step tests are `src/tests.rs`, a
 module for each area of this document under `src/tests/`: handles,
 containers, bytes, streams, and time.
 
@@ -165,6 +164,28 @@ plain reference, over random cases drawn from a seed: a few hundred in
 the step tests, and 20,000 from the same seeds in the fuzzy suite, in
 `tests/lib` (testing-strategy.md, 8).
 
+Each `worst_case` is checked against the counting allocator (testing.md,
+5), in `tests/lib/tests/memory.rs`, in the focused suite. Every container
+is built at capacities from 0 to 300, filled to them, emptied and filled
+again, every operation a step of the meter, and what it held of its own is
+never more than `worst_case(capacity)`. What an item owns is its owner's
+to count, so the items own no heap; they come in several sizes and
+alignments, up to 64 bytes, as a container's price depends on both. What
+an operation hands out (an item taken, a delivery, a list moved into a
+box) is its receiver's.
+
+- **A slab, a queue, a list, a stack and an intake** are allocated once,
+  at their capacity, and hold exactly their worst case from the start.
+- **A map, a set and a deadline table** are filled in order, each leaf
+  left behind holding six entries, then thinned to five a leaf, the fewest
+  a leaf holds: a tree within a few nodes of the most its capacity allows,
+  and driven at random. Their
+  worst case prices every node as an internal one, the larger kind, so at
+  a capacity of 12 or more they hold from about 30% of it, for small
+  entries, whose nodes are mostly edges, to 96%, for 64-byte keys and
+  values. Below 12, a tree is at most one leaf, and the worst case counts
+  up to three nodes.
+
 ## 11. Not built yet
 
 - **`Slab::get2_mut`,** which looks up two entities at once and fails on
@@ -172,5 +193,3 @@ the step tests, and 20,000 from the same seeds in the fuzzy suite, in
 - **A state digest** for replay: a fixed-key hasher over the state types'
   derived `Hash`, independent of their layout in memory
   (testing-strategy.md, 6).
-- **The `worst_case` checks** against the counting allocator, when it is
-  built.
