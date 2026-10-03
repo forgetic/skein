@@ -8,6 +8,7 @@ members = [
     "testing/skein-heap",
     "tests/conformance/ring",
     "tests/conformance/sim",
+    "tests/heap",
     "tests/lib",
     "tests/ring",
     "tests/sim",

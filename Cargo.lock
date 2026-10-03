@@ -65,6 +65,13 @@ name = "skein-heap"
 version = "0.0.0"
 
 [[package]]
+name = "skein-heap-tests"
+version = "0.0.0"
+dependencies = [
+ "skein-heap",
+]
+
+[[package]]
 name = "skein-io"
 version = "0.0.0"
 dependencies = [
