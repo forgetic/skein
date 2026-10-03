@@ -33,7 +33,6 @@ const ROOM: u32 = 64;
 /// One process: io, the owner above it, and the loop's queues between them.
 #[derive(Debug)]
 pub struct Proc {
-    pub pid: Pid,
     pub io: Io,
     pub env: Env<Limits>,
     pub owner: Owner,
@@ -48,9 +47,8 @@ pub struct Proc {
 
 impl Proc {
     #[must_use]
-    pub fn new(pid: Pid, limits: Limits, owner: Owner) -> Proc {
+    pub fn new(limits: Limits, owner: Owner) -> Proc {
         let mut proc = Proc {
-            pid,
             io: Io::new(&limits),
             env: Env { now: Time::ZERO, wall: Wall::EPOCH, limits },
             owner,
@@ -125,7 +123,8 @@ impl Proc {
     }
 
     /// Whether the loop has work now, without the kernel or time.
-    fn busy(&self, now: Time) -> bool {
+    #[must_use]
+    pub fn busy(&self, now: Time) -> bool {
         self.io.is_ready()
             || self.io.is_due(now)
             || !self.completions.is_empty()
@@ -138,6 +137,8 @@ impl Proc {
 pub struct World {
     pub sim: Sim,
     pub procs: Vec<Proc>,
+    /// Each process's in the simulator.
+    pids: Vec<Pid>,
     pub referee: Referee,
     pub directory: Directory,
 }
@@ -153,13 +154,13 @@ pub struct Outcome {
 impl World {
     #[must_use]
     pub fn new(seed: u64, config: Config, referee: Referee) -> World {
-        World { sim: Sim::new(seed, config), procs: Vec::new(), referee, directory: Directory::new() }
+        World { sim: Sim::new(seed, config), procs: Vec::new(), pids: Vec::new(), referee, directory: Directory::new() }
     }
 
     /// Adds a process running io under `limits`, with `owner` above it.
     pub fn spawn(&mut self, limits: Limits, owner: Owner) -> usize {
-        let pid = self.sim.spawn_process();
-        self.procs.push(Proc::new(pid, limits, owner));
+        self.pids.push(self.sim.spawn_process());
+        self.procs.push(Proc::new(limits, owner));
         self.procs.len() - 1
     }
 
@@ -173,10 +174,10 @@ impl World {
             assert!(iterations < STEPS, "the world settles\n{}", self.trace());
             let now = self.sim.now();
             let wall = self.sim.wall();
-            for (at, proc) in self.procs.iter_mut().enumerate() {
-                self.sim.reap(proc.pid, &mut proc.completions);
+            for (at, (proc, pid)) in self.procs.iter_mut().zip(&self.pids).enumerate() {
+                self.sim.reap(*pid, &mut proc.completions);
                 proc.iterate(now, wall, &mut self.directory);
-                self.sim.submit(proc.pid, &mut proc.subs);
+                self.sim.submit(*pid, &mut proc.subs);
                 self.referee.observe(now, at, &proc.owner);
             }
             if self.busy(now) {
@@ -197,10 +198,10 @@ impl World {
                 None => panic!("the world is idle, unsettled, with nothing due\n{}", self.trace()),
             }
         }
-        for proc in &self.procs {
+        for (proc, pid) in self.procs.iter().zip(&self.pids) {
             assert!(proc.io.is_empty(), "io holds nothing once settled: {:?}", proc.io);
-            self.sim.assert_quiescent(proc.pid);
-            self.sim.assert_no_open_fds(proc.pid);
+            self.sim.assert_quiescent(*pid);
+            self.sim.assert_no_open_fds(*pid);
             proc.ledger.settled();
         }
         Outcome {
@@ -213,11 +214,17 @@ impl World {
     /// Whether any process has work now: its loop's, or the kernel's deferred
     /// to its next entry, or completions delivered and not reaped.
     fn busy(&self, now: Time) -> bool {
-        self.procs.iter().any(|proc| proc.busy(now) || self.sim.deferred(proc.pid) || self.sim.ready(proc.pid) > 0)
+        self.procs
+            .iter()
+            .zip(&self.pids)
+            .any(|(proc, pid)| proc.busy(now) || self.sim.deferred(*pid) || self.sim.ready(*pid) > 0)
     }
 
     fn settled(&self) -> bool {
-        self.procs.iter().all(|proc| proc.owner.done() && proc.io.is_empty() && self.sim.in_flight(proc.pid) == 0)
+        self.procs
+            .iter()
+            .zip(&self.pids)
+            .all(|(proc, pid)| proc.owner.done() && proc.io.is_empty() && self.sim.in_flight(*pid) == 0)
     }
 
     /// The earliest of what the simulator has due and every deadline in the
