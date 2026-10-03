@@ -40,6 +40,9 @@ impl Seen {
         if settings.cut.is_some() {
             self.note("a stream ended early".into());
         }
+        if run.held_back == settings.cap {
+            self.note("the stream below filled while the side above stopped".into());
+        }
     }
 
     fn assert_fell(&self, expected: &[&str]) {
@@ -64,7 +67,7 @@ const EVERY_ERROR: [&str; 12] = [
     "failed Stream",
 ];
 
-const EVERY_NEIGHBOUR: [&str; 7] = [
+const EVERY_NEIGHBOUR: [&str; 8] = [
     "Done",
     "closed before the outcome",
     "closed while waiting for Next",
@@ -72,6 +75,7 @@ const EVERY_NEIGHBOUR: [&str; 7] = [
     "closed while waiting for Close",
     "an end with nothing demanded",
     "a stream ended early",
+    "the stream below filled while the side above stopped",
 ];
 
 #[test]

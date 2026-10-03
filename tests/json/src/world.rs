@@ -6,8 +6,8 @@
 //!   at most once. It ends when the peer's bytes run out, early when the
 //!   settings cut them, sometimes with nothing demanded; or it fails.
 //! - **The side above** asks for one token at a time, when it feels like
-//!   it, and closes: after the outcome, or at a moment the settings draw,
-//!   whatever the tokenizer is doing then.
+//!   it, stops asking for a while, and closes: after the outcome, or at a
+//!   moment the settings draw, whatever the tokenizer is doing then.
 //!
 //! The world checks the machine's contracts as it goes (testing-strategy.md,
 //! 6): `MAX_OUT` honoured on each call; one answer per `Next`, at most one
@@ -49,6 +49,9 @@ pub struct Settings {
     /// When the side above closes, if it does whatever the tokenizer is
     /// doing: from this iteration on.
     pub close: Option<u64>,
+    /// When the side above stops asking, if it does, and for how many
+    /// iterations: meanwhile it neither asks for a token nor closes.
+    pub stall: Option<(u64, u64)>,
 }
 
 impl Settings {
@@ -68,12 +71,13 @@ impl Settings {
             cut: None,
             failure: None,
             close: None,
+            stall: None,
         }
     }
 
     /// Neighbours as [`calm`](Settings::calm), and sometimes a stream that
-    /// ends early or fails, or a close at any moment, for a document of
-    /// `len` bytes.
+    /// ends early or fails, a close at any moment, or a side above that
+    /// stops asking for a while, for a document of `len` bytes.
     #[must_use]
     pub fn chaotic(rng: &mut Rng, limits: Limits, len: usize) -> Settings {
         let mut settings = Settings::calm(rng, limits);
@@ -89,6 +93,9 @@ impl Settings {
         }
         if rng.chance(150) {
             settings.close = Some(rng.below(span));
+        }
+        if rng.chance(200) {
+            settings.stall = Some((rng.below(span), rng.between(16, 256)));
         }
         settings
     }
@@ -135,6 +142,9 @@ pub struct Run {
     pub failed: Option<Fault>,
     /// Whether the side below reported the end with nothing demanded.
     pub idle_end: bool,
+    /// The most bytes the stream below held, nothing demanded, while the
+    /// side above had stopped asking.
+    pub held_back: u32,
     /// The iterations the run took.
     pub iterations: u64,
 }
@@ -173,8 +183,13 @@ pub fn run(document: &[u8], settings: &Settings, seed: u64) -> Run {
         },
         above: Above { pending: false, tokens: Vec::new(), outcome: None, closing: None, closed: false },
         iteration: 0,
+        held_back: 0,
     };
-    let budget = 64 * (document.len() as u64 + 16);
+    let stalled = match settings.stall {
+        Some((_, iterations)) => iterations,
+        None => 0,
+    };
+    let budget = 64 * (document.len() as u64 + 16) + stalled;
     while world.iteration < budget {
         if world.rng.chance(500) {
             world.below_acts();
@@ -182,6 +197,9 @@ pub fn run(document: &[u8], settings: &Settings, seed: u64) -> Run {
         } else {
             world.above_acts();
             world.below_acts();
+        }
+        if world.is_stalled() && world.below.demand.is_none() {
+            world.held_back = world.held_back.max(world.below.intake.len());
         }
         world.iteration += 1;
         if world.above.closed {
@@ -192,6 +210,7 @@ pub fn run(document: &[u8], settings: &Settings, seed: u64) -> Run {
                 closed_while: world.above.closing.expect("closed after a close"),
                 failed: world.below.failed,
                 idle_end: world.below.idle_end,
+                held_back: world.held_back,
                 iterations: world.iteration,
             };
         }
@@ -241,6 +260,7 @@ struct World<'a> {
     below: Below<'a>,
     above: Above,
     iteration: u64,
+    held_back: u32,
 }
 
 /// The stream below.
@@ -332,7 +352,18 @@ impl World<'_> {
         }
     }
 
+    /// Whether the side above has stopped asking for now.
+    fn is_stalled(&self) -> bool {
+        match self.settings.stall {
+            Some((from, iterations)) => (from..from + iterations).contains(&self.iteration),
+            None => false,
+        }
+    }
+
     fn above_acts(&mut self) {
+        if self.is_stalled() {
+            return;
+        }
         let above = &mut self.above;
         if above.closing.is_some() {
             return;

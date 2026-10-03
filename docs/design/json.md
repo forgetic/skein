@@ -243,9 +243,10 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
     demanded, or it fails; after a close, it may still deliver what was
     on its way. The tokenizer asks for no room, so there is none to grant
     late.
-  - The side above asks for a token when it feels like it, and closes
-    after the outcome, or at any moment: waiting for a `Next`, for bytes,
-    or for the close.
+  - The side above asks for a token when it feels like it, stops asking
+    for a while, so that the stream below fills to its cap with nothing
+    demanded, and closes after the outcome, or at any moment: waiting for
+    a `Next`, for bytes, or for the close.
   - The world checks the contracts as it goes: `MAX_OUT` on each call;
     one answer per `Next`, at most one outcome, `Closed` once and last;
     one demand at a time, none past the largest declared or the cap

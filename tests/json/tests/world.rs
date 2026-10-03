@@ -126,6 +126,23 @@ fn nesting_past_the_depth_is_refused() {
 }
 
 #[test]
+fn a_user_that_stops_asking_stops_the_reading_and_the_stream_below_holds_the_rest() {
+    let mut document = b"[0".to_vec();
+    for n in 1..100 {
+        document.extend_from_slice(format!(",{n}").as_bytes());
+    }
+    document.push(b']');
+    for seed in 0..8 {
+        let mut rng = Rng::new(seed);
+        let settings =
+            Settings { cap: 16, arrival: 1000, stall: Some((10 + seed, 300)), ..Settings::calm(&mut rng, LIMITS) };
+        let run = world::check(&document, &settings, seed);
+        assert_eq!(run.outcome, Some(Outcome::Done), "seed {seed}");
+        assert_eq!(run.held_back, settings.cap, "seed {seed}: the stream below filled to its cap, undemanded");
+    }
+}
+
+#[test]
 fn a_seed_replays_to_the_same_run() {
     for seed in 0..20 {
         let mut rng = Rng::new(seed);
