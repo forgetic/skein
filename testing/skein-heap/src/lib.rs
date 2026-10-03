@@ -101,9 +101,10 @@ thread_local! {
     static HIGHS: RefCell<Highs> = const { RefCell::new(Highs::NONE) };
 }
 
-/// Counts a block of `layout` allocated, and numbers it. Counts wrap rather
-/// than trap: a block freed on another thread than its own takes the count
-/// of that thread below what it allocated.
+/// Counts a block of `layout` allocated, and numbers it. The heap's counts
+/// are signed, as a block freed on another thread than its own takes that
+/// thread's below what it allocated, and wrap rather than trap: a panic
+/// here would allocate.
 fn allocated(layout: Layout) -> u64 {
     let made = MADE.get().wrapping_add(1);
     MADE.set(made);
