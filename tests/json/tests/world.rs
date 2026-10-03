@@ -1,6 +1,6 @@
 //! The tokenizer's machine world (testing-strategy.md, 2.4), focused: a
 //! few seeds of each neighbour's behaviour, each run checked against the
-//! reference parser.
+//! reference parser. The sweeps over many seeds are in `fuzzy_documents.rs`.
 
 use std::collections::BTreeSet;
 

@@ -187,7 +187,9 @@ machine's contracts as it goes; every run is checked against a reference
 parser (json.md, 6). Its transcripts, nine in the shape of an LLM
 provider's and a forge's answers and twenty-nine hostile ones, decode to
 their expectations in the focused suite, with the writer reading back
-what it writes.
+what it writes. The fuzzy suite runs 20,000 generated and mutated
+documents and 5,000 cut and mutated transcripts under neighbours drawn
+from each seed, and writes 5,000 documents and reads them back.
 
 The two suites of testing-strategy.md, section 8, are
 `.config/nextest.toml`'s profiles, each with its budget as a global

@@ -284,6 +284,14 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   generated documents, written and read back the same through the world;
   every byte a string may hold; and what the tokenizer refuses, the writer
   refuses to write.
+- **The fuzzy suite** (`tests/json/tests/fuzzy_*.rs`): 20,000 generated
+  documents, most of them mutated, and 5,000 transcripts cut and mutated,
+  under limits and neighbours drawn from each seed, each against the
+  reference, asserting that every error, every way of ending, and a close
+  in every state fell; 5,000 generated documents written and read back;
+  and 20,000 texts and numbers drawn at random, which the writer writes
+  exactly when the standard library and the grammar accept them. It
+  stands in for the fuzz target until a nightly toolchain is installed.
 
 ## 7. Decisions
 
@@ -321,8 +329,7 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
 ## 9. Not built yet
 
 - **The fuzz target** (`fuzz/`, fed `Bytes` under every demand), which
-  waits for a nightly toolchain, and the fuzzy suite's sweeps of these
-  worlds over many seeds, which stand in for it until then.
+  waits for a nightly toolchain; the fuzzy suite stands in for it.
 - **The memory check** of each `worst_case` against the counting
   allocator, when it lands.
 - **Writing in pieces:** temper's performance.md asks for a body measured

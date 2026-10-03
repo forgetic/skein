@@ -16,7 +16,8 @@
 //!   what it must decode to.
 //! - [`write`]: tokens through the writer's two passes.
 //!
-//! The focused tests are `tests/*.rs` (testing-strategy.md, 8).
+//! The focused tests are `tests/*.rs`; the sweeps over many seeds are
+//! `tests/fuzzy_*.rs` (testing-strategy.md, 8).
 
 pub mod generate;
 pub mod reference;

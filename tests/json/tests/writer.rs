@@ -1,5 +1,6 @@
 //! The writer against the tokenizer (json.md, 6): what one writes, the
-//! other reads back the same, through the machine world.
+//! other reads back the same, through the machine world. The sweep over
+//! many seeds is in `fuzzy_writer.rs`.
 
 use skein_json::Token;
 use skein_json::tokenizer::Limits;
