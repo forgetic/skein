@@ -30,6 +30,8 @@ mod set;
 mod slab;
 mod stack;
 pub mod stream;
+#[cfg(test)]
+mod tests;
 mod time;
 mod token;
 mod writer;

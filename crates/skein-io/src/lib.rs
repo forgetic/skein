@@ -9,3 +9,5 @@
 extern crate alloc;
 
 pub mod kernel;
+#[cfg(test)]
+mod tests;

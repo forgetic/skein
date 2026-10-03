@@ -45,32 +45,3 @@ impl Rng {
         self.below(1000) < u64::from(per_mille)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Rng;
-
-    #[test]
-    fn the_same_seed_gives_the_same_stream() {
-        let mut a = Rng::new(42);
-        let mut b = Rng::new(42);
-        for _ in 0_u32..100 {
-            assert_eq!(a.next_u64(), b.next_u64());
-        }
-    }
-
-    #[test]
-    fn draws_stay_in_range() {
-        let mut rng = Rng::new(7);
-        for _ in 0_u32..1000 {
-            assert!(rng.below(10) < 10);
-            let n = rng.between(5, 9);
-            assert!((5_u64..=9).contains(&n));
-        }
-        assert_eq!(rng.below(0), 0);
-        assert_eq!(rng.between(9, 5), 9_u64);
-        let _: u64 = rng.between(0, u64::MAX);
-        assert!(!rng.chance(0));
-        assert!(rng.chance(1000));
-    }
-}

@@ -35,10 +35,10 @@
 //!
 //! # Conformance
 //!
-//! [`conformance`] holds the simulator and the ring to the same contract
-//! (kernel.md, 8; testing-strategy.md, 5): scenarios over a
-//! [`conformance::Backend`], which the simulator implements here and the
-//! ring in `skein-shell`'s tests.
+//! The conformance suite (`testing/skein-conformance`; kernel.md, 8;
+//! testing-strategy.md, 5) holds the simulator and the ring to the same
+//! contract: its scenarios run against the simulator in
+//! `tests/conformance/sim`, and against the ring in `tests/conformance/ring`.
 //!
 //! # Its choices, where the contract leaves one
 //!
@@ -81,7 +81,6 @@
 extern crate alloc;
 
 mod config;
-pub mod conformance;
 mod net;
 mod sim;
 mod trace;

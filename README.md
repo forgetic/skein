@@ -26,7 +26,7 @@ part, each the brief for the agent that builds it, and
 | the kernel boundary | `skein-io` (`kernel`) | the records io submits to a backend and the completions it gets back | [kernel.md](docs/design/kernel.md) |
 | io | `skein-io` | sockets, pipes, files, processes, signals to the service | [io.md](docs/design/io.md) |
 | the shell kit | `skein-shell` | the io_uring backend, the clock, the seed, startup | [shell.md](docs/design/shell.md) |
-| the simulator | `skein-sim` | the simulated kernel, its faults, the conformance suite | [simulator.md](docs/design/simulator.md) |
+| the simulator | `skein-sim` | the simulated kernel and its faults; beside it, the conformance suite (`skein-conformance`) | [simulator.md](docs/design/simulator.md) |
 | HTTP | `skein-http` | HTTP/1.1 client and server, server-sent events | [http.md](docs/design/http.md) |
 | JSON | `skein-json` | a bounded tokenizer, a sized writer | [json.md](docs/design/json.md) |
 | TLS | `skein-tls` | a TLS stream over rustls | [tls.md](docs/design/tls.md) |

@@ -95,15 +95,3 @@ impl<T> fmt::Debug for Id<T> {
         f.debug_struct("Id").field("slot", &self.slot).field("generation", &self.generation).finish()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Id;
-
-    #[test]
-    fn a_handle_survives_the_round_trip_through_a_token() {
-        let id: Id<u8> = Id::new(0xDEAD_BEEF, 7);
-        assert_eq!(Id::<u8>::from_token(id.token()), id);
-        assert_ne!(Id::<u8>::new(1, 2).token(), Id::<u8>::new(2, 1).token());
-    }
-}

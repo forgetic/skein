@@ -1,0 +1,32 @@
+[package]
+name = "skein-conformance-ring"
+description = "The conformance suite against the ring on the real kernel, each scenario once"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-io.workspace = true
+skein-shell.workspace = true
+skein-conformance.workspace = true
+libc.workspace = true
+
+# Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.
+# tests/clippy.toml bans what would make a run unrepeatable.
+[lints.rust]
+unsafe_code = "forbid"
+elided_lifetimes_in_paths = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_panics_doc = "allow"          # a failing scenario panics, naming the rule
+wildcard_enum_match_arm = "deny"      # a new variant must break the tests
+match_wildcard_for_single_variants = "deny"
+unwrap_used = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+disallowed_types = "deny"
+disallowed_methods = "deny"

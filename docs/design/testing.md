@@ -86,19 +86,37 @@ reproduced in skein's own tier, and fixed there.
 ## 6. Layout
 
 ```
-crates/*/src/**                 step tests, in each module's tests
-crates/skein-sim/               the simulator and the conformance suite; later the counting allocator
-crates/skein-sim/tests/         the simulator's own tests and the suite against it; later io worlds and the minimal machine
-crates/skein-shell/tests/       the ring's own tests, and the conformance suite against the ring
-crates/skein-<machine>/tests/   machine worlds and transcripts
-tests/protocol/                 protocol worlds
+crates/*/src/tests.rs           step tests; lib's in a module per area, under src/tests/
+testing/skein-conformance       the conformance suite: the backend interface, the scenarios, the driver, the checks
+tests/lib                       lib's comparisons with naive functions, run long, skein-lib-tests
+tests/sim                       the simulator's own tests, skein-sim-tests
+tests/ring                      the ring adapter's own tests, skein-ring-tests
+tests/conformance/sim           the suite against the simulator, skein-conformance-sim
+tests/conformance/ring          the suite against the ring, skein-conformance-ring
+tests/**/tests/*.rs             a crate's focused tests
+tests/**/tests/fuzzy_*.rs       its fuzzy tests: sweeps over many seeds
+tests/clippy.toml               what the crates under tests/ may not use
 examples/                       echo, an HTTP server and client: simulated worlds and the real loop
 fuzz/                           one target per machine
 ```
 
-Each finds its home when the first of its kind is built.
-`scripts/check.sh` runs what CI runs: formatting, the lints as errors,
-and the tests with nextest.
+No crate under `crates/` has a `tests/` directory: its step tests are
+in `src/`, and whatever drives it from outside is a crate under `tests/`,
+named by its path. Such a crate is ordinary Rust (programming-model.md,
+10.2): what its test binaries share is its library, in `src/` (the
+simulator's harness and its scripted exchange, a backend of the suite,
+the naive functions lib is compared with),
+and each file in its `tests/` is a test binary of its own, a fuzzy one
+when its name starts with `fuzzy_`. `tests/clippy.toml` bans what would
+make a run unrepeatable: hash maps with a random seed, the system clocks,
+threads. Each backend of the conformance suite is implemented beside the
+tests that run the suite against it.
+
+The io worlds with the minimal machine, the machine worlds with their
+transcripts, and the protocol worlds find their homes under `tests/` when
+the first of each is built. `scripts/check.sh` runs what CI runs:
+formatting, the lints as errors, then the focused suite and the fuzzy
+suite, with nextest (section 7).
 
 ## 7. Where things stand
 
@@ -106,7 +124,7 @@ As of 2026-10-03.
 
 | Tier | Built |
 |---|---|
-| step tests | lib: every container and value type |
+| step tests | lib: every container and value type; io: the kernel records' rules |
 | machine worlds | none: no machine exists |
 | protocol worlds | none |
 | io worlds | none: no io yet |
@@ -117,14 +135,26 @@ As of 2026-10-03.
 
 The simulator plays the kernel for sockets, with every fault of
 simulator.md, 4. Its own tests submit records by hand, and a client and a
-server exchange bytes, calm and under chaos over 200 seeds. The
-conformance suite covers sockets: a connection's lifecycle over IPv4 and
-IPv6, graceful close, a send after the peer closed, refused connects,
-`AddressInUse`, IPv6-only sockets, the wrong-state records, a full accept
-queue, closes with bytes unread, a reset after the end of stream, a
-client closed before accept, a listener closing on waiting connections,
-backpressure, and cancels of every waiting operation and every race
-(kernel.md, 8).
+server exchange bytes, calm and replayed in the focused suite, and under
+chaos over 200 seeds in the fuzzy one. The conformance suite covers
+sockets: a connection's lifecycle over IPv4 and IPv6, graceful close, a
+send after the peer closed, refused connects, `AddressInUse`, IPv6-only
+sockets, the wrong-state records, a full accept queue, closes with bytes
+unread, a reset after the end of stream, a client closed before accept,
+a listener closing on waiting connections, backpressure, and cancels of
+every waiting operation and every race (kernel.md, 8). Against the
+simulator, the focused suite runs each scenario over 16 calm seeds and 4
+of chaos, and the fuzzy suite over 200 of chaos, counting the pairings
+each race shows over them; against the ring, each runs once, in the
+focused suite.
+
+The two suites of testing-strategy.md, section 8, are
+`.config/nextest.toml`'s profiles, each with its budget as a global
+timeout: the focused suite by default, within 15 seconds, and the fuzzy
+suite, the `fuzzy_*` binaries, with `--profile fuzzy`, within a minute.
+lib's comparisons of the byte search with a naive one and of the intake
+with a plain reference run 300 random cases as step tests, and 20,000
+from the same seeds in the fuzzy suite.
 
 Replay: a seed replays to the same trace of submissions and completions.
 No state digest yet.
@@ -147,12 +177,6 @@ By tier, in the order temper pulls the parts (README.md):
 
 By check: the counting allocator, state digests for replay, transition
 coverage, fuzzing.
-
-By suite: the two suites of testing-strategy.md, section 8. skein has one
-today, which runs everything, the conformance and chaos sweeps over
-hundreds of seeds included. It needs `.config/nextest.toml` with a
-default and a `fuzzy` profile, each with its global timeout (15 seconds
-and 1 minute), and its long sweeps moved to the fuzzy suite.
 
 ## 9. Open questions
 

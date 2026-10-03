@@ -33,17 +33,3 @@ pub(crate) fn worst_case(entries: u32, key: usize, value: usize, align: usize) -
 fn round_up(bytes: usize, align: usize) -> Option<usize> {
     bytes.checked_next_multiple_of(align)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::worst_case;
-
-    #[test]
-    fn the_price_grows_with_the_entries_and_their_size() {
-        let empty = worst_case(0, 8, 8, 8).expect("fits");
-        assert!(empty > 0, "the root is priced even before it is allocated");
-        assert!(worst_case(5, 8, 8, 8).expect("fits") > empty);
-        assert!(worst_case(5, 8, 16, 8).expect("fits") > worst_case(5, 8, 8, 8).expect("fits"));
-        assert_eq!(worst_case(u32::MAX, usize::MAX, 0, 8), None);
-    }
-}

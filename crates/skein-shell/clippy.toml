@@ -2,11 +2,6 @@
 # own in programming-model.md, 2.1: `unsafe` in the ring adapter only (the
 # lints in Cargo.toml), and no std handle types that close on drop (here).
 
-# Tests run against the real kernel and may assert by panicking.
-allow-unwrap-in-tests = true
-allow-expect-in-tests = true
-allow-indexing-slicing-in-tests = true
-
 doc-valid-idents = ["io_uring", ".."]
 
 disallowed-types = [

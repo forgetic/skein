@@ -4,11 +4,6 @@
 # clock, threads, OS randomness, hash maps with a random seed, and std handles
 # that close on drop.
 
-allow-unwrap-in-tests = true
-allow-expect-in-tests = true
-allow-panic-in-tests = true
-allow-indexing-slicing-in-tests = true
-
 disallowed-types = [
     { path = "std::time::Instant", reason = "the simulator owns time: Sim::now" },
     { path = "std::time::SystemTime", reason = "the simulator owns time: Sim::wall" },

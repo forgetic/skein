@@ -156,8 +156,14 @@ Step tests drive each container through its operations, at and past its
 capacity: a full queue, a stale handle, a slot whose generation would
 wrap, a refusal at the entrance, a deadline that fires as it is
 cancelled, a scan cut at every byte. Each `worst_case` is checked
-against the counting allocator. The byte search is also fuzzed against a
-naive one.
+against the counting allocator. The step tests are `src/tests.rs`, a
+module for each area of this document under `src/tests/`: handles,
+containers, bytes, streams, and time.
+
+The byte search is also compared with a naive one, and the intake with a
+plain reference, over random cases drawn from a seed: a few hundred in
+the step tests, and 20,000 from the same seeds in the fuzzy suite, in
+`tests/lib` (testing-strategy.md, 8).
 
 ## 11. Not built yet
 
@@ -166,6 +172,5 @@ naive one.
 - **A state digest** for replay: a fixed-key hasher over the state types'
   derived `Hash`, independent of their layout in memory
   (testing-strategy.md, 6).
-- The `worst_case` checks against the counting allocator, and the fuzzing
-  of the byte search, wait for the counting allocator and the fuzzy
-  suite.
+- **The `worst_case` checks** against the counting allocator, when it is
+  built.
