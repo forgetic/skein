@@ -17,5 +17,7 @@ disallowed-types = [
 
 disallowed-methods = [
     { path = "std::thread::spawn", reason = "counts are each thread's own: a step is measured on the thread it runs on" },
+    { path = "std::thread::Builder::spawn", reason = "counts are each thread's own: a step is measured on the thread it runs on" },
+    { path = "std::thread::scope", reason = "counts are each thread's own: a step is measured on the thread it runs on" },
     { path = "std::env::var", reason = "what a meter checks comes from its test" },
 ]
