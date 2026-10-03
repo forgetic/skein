@@ -12,12 +12,12 @@
 
 use skein_io::kernel::{Complete, Family, Submit};
 use skein_lib::{Duration, Queue, Time};
-use skein_shell::{Clock, Config, Kernel, Wait};
+use skein_shell::{Clock, Config, Kernel, OpenError, Wait};
 use skein_sim::conformance::{
-    Backend, Check, address_in_use, backpressure, cancel_accept, cancel_accept_racing_a_connect, cancel_connect,
-    cancel_recv, cancel_recv_racing_bytes, closed_before_accept, full_accept_queue, graceful_close, ipv6_only,
-    lifecycle, refused, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
-    unread_close_meets_send, wrong_state,
+    Backend, Check, Pairing, Race, address_in_use, backpressure, cancel_accept, cancel_accept_racing_a_connect,
+    cancel_connect, cancel_connect_established_while_away, cancel_recv, cancel_recv_racing_bytes, closed_before_accept,
+    full_accept_queue, graceful_close, ipv6_only, lifecycle, listener_close_resets_waiting, refused,
+    reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv, unread_close_meets_send, wrong_state,
 };
 
 /// Operations in flight per process: a scenario has a few at most.
@@ -26,9 +26,6 @@ const OPERATIONS: u32 = 16;
 /// The longest one wait blocks on one process's ring before the others are
 /// entered: their deferred completions run only when they are.
 const SLICE: Duration = Duration::from_millis(5);
-
-/// How many times a scenario whose outcome is a race runs.
-const RACES: u32 = 20;
 
 /// One `Kernel` per process.
 struct Ring {
@@ -52,6 +49,12 @@ impl Backend for Ring {
     fn open(&mut self) -> usize {
         let kernel = match Kernel::open(Config { operations: OPERATIONS }) {
             Ok(kernel) => kernel,
+            // Rings closed a moment ago are freed by the kernel in its own
+            // time: many opened at once can run out of memory, which is not
+            // io_uring missing.
+            Err(OpenError::Setup(libc::ENOMEM)) => {
+                panic!("the kernel had no memory for another ring (ENOMEM): too many rings at once")
+            }
             Err(error) => panic!("io_uring is not usable here, so the ring cannot be tested: {error}"),
         };
         self.kernels.push(kernel);
@@ -70,6 +73,10 @@ impl Backend for Ring {
         self.clock.now().now
     }
 
+    fn enter(&mut self, process: usize) {
+        self.kernel(process).submit(&mut Queue::with_capacity(0), Wait::No);
+    }
+
     /// Enters every other process's ring, so that what they deferred runs,
     /// then waits on this one's for a slice of `bound`.
     fn pass(&mut self, process: usize, bound: Duration) {
@@ -81,6 +88,12 @@ impl Backend for Ring {
         }
         let until = self.now().saturating_add(bound.min(SLICE));
         self.kernel(process).submit(&mut nothing, Wait::Until(until));
+    }
+
+    /// Blocks the thread: no ring is entered, while the kernel's network
+    /// runs on.
+    fn sleep(&mut self, span: Duration) {
+        std::thread::sleep(std::time::Duration::from_nanos(span.as_nanos()));
     }
 
     fn assert_settled(&self, process: usize) {
@@ -174,23 +187,47 @@ fn a_cancel_of_a_waiting_recv() {
     on_the_ring(cancel_recv);
 }
 
-#[test]
-fn a_cancel_of_a_recv_racing_bytes() {
-    for _ in 0..RACES {
-        on_the_ring(|ring| cancel_recv_racing_bytes(ring, true));
-        on_the_ring(|ring| cancel_recv_racing_bytes(ring, false));
+/// On the ring each race pairs one way: a cancel stops a target whose
+/// process has not entered its ring since what it waited for arrived, and
+/// is too late for one whose process has.
+fn race(scenario: fn(&mut Ring, Race) -> skein_sim::conformance::Cancelling) {
+    for (race, pairing) in [
+        (Race::CancelFirst, Pairing::Stopped),
+        (Race::ArrivedAway, Pairing::Stopped),
+        (Race::ArrivedEntered, Pairing::Completed),
+    ] {
+        let seen = scenario(&mut Ring::new(), race);
+        seen.check();
+        assert_eq!(seen.pairing(), pairing, "{race:?}: {seen:?}");
     }
 }
 
 #[test]
+fn a_cancel_of_a_recv_racing_bytes() {
+    race(cancel_recv_racing_bytes);
+}
+
+#[test]
 fn a_cancel_of_an_accept_racing_a_connect() {
-    for _ in 0..RACES {
-        on_the_ring(|ring| cancel_accept_racing_a_connect(ring, true));
-        on_the_ring(|ring| cancel_accept_racing_a_connect(ring, false));
-    }
+    race(cancel_accept_racing_a_connect);
 }
 
 #[test]
 fn a_cancel_of_a_waiting_connect() {
     on_the_ring(cancel_connect);
+}
+
+/// The SYN a full accept queue dropped is retransmitted a second later,
+/// once an accept made room, and establishes the connection while the
+/// client stays out of its ring: its cancel still stops the `Connect`.
+#[test]
+fn a_cancel_of_a_connect_established_while_its_client_was_away() {
+    let seen = cancel_connect_established_while_away(&mut Ring::new());
+    seen.check();
+    assert_eq!(seen.cancelling.pairing(), Pairing::Stopped, "{seen:?}");
+}
+
+#[test]
+fn closing_a_listener_resets_the_connections_waiting_on_it() {
+    on_the_ring(listener_close_resets_waiting);
 }

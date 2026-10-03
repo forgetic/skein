@@ -10,6 +10,7 @@ use core::fmt::Debug;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use skein_io::kernel::{Addr, Done, Error, Family, Fd, Op};
+use skein_lib::{Duration, Token};
 
 use super::run::{BRIEFLY, Run, received, unexpected};
 use super::{Backend, Check};
@@ -35,6 +36,10 @@ const CLIENTS: usize = 4;
 /// The most descriptors a descriptor limit scenario opens.
 const DESCRIPTORS: u32 = 64;
 
+/// Longer than Linux takes to retransmit a SYN that a full accept queue
+/// dropped: a second.
+const SYN_RETRY: Duration = Duration::from_secs(2);
+
 /// `port` on the loopback address of `family`.
 fn at(family: Family, port: u16) -> Addr {
     SocketAddr::new(loopback(family), port)
@@ -55,13 +60,32 @@ fn rule<T: Debug>(holds: bool, rule: &str, seen: &T) {
     assert!(holds, "the contract: {rule}; saw {seen:?}");
 }
 
-/// Whether a `Send` answered as one after the peer closed may: it succeeds
-/// once with its bytes lost, or already fails.
-fn sent_or_broken(result: Result<Done, Error>) -> bool {
-    match result {
-        Ok(Done::Count(_)) | Err(Error::BrokenPipe) => true,
+/// Whether retried answers end with `last`, every earlier one `earlier`:
+/// an answer that changes once the peer's reset or acknowledgement
+/// arrives.
+fn settles(
+    answers: &[Result<Done, Error>],
+    earlier: fn(Result<Done, Error>) -> bool,
+    last: Result<Done, Error>,
+) -> bool {
+    match answers.split_last() {
+        Some((end, before)) => *end == last && before.iter().all(|answer| earlier(*answer)),
+        None => false,
+    }
+}
+
+/// A `Send` that succeeded: before the peer's reset arrived, its bytes
+/// lost.
+fn sent(answer: Result<Done, Error>) -> bool {
+    match answer {
+        Ok(Done::Count(_)) => true,
         Ok(Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_)) | Err(_) => false,
     }
+}
+
+/// A `Shutdown` that succeeded: before the connection was closed.
+fn shut(answer: Result<Done, Error>) -> bool {
+    answer == NOTHING
 }
 
 const NOTHING: Result<Done, Error> = Ok(Done::Nothing);
@@ -86,9 +110,9 @@ pub struct Lifecycle {
     pub backward_intact: bool,
     pub server_shutdown: Result<Done, Error>,
     pub end_at_client: Result<Vec<u8>, Error>,
-    /// Each side's `Shutdown` once both have ended their sending and read
-    /// the other's end.
-    pub closed_shutdowns: [Result<Done, Error>; 2],
+    /// Each side's `Shutdowns` once both have ended their sending and read
+    /// the other's end, until the connection is closed.
+    pub closed_shutdowns: [Vec<Result<Done, Error>>; 2],
 }
 
 #[must_use]
@@ -108,7 +132,7 @@ pub fn lifecycle<B: Backend>(backend: &mut B, family: Family) -> Lifecycle {
     let backward_intact = run.transfer(server, s, client, c, &backward) == backward;
     let server_shutdown = run.shutdown(server, s);
     let end_at_client = run.recv(client, c, 64);
-    let closed_shutdowns = [run.shutdown(client, c), run.shutdown(server, s)];
+    let closed_shutdowns = [run.shutdown_until_refused(client, c), run.shutdown_until_refused(server, s)];
     run.close(client, c);
     run.close(server, s);
     run.close(server, listener);
@@ -147,8 +171,9 @@ impl Check for Lifecycle {
         assert!(self.backward_intact, "the contract: Recv keeps working after this side's Shutdown");
         assert_eq!(self.server_shutdown, NOTHING, "the contract: Shutdown ends this side's sending");
         assert_eq!(self.end_at_client, END, "the contract: a Recv of zero bytes means the stream ended");
-        for shutdown in self.closed_shutdowns {
-            assert_eq!(shutdown, Err(Error::NotConnected), "the contract: a second Shutdown once closed");
+        for shutdowns in &self.closed_shutdowns {
+            let closed = settles(shutdowns, shut, Err(Error::NotConnected));
+            rule(closed, "a second Shutdown is NotConnected once the connection is closed", shutdowns);
         }
     }
 }
@@ -159,8 +184,8 @@ impl Check for Lifecycle {
 pub struct GracefulClose {
     pub bytes_intact: bool,
     pub end: Result<Vec<u8>, Error>,
-    pub shutdown: Result<Done, Error>,
-    pub shutdown_again: Result<Done, Error>,
+    /// This side's `Shutdown`s, until the connection is closed.
+    pub shutdowns: Vec<Result<Done, Error>>,
 }
 
 #[must_use]
@@ -174,29 +199,32 @@ pub fn graceful_close<B: Backend>(backend: &mut B) -> GracefulClose {
     run.close(client, c);
     let bytes_intact = run.recv_exact(server, s, 7) == b"goodbye";
     let end = run.recv(server, s, 64);
-    let shutdown = run.shutdown(server, s);
-    let shutdown_again = run.shutdown(server, s);
+    let shutdowns = run.shutdown_until_refused(server, s);
     run.close(server, s);
     run.finish();
-    GracefulClose { bytes_intact, end, shutdown, shutdown_again }
+    GracefulClose { bytes_intact, end, shutdowns }
 }
 
 impl Check for GracefulClose {
     fn check(&self) {
         assert!(self.bytes_intact, "the contract: the bytes sent before a Close arrive");
         assert_eq!(self.end, END, "the contract: a Recv of zero bytes means the stream ended");
-        assert_eq!(self.shutdown, NOTHING, "the contract: Shutdown is Ok while the connection lasts");
-        assert_eq!(self.shutdown_again, Err(Error::NotConnected), "the contract: a second Shutdown once closed");
+        let first = self.shutdowns.first().copied();
+        assert_eq!(first, Some(NOTHING), "the contract: Shutdown is Ok while the connection lasts");
+        let closed = self.shutdowns.len() > 1 && settles(&self.shutdowns, shut, Err(Error::NotConnected));
+        rule(closed, "a second Shutdown is NotConnected once the connection is closed", &self.shutdowns);
     }
 }
 
-/// A `Send` to a peer that closed with nothing unread.
+/// `Send`s to a peer that closed with nothing unread.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PeerClosed {
     pub end: Result<Vec<u8>, Error>,
-    pub sends: [Result<Done, Error>; 2],
+    /// Every `Send`, until one failed.
+    pub sends: Vec<Result<Done, Error>>,
     pub recv: Result<Vec<u8>, Error>,
-    pub shutdown: Result<Done, Error>,
+    /// Every `Shutdown`, until one failed.
+    pub shutdowns: Vec<Result<Done, Error>>,
 }
 
 #[must_use]
@@ -208,23 +236,31 @@ pub fn send_after_peer_closed<B: Backend>(backend: &mut B) -> PeerClosed {
     run.close(server, listener);
     run.close(client, c);
     let end = run.recv(server, s, 64);
-    let sends = [run.send(server, s, b"lost"), run.send(server, s, b"lost")];
+    let sends = run.send_until_refused(server, s);
     let recv = run.recv(server, s, 64);
-    let shutdown = run.shutdown(server, s);
+    let shutdowns = run.shutdown_until_refused(server, s);
     run.close(server, s);
     run.finish();
-    PeerClosed { end, sends, recv, shutdown }
+    PeerClosed { end, sends, recv, shutdowns }
 }
 
 impl Check for PeerClosed {
     fn check(&self) {
         assert_eq!(self.end, END, "the contract: a Recv of zero bytes means the stream ended");
-        let [first, second] = self.sends;
-        rule(sent_or_broken(first), "a Send after the peer closed may succeed once, its bytes lost", &first);
-        assert_eq!(second, Err(Error::BrokenPipe), "the contract: later ones fail with BrokenPipe, never Reset");
-        assert_eq!(self.recv, END, "the contract: after it, a Recv gives Ok(Count(0))");
-        assert_eq!(self.shutdown, Err(Error::NotConnected), "the contract: after it, a Shutdown fails");
+        peer_gone(&self.sends, &self.recv, &self.shutdowns);
     }
+}
+
+/// The rule for a connection whose peer closed with nothing unread: a
+/// `Send` may succeed, its bytes lost, until the peer's reset arrives, then
+/// fails with `BrokenPipe`, never `Reset`; a `Recv` then gives the end and
+/// a `Shutdown` fails with `NotConnected`.
+fn peer_gone(sends: &[Result<Done, Error>], recv: &Result<Vec<u8>, Error>, shutdowns: &[Result<Done, Error>]) {
+    let broken = settles(sends, sent, Err(Error::BrokenPipe));
+    rule(broken, "a Send after the peer closed may succeed until its reset arrives, then fails BrokenPipe", &sends);
+    assert_eq!(*recv, END, "the contract: then a Recv gives Ok(Count(0))");
+    let closed = settles(shutdowns, shut, Err(Error::NotConnected));
+    rule(closed, "then a Shutdown fails with NotConnected", &shutdowns);
 }
 
 /// A connect where a socket is bound but nothing listens.
@@ -446,8 +482,6 @@ pub struct FullQueue {
     /// not, each with its answer once it came.
     pub at_once: Vec<Result<Done, Error>>,
     pub delayed: Vec<Result<Done, Error>>,
-    /// Every waiting connection was accepted.
-    pub accepted: usize,
 }
 
 #[must_use]
@@ -486,7 +520,7 @@ pub fn full_accept_queue<B: Backend>(backend: &mut B) -> FullQueue {
     }
     run.close(server, listener);
     run.finish();
-    FullQueue { at_once, delayed, accepted: accepted.len() }
+    FullQueue { at_once, delayed }
 }
 
 impl Check for FullQueue {
@@ -496,7 +530,6 @@ impl Check for FullQueue {
         for answer in self.at_once.iter().chain(&self.delayed) {
             assert_eq!(*answer, NOTHING, "the contract: a full accept queue never refuses a Connect");
         }
-        assert_eq!(self.accepted, CLIENTS, "the contract: every connection made is accepted");
     }
 }
 
@@ -506,9 +539,9 @@ impl Check for FullQueue {
 pub struct UnreadClose {
     /// The bytes the peer had received before the reset, read after it.
     pub bytes_intact: bool,
-    /// The operation that met the reset: a `Recv` after those bytes, or a
-    /// `Send`.
-    pub reset: Result<Done, Error>,
+    /// The operations until one met the reset: a `Recv` after those bytes,
+    /// or `Send`s, which may succeed until the reset arrives.
+    pub reset: Vec<Result<Done, Error>>,
     /// After it: a `Recv`, a `Send` and a `Shutdown`.
     pub after: [Result<Done, Error>; 3],
 }
@@ -536,12 +569,12 @@ fn unread_close<B: Backend>(backend: &mut B, send_first: bool) -> UnreadClose {
     run.send_all(client, c, b"unread");
     run.close(server, s);
     let (bytes_intact, reset) = if send_first {
-        let reset = run.send(client, c, b"x");
+        let reset = run.send_until_refused(client, c);
         (run.recv_exact(client, c, before.len()) == before, reset)
     } else {
         let intact = run.recv_exact(client, c, before.len()) == before;
         let reset = run.call(client, Op::Recv { fd: c, buf: Box::from([0; 64]) }).result;
-        (intact, reset)
+        (intact, vec![reset])
     };
     let after = [
         run.call(client, Op::Recv { fd: c, buf: Box::from([0; 64]) }).result,
@@ -556,7 +589,8 @@ fn unread_close<B: Backend>(backend: &mut B, send_first: bool) -> UnreadClose {
 impl Check for UnreadClose {
     fn check(&self) {
         assert!(self.bytes_intact, "the contract: the bytes already received stay readable");
-        assert_eq!(self.reset, Err(Error::Reset), "the contract: a Close with received data unread resets the peer");
+        let reset = settles(&self.reset, sent, Err(Error::Reset));
+        rule(reset, "a Close with received data unread resets the peer: its next operation fails", &self.reset);
         assert_eq!(
             self.after,
             [Ok(Done::Count(0)), Err(Error::BrokenPipe), Err(Error::NotConnected)],
@@ -570,9 +604,11 @@ impl Check for UnreadClose {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ResetAfterEnd {
     pub end: Result<Vec<u8>, Error>,
-    /// After the peer closed with bytes unread: two `Recv`s, a `Send`, a
-    /// `Shutdown`.
-    pub after: [Result<Done, Error>; 4],
+    /// After the peer closed with bytes unread: two `Recv`s, then `Send`s
+    /// and `Shutdown`s, each until one failed.
+    pub recvs: [Result<Done, Error>; 2],
+    pub sends: Vec<Result<Done, Error>>,
+    pub shutdowns: Vec<Result<Done, Error>>,
 }
 
 #[must_use]
@@ -586,25 +622,24 @@ pub fn reset_after_end_of_stream<B: Backend>(backend: &mut B) -> ResetAfterEnd {
     assert_eq!(run.shutdown(server, s), NOTHING, "a connected socket shuts down");
     let end = run.recv(client, c, 64);
     run.close(server, s);
-    let after = [
+    let recvs = [
         run.call(client, Op::Recv { fd: c, buf: Box::from([0; 64]) }).result,
         run.call(client, Op::Recv { fd: c, buf: Box::from([0; 64]) }).result,
-        run.send(client, c, b"x"),
-        run.shutdown(client, c),
     ];
+    let sends = run.send_until_refused(client, c);
+    let shutdowns = run.shutdown_until_refused(client, c);
     run.close(client, c);
     run.finish();
-    ResetAfterEnd { end, after }
+    ResetAfterEnd { end, recvs, sends, shutdowns }
 }
 
 impl Check for ResetAfterEnd {
     fn check(&self) {
         assert_eq!(self.end, END, "the contract: a Recv of zero bytes means the stream ended");
-        assert_eq!(
-            self.after,
-            [Ok(Done::Count(0)), Ok(Done::Count(0)), Err(Error::BrokenPipe), Err(Error::NotConnected)],
-            "the contract: an end that already received the peer's end of stream hears of no reset"
-        );
+        let rule_ = "the contract: an end that already received the peer's end of stream hears of no reset";
+        assert_eq!(self.recvs, [Ok(Done::Count(0)), Ok(Done::Count(0))], "{rule_}");
+        rule(settles(&self.sends, sent, Err(Error::BrokenPipe)), rule_, &self.sends);
+        rule(settles(&self.shutdowns, shut, Err(Error::NotConnected)), rule_, &self.shutdowns);
     }
 }
 
@@ -614,8 +649,11 @@ pub struct ClosedBeforeAccept {
     pub accepted: bool,
     pub bytes_intact: bool,
     pub end: Result<Vec<u8>, Error>,
-    pub sends: [Result<Done, Error>; 2],
-    pub shutdown: Result<Done, Error>,
+    /// Every `Send`, then every `Shutdown`, each until one failed, and a
+    /// `Recv` between them.
+    pub sends: Vec<Result<Done, Error>>,
+    pub recv: Result<Vec<u8>, Error>,
+    pub shutdowns: Vec<Result<Done, Error>>,
 }
 
 #[must_use]
@@ -631,12 +669,13 @@ pub fn closed_before_accept<B: Backend>(backend: &mut B) -> ClosedBeforeAccept {
     let accepted = peer.ip() == addr.ip();
     let bytes_intact = run.recv_exact(server, s, 2) == b"hi";
     let end = run.recv(server, s, 64);
-    let sends = [run.send(server, s, b"lost"), run.send(server, s, b"lost")];
-    let shutdown = run.shutdown(server, s);
+    let sends = run.send_until_refused(server, s);
+    let recv = run.recv(server, s, 64);
+    let shutdowns = run.shutdown_until_refused(server, s);
     run.close(server, s);
     run.close(server, listener);
     run.finish();
-    ClosedBeforeAccept { accepted, bytes_intact, end, sends, shutdown }
+    ClosedBeforeAccept { accepted, bytes_intact, end, sends, recv, shutdowns }
 }
 
 impl Check for ClosedBeforeAccept {
@@ -644,10 +683,7 @@ impl Check for ClosedBeforeAccept {
         assert!(self.accepted, "the contract: a connection closed while it waits is still accepted");
         assert!(self.bytes_intact, "the contract: the bytes sent before the Close arrive");
         assert_eq!(self.end, END, "the contract: then the stream ends");
-        let [first, second] = self.sends;
-        rule(sent_or_broken(first), "a Send after the peer closed may succeed once, its bytes lost", &first);
-        assert_eq!(second, Err(Error::BrokenPipe), "the contract: later ones fail with BrokenPipe, never Reset");
-        assert_eq!(self.shutdown, Err(Error::NotConnected), "the contract: after it, a Shutdown fails");
+        peer_gone(&self.sends, &self.recv, &self.shutdowns);
     }
 }
 
@@ -727,10 +763,45 @@ impl Check for Backpressure {
     }
 }
 
+/// The operation a `Cancel` aims at, which says what its own result is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Target {
+    Accept,
+    Recv,
+    Connect,
+}
+
+/// When a racing target's `Cancel` is submitted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Race {
+    /// Before what the target waits for arrives.
+    CancelFirst,
+    /// After it arrived, while the target's process was away: the target
+    /// is not decided yet, and a `Cancel` can still stop it.
+    ArrivedAway,
+    /// After it arrived and the target's process entered the kernel: the
+    /// target completed, and the `Cancel` is too late.
+    ArrivedEntered,
+}
+
+/// How a `Cancel` and its target paired, by the last `Cancel`'s answer.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Pairing {
+    /// `Ok`: the target `Cancelled`.
+    Stopped,
+    /// `TooLate`: the target `Cancelled`, interrupted by the kernel.
+    Interrupted,
+    /// `TooLate`: the target's own result.
+    Completed,
+    /// Not submitted: the target ran on to its own result.
+    RanOn,
+}
+
 /// A `Cancel` of a waiting operation: what each `Cancel` answered, and how
 /// its target completed.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Cancelling {
+    pub of: Target,
     /// Every `Cancel`'s answer, in order: one more after each the backend
     /// could not submit while the target ran on.
     pub cancels: Vec<Result<Done, Error>>,
@@ -738,9 +809,36 @@ pub struct Cancelling {
     /// Whether the target could complete by itself while it was cancelled.
     /// One that could not completes `Cancelled`.
     pub could_complete: bool,
+    /// Whether the target had completed when the `Cancel` was submitted.
+    pub decided_first: bool,
     /// What arrived for the target (bytes for a `Recv`, a connection for an
     /// `Accept`) was taken once, by the target or by the next operation.
-    pub bytes_intact: bool,
+    pub taken_once: bool,
+}
+
+impl Cancelling {
+    /// How the last `Cancel` and the target paired, which [`Check`] holds
+    /// to the contract.
+    #[must_use]
+    pub fn pairing(&self) -> Pairing {
+        match (self.cancels.last(), self.target) {
+            (Some(Ok(Done::Nothing)), _) => Pairing::Stopped,
+            (Some(Err(Error::TooLate)), Err(Error::Cancelled)) => Pairing::Interrupted,
+            (Some(Err(Error::TooLate)), _) => Pairing::Completed,
+            (Some(Err(Error::InvalidArgument | Error::Other(_))), _) => Pairing::RanOn,
+            (other, _) => unexpected("a Cancel answers Ok, TooLate, or that it was not submitted", &other),
+        }
+    }
+
+    /// Whether the target completed with its own result: what its
+    /// operation does when nothing stops it.
+    fn own(&self) -> bool {
+        match (self.of, self.target) {
+            (Target::Recv, Ok(Done::Count(n))) => n > 0,
+            (Target::Accept, Ok(Done::Accepted { .. })) | (Target::Connect, Ok(Done::Nothing)) => true,
+            (Target::Recv | Target::Accept | Target::Connect, _) => false,
+        }
+    }
 }
 
 /// An `Accept` with nothing connecting.
@@ -753,7 +851,8 @@ pub fn cancel_accept<B: Backend>(backend: &mut B) -> Cancelling {
     let (cancels, target) = run.cancel(server, accept);
     run.close(server, listener);
     run.finish();
-    Cancelling { cancels, target: target.result, could_complete: false, bytes_intact: true }
+    let target = target.result;
+    Cancelling { of: Target::Accept, cancels, target, could_complete: false, decided_first: false, taken_once: true }
 }
 
 /// A `Recv` with nothing sent; bytes sent after it go to the next.
@@ -767,17 +866,18 @@ pub fn cancel_recv<B: Backend>(backend: &mut B) -> Cancelling {
     let recv = run.start(server, Op::recv(s, vec![0; 16].into_boxed_slice()).expect("room"));
     let (cancels, target) = run.cancel(server, recv);
     run.send_all(client, c, b"after");
-    let bytes_intact = run.recv_exact(server, s, 5) == b"after";
+    let taken_once = run.recv_exact(server, s, 5) == b"after";
     run.close(client, c);
     run.close(server, s);
     run.finish();
-    Cancelling { cancels, target: target.result, could_complete: false, bytes_intact }
+    let target = target.result;
+    Cancelling { of: Target::Recv, cancels, target, could_complete: false, decided_first: false, taken_once }
 }
 
-/// A `Recv` cancelled as bytes arrive: before the bytes are sent, or just
-/// after. Either way they are received once, by the target or after it.
+/// A `Recv` cancelled as its bytes arrive, as `race` says. Either way they
+/// are received once, by the target or after it.
 #[must_use]
-pub fn cancel_recv_racing_bytes<B: Backend>(backend: &mut B, cancel_first: bool) -> Cancelling {
+pub fn cancel_recv_racing_bytes<B: Backend>(backend: &mut B, race: Race) -> Cancelling {
     let mut run = Run::new(backend);
     let (client, server) = (run.process(), run.process());
     let (listener, addr) = run.listener(server, at(Family::Ipv4, 0), 16);
@@ -785,14 +885,27 @@ pub fn cancel_recv_racing_bytes<B: Backend>(backend: &mut B, cancel_first: bool)
     run.close(server, listener);
     let sent = pattern(16, 5);
     let recv = run.start(server, Op::recv(s, vec![0; 64].into_boxed_slice()).expect("room"));
-    let cancel = if cancel_first {
+    if race == Race::CancelFirst {
         let cancel = run.start(server, Op::Cancel { target: recv });
         run.send_all(client, c, &sent);
-        cancel
-    } else {
-        run.send_all(client, c, &sent);
-        run.start(server, Op::Cancel { target: recv })
-    };
+        return finish_racing_recv(run, (client, c), (server, s), (recv, cancel), &sent, race);
+    }
+    run.send_all(client, c, &sent);
+    if race == Race::ArrivedEntered {
+        run.enter(server);
+    }
+    let cancel = run.start(server, Op::Cancel { target: recv });
+    finish_racing_recv(run, (client, c), (server, s), (recv, cancel), &sent, race)
+}
+
+fn finish_racing_recv<B: Backend>(
+    mut run: Run<'_, B>,
+    (client, c): (B::Process, Fd),
+    (server, s): (B::Process, Fd),
+    (recv, cancel): (Token, Token),
+    sent: &[u8],
+    race: Race,
+) -> Cancelling {
     let (cancels, target) = run.settle_cancel(server, recv, cancel);
     let result = target.result;
     let mut got = received(target).unwrap_or_default();
@@ -801,25 +914,35 @@ pub fn cancel_recv_racing_bytes<B: Backend>(backend: &mut B, cancel_first: bool)
     run.close(client, c);
     run.close(server, s);
     run.finish();
-    Cancelling { cancels, target: result, could_complete: true, bytes_intact: got == sent }
+    Cancelling {
+        of: Target::Recv,
+        cancels,
+        target: result,
+        could_complete: true,
+        decided_first: race == Race::ArrivedEntered,
+        taken_once: got == sent,
+    }
 }
 
-/// An `Accept` cancelled as a connection arrives: before the client
-/// connects, or just after. Either way the connection is accepted once, by
-/// the target or by the next `Accept`.
+/// An `Accept` cancelled as a connection arrives, as `race` says. Either
+/// way the connection is accepted once, by the target or by the next
+/// `Accept`.
 #[must_use]
-pub fn cancel_accept_racing_a_connect<B: Backend>(backend: &mut B, cancel_first: bool) -> Cancelling {
+pub fn cancel_accept_racing_a_connect<B: Backend>(backend: &mut B, race: Race) -> Cancelling {
     let mut run = Run::new(backend);
     let (client, server) = (run.process(), run.process());
     let (listener, addr) = run.listener(server, at(Family::Ipv4, 0), 16);
     let fd = run.socket(client, Family::Ipv4);
     let accept = run.start(server, Op::Accept { fd: listener });
-    let cancel = if cancel_first {
+    let cancel = if race == Race::CancelFirst {
         let cancel = run.start(server, Op::Cancel { target: accept });
         assert_eq!(run.connect(client, fd, addr), NOTHING, "a connect to a listener");
         cancel
     } else {
         assert_eq!(run.connect(client, fd, addr), NOTHING, "a connect to a listener");
+        if race == Race::ArrivedEntered {
+            run.enter(server);
+        }
         run.start(server, Op::Cancel { target: accept })
     };
     let (cancels, target) = run.settle_cancel(server, accept, cancel);
@@ -828,12 +951,35 @@ pub fn cancel_accept_racing_a_connect<B: Backend>(backend: &mut B, cancel_first:
         Ok(_) | Err(_) => run.accept(server, listener).0,
     };
     run.send_all(client, fd, b"once");
-    let bytes_intact = run.recv_exact(server, accepted, 4) == b"once";
+    let taken_once = run.recv_exact(server, accepted, 4) == b"once";
     for (process, fd) in [(client, fd), (server, accepted), (server, listener)] {
         run.close(process, fd);
     }
     run.finish();
-    Cancelling { cancels, target: target.result, could_complete: true, bytes_intact }
+    Cancelling {
+        of: Target::Accept,
+        cancels,
+        target: target.result,
+        could_complete: true,
+        decided_first: race == Race::ArrivedEntered,
+        taken_once,
+    }
+}
+
+/// Connects to a listener whose queue holds one until a `Connect` waits for
+/// room: every socket, and the waiting `Connect`, on the last.
+fn fill_queue<B: Backend>(run: &mut Run<'_, B>, client: B::Process, addr: Addr) -> (Vec<Fd>, Token) {
+    let mut sockets = Vec::new();
+    for _ in 0..CLIENTS {
+        let fd = run.socket(client, Family::Ipv4);
+        sockets.push(fd);
+        let connect = run.start(client, Op::Connect { fd, addr });
+        match run.within(client, connect, BRIEFLY) {
+            Some(complete) => assert_eq!(complete.result, NOTHING, "a connect to a listener with room"),
+            None => return (sockets, connect),
+        }
+    }
+    unexpected("a full accept queue delays a connect", &sockets)
 }
 
 /// A `Connect` waiting for room in a full accept queue.
@@ -842,21 +988,7 @@ pub fn cancel_connect<B: Backend>(backend: &mut B) -> Cancelling {
     let mut run = Run::new(backend);
     let (client, server) = (run.process(), run.process());
     let (listener, addr) = run.listener(server, at(Family::Ipv4, 0), 1);
-    let mut sockets = Vec::new();
-    let mut waiting = None;
-    for _ in 0..CLIENTS {
-        let fd = run.socket(client, Family::Ipv4);
-        sockets.push(fd);
-        let connect = run.start(client, Op::Connect { fd, addr });
-        match run.within(client, connect, BRIEFLY) {
-            Some(complete) => assert_eq!(complete.result, NOTHING, "a connect to a listener with room"),
-            None => {
-                waiting = Some(connect);
-                break;
-            }
-        }
-    }
-    let connect = waiting.expect("a full accept queue delays a connect");
+    let (sockets, connect) = fill_queue(&mut run, client, addr);
     let (cancels, target) = run.cancel(client, connect);
     // The connections that were made wait in the queue: closing the
     // listener resets them, and their clients only close.
@@ -865,34 +997,142 @@ pub fn cancel_connect<B: Backend>(backend: &mut B) -> Cancelling {
     }
     run.close(server, listener);
     run.finish();
-    Cancelling { cancels, target: target.result, could_complete: true, bytes_intact: true }
+    let target = target.result;
+    Cancelling { of: Target::Connect, cancels, target, could_complete: true, decided_first: false, taken_once: true }
 }
 
 impl Check for Cancelling {
     fn check(&self) {
-        let Some((last, earlier)) = self.cancels.split_last() else {
+        let Some((_, earlier)) = self.cancels.split_last() else {
             unexpected("a Cancel submitted", self);
         };
         for answer in earlier {
             let unsubmitted = matches!(answer, Err(Error::InvalidArgument | Error::Other(_)));
             rule(unsubmitted, "a Cancel is asked again only after one the backend could not submit", self);
         }
-        match last {
-            Ok(Done::Nothing) => {
+        match self.pairing() {
+            Pairing::Stopped => {
                 assert_eq!(self.target, Err(Error::Cancelled), "the contract: a Cancel that stopped its target");
             }
-            // The target's own result, or Cancelled when the kernel
-            // interrupted it.
-            Err(Error::TooLate) => {}
-            Err(Error::InvalidArgument | Error::Other(_)) => {
-                rule(self.target != Err(Error::Cancelled), "a Cancel not submitted leaves its target running", self);
+            Pairing::Interrupted => {}
+            Pairing::Completed => {
+                rule(self.own(), "a Cancel too late: the target completes with what its operation does", self);
             }
-            Ok(_) | Err(_) => unexpected("a Cancel answers Ok, TooLate, or that it was not submitted", self),
+            Pairing::RanOn => rule(self.own(), "a Cancel not submitted leaves its target running", self),
         }
         if !self.could_complete {
             assert_eq!(self.target, Err(Error::Cancelled), "the contract: a target with nothing to do is stopped");
         }
-        assert!(self.bytes_intact, "the contract: a stopped target took nothing, and one that took something says so");
+        if self.decided_first {
+            let late = matches!(self.pairing(), Pairing::Completed | Pairing::RanOn) && self.own();
+            rule(late, "a Cancel of a target that completed is too late, the target saying what it did", self);
+        }
+        assert!(self.taken_once, "the contract: a stopped Recv or Accept took nothing; what arrived is taken once");
+    }
+}
+
+/// A `Connect` the network established while its client was away (the
+/// SYN, retransmitted once an accept made room in the full queue),
+/// cancelled before the client entered: the `Cancel` may stop it, yet the
+/// connection reached the server, which accepts it and sees it end when the
+/// client closes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct StoppedConnect {
+    pub cancelling: Cancelling,
+    /// The server accepted every connection made, the cancelled one among
+    /// them.
+    pub reached: bool,
+    /// Each accepted connection's `Recv` once the client closed every
+    /// socket.
+    pub ends: Vec<Result<Vec<u8>, Error>>,
+}
+
+#[must_use]
+pub fn cancel_connect_established_while_away<B: Backend>(backend: &mut B) -> StoppedConnect {
+    let mut run = Run::new(backend);
+    let (client, server) = (run.process(), run.process());
+    let (listener, addr) = run.listener(server, at(Family::Ipv4, 0), 1);
+    let (sockets, connect) = fill_queue(&mut run, client, addr);
+    let mut accepted = vec![run.accept(server, listener).0];
+    run.sleep(SYN_RETRY);
+    let (cancels, target) = run.cancel(client, connect);
+    while accepted.len() < sockets.len() {
+        let accept = run.start(server, Op::Accept { fd: listener });
+        let complete = match run.within(server, accept, BRIEFLY) {
+            Some(complete) => complete,
+            None => run.cancel(server, accept).1,
+        };
+        let Ok(Done::Accepted { fd, .. }) = complete.result else {
+            break;
+        };
+        accepted.push(fd);
+    }
+    let reached = accepted.len() == sockets.len();
+    for fd in sockets {
+        run.close(client, fd);
+    }
+    let mut ends = Vec::new();
+    for fd in &accepted {
+        ends.push(run.recv(server, *fd, 64));
+    }
+    for fd in accepted {
+        run.close(server, fd);
+    }
+    run.close(server, listener);
+    run.finish();
+    let target = target.result;
+    let cancelling = Cancelling {
+        of: Target::Connect,
+        cancels,
+        target,
+        could_complete: true,
+        decided_first: false,
+        taken_once: true,
+    };
+    StoppedConnect { cancelling, reached, ends }
+}
+
+impl Check for StoppedConnect {
+    fn check(&self) {
+        self.cancelling.check();
+        rule(self.reached, "a Connect established before its Cancel reached its peer, whatever the Cancel said", self);
+        for end in &self.ends {
+            assert_eq!(*end, END, "the contract: the peer sees the connection end when the client closes it");
+        }
+    }
+}
+
+/// A connection waiting in a listener's queue when the listener closes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ListenerClosed {
+    /// The client's `Recv`s after the listener's `Close`.
+    pub recvs: [Result<Done, Error>; 2],
+}
+
+#[must_use]
+pub fn listener_close_resets_waiting<B: Backend>(backend: &mut B) -> ListenerClosed {
+    let mut run = Run::new(backend);
+    let (client, server) = (run.process(), run.process());
+    let (listener, addr) = run.listener(server, at(Family::Ipv4, 0), 16);
+    let fd = run.socket(client, Family::Ipv4);
+    assert_eq!(run.connect(client, fd, addr), NOTHING, "a connect to a listener");
+    run.close(server, listener);
+    let recvs = [
+        run.call(client, Op::Recv { fd, buf: Box::from([0; 8]) }).result,
+        run.call(client, Op::Recv { fd, buf: Box::from([0; 8]) }).result,
+    ];
+    run.close(client, fd);
+    run.finish();
+    ListenerClosed { recvs }
+}
+
+impl Check for ListenerClosed {
+    fn check(&self) {
+        assert_eq!(
+            self.recvs,
+            [Err(Error::Reset), Ok(Done::Count(0))],
+            "the contract: closing a listener resets the connections waiting on it"
+        );
     }
 }
 

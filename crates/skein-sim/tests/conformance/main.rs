@@ -5,5 +5,7 @@
 //!
 //! A failing seed is named, with the end of its trace.
 
+extern crate alloc;
+
 #[cfg(test)]
 mod suite;

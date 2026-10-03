@@ -30,6 +30,10 @@ pub(crate) const BRIEFLY: Duration = Duration::from_millis(300);
 /// cannot submit them.
 const ATTEMPTS: u32 = 32;
 
+/// How long a retry waits for an answer that needs the peer's reset or
+/// acknowledgement to have arrived.
+const RETRY: Duration = Duration::from_millis(1);
+
 /// Room for the completions of one reap.
 const ROOM: u32 = 64;
 
@@ -57,8 +61,9 @@ pub(crate) struct Run<'b, B: Backend> {
 struct Flight<P> {
     process: P,
     summary: Summary,
-    /// A `Send`'s bytes, which come back untouched.
-    bytes: Option<Box<[u8]>>,
+    /// A `Recv`'s or a `Send`'s buffer: its address, which the completion
+    /// hands back in the same `Box`, and what it held.
+    buffer: Option<(usize, Box<[u8]>)>,
 }
 
 impl<'b, B: Backend> Run<'b, B> {
@@ -85,19 +90,8 @@ impl<'b, B: Backend> Run<'b, B> {
     pub(crate) fn start(&mut self, process: B::Process, op: Op) -> Token {
         let token = Token::new(self.next);
         self.next = self.next.checked_add(1).expect("tokens never run out");
-        let bytes = match &op {
-            Op::Send { bytes, .. } => Some(bytes.clone()),
-            Op::Socket { .. }
-            | Op::Bind { .. }
-            | Op::Listen { .. }
-            | Op::Accept { .. }
-            | Op::Connect { .. }
-            | Op::Recv { .. }
-            | Op::Shutdown { .. }
-            | Op::Close { .. }
-            | Op::Cancel { .. } => None,
-        };
-        self.flights.insert(token, Flight { process, summary: Summary::of(&op), bytes });
+        let buffer = buffer(&op).map(|held| (held.as_ptr().addr(), Box::from(held)));
+        self.flights.insert(token, Flight { process, summary: Summary::of(&op), buffer });
         self.submissions.push(Submit { op: token, kind: op });
         self.backend.submit(process, &mut self.submissions);
         assert!(self.submissions.is_empty(), "the backend takes every record of a scenario");
@@ -181,6 +175,45 @@ impl<'b, B: Backend> Run<'b, B> {
         unexpected("a Cancel the backend submits, within a few attempts", &answers)
     }
 
+    /// `process` enters the kernel, deciding what waited on it.
+    pub(crate) fn enter(&mut self, process: B::Process) {
+        self.backend.enter(process);
+    }
+
+    /// Lets `span` pass with no process entering the kernel.
+    pub(crate) fn sleep(&mut self, span: Duration) {
+        self.backend.sleep(span);
+    }
+
+    /// Sends on `fd` until a `Send` fails, or for as long as the peer's
+    /// reset may take to arrive: every answer, in order.
+    pub(crate) fn send_until_refused(&mut self, process: B::Process, fd: Fd) -> Vec<Result<Done, Error>> {
+        self.retry(process, Retried::Send(fd))
+    }
+
+    /// Shuts `fd` down until a `Shutdown` fails, or for as long as the
+    /// peer's reset or acknowledgement may take to arrive: every answer.
+    pub(crate) fn shutdown_until_refused(&mut self, process: B::Process, fd: Fd) -> Vec<Result<Done, Error>> {
+        self.retry(process, Retried::Shutdown(fd))
+    }
+
+    fn retry(&mut self, process: B::Process, retried: Retried) -> Vec<Result<Done, Error>> {
+        let deadline = self.later(BRIEFLY);
+        let mut answers = Vec::new();
+        loop {
+            let op = match retried {
+                Retried::Send(fd) => Op::send(fd, Box::from(*b"lost"), 0).expect("bytes to send"),
+                Retried::Shutdown(fd) => Op::Shutdown { fd },
+            };
+            let answer = self.call(process, op).result;
+            answers.push(answer);
+            if answer.is_err() || self.backend.now() >= deadline {
+                return answers;
+            }
+            self.backend.pass(process, RETRY);
+        }
+    }
+
     /// Submits `op` and waits for its completion.
     pub(crate) fn call(&mut self, process: B::Process, op: Op) -> Complete {
         let token = self.start(process, op);
@@ -208,8 +241,14 @@ impl<'b, B: Backend> Run<'b, B> {
         let flight = flight.expect("every completion answers a submission still in flight, once");
         assert!(flight.process == process, "a completion comes back to the process that submitted it");
         assert!(flight.summary == Summary::of(&complete.kind), "the completion hands back the operation submitted");
-        if let (Some(sent), Op::Send { bytes, .. }) = (&flight.bytes, &complete.kind) {
-            assert!(sent == bytes, "a Send's bytes come back untouched");
+        if let (Some((address, held)), Some(back)) = (&flight.buffer, buffer(&complete.kind)) {
+            assert!(back.as_ptr().addr() == *address, "a buffer comes back in the Box it went down in");
+            let untouched = match (&complete.kind, complete.result) {
+                // A Recv wrote only the bytes it counts.
+                (Op::Recv { .. }, Ok(Done::Count(n))) => back.get(usize_of(n)..) == held.get(usize_of(n)..),
+                _ => back == &**held,
+            };
+            assert!(untouched, "a Send's bytes, and a Recv's buffer past its count, come back untouched");
         }
         self.track(process, &complete);
         self.arrived.insert(complete.op, complete);
@@ -392,6 +431,29 @@ impl<B: Backend> Run<'_, B> {
     pub(crate) fn close(&mut self, process: B::Process, fd: Fd) {
         let closed = self.call(process, Op::Close { fd }).result;
         assert_eq!(closed, Ok(Done::Nothing), "a Close of a descriptor nothing else uses succeeds");
+    }
+}
+
+/// An operation retried until it fails.
+#[derive(Clone, Copy, Debug)]
+enum Retried {
+    Send(Fd),
+    Shutdown(Fd),
+}
+
+/// The buffer a `Recv` or a `Send` carries.
+fn buffer(op: &Op) -> Option<&[u8]> {
+    match op {
+        Op::Recv { buf, .. } => Some(buf),
+        Op::Send { bytes, .. } => Some(bytes),
+        Op::Socket { .. }
+        | Op::Bind { .. }
+        | Op::Listen { .. }
+        | Op::Accept { .. }
+        | Op::Connect { .. }
+        | Op::Shutdown { .. }
+        | Op::Close { .. }
+        | Op::Cancel { .. } => None,
     }
 }
 

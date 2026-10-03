@@ -75,10 +75,10 @@
 //!   `Shutdown` with `NotConnected`. An end that already received the peer's
 //!   end of stream hears of no reset: its `Recv` drains to `Ok(Count(0))`,
 //!   its `Send` fails with `BrokenPipe`, its `Shutdown` with `NotConnected`.
-//! - **A `Send` after the peer closed** with nothing unread may succeed once,
-//!   its bytes lost; later ones fail with `BrokenPipe`, never `Reset`. Then
-//!   a `Recv` gives `Ok(Count(0))` and a `Shutdown` fails with
-//!   `NotConnected`.
+//! - **A `Send` after the peer closed** with nothing unread may succeed, its
+//!   bytes lost, until the peer's reset arrives; then it fails with
+//!   `BrokenPipe`, never `Reset`, a `Recv` gives `Ok(Count(0))` and a
+//!   `Shutdown` fails with `NotConnected`.
 //! - **An [`Fd`] is closed only by `Close`,** which releases it whatever its
 //!   result. A `Close` with received data unread makes the peer see `Reset`;
 //!   closing a listener resets the connections waiting on it.

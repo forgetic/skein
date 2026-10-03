@@ -406,8 +406,8 @@ with, or an `Error`), so every record comes back up whatever happened.
     bytes already received; after it, receives give zero bytes and sends
     and half-closes fail. An end that already received the peer's end of
     stream hears of no reset, and a send after the peer closed may
-    succeed once, its bytes lost, then fails without a reset, the
-    connection closed;
+    succeed, its bytes lost, until the peer's reset arrives, then fails
+    without a reset, the connection closed;
   - a descriptor is closed only by a close. Closing with unread data
     resets the peer; closing a listener resets the connections waiting
     on it.

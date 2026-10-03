@@ -228,6 +228,15 @@ impl Sim {
         u32::try_from(self.process(pid).ready.len()).expect("fewer than 2^32 completions")
     }
 
+    /// Every process of the world, in the order they were spawned.
+    pub(crate) fn pids(&self) -> Vec<Pid> {
+        let mut pids = Vec::with_capacity(self.processes.len());
+        for index in 0..self.processes.len() {
+            pids.push(Pid(u32::try_from(index).expect("fewer than 2^32 processes")));
+        }
+        pids
+    }
+
     /// Operations of `pid` submitted and not yet reaped.
     #[must_use]
     pub fn in_flight(&self, pid: Pid) -> u32 {
@@ -982,7 +991,9 @@ impl Sim {
                 let most = left.len().min(usize_of(self.config.buffer));
                 let (n, short) = cut(&mut self.rng, self.config.faults.short_send, most);
                 cut_short = short;
-                self.stream_mut(id).fate = Fate::Dead;
+                if !self.fault(pid, self.config.faults.late_reset, Fault::LateReset) {
+                    self.stream_mut(id).fate = Fate::Dead;
+                }
                 Ok(Done::Count(u32::try_from(n).expect("a Send's length fits a u32")))
             }
             (Fate::Open, Some(peer)) => {

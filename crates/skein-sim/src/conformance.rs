@@ -31,10 +31,12 @@ use crate::sim::{Pid, Sim};
 
 pub use scenarios::{
     AddressInUse, Backpressure, Cancelling, ClosedBeforeAccept, DescriptorLimit, FullQueue, GracefulClose, Ipv6Only,
-    Lifecycle, PeerClosed, Refused, ResetAfterEnd, UnreadClose, WrongState, accept_past_the_descriptor_limit,
-    address_in_use, backpressure, cancel_accept, cancel_accept_racing_a_connect, cancel_connect, cancel_recv,
-    cancel_recv_racing_bytes, closed_before_accept, full_accept_queue, graceful_close, ipv6_only, lifecycle, refused,
-    reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv, unread_close_meets_send, wrong_state,
+    Lifecycle, ListenerClosed, Pairing, PeerClosed, Race, Refused, ResetAfterEnd, StoppedConnect, Target, UnreadClose,
+    WrongState, accept_past_the_descriptor_limit, address_in_use, backpressure, cancel_accept,
+    cancel_accept_racing_a_connect, cancel_connect, cancel_connect_established_while_away, cancel_recv,
+    cancel_recv_racing_bytes, closed_before_accept, full_accept_queue, graceful_close, ipv6_only, lifecycle,
+    listener_close_resets_waiting, refused, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
+    unread_close_meets_send, wrong_state,
 };
 
 /// What the suite drives: the calls the shell's `Kernel` offers, per
@@ -56,9 +58,19 @@ pub trait Backend {
     /// The backend's monotonic time.
     fn now(&self) -> Time;
 
+    /// `process` enters the kernel without submitting or waiting, as a
+    /// loop's empty submit does: its waiting operations that can proceed
+    /// are decided.
+    fn enter(&mut self, process: Self::Process);
+
     /// Lets time pass until something may have completed for `process`, or
-    /// for at most `bound`.
+    /// for at most `bound`, every process entering the kernel first, as a
+    /// world's loops would.
     fn pass(&mut self, process: Self::Process, bound: Duration);
+
+    /// Lets `span` pass with no process entering the kernel: what waits on
+    /// a process stays undecided.
+    fn sleep(&mut self, span: Duration);
 
     /// Fails unless `process` has nothing in flight, as the backend sees it.
     fn assert_settled(&self, process: Self::Process);
@@ -90,14 +102,30 @@ impl Backend for Sim {
         Sim::now(self)
     }
 
-    /// Moves to what is next due, or by `bound` when that is later or the
-    /// world is idle.
-    fn pass(&mut self, _process: Pid, bound: Duration) {
+    fn enter(&mut self, process: Pid) {
+        Sim::submit(self, process, &mut Queue::with_capacity(0));
+    }
+
+    /// Every process enters; then, unless that delivered something to
+    /// `process`, time moves to what is next due, or by `bound` when that
+    /// is later or nothing is due.
+    fn pass(&mut self, process: Pid, bound: Duration) {
+        for pid in self.pids() {
+            Backend::enter(self, pid);
+        }
+        if self.ready(process) > 0 {
+            return;
+        }
         let until = self.now().saturating_add(bound);
         match self.next_due() {
             Some(at) if at < until => self.advance_to(at),
             Some(_) | None => self.advance_to(until),
         }
+    }
+
+    fn sleep(&mut self, span: Duration) {
+        let until = self.now().saturating_add(span);
+        self.advance_to(until);
     }
 
     fn assert_settled(&self, process: Pid) {
@@ -107,7 +135,8 @@ impl Backend for Sim {
 }
 
 /// The chaos loopback can show: [`Config::chaos`]'s small buffers and
-/// short backlog, latency, short receives and sends, and raced cancels,
+/// short backlog, latency, short receives and sends, raced cancels and late
+/// resets,
 /// without the faults that model a network beyond it.
 #[must_use]
 pub const fn loopback_chaos() -> Config {

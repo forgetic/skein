@@ -39,6 +39,7 @@ pub enum Fault {
     TimedOut,
     CancelRace,
     CancelUnsubmitted,
+    LateReset,
 }
 
 /// An operation without its buffers: their lengths stand in for them.
