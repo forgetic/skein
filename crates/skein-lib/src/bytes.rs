@@ -13,6 +13,14 @@ pub fn copy_of(bytes: &[u8]) -> Box<[u8]> {
     Box::from(bytes)
 }
 
+/// A box of `len` zero bytes, for the side below to fill: a receive buffer,
+/// at a length the side below computed (programming-model.md, 6.2).
+#[must_use]
+#[expect(clippy::disallowed_macros, reason = "a buffer is allocated once, at its final length, and boxed")]
+pub fn zeroed(len: usize) -> Box<[u8]> {
+    alloc::vec![0; len].into_boxed_slice()
+}
+
 /// Where `needle` first occurs in `haystack`, or `None`. An empty needle
 /// occurs at 0.
 ///

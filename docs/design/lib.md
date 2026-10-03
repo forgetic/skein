@@ -76,7 +76,8 @@ entries.
 ## 6. Bytes
 
 - **Owned bytes** are a `Box<[u8]>` allocated at its final length.
-  `bytes::copy_of` copies one, for data a domain keeps and also sends.
+  `bytes::copy_of` copies one, for data a domain keeps and also sends;
+  `bytes::zeroed` makes one for the side below to fill, a receive buffer.
   The byte search (`bytes::find`, `find_from`, `count`) runs in linear
   time and allocates nothing.
 - **`Reader`** reads a delivery without trusting any length in it: every
