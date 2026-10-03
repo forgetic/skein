@@ -248,9 +248,10 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   - The side below receives the peer's bytes in pieces cut at random,
     late, into an intake under its cap, and meets each demand exactly; it
     ends when the bytes run out, early at a cut, sometimes with nothing
-    demanded, or it fails; after a close, it may still deliver what was
-    on its way. The tokenizer asks for no room, so there is none to grant
-    late.
+    demanded and a demand crossing that end on its way; it fails, with
+    each fault, before its end or after it; after a close, it may still
+    deliver what was on its way, end, or fail. The tokenizer asks for no
+    room, so there is none to grant late.
   - The side above asks for a token when it feels like it, stops asking
     for a while, so that the stream below fills to its cap with nothing
     demanded, and closes after the outcome, or at any moment: waiting for
@@ -309,10 +310,15 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
 - **The fuzzy suite** (`tests/json/tests/fuzzy_*.rs`): 20,000 generated
   documents, most of them mutated, and 5,000 transcripts cut and mutated,
   under limits and neighbours drawn from each seed, each against the
-  reference, asserting that every error, every way of ending, and a close
-  in every state fell; 5,000 generated documents written and read back;
-  and 20,000 texts and numbers drawn at random, which the writer writes
-  exactly when the standard library and the grammar accept them. It
+  reference. Each sweep asserts that what it injects fell
+  (testing-strategy.md, 3): every error; every way of ending, an end that
+  crossed a demand and one after a number's last byte; each fault, a
+  failure while the tokenizer waited for each thing and after the end;
+  a delivery after the close; a stall that filled the stream; and a close
+  in every state. Then 5,000 generated documents written and read back;
+  and 20,000 of each of texts and numbers drawn at random, which the
+  writer writes exactly when the standard library and the grammar accept
+  them. It
   stands in for the fuzz target until a nightly toolchain is installed.
 
 ## 7. Decisions

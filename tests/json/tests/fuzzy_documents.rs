@@ -34,11 +34,27 @@ impl Seen {
             None => self.note("closed before the outcome".into()),
         }
         self.note(format!("closed while waiting for {:?}", run.closed_while));
-        if run.idle_end {
+        let fell = run.fell;
+        if fell.idle_end {
             self.note("an end with nothing demanded".into());
         }
-        if run.crossed_end {
+        if fell.crossed_end {
             self.note("a demand crossed the end".into());
+        }
+        if fell.byte_then_end {
+            self.note("an end after a number's last byte".into());
+        }
+        if fell.late_delivery {
+            self.note("a delivery after the close".into());
+        }
+        if fell.failed_after_end {
+            self.note("a failure after the end".into());
+        }
+        if let Some(waiting) = fell.failed_while {
+            self.note(format!("failed while waiting for {waiting:?}"));
+        }
+        if let Some(fault) = run.failed {
+            self.note(format!("failed with {fault:?}"));
         }
         if settings.cut.is_some() {
             self.note("a stream ended early".into());
@@ -69,6 +85,19 @@ const EVERY_ERROR: [&str; 13] = [
     "Failed(Control)",
     "Failed(Truncated)",
     "failed Stream",
+];
+
+const EVERY_FAULT: [&str; 10] = [
+    "an end after a number's last byte",
+    "a delivery after the close",
+    "a failure after the end",
+    "failed while waiting for Next",
+    "failed while waiting for Bytes",
+    "failed while waiting for Close",
+    "failed while waiting for Nothing",
+    "failed with Reset",
+    "failed with Invalid",
+    "failed with Other",
 ];
 
 const EVERY_NEIGHBOUR: [&str; 9] = [
@@ -105,6 +134,7 @@ fn generated_and_mutated_documents_read_as_the_reference_reads_them_whatever_the
         tally.record(&run, &settings);
     }
     tally.assert_fell(&EVERY_ERROR);
+    tally.assert_fell(&EVERY_FAULT);
     tally.assert_fell(&EVERY_NEIGHBOUR);
 }
 
@@ -130,5 +160,7 @@ fn transcripts_cut_mutated_and_failed_read_as_the_reference_reads_them() {
         let run = world::check(&document, &settings, seed);
         tally.record(&run, &settings);
     }
+    tally.assert_fell(&EVERY_ERROR);
+    tally.assert_fell(&EVERY_FAULT);
     tally.assert_fell(&EVERY_NEIGHBOUR);
 }

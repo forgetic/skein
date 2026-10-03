@@ -45,8 +45,8 @@ pub struct Settings {
     /// Where the peer's bytes stop, if before the document's end: the
     /// stream ends early.
     pub cut: Option<usize>,
-    /// When the stream fails, if it does: at the first iteration from this
-    /// one on where it has not ended, with this fault.
+    /// When the stream fails, if it does: once, at the first iteration from
+    /// this one on, before its end or after it, with this fault.
     pub failure: Option<(u64, Fault)>,
     /// When the side above closes, if it does whatever the tokenizer is
     /// doing: from this iteration on.
@@ -89,9 +89,7 @@ impl Settings {
             settings.cut = Some(usize::try_from(rng.below(len as u64 + 1)).expect("fits a usize"));
         }
         if rng.chance(150) {
-            let fault =
-                [Fault::Reset, Fault::Invalid, Fault::Other][usize::try_from(rng.below(3)).expect("fits a usize")];
-            settings.failure = Some((rng.below(span), fault));
+            settings.failure = Some((rng.below(span), fault(rng)));
         }
         if rng.chance(150) {
             settings.close = Some(rng.below(span));
@@ -134,6 +132,10 @@ pub fn limits(rng: &mut Rng) -> Limits {
     }
 }
 
+fn fault(rng: &mut Rng) -> Fault {
+    [Fault::Reset, Fault::Invalid, Fault::Other][usize::try_from(rng.below(3)).expect("fits a usize")]
+}
+
 fn draw(rng: &mut Rng, low: u32, high: u32) -> u32 {
     u32::try_from(rng.between(u64::from(low), u64::from(high))).expect("fits a u32")
 }
@@ -149,15 +151,33 @@ pub struct Run {
     pub closed_while: Waiting,
     /// The fault the stream failed with, if the side below reported one.
     pub failed: Option<Fault>,
-    /// Whether the side below reported the end with nothing demanded.
-    pub idle_end: bool,
-    /// Whether a demand crossed the end on its way, and was never answered.
-    pub crossed_end: bool,
+    /// What else the neighbours injected that fell.
+    pub fell: Fell,
     /// The most bytes the stream below held, nothing demanded, while the
     /// side above had stopped asking.
     pub held_back: u32,
     /// The iterations the run took.
     pub iterations: u64,
+}
+
+/// What fell in a run, of what its neighbours may inject: a sweep asserts
+/// that each fell at least once (testing-strategy.md, 3).
+#[expect(clippy::struct_excessive_bools, reason = "a record of what fell, a flag each")]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub struct Fell {
+    /// The side below reported the end with nothing demanded.
+    pub idle_end: bool,
+    /// A demand crossed the end on its way, and was never answered.
+    pub crossed_end: bool,
+    /// The end came while the tokenizer held the byte that ended a number.
+    pub byte_then_end: bool,
+    /// A delivery reached the tokenizer after its close, for the demand the
+    /// close withdrew.
+    pub late_delivery: bool,
+    /// The stream failed after its end.
+    pub failed_after_end: bool,
+    /// What the tokenizer waited for when the stream failed, if it did.
+    pub failed_while: Option<Waiting>,
 }
 
 impl Run {
@@ -188,14 +208,14 @@ pub fn run(document: &[u8], settings: &Settings, seed: u64) -> Run {
             intake: Intake::with_capacity(settings.cap),
             demand: None,
             life: Life::Open,
-            crossed: false,
             failed: None,
-            idle_end: false,
+            fell: Fell::default(),
             withdrawn: None,
         },
         above: Above { pending: false, tokens: Vec::new(), outcome: None, closing: None, closed: false },
         iteration: 0,
         held_back: 0,
+        held_byte: false,
     };
     let stalled = match settings.stall {
         Some((_, iterations)) => iterations,
@@ -221,8 +241,7 @@ pub fn run(document: &[u8], settings: &Settings, seed: u64) -> Run {
                 outcome: world.above.outcome,
                 closed_while: world.above.closing.expect("closed after a close"),
                 failed: world.below.failed,
-                idle_end: world.below.idle_end,
-                crossed_end: world.below.crossed,
+                fell: world.below.fell,
                 held_back: world.held_back,
                 iterations: world.iteration,
             };
@@ -274,6 +293,10 @@ struct World<'a> {
     above: Above,
     iteration: u64,
     held_back: u32,
+    /// Whether the tokenizer holds the byte that ended a number, as the
+    /// world sees it: a number sent up for a byte that is not whitespace,
+    /// and no `Next` since.
+    held_byte: bool,
 }
 
 /// The stream below.
@@ -284,10 +307,8 @@ struct Below<'a> {
     /// The demand outstanding, met at most once.
     demand: Option<Read>,
     life: Life,
-    /// Whether a demand crossed the end.
-    crossed: bool,
     failed: Option<Fault>,
-    idle_end: bool,
+    fell: Fell,
     /// The demand a close withdrew, which a delivery already on its way
     /// may still meet.
     withdrawn: Option<Read>,
@@ -326,12 +347,36 @@ impl World<'_> {
             && self.rng.chance(500)
             && let Some(bytes) = self.below.intake.meet(read)
         {
+            self.below.fell.late_delivery = true;
             self.up(Up::Bytes(bytes));
         }
         if self.below.life != Life::Over && self.rng.chance(500) {
-            self.below.life = Life::Over;
-            self.up(Up::End);
+            self.end();
         }
+        if self.below.failed.is_none() && self.rng.chance(300) {
+            let fault = fault(&mut self.rng);
+            self.fail(fault);
+        }
+    }
+
+    /// The stream ends: a demand outstanding, or one that crossed the end,
+    /// is never answered.
+    fn end(&mut self) {
+        self.below.life = Life::Over;
+        self.below.demand = None;
+        self.below.fell.byte_then_end |= self.held_byte;
+        self.up(Up::End);
+    }
+
+    /// The stream fails: before its end or after it, once.
+    fn fail(&mut self, fault: Fault) {
+        let below = &mut self.below;
+        below.fell.failed_after_end = below.life == Life::Over;
+        below.fell.failed_while = Some(self.tokenizer.waiting());
+        below.life = Life::Over;
+        below.demand = None;
+        below.failed = Some(fault);
+        self.up(Up::Failed(fault));
     }
 
     fn below_acts(&mut self) {
@@ -348,20 +393,14 @@ impl World<'_> {
             && self.iteration >= at
             && below.failed.is_none()
         {
-            below.life = Life::Over;
-            below.demand = None;
-            below.failed = Some(fault);
-            self.up(Up::Failed(fault));
+            self.fail(fault);
             return;
         }
         if below.life == Life::Over {
             return;
         }
         if below.life == Life::Ending {
-            // A demand that crossed the end stays unanswered.
-            below.life = Life::Over;
-            below.demand = None;
-            self.up(Up::End);
+            self.end();
             return;
         }
         match below.demand {
@@ -372,20 +411,17 @@ impl World<'_> {
                     self.up(Up::Bytes(bytes));
                 } else if below.unsent.is_empty() {
                     // It can never be met.
-                    below.life = Life::Over;
-                    below.demand = None;
-                    self.up(Up::End);
+                    self.end();
                 }
             }
             None => {
                 if below.unsent.is_empty() && below.intake.is_empty() && self.rng.chance(self.settings.idle_end) {
-                    below.idle_end = true;
+                    below.fell.idle_end = true;
                     // Now, or on its way, which a demand may cross.
                     if self.rng.chance(500) {
                         below.life = Life::Ending;
                     } else {
-                        below.life = Life::Over;
-                        self.up(Up::End);
+                        self.end();
                     }
                 }
             }
@@ -426,11 +462,23 @@ impl World<'_> {
     }
 
     fn up(&mut self, ev: Up) {
+        // A byte that is not whitespace, and ends a number, is held.
+        let ends_a_number = match &ev {
+            Up::Bytes(bytes) => matches!(**bytes, [byte] if !b" \t\n\r".contains(&byte)),
+            Up::Room | Up::End | Up::Failed(_) => false,
+        };
+        let before = self.above.tokens.len();
         json::up(&mut self.tokenizer, &self.env, ev, &mut self.events, &mut self.requests);
         self.route(json::UP_MAX_OUT, false);
+        if ends_a_number && self.above.tokens.len() > before {
+            self.held_byte |= matches!(self.above.tokens.last(), Some(Token::Number(_)));
+        }
     }
 
     fn down(&mut self, rq: Request) {
+        if rq == Request::Next {
+            self.held_byte = false;
+        }
         json::down(&mut self.tokenizer, &self.env, rq, &mut self.events, &mut self.requests);
         self.route(json::DOWN_MAX_OUT, rq == Request::Close);
     }
@@ -514,7 +562,7 @@ impl Below<'_> {
         assert!(self.demand.is_none(), "one demand at a time: {read:?} over {:?}", self.demand);
         // One stated while the end is on its way crosses it (lib.md, 7).
         assert!(self.life != Life::Over, "nothing is demanded once the stream's end or failure arrived: {read:?}");
-        self.crossed |= self.life == Life::Ending;
+        self.fell.crossed_end |= self.life == Life::Ending;
         assert!(wanted >= 1, "a demand is for something: {read:?}");
         assert!(wanted <= json::largest_demand(limits), "no demand past the largest declared: {read:?}");
         assert!(wanted <= self.intake.capacity(), "no demand past the cap below: {read:?}");

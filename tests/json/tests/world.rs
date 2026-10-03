@@ -100,7 +100,7 @@ fn an_end_with_nothing_demanded_is_held_for_the_next_token() {
         let settings = Settings { idle_end: 1000, eagerness: 100, ..Settings::calm(&mut rng, LIMITS) };
         let run = world::check(&document, &settings, seed);
         assert_eq!(run.outcome, Some(Outcome::Done), "seed {seed}");
-        if run.idle_end {
+        if run.fell.idle_end {
             idle_ends += 1;
         }
     }
