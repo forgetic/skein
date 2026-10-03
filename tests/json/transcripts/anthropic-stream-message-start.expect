@@ -1,0 +1,34 @@
+# Written by hand after the published format of Anthropic's Messages API:
+# no real answer can be captured offline. Drafted by the reference parser,
+# then checked by hand.
+# The data of a stream's message_start event.
+object
+key "type"
+string "message_start"
+key "message"
+object
+key "id"
+string "msg_014p7gG3wDgGV9EUtLvnow3U"
+key "type"
+string "message"
+key "role"
+string "assistant"
+key "model"
+string "claude-sonnet-4-5-20250929"
+key "stop_sequence"
+null
+key "usage"
+object
+key "input_tokens"
+number 472
+key "output_tokens"
+number 2
+end object
+key "content"
+array
+end array
+key "stop_reason"
+null
+end object
+end object
+done

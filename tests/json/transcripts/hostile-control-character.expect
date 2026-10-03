@@ -1,0 +1,4 @@
+# A line feed in a string, not escaped.
+object
+key "text"
+failed control

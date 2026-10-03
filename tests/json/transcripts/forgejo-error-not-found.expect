@@ -1,0 +1,13 @@
+# Written by hand after the published format of Forgejo's API:
+# no real answer can be captured offline. Drafted by the reference parser,
+# then checked by hand.
+# A 404's body.
+object
+key "errors"
+null
+key "message"
+string "The target couldn't be found."
+key "url"
+string "https://git.example.org/api/swagger"
+end object
+done

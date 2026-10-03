@@ -1,0 +1,3 @@
+# An overlong encoding of '/', which a lax decoder lets through.
+array
+failed utf8

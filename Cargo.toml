@@ -9,6 +9,7 @@ members = [
     "tests/conformance/ring",
     "tests/conformance/sim",
     "tests/heap",
+    "tests/json",
     "tests/lib",
     "tests/ring",
     "tests/sim",

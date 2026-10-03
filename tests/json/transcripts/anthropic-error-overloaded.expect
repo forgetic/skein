@@ -1,0 +1,18 @@
+# Written by hand after the published format of Anthropic's Messages API:
+# no real answer can be captured offline. Drafted by the reference parser,
+# then checked by hand.
+# An error response.
+object
+key "type"
+string "error"
+key "error"
+object
+key "type"
+string "overloaded_error"
+key "message"
+string "Overloaded"
+end object
+key "request_id"
+string "req_011CSHoEeqs5C35K2UUqR7Fy"
+end object
+done

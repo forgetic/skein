@@ -1,0 +1,4 @@
+limits string 256
+object
+key "text"
+failed string-too-long

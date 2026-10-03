@@ -1,0 +1,4 @@
+# A hundred digits, against a limit of sixty-four.
+limits number 64
+array
+failed number-too-long

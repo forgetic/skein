@@ -234,13 +234,56 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   grammar against a plain reading of it over every short text of its
   bytes, the writer's escapes, refusals and assertions, and its output
   read back.
-- **Machine worlds** (testing-strategy.md, 2.4), with documents cut at
-  random, transcripts of real documents (an LLM provider's tool calls, a
-  forge's API), generated documents, and hostile ones: nested too deep,
-  strings too long, invalid UTF-8, numbers that are not numbers.
-- **The writer against the tokenizer:** what one writes, the other reads
-  back the same.
-- **Fuzzing:** one target, fed `Bytes` under every demand.
+- **Machine worlds** (testing-strategy.md, 2.4) in `tests/json`
+  (`skein-json-world`): one tokenizer from a seed, in one loop with both
+  its neighbours.
+  - The side below receives the peer's bytes in pieces cut at random,
+    late, into an intake under its cap, and meets each demand exactly; it
+    ends when the bytes run out, early at a cut, sometimes with nothing
+    demanded, or it fails; after a close, it may still deliver what was
+    on its way. The tokenizer asks for no room, so there is none to grant
+    late.
+  - The side above asks for a token when it feels like it, and closes
+    after the outcome, or at any moment: waiting for a `Next`, for bytes,
+    or for the close.
+  - The world checks the contracts as it goes: `MAX_OUT` on each call;
+    one answer per `Next`, at most one outcome, `Closed` once and last;
+    one demand at a time, none past the largest declared or the cap
+    below, none of a stream that ended, one withdrawn only by a close;
+    nothing sent down; and `waiting()` matching what the neighbours see.
+    A seed replays to the same run.
+- **A reference parser** in the world crate, recursive descent over a
+  whole document, sharing no code with the tokenizer: the standard
+  library judges UTF-8 and surrogate pairs, and a plain reading of the
+  grammar judges numbers. It mirrors only what the tokenizer promises:
+  which bytes its scans see, and the order of errors at one byte. Every
+  run is checked against it: the same tokens in order, and the same
+  outcome, unless the stream failed or the side above closed first.
+- **Transcripts** in `tests/json/transcripts/`, each `<name>.json` beside
+  `<name>.expect`, what it must decode to:
+  - realistic: an Anthropic Messages API response ending in tool calls,
+    three of its stream events and an error; an OpenAI chat completion
+    with tool calls, their arguments JSON in a string, with `\u` escapes
+    and a surrogate pair; a Forgejo pull request, a page of issues and a
+    404, compact, with `<`, `>` and `&` escaped as Go's encoder does. No
+    real answer can be captured offline, so each is written by hand after
+    the API's published format, and says so; its expectation was drafted
+    by the reference parser and checked by hand.
+  - hostile: nested too deep, strings too long (and escapes that fit
+    once undone), invalid and overlong UTF-8, an encoded surrogate, bad
+    and short escapes, lone and swapped surrogates, control characters,
+    numbers that are not numbers or are too long, a truncated response,
+    a second document, a trailing comma, quotes and keys JavaScript
+    allows, an empty stream, a byte order mark.
+
+  Each decodes to its expectation under several seeds and scan maximums,
+  and cut anywhere, as the reference reads the prefix. A transcript
+  without an expectation fails, printing the reference's reading as a
+  draft to check.
+- **The writer against the tokenizer:** every transcript read whole, and
+  generated documents, written and read back the same through the world;
+  every byte a string may hold; and what the tokenizer refuses, the writer
+  refuses to write.
 
 ## 7. Decisions
 
@@ -277,10 +320,14 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
 
 ## 9. Not built yet
 
-- **The machine worlds,** with their transcripts, and the writer against
-  the tokenizer in them.
-- **The fuzz target,** which waits for a nightly toolchain.
+- **The fuzz target** (`fuzz/`, fed `Bytes` under every demand), which
+  waits for a nightly toolchain, and the fuzzy suite's sweeps of these
+  worlds over many seeds, which stand in for it until then.
+- **The memory check** of each `worst_case` against the counting
+  allocator, when it lands.
 - **Writing in pieces:** temper's performance.md asks for a body measured
   whole and encoded a piece at a time, as io grants room. The writer
   writes a document whole.
-- **The memory check** of `worst_case` against the counting allocator.
+- **Several documents in one stream,** concatenated or as JSON lines.
+- **Protocol worlds,** once the tokenizer is stacked under a service's
+  decoder and over HTTP or server-sent events (http.md, 5).

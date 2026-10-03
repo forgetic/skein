@@ -1,0 +1,4 @@
+# A two-byte character whose second byte is not a continuation.
+object
+key "name"
+failed utf8
