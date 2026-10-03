@@ -10,5 +10,8 @@ publish.workspace = true
 skein-lib.workspace = true
 skein-io.workspace = true
 
+# Ordinary Rust (programming-model.md, 10.2), held to the step crates' lints
+# as the simulator is: its own clippy.toml lets in the std types, closures and
+# formatting it needs, and the subset's other checks stay on.
 [lints]
 workspace = true
