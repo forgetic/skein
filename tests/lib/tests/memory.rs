@@ -3,11 +3,11 @@
 //! filled to it, emptied and filled again, every operation a step of the
 //! meter, and what it held of its own never more than `worst_case(capacity)`.
 //!
-//! The items own no heap: what an item owns is its owner's to count (lib.md,
-//! 5). They come in several sizes and alignments, up to 64 bytes, as a
-//! container's price depends on both. What an operation hands out (an item
-//! taken, a delivery, a box of a list's items) is its receiver's, dropped
-//! before the check.
+//! The items own no heap: what an item owns is its owner's to count
+//! (programming-model.md, 6.3). They come in several sizes and alignments, up
+//! to 64 bytes, as a container's price depends on both. What an operation
+//! hands out (an item taken, a delivery, a box of a list's items) is its
+//! receiver's, dropped before the check.
 //!
 //! A slab, a queue, a list, a stack and an intake are allocated once, at their
 //! capacity, and hold exactly their worst case from the start. A map, a set
@@ -545,5 +545,6 @@ fn a_deadline_table_holds_no_more_than_its_worst_case() {
         deadlines::<u16>(capacity);
         deadlines::<u64>(capacity);
         deadlines::<u128>(capacity);
+        deadlines::<[u64; 8]>(capacity);
     }
 }
