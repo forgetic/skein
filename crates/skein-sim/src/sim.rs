@@ -228,15 +228,6 @@ impl Sim {
         u32::try_from(self.process(pid).ready.len()).expect("fewer than 2^32 completions")
     }
 
-    /// Every process of the world, in the order they were spawned.
-    pub(crate) fn pids(&self) -> Vec<Pid> {
-        let mut pids = Vec::with_capacity(self.processes.len());
-        for index in 0..self.processes.len() {
-            pids.push(Pid(u32::try_from(index).expect("fewer than 2^32 processes")));
-        }
-        pids
-    }
-
     /// Operations of `pid` submitted and not yet reaped.
     #[must_use]
     pub fn in_flight(&self, pid: Pid) -> u32 {

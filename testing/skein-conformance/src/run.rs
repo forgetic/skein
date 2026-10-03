@@ -13,8 +13,7 @@ use core::mem;
 use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, Submit};
 use skein_lib::{Duration, Queue, Time, Token};
 
-use super::Backend;
-use crate::trace::Summary;
+use crate::Backend;
 
 /// How long a scenario waits for a completion it expects before it fails:
 /// on the ring, a SYN retransmitted after a full accept queue made room
@@ -431,6 +430,41 @@ impl<B: Backend> Run<'_, B> {
     pub(crate) fn close(&mut self, process: B::Process, fd: Fd) {
         let closed = self.call(process, Op::Close { fd }).result;
         assert_eq!(closed, Ok(Done::Nothing), "a Close of a descriptor nothing else uses succeeds");
+    }
+}
+
+/// An operation without its buffers, their lengths standing in for them:
+/// what a completion must hand back, whatever its buffers now hold. The
+/// simulator's trace summarises an operation the same way, but the suite
+/// depends on no backend.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Summary {
+    Socket { family: Family },
+    Bind { fd: Fd, addr: Addr },
+    Listen { fd: Fd, backlog: u32 },
+    Accept { fd: Fd },
+    Connect { fd: Fd, addr: Addr },
+    Recv { fd: Fd, len: usize },
+    Send { fd: Fd, len: usize, from: u32 },
+    Shutdown { fd: Fd },
+    Close { fd: Fd },
+    Cancel { target: Token },
+}
+
+impl Summary {
+    fn of(op: &Op) -> Summary {
+        match op {
+            Op::Socket { family } => Summary::Socket { family: *family },
+            Op::Bind { fd, addr } => Summary::Bind { fd: *fd, addr: *addr },
+            Op::Listen { fd, backlog } => Summary::Listen { fd: *fd, backlog: *backlog },
+            Op::Accept { fd } => Summary::Accept { fd: *fd },
+            Op::Connect { fd, addr } => Summary::Connect { fd: *fd, addr: *addr },
+            Op::Recv { fd, buf } => Summary::Recv { fd: *fd, len: buf.len() },
+            Op::Send { fd, bytes, from } => Summary::Send { fd: *fd, len: bytes.len(), from: *from },
+            Op::Shutdown { fd } => Summary::Shutdown { fd: *fd },
+            Op::Close { fd } => Summary::Close { fd: *fd },
+            Op::Cancel { target } => Summary::Cancel { target: *target },
+        }
     }
 }
 

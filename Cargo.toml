@@ -4,6 +4,9 @@
 resolver = "3"
 members = [
     "crates/*",
+    "testing/skein-conformance",
+    "tests/conformance/ring",
+    "tests/conformance/sim",
     "tests/ring",
     "tests/sim",
 ]
@@ -19,6 +22,7 @@ skein-lib = { path = "crates/skein-lib" }
 skein-io = { path = "crates/skein-io" }
 skein-shell = { path = "crates/skein-shell" }
 skein-sim = { path = "crates/skein-sim" }
+skein-conformance = { path = "testing/skein-conformance" }
 
 # The only dependencies from outside the workspace, with rustls later
 # (programming-model.md, 2.1): the shell's, for the ring adapter.

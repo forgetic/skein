@@ -7,14 +7,13 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Debug;
-use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use skein_io::kernel::{Addr, Done, Error, Family, Fd, Op};
 use skein_lib::{Duration, Token};
 
-use super::run::{BRIEFLY, Run, received, unexpected};
-use super::{Backend, Check};
-use crate::net::loopback;
+use crate::run::{BRIEFLY, Run, received, unexpected};
+use crate::{Backend, Check};
 
 /// The bytes each way of a connection's lifecycle: past the chaos world's
 /// buffer many times over.
@@ -39,6 +38,14 @@ const DESCRIPTORS: u32 = 64;
 /// Longer than Linux takes to retransmit a SYN that a full accept queue
 /// dropped: a second.
 const SYN_RETRY: Duration = Duration::from_secs(2);
+
+/// The loopback address of `family`.
+const fn loopback(family: Family) -> IpAddr {
+    match family {
+        Family::Ipv4 => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Family::Ipv6 => IpAddr::V6(Ipv6Addr::LOCALHOST),
+    }
+}
 
 /// `port` on the loopback address of `family`.
 fn at(family: Family, port: u16) -> Addr {

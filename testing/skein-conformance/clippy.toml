@@ -1,12 +1,13 @@
-# The simulator is ordinary Rust (programming-model.md, 10.2): std,
-# Vec, String, closures and formatting are in, since none of it runs in a
-# service. What stays out is what would break replay or the lifecycle: a
-# clock, threads, OS randomness, hash maps with a random seed, and std handles
-# that close on drop.
+# The conformance suite is ordinary Rust (programming-model.md, 10.2), as the
+# simulator is: std, Vec, closures and formatting are in, since none of it
+# runs in a service. What stays out is what would break a seed's replay on the
+# simulator (a clock of its own, threads, OS randomness, hash maps with a
+# random seed), and std handles that close on drop: descriptors are the
+# backend's, opened and closed by records.
 
 disallowed-types = [
-    { path = "std::time::Instant", reason = "the simulator owns time: Sim::now" },
-    { path = "std::time::SystemTime", reason = "the simulator owns time: Sim::wall" },
+    { path = "std::time::Instant", reason = "the backend's clock: Backend::now" },
+    { path = "std::time::SystemTime", reason = "the backend's clock: Backend::now" },
     { path = "std::collections::HashMap", reason = "iteration order depends on a random seed: BTreeMap" },
     { path = "std::collections::HashSet", reason = "iteration order depends on a random seed: BTreeSet" },
     { path = "std::hash::RandomState", reason = "iteration order would depend on a random seed: BTreeMap" },
@@ -14,18 +15,18 @@ disallowed-types = [
     { path = "std::sync::Mutex", reason = "one thread" },
     { path = "std::sync::RwLock", reason = "one thread" },
     { path = "std::fs::File", reason = "closes on drop (programming-model.md, 2.1)" },
-    { path = "std::net::TcpStream", reason = "the simulator plays the network" },
-    { path = "std::net::TcpListener", reason = "the simulator plays the network" },
-    { path = "std::net::UdpSocket", reason = "the simulator plays the network" },
+    { path = "std::net::TcpStream", reason = "sockets are the backend's, driven by records" },
+    { path = "std::net::TcpListener", reason = "sockets are the backend's, driven by records" },
+    { path = "std::net::UdpSocket", reason = "sockets are the backend's, driven by records" },
     { path = "std::os::fd::OwnedFd", reason = "closes on drop (programming-model.md, 2.1)" },
     { path = "std::process::Child", reason = "std::process is not used (io.md, 6)" },
 ]
 
 disallowed-methods = [
-    { path = "std::thread::spawn", reason = "one thread: the world is deterministic" },
+    { path = "std::thread::spawn", reason = "one thread: a seed replays" },
     { path = "std::collections::HashMap::new", reason = "a random seed: BTreeMap, or a fixed hasher" },
     { path = "std::collections::HashMap::with_capacity", reason = "a random seed: BTreeMap, or a fixed hasher" },
     { path = "std::collections::HashSet::new", reason = "a random seed: BTreeSet, or a fixed hasher" },
     { path = "std::collections::HashSet::with_capacity", reason = "a random seed: BTreeSet, or a fixed hasher" },
-    { path = "std::env::var", reason = "behaviour comes from the seed and the config" },
+    { path = "std::env::var", reason = "a scenario's behaviour comes from its backend and its arguments" },
 ]
