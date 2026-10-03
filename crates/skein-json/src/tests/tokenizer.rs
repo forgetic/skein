@@ -237,6 +237,28 @@ fn strings_and_keys_are_held_to_their_limit_once_unescaped() {
 }
 
 #[test]
+fn a_document_is_held_to_its_length_whitespace_and_all() {
+    let five = Limits { length: 5, ..LIMITS };
+    assert_eq!(read(b"[1,2]", five).pop(), Some(Event::Done), "five bytes fit five");
+    assert_eq!(failure(b"[1,2] ", five), Error::TooLong, "whitespace after the document counts");
+    let four = Limits { length: 4, ..LIMITS };
+    let events = read(b"[1,2]", four);
+    let expected = [Token::ArrayStart, number(b"1")];
+    assert_eq!(events.len(), 3);
+    for (event, token) in events.iter().zip(&expected) {
+        assert_eq!(event, &Event::Token(token.clone()));
+    }
+    assert_eq!(events.last(), Some(&Event::Failed(Error::TooLong)), "the byte that would end the 2 is past it");
+    let mut flood = Vec::from(&b"["[..]);
+    flood.extend_from_slice(&[b' '; 2000]);
+    flood.extend_from_slice(b"1]");
+    assert_eq!(failure(&flood, LIMITS), Error::TooLong, "whitespace alone cannot keep the tokenizer reading");
+    let scans = Limits { length: 6, chunk: 4, ..LIMITS };
+    assert_eq!(failure(b"\"abcdef\"", scans), Error::TooLong, "a scan that would pass it, before it is read");
+    assert_eq!(failure(b"\"abc\x01ef\"", scans), Error::Control, "a scan within it is read");
+}
+
+#[test]
 fn numbers_are_held_to_their_limit() {
     let limits = Limits { number: 3, ..LIMITS };
     assert_eq!(
@@ -382,7 +404,7 @@ fn the_largest_demand_is_the_chunk_or_a_literal() {
 
 #[test]
 fn the_worst_case_is_the_stack_and_the_longest_text() {
-    let limits = Limits { depth: 10, string: 100, number: 40, chunk: 16 };
+    let limits = Limits { depth: 10, string: 100, number: 40, chunk: 16, length: 1 << 20 };
     assert_eq!(json::worst_case(&limits), Some(10 + 100), "a container is a byte");
     assert_eq!(json::worst_case(&Limits { number: 200, ..limits }), Some(10 + 200));
     assert_eq!(json::worst_case(&Limits { chunk: 0, ..limits }), None, "a scan of nothing");

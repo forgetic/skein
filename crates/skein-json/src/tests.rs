@@ -19,7 +19,7 @@ use crate::Token;
 use crate::tokenizer::{self as json, Event, Limits, Request, Tokenizer};
 
 /// Small limits, so that a test reaches each of them.
-const LIMITS: Limits = Limits { depth: 4, string: 16, number: 8, chunk: 4 };
+const LIMITS: Limits = Limits { depth: 4, string: 16, number: 8, chunk: 4, length: 1024 };
 
 fn env(limits: Limits) -> Env<Limits> {
     Env { now: Time::ZERO, wall: Wall::EPOCH, limits }

@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! # a comment
-//! limits depth 16 string 256 number 64 chunk 64   (optional; any of them)
+//! limits depth 16 string 256 length 4096 chunk 64 (optional; any of them)
 //! object
 //! key "name"
 //! string "caf\xc3\xa9"                            (or the UTF-8 itself)
@@ -35,7 +35,7 @@ use crate::{Decoded, Outcome};
 
 /// The limits a transcript is read with, unless its expectation says
 /// otherwise.
-pub const LIMITS: Limits = Limits { depth: 32, string: 4096, number: 64, chunk: 64 };
+pub const LIMITS: Limits = Limits { depth: 32, string: 4096, number: 64, chunk: 64, length: 1 << 20 };
 
 /// A transcript and what it must decode to.
 #[derive(Clone, Debug)]
@@ -112,6 +112,7 @@ pub fn parse(text: &[u8]) -> Result<(Limits, bool, Decoded), String> {
                         b"depth" => limits.depth = value,
                         b"string" => limits.string = value,
                         b"number" => limits.number = value,
+                        b"length" => limits.length = value,
                         b"chunk" => {
                             limits.chunk = value;
                             pinned = true;
@@ -148,8 +149,8 @@ pub fn parse(text: &[u8]) -> Result<(Limits, bool, Decoded), String> {
 pub fn render(limits: &Limits, decoded: &Decoded) -> String {
     let mut out = String::new();
     if *limits != LIMITS {
-        let Limits { depth, string, number, chunk } = *limits;
-        writeln!(out, "limits depth {depth} string {string} number {number} chunk {chunk}")
+        let Limits { depth, string, number, chunk, length } = *limits;
+        writeln!(out, "limits depth {depth} string {string} number {number} chunk {chunk} length {length}")
             .expect("writing to a String");
     }
     for token in &decoded.tokens {
@@ -175,9 +176,10 @@ pub fn render(limits: &Limits, decoded: &Decoded) -> String {
     out
 }
 
-const ERRORS: [(Error, &str); 11] = [
+const ERRORS: [(Error, &str); 12] = [
     (Error::Unexpected, "unexpected"),
     (Error::Trailing, "trailing"),
+    (Error::TooLong, "too-long"),
     (Error::TooDeep, "too-deep"),
     (Error::StringTooLong, "string-too-long"),
     (Error::NumberTooLong, "number-too-long"),

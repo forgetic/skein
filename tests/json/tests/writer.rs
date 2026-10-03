@@ -11,7 +11,7 @@ use skein_json_world::{Decoded, Outcome, reference, transcript, write};
 use skein_lib::Rng;
 
 const WRITER: writer::Limits = writer::Limits { depth: 64, length: 1 << 20 };
-const READER: Limits = Limits { depth: 64, string: 4096, number: 64, chunk: 32 };
+const READER: Limits = Limits { depth: 64, string: 4096, number: 64, chunk: 32, length: 1 << 20 };
 
 /// Reads `document` back through the world from `seed`, whole.
 fn read_back(document: &[u8], seed: u64) -> Decoded {

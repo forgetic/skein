@@ -120,9 +120,16 @@ pub fn limits(rng: &mut Rng) -> Limits {
             string: draw(rng, 0, 16),
             number: draw(rng, 1, 8),
             chunk: draw(rng, 1, 8),
+            length: draw(rng, 0, 256),
         };
     }
-    Limits { depth: draw(rng, 6, 16), string: draw(rng, 64, 256), number: draw(rng, 24, 64), chunk: draw(rng, 1, 64) }
+    Limits {
+        depth: draw(rng, 6, 16),
+        string: draw(rng, 64, 256),
+        number: draw(rng, 24, 64),
+        chunk: draw(rng, 1, 64),
+        length: draw(rng, 1 << 12, 1 << 16),
+    }
 }
 
 fn draw(rng: &mut Rng, low: u32, high: u32) -> u32 {

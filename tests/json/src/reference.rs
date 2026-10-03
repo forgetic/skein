@@ -10,7 +10,10 @@
 //!   `chunk` bytes, so the bytes of a scan that the end of the document
 //!   leaves unmet are never seen, and the string is cut short;
 //! - **the order of errors at one byte:** a byte's validity before the
-//!   limit it would pass, and a character's room at its first byte.
+//!   limit it would pass, and a character's room at its first byte;
+//! - **what each delivery is,** since a delivery that would pass the
+//!   document's length fails it before it is read: a byte between tokens
+//!   and within a number, the rest of a literal, a scan of a string.
 
 use skein_json::Token;
 use skein_json::tokenizer::{Error, Limits};
@@ -44,8 +47,9 @@ impl Parser<'_> {
     fn document(&mut self) -> Result<(), Error> {
         let first = self.significant()?;
         self.value(first)?;
-        while let Some(&byte) = self.input.get(self.at) {
-            if !is_whitespace(byte) {
+        while self.at < self.input.len() {
+            self.delivered(self.at + 1)?;
+            if !is_whitespace(self.input[self.at]) {
                 return Err(Error::Trailing);
             }
             self.at += 1;
@@ -53,15 +57,24 @@ impl Parser<'_> {
         Ok(())
     }
 
-    /// The next byte that is not whitespace, read.
+    /// The next byte that is not whitespace, read, a delivery of its own.
     fn significant(&mut self) -> Result<u8, Error> {
         while let Some(&byte) = self.input.get(self.at) {
+            self.delivered(self.at + 1)?;
             self.at += 1;
             if !is_whitespace(byte) {
                 return Ok(byte);
             }
         }
         Err(Error::Truncated)
+    }
+
+    /// A delivery that ends at `end`, within the document's length.
+    fn delivered(&self, end: usize) -> Result<(), Error> {
+        if end > usize::try_from(self.limits.length).expect("fits a usize") {
+            return Err(Error::TooLong);
+        }
+        Ok(())
     }
 
     /// A value, its first byte read.
@@ -145,6 +158,7 @@ impl Parser<'_> {
         let Some(read) = self.input.get(self.at..self.at + rest.len()) else {
             return Err(Error::Truncated);
         };
+        self.delivered(self.at + rest.len())?;
         if read != rest {
             return Err(Error::Unexpected);
         }
@@ -165,6 +179,10 @@ impl Parser<'_> {
         let run = &self.input[start..end];
         let limit = usize::try_from(self.limits.number).expect("fits a usize");
         for len in 1..=run.len() {
+            // Each byte after the first is a delivery of its own.
+            if len > 1 {
+                self.delivered(start + len)?;
+            }
             let prefix = &run[..len];
             let mut completed = prefix.to_vec();
             completed.push(b'0');
@@ -176,9 +194,13 @@ impl Parser<'_> {
             }
         }
         self.at = end;
-        // Within an object or an array, only another byte ends a number.
+        // Within an object or an array, only another byte ends a number;
+        // that byte is read with it, a delivery of its own.
         if end == self.input.len() && self.depth > 0 {
             return Err(Error::Truncated);
+        }
+        if end < self.input.len() {
+            self.delivered(end + 1)?;
         }
         if !is_number(run) {
             return Err(Error::Number);
@@ -216,6 +238,7 @@ impl Parser<'_> {
                 None if rest.len() >= chunk => self.visible += chunk,
                 None => return Err(Error::Truncated),
             }
+            self.delivered(self.visible)?;
         }
         let byte = self.input[self.at];
         self.at += 1;

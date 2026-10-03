@@ -1,0 +1,6 @@
+# Whitespace without end, as far as the length allows: a peer cannot keep
+# the tokenizer reading for one token.
+limits length 1024
+object
+key "a"
+failed too-long

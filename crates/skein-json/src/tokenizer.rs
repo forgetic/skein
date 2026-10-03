@@ -36,7 +36,9 @@
 //! recursion (programming-model.md, 8). The string or number being read is
 //! held in one buffer of the longer of [`Limits::string`] and
 //! [`Limits::number`], allocated with the tokenizer, and goes up in a box of
-//! exactly its length. Past any limit, the document fails. Each entry point
+//! exactly its length. Every byte delivered counts against
+//! [`Limits::length`], so no peer keeps the tokenizer reading without end,
+//! whitespace included. Past any limit, the document fails. Each entry point
 //! emits at most [`UP_MAX_OUT`] or [`DOWN_MAX_OUT`]; [`worst_case`] is what
 //! a tokenizer holds; [`largest_demand`] is what whoever stacks it checks
 //! against the cap of the side below at startup.
@@ -66,6 +68,10 @@ pub struct Limits {
     /// The most bytes of a string's text demanded at once: the maximum of
     /// each scan to the next quote. At least one.
     pub chunk: u32,
+    /// The longest document, in bytes the stream delivers, whitespace
+    /// around it included. A delivery that would pass it fails the document
+    /// with [`Error::TooLong`], before it is read.
+    pub length: u32,
 }
 
 /// The most bytes the tokenizer demands at once: a scan of
@@ -147,6 +153,8 @@ pub enum Error {
     Unexpected,
     /// Something other than whitespace after the document: `{} {}`.
     Trailing,
+    /// A document longer than [`Limits::length`].
+    TooLong,
     /// Objects and arrays nested deeper than [`Limits::depth`].
     TooDeep,
     /// A string or key longer than [`Limits::string`] once unescaped.
@@ -205,6 +213,7 @@ impl Tokenizer {
                 expect: Expect::Value,
                 open: Stack::with_capacity(limits.depth),
                 text: List::with_capacity(text_capacity(limits)),
+                read: 0,
             },
         }
     }
@@ -364,6 +373,8 @@ struct Document {
     open: Stack<Container>,
     /// The text of the string or number being read: empty between tokens.
     text: List<u8>,
+    /// The bytes delivered so far, at most [`Limits::length`].
+    read: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -527,6 +538,14 @@ fn ended(document: &mut Document, reading: Reading, above: &mut Queue<Event>) ->
 
 /// The bytes delivered for `reading`'s demand.
 fn delivered(document: &mut Document, limits: &Limits, reading: Reading, bytes: &[u8]) -> Step {
+    let read = match u32::try_from(bytes.len()) {
+        Ok(len) => document.read.checked_add(len),
+        Err(_) => None,
+    };
+    match read {
+        Some(read) if read <= limits.length => document.read = read,
+        Some(_) | None => return Step::Fail(Error::TooLong),
+    }
     match reading {
         Reading::Byte => significant(document, limits, one(bytes)),
         Reading::Number(number) => number_byte(document, limits, number, one(bytes)),

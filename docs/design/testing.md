@@ -184,10 +184,10 @@ The JSON tokenizer runs in a machine world between a stream below that
 cuts the peer's bytes at random, ends early, idle or not, and fails, and
 a user above that demands slowly, stops, and closes in every state,
 checking the machine's contracts as it goes; every run is checked
-against a reference parser (json.md, 6). Its transcripts, nine in the shape of an LLM
-provider's and a forge's answers and twenty-nine hostile ones, decode to
-their expectations in the focused suite, with the writer reading back
-what it writes. The fuzzy suite runs 20,000 generated and mutated
+against a reference parser (json.md, 6). Its transcripts, nine in the
+shape of an LLM provider's and a forge's answers and thirty hostile ones,
+decode to their expectations in the focused suite, with the writer
+reading back what it writes. The fuzzy suite runs 20,000 generated and mutated
 documents and 5,000 cut and mutated transcripts under neighbours drawn
 from each seed, and writes 5,000 documents and reads them back.
 

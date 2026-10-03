@@ -12,7 +12,7 @@ use skein_json_world::{Decoded, Outcome, reference, write};
 use skein_lib::Rng;
 
 const WRITER: writer::Limits = writer::Limits { depth: 64, length: 1 << 20 };
-const READER: Limits = Limits { depth: 64, string: 4096, number: 64, chunk: 32 };
+const READER: Limits = Limits { depth: 64, string: 4096, number: 64, chunk: 32, length: 1 << 20 };
 
 #[test]
 fn generated_documents_are_written_and_read_back_the_same_whatever_the_neighbours() {

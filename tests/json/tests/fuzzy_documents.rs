@@ -52,9 +52,10 @@ impl Seen {
     }
 }
 
-const EVERY_ERROR: [&str; 12] = [
+const EVERY_ERROR: [&str; 13] = [
     "Failed(Unexpected)",
     "Failed(Trailing)",
+    "Failed(TooLong)",
     "Failed(TooDeep)",
     "Failed(StringTooLong)",
     "Failed(NumberTooLong)",

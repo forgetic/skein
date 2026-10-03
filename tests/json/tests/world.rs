@@ -12,7 +12,7 @@ use skein_json_world::{Outcome, reference};
 use skein_lib::Rng;
 use skein_lib::stream::Fault;
 
-const LIMITS: Limits = Limits { depth: 8, string: 64, number: 32, chunk: 16 };
+const LIMITS: Limits = Limits { depth: 8, string: 64, number: 32, chunk: 16, length: 1 << 16 };
 const SHAPE: Shape = Shape { depth: 4, width: 4, string: 8 };
 
 /// A document generated from `seed`, rendered with whitespace and escapes.

@@ -10,8 +10,8 @@ a connection's stack (programming-model.md, 4), and depends on lib only.
   tokens, by demand. An application decodes its own documents from the
   tokens, with small state machines, into its domain's types.
 - **Bounded everywhere.** Nesting is held in a `lib::Stack` of configured
-  depth, never in recursion; strings and numbers are under maximum
-  lengths.
+  depth, never in recursion; strings, numbers and the whole document are
+  under maximum lengths.
 - **No floats.** Numbers go up as validated text; the consumer parses the
   integers it expects, with checks.
 - **The writer is sized:** measure the document first, then write it,
@@ -90,7 +90,7 @@ pub enum Token {
   its one terminal event; nothing follows. It does not close the stream
   below, which its owner closes: the stream vocabulary has no close.
 - **Errors** are values: `Unexpected` (a byte the grammar does not allow
-  there), `Trailing`, `TooDeep`, `StringTooLong`, `NumberTooLong`,
+  there), `Trailing`, `TooLong`, `TooDeep`, `StringTooLong`, `NumberTooLong`,
   `Number` (a number that is not one: `01`, `1.`, `-`), `Escape`,
   `Surrogate` (half a pair), `Utf8`, `Control` (an unescaped control
   character), `Truncated` (the stream ended first), and `Stream(Fault)`.
@@ -98,6 +98,11 @@ pub enum Token {
   `Next`, for bytes from below, for a `Close` after its outcome, or for
   nothing once closed. Machines keep no timers (programming-model.md, 4):
   the connection arms its progress deadline while it waits for bytes.
+- **Progress is counted in tokens,** not in demands met. Between tokens
+  and within a number the tokenizer demands one byte at a time, and
+  single bytes are not progress (programming-model.md, 7): the connection
+  counts a token sent up, or the chunks received below it, and
+  `Limits::length` bounds the bytes a peer can send for any one token.
 
 ### 3.2 The side below
 
@@ -135,9 +140,13 @@ pub struct Limits {
     pub string: u32,   // a string or key, in bytes once unescaped: past it, StringTooLong
     pub number: u32,   // a number's text: past it, NumberTooLong
     pub chunk: u32,    // the most of a string's text demanded at once: a scan's max, at least 1
+    pub length: u32,   // the document, in bytes delivered, whitespace included: past it, TooLong
 }
 ```
 
+- **`length`** is counted a delivery at a time, before the delivery is
+  read: a delivery that would pass it fails the document. Without it, a
+  peer could hold one `Next` unanswered for ever with whitespace.
 - **`worst_case(&limits)`** is the stack of open containers and one
   buffer for the text being read, the longer of `string` and `number`,
   both allocated with the tokenizer. A delivery is dropped within the step
@@ -275,7 +284,8 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
     and short escapes, lone and swapped surrogates, control characters,
     numbers that are not numbers or are too long, a truncated response,
     a second document, a trailing comma, quotes and keys JavaScript
-    allows, an empty stream, a byte order mark.
+    allows, an empty stream, a byte order mark, and whitespace without
+    end.
 
   Each decodes to its expectation under several seeds and scan maximums,
   and cut anywhere, as the reference reads the prefix. A transcript
