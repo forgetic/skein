@@ -255,7 +255,7 @@ pub fn up(tokenizer: &mut Tokenizer, env: &Env<Limits>, ev: Up, above: &mut Queu
         State::Idle(held) => match ev {
             Up::Bytes(_) => unreachable!("bytes delivered without a read demand"),
             Up::End => State::Idle(held_end(held)),
-            Up::Failed(fault) => State::Idle(Held::Failed(fault)),
+            Up::Failed(fault) => State::Idle(held_failed(held, fault)),
             Up::Room => unreachable!("the tokenizer asks for no room"),
         },
         State::Over => match ev {
@@ -322,7 +322,7 @@ enum Held {
     End,
     /// The stream ended, after the byte that ended a number.
     ByteThenEnd(u8),
-    /// The stream failed, whatever was held before.
+    /// The stream failed before it ended, whatever was held before.
     Failed(Fault),
 }
 
@@ -489,6 +489,16 @@ fn held_end(held: Held) -> Held {
         Held::Nothing => Held::End,
         Held::Byte(byte) => Held::ByteThenEnd(byte),
         // Nothing comes after an end or a failure, a second end included.
+        Held::End | Held::ByteThenEnd(_) | Held::Failed(_) => held,
+    }
+}
+
+/// What an idle tokenizer holds once the stream has failed. After the end,
+/// a failure says only that the stream can no longer send: what was read
+/// stands.
+fn held_failed(held: Held, fault: Fault) -> Held {
+    match held {
+        Held::Nothing | Held::Byte(_) => Held::Failed(fault),
         Held::End | Held::ByteThenEnd(_) | Held::Failed(_) => held,
     }
 }

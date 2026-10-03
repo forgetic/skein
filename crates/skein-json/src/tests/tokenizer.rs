@@ -152,7 +152,7 @@ fn a_byte_held_after_a_number_is_read_before_an_end_held_after_it() {
 }
 
 #[test]
-fn a_failure_after_the_end_overrides_what_was_held() {
+fn a_failure_after_the_end_leaves_what_was_read() {
     let mut machine = Machine::new(LIMITS);
     assert_eq!(machine.down(Request::Next), (None, demand(Read::Fill(1))));
     assert_eq!(machine.bytes(b"["), (Some(Event::Token(Token::ArrayStart)), None));
@@ -161,14 +161,28 @@ fn a_failure_after_the_end_overrides_what_was_held() {
     assert_eq!(machine.bytes(b"]"), (Some(Event::Token(number(b"3"))), None), "the ] is held");
     assert_eq!(machine.up(Up::End), (None, None));
     assert_eq!(machine.up(Up::Failed(Fault::Reset)), (None, None));
-    assert_eq!(machine.down(Request::Next), (Some(Event::Failed(Error::Stream(Fault::Reset))), None));
+    assert_eq!(machine.down(Request::Next), (Some(Event::Token(Token::ArrayEnd)), None));
+    assert_eq!(machine.down(Request::Next), (Some(Event::Done), None), "the document was whole");
 
     let mut machine = Machine::new(LIMITS);
     assert_eq!(machine.down(Request::Next), (None, demand(Read::Fill(1))));
     assert_eq!(machine.bytes(b"{"), (Some(Event::Token(Token::ObjectStart)), None));
     assert_eq!(machine.up(Up::End), (None, None));
     assert_eq!(machine.up(Up::Failed(Fault::Other)), (None, None));
-    assert_eq!(machine.down(Request::Next), (Some(Event::Failed(Error::Stream(Fault::Other))), None));
+    assert_eq!(machine.down(Request::Next), (Some(Event::Failed(Error::Truncated)), None), "as the end left it");
+}
+
+#[test]
+fn a_failure_before_the_end_overrides_a_held_byte() {
+    let mut machine = Machine::new(LIMITS);
+    assert_eq!(machine.down(Request::Next), (None, demand(Read::Fill(1))));
+    assert_eq!(machine.bytes(b"["), (Some(Event::Token(Token::ArrayStart)), None));
+    assert_eq!(machine.down(Request::Next), (None, demand(Read::Fill(1))));
+    assert_eq!(machine.bytes(b"3"), (None, demand(Read::Fill(1))));
+    assert_eq!(machine.bytes(b"]"), (Some(Event::Token(number(b"3"))), None), "the ] is held");
+    assert_eq!(machine.up(Up::Failed(Fault::Reset)), (None, None));
+    assert_eq!(machine.up(Up::End), (None, None), "nothing follows a failure");
+    assert_eq!(machine.down(Request::Next), (Some(Event::Failed(Error::Stream(Fault::Reset))), None));
 }
 
 #[test]

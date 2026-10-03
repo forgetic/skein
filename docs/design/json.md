@@ -129,10 +129,11 @@ below the tokenizer is held to it, io's included when it is built:
   is idle, only with nothing buffered. An idle tokenizer holds it for the
   next `Next`, which reads nothing more. A side below that reported the
   end with bytes still buffered would cut a whole document short.
-- **`Failed` may come at any time,** a demand outstanding or not, before
-  or after `End`. It fails a document whose outcome has not gone up,
-  whatever was read before it; idle, the tokenizer holds it for the next
-  `Next`.
+- **`Failed` may come at any time,** a demand outstanding or not. Before
+  `End`, it fails a document whose outcome has not gone up, whatever was
+  read before it; idle, the tokenizer holds it for the next `Next`. After
+  `End`, it says only that the stream can no longer send: what was read
+  stands, and the document ends as the end left it.
 - **`Bytes` never come without a demand,** nor `Room` without room asked
   for: asserted. The exception is a delivery already on its way when a
   `Close` withdrew the demand it meets, which a closed tokenizer drops.
