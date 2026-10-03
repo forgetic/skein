@@ -79,6 +79,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-io-world"
+version = "0.0.0"
+dependencies = [
+ "skein-heap",
+ "skein-io",
+ "skein-lib",
+ "skein-shell",
+ "skein-sim",
+]
+
+[[package]]
 name = "skein-json"
 version = "0.0.0"
 dependencies = [
