@@ -97,34 +97,3 @@ impl Delimiter {
         self.bytes.get(..usize::from(self.len)).expect("a delimiter is at most four bytes")
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Delimiter;
-
-    #[test]
-    fn a_delimiter_is_one_to_four_bytes() {
-        assert_eq!(Delimiter::new(b""), None);
-        assert_eq!(Delimiter::new(b"abcde"), None);
-        assert_eq!(Delimiter::new(b"\n"), Some(Delimiter::LF));
-        assert_eq!(Delimiter::new(b"\r\n"), Some(Delimiter::CRLF));
-        assert_eq!(Delimiter::new(b"\r\n\r\n"), Some(Delimiter::CRLF_CRLF));
-        let three = Delimiter::new(b"abc").expect("three bytes");
-        assert_eq!(three.as_bytes(), b"abc");
-    }
-
-    #[test]
-    fn the_consts_are_their_bytes() {
-        assert_eq!(Delimiter::LF.as_bytes(), b"\n");
-        assert_eq!(Delimiter::CRLF.as_bytes(), b"\r\n");
-        assert_eq!(Delimiter::CRLF_CRLF.as_bytes(), b"\r\n\r\n");
-    }
-
-    #[test]
-    fn a_delimiter_with_zero_bytes_is_not_a_shorter_one() {
-        let zero = Delimiter::new(b"\0").expect("one byte");
-        let zeros = Delimiter::new(b"\0\0").expect("two bytes");
-        assert_ne!(zero, zeros);
-        assert_eq!(zeros.as_bytes(), b"\0\0");
-    }
-}

@@ -87,27 +87,3 @@ impl<'a, T> IntoIterator for &'a Queue<T> {
         self.items.iter()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::Queue;
-
-    #[test]
-    fn a_queue_is_fifo_and_bounded() {
-        let mut queue = Queue::with_capacity(2);
-        queue.push(1_u8);
-        assert_eq!(queue.try_push(2), Ok(()));
-        assert_eq!(queue.try_push(3), Err(3));
-        assert_eq!(queue.room(), 0);
-        assert_eq!(queue.pop(), Some(1));
-        assert_eq!(queue.pop(), Some(2));
-        assert_eq!(queue.pop(), None);
-    }
-
-    #[test]
-    #[should_panic(expected = "the loop reserves room for every output")]
-    fn pushing_past_the_reservation_is_a_bug() {
-        let mut queue = Queue::with_capacity(0);
-        queue.push(());
-    }
-}

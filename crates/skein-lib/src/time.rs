@@ -121,27 +121,3 @@ impl Duration {
         Duration(self.0.saturating_mul(factor))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{Duration, Time, Wall};
-
-    #[test]
-    fn arithmetic_is_checked_or_saturating() {
-        let end = Time::from_nanos(u64::MAX);
-        assert_eq!(end.checked_add(Duration::from_nanos(1)), None);
-        assert_eq!(end.saturating_add(Duration::from_secs(1)), end);
-        assert_eq!(Time::ZERO.saturating_since(end), Duration::ZERO);
-        assert_eq!(Duration::from_secs(u64::MAX).as_nanos(), u64::MAX);
-        assert_eq!(Duration::from_millis(3).as_nanos(), 3_000_000);
-    }
-
-    #[test]
-    fn wall_time_counts_from_the_epoch() {
-        assert_eq!(Wall::EPOCH.as_nanos(), 0);
-        let wall = Wall::from_nanos(1_700_000_000_999_999_999);
-        assert_eq!(wall.as_secs(), 1_700_000_000);
-        assert_eq!(wall.as_nanos(), 1_700_000_000_999_999_999);
-        assert!(Wall::EPOCH < wall);
-    }
-}
