@@ -423,7 +423,14 @@ impl Owner {
                 if let Some(conn) = self.conns.get_mut(&owner) {
                     conn.error = Some(error);
                 } else {
-                    self.listeners.get_mut(&owner).expect("an entity of this owner").error = Some(error);
+                    let listener = self.listeners.get_mut(&owner).expect("an entity of this owner");
+                    listener.error = Some(error);
+                    // A listener that never listened: its clients dial where
+                    // nothing listens, and are refused, as by a server that
+                    // is not there.
+                    if listener.addr.is_none() {
+                        directory.insert(listener.serve.name, nowhere(listener.serve.addr));
+                    }
                 }
             }
             Event::Closed { owner } => {
@@ -550,6 +557,11 @@ impl Owner {
             requests.push_back(Request::Stream { stream: socket, down: Down::Demand { read, room } });
         }
     }
+}
+
+/// An address of `addr`'s host where nothing listens: port 1.
+fn nowhere(addr: Addr) -> Addr {
+    Addr::new(addr.ip(), 1)
 }
 
 fn close(conn: &mut Conn, socket: Token, requests: &mut VecDeque<Request>) {
