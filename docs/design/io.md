@@ -278,27 +278,34 @@ it.
 Open in the up pass, and by `resume` after a request in the down pass
 (programming-model.md, 2):
 
-1. `Bytes`, if the intake meets the read demand, which is then spent;
-2. `Room`, if room was demanded, the writer takes sends, and the output
-   has that many bytes and one more `Send` free; spent too;
-3. `End`, once, if the peer ended and the read demand is not met: with
-   no read demand, once the intake is empty;
-4. a `Recv`, if none is in flight and the intake has room again.
+1. the demand's answer, if there is one: `Bytes`, if the intake meets its
+   read (never after `End`); or else `Room`, if it asks for room, the
+   writer takes sends, and the output has that many bytes and one more
+   `Send` free. Either answer ends the demand, read and room;
+2. `End`, once, if the peer ended and a read is outstanding that can
+   never be met, or none is and the intake is empty;
+3. a `Recv`, if none is in flight and the intake has room again.
 
-- **Each demand is met at most once,** against the demand io holds when
-  it delivers; io holds no delivery made for an earlier one. A delivery
-  told in the up pass reaches the layer above in that same pass, before
-  any demand the layer makes there reaches io, in the down pass. So a
-  delivery the layer reads after it changed its demand in that pass, on
-  an event told before it, was met against the demand before: a `Room`
-  grants the room io held when the pass began, not room asked for since.
-  Dropping such a delivery, or sending only within that room, is the
-  layer above's (the worlds' owner does the latter).
-- **`End` comes after what a demand could take,** and `Bytes` may follow
-  it: `End` says that nothing more will arrive, and a later demand the
-  intake can still meet is met. A read past the end is never met, so a
-  reader that must take every byte caps its demands by what it expects,
-  as a protocol's framing does.
+- **A demand is answered at most once,** by `Bytes` or by `Room`,
+  whichever io can give first, against the demand it holds when it
+  answers; nothing is outstanding then until the next. A `Demand` of
+  nothing with no room withdraws the one outstanding. io holds no answer
+  made for an earlier demand, but an answer told in the up pass reaches
+  the layer above in that same pass, before any demand the layer makes
+  there reaches io, in the down pass. So an answer the layer reads after
+  it changed its demand in that pass, on an event told before it, answers
+  the demand before: a `Room` grants the room io held when the pass
+  began, not room asked for since. Dropping such an answer, or sending
+  only within that room, is the layer above's (the worlds' owner does the
+  latter).
+- **`End` comes once nothing held can meet a demand.** A read demand
+  that crosses it, or comes after it, is accepted and never answered with
+  bytes, and what the intake still holds is dropped with the stream. A
+  read past the end is never met, so a reader that must take every byte
+  caps its demands by what it expects, as a protocol's framing does.
+  Room is still granted after `End`: the stream may still send, to a peer
+  that only half-closed, and a `Failed` after `End` says only that it
+  can no longer.
 - **Room grants one more `Send`** of up to that many bytes, and the
   output counts a `Send` in flight until all of it is sent. A `Send` past
   the output cap or `Limits::sends`, or after `Finish`, is the layer

@@ -140,11 +140,28 @@ fn the_end_is_told_once_behind_what_the_intake_holds() {
     ask(&mut rig, socket, Read::Fill(2), 0).nothing();
     assert_eq!(rig.next().events, [up(Up::End)], "a demand that cannot be met any more");
     ask(&mut rig, socket, Read::Fill(1), 0).nothing();
-    assert_eq!(
-        rig.next().events,
-        [bytes(b"b")],
-        "what the intake holds can still be demanded, and End is not told again"
-    );
+    rig.next().nothing();
+    assert!(rig.next().events.is_empty(), "a demand after the end is never answered, and End is not told again");
+}
+
+#[test]
+fn a_demand_is_answered_once_by_its_bytes_or_else_its_room() {
+    let mut rig = Rig::new(limits());
+    let (socket, recv) = connected(&mut rig, owner(1), FD);
+    let recv = filled(&mut rig, recv, b"ab").take(Kind::Recv);
+    // Both could be given: the bytes answer it, and the room is not granted.
+    ask(&mut rig, socket, Read::Fill(2), 4).nothing();
+    assert_eq!(rig.next().events, [bytes(b"ab")]);
+    let out = filled(&mut rig, recv, b"cd");
+    assert!(out.events.is_empty(), "answered: nothing is outstanding until the next demand");
+    // Only the room can be given: it answers, and the read is dropped.
+    ask(&mut rig, socket, Read::Fill(4), 4).nothing();
+    assert_eq!(rig.next().events, [up(Up::Room)]);
+    rig.next().nothing();
+    // A demand of nothing withdraws the one outstanding.
+    ask(&mut rig, socket, Read::Fill(3), 0).nothing();
+    ask(&mut rig, socket, Read::Nothing, 0).nothing();
+    rig.next().nothing();
 }
 
 #[test]

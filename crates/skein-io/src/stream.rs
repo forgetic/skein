@@ -64,8 +64,8 @@ pub(crate) struct Open {
     output: Output,
 }
 
-/// What the owner's state needs (lib.md, 7): a read and output room, each
-/// spent when it is delivered.
+/// What the owner's state needs (lib.md, 7): a read and output room, answered
+/// once, by the bytes or the room, which ends both.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Demand {
     read: Read,
@@ -624,9 +624,10 @@ fn open(
     }
 }
 
-/// What the owner's demand asks for and the stream can give, told: bytes,
-/// room and the end; and a receive armed again once the intake has room
-/// (io.md, 3.3).
+/// The owner's demand answered, if the stream can: by the bytes it reads,
+/// or else by the room it asks for, and either answer ends it (lib.md, 7).
+/// Then the end, once nothing held can meet a demand; and a receive armed
+/// again once the intake has room (io.md, 3.3).
 fn deliver(
     open: &mut Open,
     id: Id<Entity>,
@@ -636,16 +637,22 @@ fn deliver(
     subs: &mut Queue<Submit>,
 ) {
     let owner = open.owner;
-    if let Some(bytes) = open.intake.meet(open.demand.read) {
+    // After the end, a demand is never answered with bytes, crossing it or
+    // not; what the intake still holds is dropped with it.
+    let bytes = match open.reader {
+        Reader::Told => None,
+        Reader::Receiving(_) | Reader::Full | Reader::Ended => open.intake.meet(open.demand.read),
+    };
+    if let Some(bytes) = bytes {
         up.push(Event::Stream { owner, up: Up::Bytes(bytes) });
-        open.demand.read = Read::Nothing;
-    }
-    if open.demand.room > 0 && open.writer.takes_sends() && open.output.fits(open.demand.room, env.limits.output) {
+        open.demand = Demand { read: Read::Nothing, room: 0 };
+    } else if open.demand.room > 0 && open.writer.takes_sends() && open.output.fits(open.demand.room, env.limits.output)
+    {
         up.push(Event::Stream { owner, up: Up::Room });
-        open.demand.room = 0;
+        open.demand = Demand { read: Read::Nothing, room: 0 };
     }
-    // With no read demand, the end waits behind what the intake holds, which
-    // a later demand may still take.
+    // With a read outstanding, the end comes once it can never be met; with
+    // none, once nothing is held that a demand could take.
     if open.reader == Reader::Ended && (open.demand.read != Read::Nothing || open.intake.is_empty()) {
         up.push(Event::Stream { owner, up: Up::End });
         open.reader = Reader::Told;

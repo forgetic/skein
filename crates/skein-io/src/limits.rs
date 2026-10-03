@@ -114,14 +114,14 @@ pub struct MaxOut {
 }
 
 /// `resume`: a refusal's `Failed` and `Closed`; or a connect's `Connecting`;
-/// or a stream's `Bytes`, `Room` and `End`, and the receive the intake has
-/// room for again; or a listener's accept.
-pub const MAX_OUT_RESUME: MaxOut = MaxOut { events: 3, submissions: 1 };
+/// or a stream's answer to its demand (`Bytes` or `Room`) and `End`, and the
+/// receive the intake has room for again; or a listener's accept.
+pub const MAX_OUT_RESUME: MaxOut = MaxOut { events: 2, submissions: 1 };
 
-/// `up`: a stream's `Bytes`, `Room` and `End`, or an entity's `Failed` and
-/// `Closed`; the operation that follows the one completed, and a receive the
-/// intake has room for again.
-pub const MAX_OUT_UP: MaxOut = MaxOut { events: 3, submissions: 2 };
+/// `up`: a stream's answer to its demand (`Bytes` or `Room`) and `End`, or an
+/// entity's `Failed` and `Closed`; the operation that follows the one
+/// completed, and a receive the intake has room for again.
+pub const MAX_OUT_UP: MaxOut = MaxOut { events: 2, submissions: 2 };
 
 /// `fire`: the cancels of a closing stream's receive and send.
 pub const MAX_OUT_FIRE: MaxOut = MaxOut { events: 0, submissions: 2 };

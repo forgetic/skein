@@ -164,10 +164,11 @@ pub struct Conn {
     pub finished: bool,
     /// The demand it last asked io for: a read, and room.
     pub asked: (Read, u32),
-    /// The room io held when this stage began: what a `Room` told in this
-    /// stage grants. A demand made in this stage reaches io only in the down
-    /// pass, after every delivery of this one (io.md, 3.3).
-    held: u32,
+    /// The demand io held when this stage began: what an answer told in this
+    /// stage answers, `Room` granting its room. A demand made in this stage
+    /// reaches io only in the down pass, after every answer of this one
+    /// (io.md, 3.3).
+    held: (Read, u32),
     /// The next read it will demand, drawn when it is first demanded.
     pub next: Option<Read>,
     pub closed_at: Option<Time>,
@@ -210,7 +211,7 @@ impl Conn {
             error: None,
             finished: false,
             asked: (Read::Nothing, 0),
-            held: 0,
+            held: (Read::Nothing, 0),
             next: None,
             closed_at: None,
         }
@@ -220,6 +221,15 @@ impl Conn {
     #[must_use]
     pub fn broken(&self) -> bool {
         self.failed.is_some() || self.error.is_some()
+    }
+
+    /// io answered the demand it held, which ends it, read and room (lib.md,
+    /// 7); unless the connection has asked for another since, io holds none.
+    fn answered(&mut self) {
+        if self.asked == self.held {
+            self.asked = (Read::Nothing, 0);
+        }
+        self.held = (Read::Nothing, 0);
     }
 
     /// How many bytes it has yet to receive, if it knows; a framed one, its
@@ -350,7 +360,7 @@ impl Owner {
     /// Its stage begins: io holds what it asked for by the end of the last.
     pub fn begin(&mut self) {
         for conn in self.conns.values_mut() {
-            conn.held = conn.asked.1;
+            conn.held = conn.asked;
         }
     }
 
@@ -468,7 +478,7 @@ impl Owner {
         let socket = conn.socket.expect("a stream told is bound or connected");
         match up {
             Up::Bytes(bytes) => {
-                conn.asked.0 = Read::Nothing;
+                conn.answered();
                 conn.next = None;
                 conn.received.extend_from_slice(&bytes);
                 if conn.plan.echo {
@@ -477,11 +487,8 @@ impl Owner {
             }
             Up::Room => {
                 // Granted for the room io held, not for one asked since.
-                let room = conn.held;
-                if conn.asked.1 == conn.held {
-                    conn.asked.1 = 0;
-                }
-                conn.held = 0;
+                let room = conn.held.1;
+                conn.answered();
                 let bytes: Box<[u8]> = if conn.sent < conn.plan.send.len() {
                     let end = conn.plan.send.len().min(conn.sent + len(room));
                     let chunk = Box::from(&conn.plan.send[conn.sent..end]);

@@ -31,7 +31,7 @@ fn an_exchange_through_io_over_the_ring() {
     let serve = Serve {
         name: "server",
         addr: local(0),
-        answers: vec![Some(echo("echo", 64, Reads::Mixed(16)))],
+        answers: vec![Some(echo("echo", limits.largest_room(), Reads::Mixed(16)))],
         close: ServeClose::Answered(at(10_000)),
     };
     let client = expecting(plan("client", sent.clone(), 32, Reads::Mixed(16)), &sent);

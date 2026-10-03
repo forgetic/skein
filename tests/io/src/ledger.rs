@@ -5,8 +5,8 @@
 //! - One `Closed` per entity with an owner, the last event naming it, and
 //!   `Failed` and `End` once each; nothing but `Closed` after the owner's own
 //!   close; `Connecting` before `Connected`.
-//! - `Bytes` only against a read demand, exactly what it demanded, and each
-//!   demand met once; `Room` only against room asked for: no buffer past its
+//! - Each demand answered once, by `Bytes` exactly what it reads, or by
+//!   `Room` if it asks for room; no `Bytes` after `End`: no buffer past its
 //!   cap.
 //! - Every socket announced is answered once.
 
@@ -146,18 +146,20 @@ impl Ledger {
                 assert!(told.connected, "a stream event once connected or bound: {event:?}");
                 assert!(!told.failed && !told.closing, "only Closed after Failed or the owner's close: {event:?}");
                 match up {
+                    // Either answer ends the demand (lib.md, 7).
                     Up::Bytes(bytes) => {
+                        assert!(!told.ended, "no Bytes after End");
                         assert!(
                             met(told.read, bytes),
                             "Bytes exactly as demanded: {:?}, {} bytes",
                             told.read,
                             bytes.len()
                         );
-                        told.read = Read::Nothing;
+                        (told.read, told.room) = (Read::Nothing, 0);
                     }
                     Up::Room => {
                         assert!(told.room > 0, "Room only when room was asked for");
-                        told.room = 0;
+                        (told.read, told.room) = (Read::Nothing, 0);
                     }
                     Up::End => {
                         assert!(!told.ended, "End once");
