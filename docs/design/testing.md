@@ -89,8 +89,9 @@ step at the most it held of its own, less what it handed out in its
 requests, against its worst case (programming-model.md, 6.3). Every world
 that checks memory uses it, whatever its tier (testing-strategy.md, 6), in
 a test binary of its own that declares it. It measures; it runs no world.
-In a simulated world, the check at every iteration is the world harness's,
-which knows the worst cases of the services it hosts (simulator.md, 5).
+In a simulated world, the check at every iteration is the world harness's:
+the live heap against the sum of the worst cases of the services it hosts
+(simulator.md, 5).
 
 ## 6. Layout
 
@@ -121,9 +122,11 @@ and each file in its `tests/` is a test binary of its own, a fuzzy one
 when its name starts with `fuzzy_`. `tests/clippy.toml` bans what would
 make a run unrepeatable: hash maps with a random seed, the system clocks,
 threads. Each backend of the conformance suite is implemented beside the
-tests that run the suite against it. A crate's memory test is a binary of
-its own, `tests/memory.rs`, as the global allocator it declares is the
-binary's: its other tests, and every sweep, run on the system's.
+tests that run the suite against it. A crate's memory tests are binaries
+of their own, as the global allocator a binary declares is the whole
+binary's: `tests/memory.rs`, and `tests/fuzzy_memory.rs` for a sweep
+against the worst case (testing-strategy.md, 8). The crate's other tests
+run on the system allocator.
 
 What a crate under `testing/` holds is shared by the tests of more than
 one crate, and is ordinary Rust held to the step crates' lints, each with
@@ -214,5 +217,12 @@ transition coverage, fuzzing.
   ledger, trace and referee, whether they move into skein as a crate of
   their own, and how much of it stays ordinary Rust. Its heap meter has
   moved already: `skein-heap` (section 5).
+- **Attributing heap to each service in a shared thread.** The services
+  of a simulated world and the simulator run on one thread, and a
+  service's submit and reap run simulator code, so the counting allocator
+  sees one heap: a world checks the total against the sum of the services'
+  worst cases (simulator.md, 5). Checking each service against its own
+  would take attributing every allocation to the code that made it, and
+  every hand-off between them.
 - The real loop in CI and sanitizers on the ring adapter are the shell's
   (shell.md, 10).

@@ -93,10 +93,16 @@ small buffers so that sends are cut and stall.
   closed.
 
 Memory is not the simulator's to check, though a simulated world checks it
-at every iteration (testing-strategy.md, 6): the world's harness, whose
+at every iteration (testing-strategy.md, 6). The world's harness, whose
 loop calls each service's `iterate` and which knows their worst cases,
-measures each with the counting allocator, `skein-heap` (testing.md, 5),
-against its worst case (programming-model.md, 6.3).
+checks with the counting allocator, `skein-heap` (testing.md, 5), the live
+heap against the sum of the hosted services' worst cases
+(programming-model.md, 6.3). It checks the total, not each service: the
+services and the simulator share one thread, and a service's submit and
+reap run simulator code, so the allocator cannot tell their heaps apart
+(testing.md, 9). The simulator's own heap (its trace, the bytes in its
+network) is left out by metering around the simulator's calls: what the
+heap grew by within them is the simulator's.
 
 ## 6. Testing
 
@@ -120,7 +126,8 @@ against its worst case (programming-model.md, 6.3).
 - **A state digest** in the trace, beside the records (lib.md, 11).
 
 The check of memory at every iteration is not the simulator's but the
-world harness's (section 5). The counting allocator it measures with is
-built, in `testing/skein-heap` (testing.md, 6); the check comes with the
-first simulated world that hosts a service, a service's own world or
-skein's examples (testing.md, 8).
+world harness's (section 5), and not built yet: no harness leaves the
+simulator's heap out. The counting allocator it measures with is built, in
+`testing/skein-heap` (testing.md, 6); the check comes with the first
+simulated world that hosts a service, a service's own world or skein's
+examples (testing.md, 8).
