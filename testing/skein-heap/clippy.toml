@@ -1,0 +1,21 @@
+# The counting allocator is ordinary Rust (programming-model.md, 10.2), as the
+# simulator is: std, its per-thread cells, closures and formatting are in,
+# since none of it runs in a service. What stays out is what would make a
+# test's run unrepeatable: a clock, threads, OS randomness, hash maps with a
+# random seed.
+
+disallowed-types = [
+    { path = "std::time::Instant", reason = "a test's clock is its world's" },
+    { path = "std::time::SystemTime", reason = "a test's clock is its world's" },
+    { path = "std::collections::HashMap", reason = "iteration order depends on a random seed: BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order depends on a random seed: BTreeSet" },
+    { path = "std::hash::RandomState", reason = "iteration order would depend on a random seed: BTreeMap" },
+    { path = "std::sync::Arc", reason = "one thread, one owner" },
+    { path = "std::sync::Mutex", reason = "counts are each thread's own" },
+    { path = "std::sync::RwLock", reason = "counts are each thread's own" },
+]
+
+disallowed-methods = [
+    { path = "std::thread::spawn", reason = "counts are each thread's own: a step is measured on the thread it runs on" },
+    { path = "std::env::var", reason = "what a meter checks comes from its test" },
+]
