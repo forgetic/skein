@@ -86,6 +86,7 @@ version = "0.0.0"
 name = "skein-lib-tests"
 version = "0.0.0"
 dependencies = [
+ "skein-heap",
  "skein-lib",
 ]
 

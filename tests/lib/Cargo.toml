@@ -1,6 +1,6 @@
 [package]
 name = "skein-lib-tests"
-description = "lib's comparisons with naive functions, run long: the byte search, and the intake against a plain reference"
+description = "lib's comparisons with naive functions, run long: the byte search, and the intake against a plain reference; and each container's worst case against the counting allocator"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,10 @@ publish.workspace = true
 
 [dependencies]
 skein-lib.workspace = true
+
+# The counting allocator, for tests/memory.rs only.
+[dev-dependencies]
+skein-heap.workspace = true
 
 # Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.
 # tests/clippy.toml bans what would make a run unrepeatable.
