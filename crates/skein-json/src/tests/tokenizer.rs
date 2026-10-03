@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use skein_lib::stream::{Delimiter, Fault, Read, Up};
 
-use super::{LIMITS, Machine, boxed, demand, failure, key, number, read, string, tokens};
+use super::{LIMITS, Machine, demand, failure, key, number, read, string, tokens};
 use crate::Token;
 use crate::tokenizer::{self as json, Error, Event, Limits, Request, Waiting};
 
@@ -93,8 +93,9 @@ fn an_escaped_quote_ends_a_scan_but_not_the_string() {
     assert_eq!(machine.down(Request::Next), (None, demand(Read::Fill(1))));
     assert_eq!(machine.bytes(b"\""), (None, demand(scan(LIMITS.chunk))));
     assert_eq!(machine.bytes(b"a\\\""), (None, demand(scan(LIMITS.chunk))));
-    assert_eq!(machine.bytes(b"\\"), (None, demand(scan(LIMITS.chunk))), "a backslash at the scan's maximum");
-    assert_eq!(machine.bytes(b"\"b\""), (Some(Event::Token(string(b"a\"\"b"))), None));
+    assert_eq!(machine.bytes(b"bcd\\"), (None, demand(scan(LIMITS.chunk))), "a backslash at the scan's maximum");
+    assert_eq!(machine.bytes(b"\""), (None, demand(scan(LIMITS.chunk))), "the quote it escapes");
+    assert_eq!(machine.bytes(b"e\""), (Some(Event::Token(string(b"a\"bcd\"e"))), None));
 }
 
 #[test]
@@ -187,17 +188,19 @@ fn a_failure_before_the_end_overrides_a_held_byte() {
 
 #[test]
 fn the_stream_failing_fails_the_document_in_any_reading() {
-    for prefix in [&b""[..], b"[", b"[\"ab", b"[1", b"[t"] {
+    // Each delivery as its demand asks: a byte, or a scan of the chunk.
+    let readings: [&[&[u8]]; 5] = [&[], &[b"["], &[b"[", b"\"", b"abcd"], &[b"[", b"1"], &[b"[", b"t"]];
+    for deliveries in readings {
         let mut machine = Machine::new(LIMITS);
         let mut demanded = machine.down(Request::Next).1;
-        for &byte in prefix {
-            demanded = match machine.bytes(&[byte]) {
+        for delivery in deliveries {
+            demanded = match machine.bytes(delivery) {
                 (Some(Event::Token(_)), None) => machine.down(Request::Next).1,
                 (None, down) => down,
-                other => panic!("{other:?} reading {}", prefix.escape_ascii()),
+                other => panic!("{other:?} reading {deliveries:?}"),
             };
         }
-        assert!(demanded.is_some(), "{} is read on", prefix.escape_ascii());
+        assert!(demanded.is_some(), "{deliveries:?} is read on");
         assert_eq!(machine.up(Up::Failed(Fault::Invalid)), (Some(Event::Failed(Error::Stream(Fault::Invalid))), None));
         assert_eq!(machine.tokenizer.waiting(), Waiting::Close);
     }
@@ -446,20 +449,19 @@ fn the_worst_case_is_the_stack_the_longest_text_and_the_largest_delivery() {
 }
 
 #[test]
-fn deliveries_cut_anywhere_in_a_character_read_the_same() {
-    // Each scan delivers what the side below held, so a test of the cuts
-    // is a test of the scan's maximum; the step is fed by hand here.
-    let text = "aé€😀".as_bytes();
-    for cut in 1..text.len() {
-        let mut machine = Machine::new(Limits { chunk: 16, ..LIMITS });
-        assert_eq!(machine.down(Request::Next), (None, demand(Read::Fill(1))));
-        assert_eq!(machine.bytes(b"\""), (None, demand(scan(16))));
-        let (first, second) = text.split_at_checked(cut).unwrap();
-        assert_eq!(machine.bytes(first), (None, demand(scan(16))), "cut at {cut}");
-        let mut last = Vec::from(second);
-        last.push(b'"');
-        let (event, down) = machine.up(Up::Bytes(boxed(&last)));
-        assert_eq!(event, Some(Event::Token(string(text))), "cut at {cut}");
-        assert_eq!(down, None);
-    }
+#[should_panic(expected = "a scan delivers through its quote or its maximum")]
+fn a_scan_short_of_its_maximum_without_its_quote_is_the_side_belows_bug() {
+    let mut machine = Machine::new(Limits { chunk: 4, ..LIMITS });
+    drop(machine.down(Request::Next));
+    drop(machine.bytes(b"\""));
+    drop(machine.bytes(b"a"));
+}
+
+#[test]
+#[should_panic(expected = "a scan delivers through its quote or its maximum")]
+fn a_scan_past_its_maximum_is_the_side_belows_bug() {
+    let mut machine = Machine::new(Limits { chunk: 4, ..LIMITS });
+    drop(machine.down(Request::Next));
+    drop(machine.bytes(b"\""));
+    drop(machine.bytes(b"bcdefghij\""));
 }

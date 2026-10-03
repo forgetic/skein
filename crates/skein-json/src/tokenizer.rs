@@ -562,11 +562,18 @@ fn delivered(document: &mut Document, limits: &Limits, reading: Reading, bytes: 
             after_value(document);
             Step::Token(literal.token(), Held::Nothing)
         }
-        Reading::String { key, text } => match string::decode(text, bytes, &mut document.text, limits.string) {
-            Ok(Piece::More(text)) => Step::Read(Reading::String { key, text }),
-            Ok(Piece::Closed) => string_token(document, key),
-            Err(error) => Step::Fail(error),
-        },
+        Reading::String { key, text } => {
+            let chunk = usize::try_from(limits.chunk).expect("a u32 fits a usize");
+            assert!(
+                bytes.len() <= chunk && (bytes.last() == Some(&b'"') || bytes.len() == chunk),
+                "a scan delivers through its quote or its maximum"
+            );
+            match string::decode(text, bytes, &mut document.text, limits.string) {
+                Ok(Piece::More(text)) => Step::Read(Reading::String { key, text }),
+                Ok(Piece::Closed) => string_token(document, key),
+                Err(error) => Step::Fail(error),
+            }
+        }
     }
 }
 
