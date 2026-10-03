@@ -13,7 +13,8 @@ use skein_lib::{Duration, Queue, Rng, Time, Token, Wall};
 
 use crate::config::Config;
 use crate::net::{
-    EPHEMERAL_FIRST, EPHEMERAL_LAST, Fate, Listener, Socket, SocketId, State, Stream, bindable, loopback, overlaps,
+    EPHEMERAL_FIRST, EPHEMERAL_LAST, Fate, Listener, Socket, SocketId, State, Stream, bindable, loopback, mapped,
+    overlaps,
 };
 use crate::trace::{self, Entry, Event, Fault, Summary};
 
@@ -54,6 +55,9 @@ struct Process {
     flights: BTreeMap<Token, Flight>,
     /// Completions delivered and not yet reaped, in delivery order.
     ready: VecDeque<Complete>,
+    /// Sockets whose waiting operations may now proceed, poked while the
+    /// process was not in the kernel: decided when it next enters.
+    deferred: VecDeque<SocketId>,
 }
 
 /// An operation in flight, until its completion is reaped.
@@ -98,6 +102,9 @@ pub struct Sim {
     schedule: BTreeMap<(Time, u64), Due>,
     /// Sockets whose waiting operations may now complete.
     pokes: VecDeque<SocketId>,
+    /// The process inside a `submit` or a `reap`, whose waiting operations
+    /// are decided at once.
+    entering: Option<Pid>,
     trace: Vec<Entry>,
 }
 
@@ -117,6 +124,7 @@ impl Sim {
             next_due: 0,
             schedule: BTreeMap::new(),
             pokes: VecDeque::new(),
+            entering: None,
             trace: Vec::new(),
         }
     }
@@ -158,6 +166,7 @@ impl Sim {
             fds: BTreeMap::new(),
             flights: BTreeMap::new(),
             ready: VecDeque::new(),
+            deferred: VecDeque::new(),
         });
         pid
     }
@@ -165,16 +174,30 @@ impl Sim {
     /// Takes every record in `submissions`, in order, as the shell's `Kernel`
     /// does. Each is checked against the broken invariants of the contract
     /// (`skein_io::kernel`) and fails the world on one.
+    ///
+    /// Then the process's waiting operations that can now proceed are
+    /// decided, as the ring runs its deferred work after the submissions:
+    /// a `Cancel` among them still stops one.
     pub fn submit(&mut self, pid: Pid, submissions: &mut Queue<Submit>) {
+        self.entering = Some(pid);
         while let Some(submit) = submissions.pop() {
             self.submit_one(pid, submit);
             self.settle();
         }
+        self.enter(pid);
+        self.entering = None;
     }
 
     /// Moves the completions delivered to `pid` into `completions`, oldest
     /// first, as many as it has room for. The rest wait for the next reap.
+    ///
+    /// First, the process's waiting operations that can now proceed are
+    /// decided, standing in for the loop's wait inside its submit: the
+    /// ring's own reap never enters it.
     pub fn reap(&mut self, pid: Pid, completions: &mut Queue<Complete>) {
+        self.entering = Some(pid);
+        self.enter(pid);
+        self.entering = None;
         while completions.room() > 0 {
             let Some(complete) = self.process_mut(pid).ready.pop_front() else {
                 return;
@@ -191,10 +214,27 @@ impl Sim {
         }
     }
 
+    /// Whether `pid` has waiting operations that can now proceed, decided
+    /// when it next enters the kernel (submits or reaps). Not due at any
+    /// time: [`Sim::advance`] does not reach them.
+    #[must_use]
+    pub fn deferred(&self, pid: Pid) -> bool {
+        !self.process(pid).deferred.is_empty()
+    }
+
     /// Completions delivered to `pid` and not yet reaped.
     #[must_use]
     pub fn ready(&self, pid: Pid) -> u32 {
         u32::try_from(self.process(pid).ready.len()).expect("fewer than 2^32 completions")
+    }
+
+    /// Every process of the world, in the order they were spawned.
+    pub(crate) fn pids(&self) -> Vec<Pid> {
+        let mut pids = Vec::with_capacity(self.processes.len());
+        for index in 0..self.processes.len() {
+            pids.push(Pid(u32::try_from(index).expect("fewer than 2^32 processes")));
+        }
+        pids
     }
 
     /// Operations of `pid` submitted and not yet reaped.
@@ -210,15 +250,17 @@ impl Sim {
     }
 
     /// When the world next does something by itself: a completion delivered
-    /// after its latency, or a raced cancel landing. `None` when the world is
-    /// idle: nothing more happens until a process submits.
+    /// after its latency, a raced cancel landing, a connect's SYN timeout.
+    /// `None` when nothing is due. The world is idle only when, besides,
+    /// no process has [`deferred`](Sim::deferred) work.
     #[must_use]
     pub fn next_due(&self) -> Option<Time> {
         self.schedule.first_key_value().map(|((at, _), _)| *at)
     }
 
     /// Moves time to [`Sim::next_due`] and does what was due then. False, and
-    /// time unmoved, when the world is idle. A world that hosts services
+    /// time unmoved, when nothing is due; work [`deferred`](Sim::deferred)
+    /// until a process enters may still be waiting. A world that hosts services
     /// moves instead to the earlier of `next_due` and their earliest
     /// deadline, with [`Sim::advance_to`].
     pub fn advance(&mut self) -> bool {
@@ -427,6 +469,11 @@ impl Sim {
         let (State::Fresh, None) = (&socket.state, socket.local) else {
             return Err(Error::InvalidArgument);
         };
+        // IPV6_V6ONLY: an IPv6 socket binds no IPv4 address, which Linux
+        // refuses as invalid rather than not this host's.
+        if mapped(addr.ip()) {
+            return Err(Error::InvalidArgument);
+        }
         if !bindable(addr.ip()) {
             return Err(Error::AddressNotAvailable);
         }
@@ -690,6 +737,13 @@ impl Sim {
             (State::Listening(listener), Op::Accept { .. }) => listener.accepter = None,
             (State::Connected(stream), Op::Recv { .. }) => stream.receiver = None,
             (State::Connected(stream), Op::Send { .. }) => stream.sender = None,
+            // Established while its process was away: the connection stays
+            // made, its server end waiting to be accepted, and this end only
+            // closes.
+            (State::Connected(stream), Op::Connect { .. }) if stream.connecting == Some(token) => {
+                stream.connecting = None;
+                socket.closing_only = true;
+            }
             (State::Connecting { listener, .. }, Op::Connect { .. }) => {
                 let listener = *listener;
                 socket.state = State::Fresh;
@@ -720,12 +774,41 @@ impl Sim {
         }
     }
 
+    /// `pid` enters the kernel: what it deferred is decided now.
+    fn enter(&mut self, pid: Pid) {
+        let deferred = core::mem::take(&mut self.process_mut(pid).deferred);
+        self.pokes.extend(deferred);
+        self.settle();
+    }
+
+    /// Decides the waiting operations of a socket that can now proceed. Those
+    /// of a process outside the kernel wait for it to enter, as the ring
+    /// runs an operation's completion only when its loop enters the ring;
+    /// what the network does meanwhile (a connection established into a
+    /// listener's queue) happens at once.
     fn poke(&mut self, id: SocketId) {
         let Some(socket) = self.sockets.get(&id) else {
             return;
         };
+        let away = match socket.owner {
+            Some((owner, _)) if self.entering != Some(owner) => Some(owner),
+            Some(_) | None => None,
+        };
+        if let Some(owner) = away
+            && waits(socket)
+        {
+            let deferred = &mut self.process_mut(owner).deferred;
+            if !deferred.contains(&id) {
+                deferred.push_back(id);
+            }
+        }
+        let Some(socket) = self.sockets.get(&id) else {
+            return;
+        };
         match &socket.state {
-            State::Listening(_) => self.serve_listener(id),
+            State::Listening(_) => self.serve_listener(id, away.is_none()),
+            State::Connected(_) if away.is_some() => {}
+            State::Connected(stream) if stream.connecting.is_some() => self.connected(id),
             State::Connected(stream) => {
                 let (receiver, sender) = (stream.receiver, stream.sender);
                 // Which of the two hears of a reset first is the world's choice.
@@ -742,13 +825,15 @@ impl Sim {
         }
     }
 
-    fn serve_listener(&mut self, id: SocketId) {
+    /// Establishes the connects waiting for room, and with `accepting`
+    /// serves the waiting `Accept`.
+    fn serve_listener(&mut self, id: SocketId, accepting: bool) {
         loop {
             let socket = self.sockets.get(&id).expect("poked while it exists");
             let State::Listening(listener) = &socket.state else {
                 return;
             };
-            if listener.accepter.is_some() && !listener.queue.is_empty() {
+            if accepting && listener.accepter.is_some() && !listener.queue.is_empty() {
                 self.accept_one(id);
             } else if !listener.connects.is_empty() && listener.queue.len() < usize_of(listener.backlog) {
                 self.establish(id);
@@ -807,6 +892,23 @@ impl Sim {
         if let State::Listening(listener) = &mut self.socket_mut(id).state {
             listener.queue.push_back(server);
         }
+        if self.entering == Some(pid) {
+            let op = self.unpark(pid, token);
+            self.complete(pid, token, op, Ok(Done::Nothing));
+        } else {
+            // The connection is made at once; the client hears of it when
+            // it enters, and a Cancel before then still stops its Connect.
+            self.disarm(pid, token);
+            self.stream_mut(client).connecting = Some(token);
+            self.pokes.push_back(client);
+        }
+    }
+
+    /// Completes the `Connect` established while its process was away.
+    fn connected(&mut self, id: SocketId) {
+        let socket = self.sockets.get(&id).expect("poked while it exists");
+        let (pid, _) = socket.owner.expect("a connecting socket has a descriptor");
+        let token = self.stream_mut(id).connecting.take().expect("a connect waits to complete");
         let op = self.unpark(pid, token);
         self.complete(pid, token, op, Ok(Done::Nothing));
     }
@@ -889,7 +991,9 @@ impl Sim {
                 let most = left.len().min(usize_of(self.config.buffer));
                 let (n, short) = cut(&mut self.rng, self.config.faults.short_send, most);
                 cut_short = short;
-                self.stream_mut(id).fate = Fate::Dead;
+                if !self.fault(pid, self.config.faults.late_reset, Fault::LateReset) {
+                    self.stream_mut(id).fate = Fate::Dead;
+                }
                 Ok(Done::Count(u32::try_from(n).expect("a Send's length fits a u32")))
             }
             (Fate::Open, Some(peer)) => {
@@ -1020,6 +1124,14 @@ impl Sim {
         flight.held = Some(op);
     }
 
+    /// Cancels the SYN timeout of a `Connect` that no longer waits for room.
+    fn disarm(&mut self, pid: Pid, token: Token) {
+        let flight = self.process_mut(pid).flights.get_mut(&token).expect("disarmed while in flight");
+        if let Some(timer) = flight.timer.take() {
+            self.schedule.remove(&timer);
+        }
+    }
+
     fn unpark(&mut self, pid: Pid, token: Token) -> Op {
         let flight = self.process_mut(pid).flights.get_mut(&token).expect("unparked while in flight");
         let op = flight.held.take().expect("a waiting operation holds its record");
@@ -1134,6 +1246,16 @@ impl Sim {
         let from = self.trace.len().saturating_sub(TAIL);
         let tail = trace::render(self.seed, self.trace.get(from..).unwrap_or_default());
         panic!("skein-sim at {} ns, {what}\n{tail}", self.now.as_nanos());
+    }
+}
+
+/// Whether an operation waits on `socket`, which its process decides when
+/// it enters.
+fn waits(socket: &Socket) -> bool {
+    match &socket.state {
+        State::Listening(listener) => listener.accepter.is_some(),
+        State::Connected(stream) => stream.receiver.is_some() || stream.sender.is_some() || stream.connecting.is_some(),
+        State::Fresh | State::Connecting { .. } => false,
     }
 }
 

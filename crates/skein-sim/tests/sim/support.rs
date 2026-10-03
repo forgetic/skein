@@ -51,6 +51,13 @@ impl World {
         token
     }
 
+    /// `pid` enters the kernel without submitting or reaping, as a loop's
+    /// empty submit does: its waiting operations that can proceed are
+    /// decided.
+    pub fn enter(&mut self, pid: Pid) {
+        self.sim.submit(pid, &mut Queue::with_capacity(0));
+    }
+
     /// Every completion delivered to `pid`.
     pub fn reap(&mut self, pid: Pid) -> Vec<Complete> {
         let mut queue = Queue::with_capacity(ROOM);

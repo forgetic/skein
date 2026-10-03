@@ -71,6 +71,9 @@ pub(crate) struct Stream {
     pub(crate) receiver: Option<Token>,
     /// The `Send` in flight that waits for room.
     pub(crate) sender: Option<Token>,
+    /// This end's `Connect`, established while its process was away: it
+    /// completes when the process enters, and a `Cancel` can still stop it.
+    pub(crate) connecting: Option<Token>,
 }
 
 /// Whether the connection broke, and whether this end has heard.
@@ -98,6 +101,7 @@ impl Stream {
             fate: Fate::Open,
             receiver: None,
             sender: None,
+            connecting: None,
         }
     }
 }
@@ -106,6 +110,15 @@ impl Stream {
 /// unspecified one, which listens on every loopback address of its family.
 pub(crate) fn bindable(ip: IpAddr) -> bool {
     ip.is_loopback() || ip.is_unspecified()
+}
+
+/// Whether `ip` is an IPv4-mapped IPv6 address, which an IPv6 socket,
+/// `IPV6_V6ONLY` by default, can neither bind nor reach.
+pub(crate) const fn mapped(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some(),
+        IpAddr::V4(_) => false,
+    }
 }
 
 /// Whether two bound addresses can meet the same connection.

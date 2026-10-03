@@ -31,7 +31,11 @@
 //!   (programming-style.md, 4.3).
 //! - **A `Cancel` completes on its own,** before or after its target (the
 //!   simulator randomises which):
-//!   - `Ok(Nothing)`: it stopped the target, which completes `Err(Cancelled)`;
+//!   - `Ok(Nothing)`: it stopped the target, which completes
+//!     `Err(Cancelled)`. A stopped `Recv`, `Send` or `Accept` took nothing:
+//!     bytes or a connection that had arrived wait for the next one. A
+//!     stopped `Connect` may still have reached its peer, which sees the
+//!     connection end when io closes the socket;
 //!   - `Err(TooLate)`: the target had completed or could no longer be
 //!     stopped, and completes with its own result, or `Err(Cancelled)` when
 //!     the kernel interrupted it;
@@ -50,9 +54,10 @@
 //!   never refuses it: `Refused` means nothing listened there when the
 //!   connect arrived. A `Connect` delayed too long fails with `TimedOut`.
 //! - **A failed `Accept`** (`TooManyOpenFiles`, `NoBufferSpace`) consumed no
-//!   waiting connection. A connection reset while waiting is still accepted;
-//!   its first `Send`, or its first `Recv` after the bytes already received,
-//!   fails with `Reset`.
+//!   waiting connection. A connection closed while waiting is still
+//!   accepted, and gives its bytes, then the end of the stream. One reset
+//!   while waiting is still accepted too; its first `Send`, or its first
+//!   `Recv` after the bytes already received, fails with `Reset`.
 //! - **A `Recv` of zero bytes means the stream ended:** the peer shut down or
 //!   closed, or a reset was already reported. It does not prove a graceful
 //!   close. A `Recv` buffer is never empty ([`Op::recv`]).
@@ -70,16 +75,19 @@
 //!   `Shutdown` with `NotConnected`. An end that already received the peer's
 //!   end of stream hears of no reset: its `Recv` drains to `Ok(Count(0))`,
 //!   its `Send` fails with `BrokenPipe`, its `Shutdown` with `NotConnected`.
-//! - **A `Send` after the peer closed** with nothing unread may succeed once,
-//!   its bytes lost; later ones fail with `BrokenPipe`, never `Reset`.
+//! - **A `Send` after the peer closed** with nothing unread may succeed, its
+//!   bytes lost, until the peer's reset arrives; then it fails with
+//!   `BrokenPipe`, never `Reset`, a `Recv` gives `Ok(Count(0))` and a
+//!   `Shutdown` fails with `NotConnected`.
 //! - **An [`Fd`] is closed only by `Close`,** which releases it whatever its
 //!   result. A `Close` with received data unread makes the peer see `Reset`;
 //!   closing a listener resets the connections waiting on it.
 //! - **Records the kernel refuses for the socket's state** are bugs in io,
 //!   answered rather than assumed away: a `Recv` on a socket never connected
-//!   fails with `NotConnected`, a `Send` with `BrokenPipe`; a second `Bind`,
-//!   a `Bind` or `Listen` on a connected socket, and an `Accept` on one that
-//!   does not listen, with `InvalidArgument`.
+//!   (a listener among them) fails with `NotConnected`, a `Send` with
+//!   `BrokenPipe`; a second `Bind`, a `Bind` or `Listen` on a connected
+//!   socket, and an `Accept` on one that does not listen, with
+//!   `InvalidArgument`.
 //!
 //! Broken invariants, which io never commits and backends may assume never
 //! happen. The simulator fails the world on each; the ring asserts the first
@@ -108,9 +116,10 @@
 //!
 //! Backend defaults, not records, until a service pulls one: every
 //! descriptor is close-on-exec; a socket that binds gets `SO_REUSEADDR`;
-//! every IPv6 socket gets `IPV6_V6ONLY`, so families never mix; connected
-//! and accepted sockets get `TCP_NODELAY`; a `Send` never raises `SIGPIPE`
-//! (`MSG_NOSIGNAL`).
+//! every IPv6 socket gets `IPV6_V6ONLY`, so families never mix: its `Bind`
+//! of an IPv4-mapped address fails with `InvalidArgument`, its `Connect`
+//! to one with `Unreachable`; connected and accepted sockets get
+//! `TCP_NODELAY`; a `Send` never raises `SIGPIPE` (`MSG_NOSIGNAL`).
 
 use alloc::boxed::Box;
 use core::net::SocketAddr;
@@ -300,7 +309,8 @@ pub enum Error {
     /// free (`EADDRNOTAVAIL`).
     AddressNotAvailable,
     /// `Connect`, `Recv`, `Send`: no route to the network or the host
-    /// (`ENETUNREACH`, `EHOSTUNREACH`).
+    /// (`ENETUNREACH`, `EHOSTUNREACH`), as from an IPv6 socket to an
+    /// IPv4-mapped address.
     Unreachable,
     /// `Connect`, `Recv`, `Send`: the kernel's own timeout, such as a connect
     /// that was never answered or retransmissions that went unacknowledged
@@ -314,8 +324,9 @@ pub enum Error {
     /// sockets (`ENOBUFS`, `ENOMEM`). A failed `Accept` consumed no waiting
     /// connection.
     NoBufferSpace,
-    /// Any operation but `Cancel`: a `Cancel` stopped it before it did
-    /// anything (`ECANCELED`, and `EINTR` on an operation io cancelled).
+    /// Any operation but `Cancel`: a `Cancel` stopped it (`ECANCELED`, and
+    /// `EINTR` on an operation io cancelled). It did nothing, but for a
+    /// `Connect`, which may still have reached its peer.
     Cancelled,
     /// `Cancel` only: the target had already completed, or was too far along
     /// to stop (`ENOENT`, `EALREADY`; on any other operation those are

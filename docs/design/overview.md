@@ -366,9 +366,9 @@ with, or an `Error`), so every record comes back up whatever happened.
   translates.
 - **Socket options are backend defaults, not records,** until a service
   pulls one: every descriptor is close-on-exec, a socket that binds gets
-  `SO_REUSEADDR`, an IPv6 socket gets `IPV6_V6ONLY` (families never mix),
-  connected and accepted sockets get `TCP_NODELAY`, and a send never
-  raises `SIGPIPE`.
+  `SO_REUSEADDR`, an IPv6 socket gets `IPV6_V6ONLY` (families never mix:
+  it neither binds nor reaches an IPv4-mapped address), connected and
+  accepted sockets get `TCP_NODELAY`, and a send never raises `SIGPIPE`.
 - **Errors cross as a skein enum:** the errors io handles by name, plus
   an `Other` code. Each backend maps its kernel's error numbers onto it,
   per operation: the same number can mean different things on a cancel
@@ -378,10 +378,13 @@ with, or an `Error`), so every record comes back up whatever happened.
   what it did before the cancel landed. Until then, io keeps the entity
   *settling* (programming-style.md, 4.3).
 - **A cancel completes too,** before or after its target: it stopped
-  the target, which then completes cancelled; too late (the target had
-  completed or could not be stopped, and completes with its own result
-  or cancelled, if the kernel interrupted it); or not submitted at all,
-  when the backend failed, the target running on.
+  the target, which then completes cancelled (a stopped receive, send or
+  accept took nothing, what had arrived waiting for the next one; a
+  stopped connect may still have reached its peer, which sees the
+  connection end when io closes it); too late (the target had completed
+  or could not be stopped, and completes with its own result or
+  cancelled, if the kernel interrupted it); or not submitted at all, when
+  the backend failed, the target running on.
 - **Single-shot operations only, to start:** one submission, one
   completion, and every cancel takes an operation slot of its own. The
   completion queue can then be sized from io's operation slab, so it
@@ -393,7 +396,8 @@ with, or an `Error`), so every record comes back up whatever happened.
     listen fails;
   - a full accept queue delays a connect, never refuses it (refused
     means nothing listened there), until it times out; a failed accept
-    takes no waiting connection;
+    takes no waiting connection, and a connection closed or reset while
+    it waits is still accepted;
   - a send's count is what the kernel accepted, and a half-close goes
     out behind every completed send; receiving still works after it;
   - a receive of zero bytes means the stream ended, which is not proof
@@ -402,7 +406,8 @@ with, or an `Error`), so every record comes back up whatever happened.
     bytes already received; after it, receives give zero bytes and sends
     and half-closes fail. An end that already received the peer's end of
     stream hears of no reset, and a send after the peer closed may
-    succeed once, its bytes lost, then fails without a reset;
+    succeed, its bytes lost, until the peer's reset arrives, then fails
+    without a reset, the connection closed;
   - a descriptor is closed only by a close. Closing with unread data
     resets the peer; closing a listener resets the connections waiting
     on it.

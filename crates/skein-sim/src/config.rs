@@ -63,6 +63,9 @@ pub struct Faults {
     /// That the backend cannot submit a `Cancel`: it fails with `Other`, and
     /// its target runs on.
     pub cancel_unsubmitted: u32,
+    /// That the reset a closed peer answers a `Send` with arrives late: the
+    /// next `Send` succeeds too, its bytes lost.
+    pub late_reset: u32,
 }
 
 impl Faults {
@@ -78,6 +81,7 @@ impl Faults {
         timed_out: 0,
         cancel_race: 0,
         cancel_unsubmitted: 0,
+        late_reset: 0,
     };
 
     /// Every fault, often enough that a few hundred seeds meet each one.
@@ -92,6 +96,7 @@ impl Faults {
         timed_out: 1,
         cancel_race: 500,
         cancel_unsubmitted: 100,
+        late_reset: 300,
     };
 }
 
