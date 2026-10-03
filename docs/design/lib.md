@@ -157,7 +157,9 @@ capacity: a full queue, a stale handle, a slot whose generation would
 wrap, a refusal at the entrance, a deadline that fires as it is
 cancelled, a scan cut at every byte. Each `worst_case` is checked
 against the counting allocator. The byte search is also fuzzed against a
-naive one.
+naive one. The step tests are `src/tests.rs`, a module for each area of
+this document under `src/tests/`: handles, containers, bytes, streams,
+and time.
 
 ## 11. Not built yet
 
@@ -166,6 +168,7 @@ naive one.
 - **A state digest** for replay: a fixed-key hasher over the state types'
   derived `Hash`, independent of their layout in memory
   (testing-strategy.md, 6).
-- The `worst_case` checks against the counting allocator, and the fuzzing
-  of the byte search, wait for the counting allocator and the fuzzy
-  suite.
+- The `worst_case` checks wait for the counting allocator. The byte
+  search's comparison with a naive one is a step test, over a fixed run of
+  random cases from one seed: not yet a fuzzy test (testing-strategy.md,
+  8).

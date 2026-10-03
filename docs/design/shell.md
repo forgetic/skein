@@ -149,12 +149,12 @@ and changes no code above io:
 
 ## 9. Testing
 
-- **The ring's own tests** run on the real kernel, on loopback: its slots
-  and waits, a large transfer through short sends, what it completes
-  itself, the invariants it asserts, and dropping it with operations in
-  flight.
+- **The ring's own tests** (`tests/ring`) run on the real kernel, on
+  loopback: its slots and waits, a large transfer through short sends,
+  what it completes itself, the invariants it asserts, and dropping it
+  with operations in flight.
 - **The conformance suite** runs against the ring, each scenario once
-  (kernel.md, 8).
+  (`tests/conformance/ring`; kernel.md, 8).
 - **The real loop** exercises the rest: the probe at startup, the signal
   path, and the ring adapter's `unsafe` under a sanitizer
   (testing-strategy.md, 2.8).

@@ -183,10 +183,12 @@ submit.
 ## 8. Testing
 
 The conformance suite is the contract's executable form
-(testing-strategy.md, 5). It lives with the simulator, in `skein-sim`,
-over a small backend interface (open a process, submit, reap, enter, let
-time pass), and runs against the simulator and against the ring on the
-real kernel.
+(testing-strategy.md, 5). It is a crate of its own,
+`testing/skein-conformance`, over a small backend interface (open a
+process, submit, reap, enter, let time pass), and runs against the
+simulator (`tests/conformance/sim`) and against the ring on the real
+kernel (`tests/conformance/ring`), each of which implements the interface
+for its backend.
 
 - **Each scenario is a scripted sequence of records** that returns what it
   saw, and its check names the rule of the contract behind each
@@ -196,8 +198,10 @@ real kernel.
   operation, one per submission, the record handed back with its buffer
   in the same `Box`, and every descriptor closed at the end.
 - **On the simulator,** each scenario runs over calm seeds and seeds of
-  every fault loopback can show; every outcome a race allows must appear
-  over the seeds, and a calm world must pair each race as the ring does.
+  every fault loopback can show: a few of chaos in the focused suite, many
+  in the fuzzy one (testing-strategy.md, 8). Every outcome a race allows
+  must appear over the fuzzy suite's seeds, and a calm world must pair
+  each race as the ring does.
 - **On the ring,** each scenario runs once, and fails, saying so, if
   io_uring is not usable.
 - What no record can observe (close-on-exec, `TCP_NODELAY`) is not

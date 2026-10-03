@@ -30,7 +30,9 @@ states each choice it makes where the contract leaves one.
 (programming-model.md, 10.2): std is in, but no clock, no thread, no OS
 randomness and no hash map with a random seed, so a seed replays. It
 needs no kernel layouts and no `unsafe`. skein's own io worlds and
-simulated worlds use it, and so do a service's simulated worlds.
+simulated worlds use it, and so do a service's simulated worlds. Its own
+tests are a crate of their own, `tests/sim`, and the conformance suite
+runs against it in `tests/conformance/sim` (testing.md, 6).
 
 ## 3. The world
 
@@ -95,17 +97,18 @@ small buffers so that sends are cut and stall.
 
 ## 6. Testing
 
-- **Its own tests** submit records by hand: each rule of the contract,
-  each broken invariant, and a client and a server exchanging bytes, calm
-  and under chaos over a few hundred seeds, asserting that every fault
-  fell.
-- **The conformance suite** (kernel.md, 8) lives here, over a small
-  backend interface the simulator implements here and the ring in the
-  shell's tests. Where the simulator draws among outcomes the kernel
-  allows, every one of them must appear over the seeds; where the kernel
-  answers one way, the simulator must too. A behaviour found in the
-  kernel that the simulator lacks goes into the suite first, then into
-  the simulator.
+- **Its own tests** (`tests/sim`) submit records by hand: each rule of
+  the contract, each broken invariant, and a client and a server
+  exchanging bytes, calm and replayed; and, in the fuzzy suite
+  (testing-strategy.md, 8), under chaos over a few hundred seeds,
+  asserting that every fault fell.
+- **The conformance suite** (kernel.md, 8) is `testing/skein-conformance`,
+  over a small backend interface the simulator implements in
+  `tests/conformance/sim` and the ring in `tests/conformance/ring`. Where
+  the simulator draws among outcomes the kernel allows, every one of them
+  must appear over the fuzzy suite's seeds; where the kernel answers one
+  way, the simulator must too. A behaviour found in the kernel that the
+  simulator lacks goes into the suite first, then into the simulator.
 
 ## 7. Not built yet
 
