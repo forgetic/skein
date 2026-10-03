@@ -31,7 +31,9 @@
 //!   (programming-style.md, 4.3).
 //! - **A `Cancel` completes on its own,** before or after its target (the
 //!   simulator randomises which):
-//!   - `Ok(Nothing)`: it stopped the target, which completes `Err(Cancelled)`;
+//!   - `Ok(Nothing)`: it stopped the target, which completes `Err(Cancelled)`
+//!     having taken nothing: bytes or a connection that had arrived for it
+//!     wait for the next `Recv` or `Accept`;
 //!   - `Err(TooLate)`: the target had completed or could no longer be
 //!     stopped, and completes with its own result, or `Err(Cancelled)` when
 //!     the kernel interrupted it;

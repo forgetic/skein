@@ -55,6 +55,9 @@ struct Process {
     flights: BTreeMap<Token, Flight>,
     /// Completions delivered and not yet reaped, in delivery order.
     ready: VecDeque<Complete>,
+    /// Sockets whose waiting operations may now proceed, poked while the
+    /// process was not in the kernel: decided when it next enters.
+    deferred: VecDeque<SocketId>,
 }
 
 /// An operation in flight, until its completion is reaped.
@@ -99,6 +102,9 @@ pub struct Sim {
     schedule: BTreeMap<(Time, u64), Due>,
     /// Sockets whose waiting operations may now complete.
     pokes: VecDeque<SocketId>,
+    /// The process inside a `submit` or a `reap`, whose waiting operations
+    /// are decided at once.
+    entering: Option<Pid>,
     trace: Vec<Entry>,
 }
 
@@ -118,6 +124,7 @@ impl Sim {
             next_due: 0,
             schedule: BTreeMap::new(),
             pokes: VecDeque::new(),
+            entering: None,
             trace: Vec::new(),
         }
     }
@@ -159,6 +166,7 @@ impl Sim {
             fds: BTreeMap::new(),
             flights: BTreeMap::new(),
             ready: VecDeque::new(),
+            deferred: VecDeque::new(),
         });
         pid
     }
@@ -166,16 +174,29 @@ impl Sim {
     /// Takes every record in `submissions`, in order, as the shell's `Kernel`
     /// does. Each is checked against the broken invariants of the contract
     /// (`skein_io::kernel`) and fails the world on one.
+    ///
+    /// Then the process's waiting operations that can now proceed are
+    /// decided, as the ring runs its deferred work after the submissions:
+    /// a `Cancel` among them still stops one.
     pub fn submit(&mut self, pid: Pid, submissions: &mut Queue<Submit>) {
+        self.entering = Some(pid);
         while let Some(submit) = submissions.pop() {
             self.submit_one(pid, submit);
             self.settle();
         }
+        self.enter(pid);
+        self.entering = None;
     }
 
     /// Moves the completions delivered to `pid` into `completions`, oldest
     /// first, as many as it has room for. The rest wait for the next reap.
+    ///
+    /// First, the process's waiting operations that can now proceed are
+    /// decided.
     pub fn reap(&mut self, pid: Pid, completions: &mut Queue<Complete>) {
+        self.entering = Some(pid);
+        self.enter(pid);
+        self.entering = None;
         while completions.room() > 0 {
             let Some(complete) = self.process_mut(pid).ready.pop_front() else {
                 return;
@@ -726,12 +747,38 @@ impl Sim {
         }
     }
 
+    /// `pid` enters the kernel: what it deferred is decided now.
+    fn enter(&mut self, pid: Pid) {
+        let deferred = core::mem::take(&mut self.process_mut(pid).deferred);
+        self.pokes.extend(deferred);
+        self.settle();
+    }
+
+    /// Decides the waiting operations of a socket that can now proceed. Those
+    /// of a process outside the kernel wait for it to enter, as the ring
+    /// runs an operation's completion only when its loop enters the ring;
+    /// what the network does meanwhile (a connection established into a
+    /// listener's queue) happens at once.
     fn poke(&mut self, id: SocketId) {
         let Some(socket) = self.sockets.get(&id) else {
             return;
         };
+        let away = match socket.owner {
+            Some((owner, _)) if self.entering != Some(owner) => Some(owner),
+            Some(_) | None => None,
+        };
+        if let Some(owner) = away {
+            let deferred = &mut self.process_mut(owner).deferred;
+            if !deferred.contains(&id) {
+                deferred.push_back(id);
+            }
+        }
+        let Some(socket) = self.sockets.get(&id) else {
+            return;
+        };
         match &socket.state {
-            State::Listening(_) => self.serve_listener(id),
+            State::Listening(_) => self.serve_listener(id, away.is_none()),
+            State::Connected(_) if away.is_some() => {}
             State::Connected(stream) => {
                 let (receiver, sender) = (stream.receiver, stream.sender);
                 // Which of the two hears of a reset first is the world's choice.
@@ -748,13 +795,15 @@ impl Sim {
         }
     }
 
-    fn serve_listener(&mut self, id: SocketId) {
+    /// Establishes the connects waiting for room, and with `accepting`
+    /// serves the waiting `Accept`.
+    fn serve_listener(&mut self, id: SocketId, accepting: bool) {
         loop {
             let socket = self.sockets.get(&id).expect("poked while it exists");
             let State::Listening(listener) = &socket.state else {
                 return;
             };
-            if listener.accepter.is_some() && !listener.queue.is_empty() {
+            if accepting && listener.accepter.is_some() && !listener.queue.is_empty() {
                 self.accept_one(id);
             } else if !listener.connects.is_empty() && listener.queue.len() < usize_of(listener.backlog) {
                 self.establish(id);

@@ -35,9 +35,14 @@
 //!
 //! - **Descriptors** count up from 3 in each process and are never reused,
 //!   up to `Config::max_fds` open at once.
-//! - **Effects happen when the operation is decided,** at submit or when a
-//!   waiting operation can proceed; latency delays only the delivery of the
-//!   completion. A completion decided but not reaped is still in flight.
+//! - **Effects happen when the operation is decided:** at submit, or for a
+//!   waiting operation once it can proceed and its process is in the
+//!   kernel (its `submit`, after the records, or its `reap`), as the ring
+//!   runs completions only when the loop enters it. Until then a `Cancel`
+//!   still stops it. What the network does meanwhile (bytes landing in a
+//!   buffer, a connection established into a queue) happens at once.
+//!   Latency delays only the delivery of the completion. A completion
+//!   decided but not reaped is still in flight.
 //! - **A cancel** of an operation still waiting wins (`Ok(Nothing)`, the
 //!   target `Err(Cancelled)`, in a random order). Of one already decided, or
 //!   of a token not in flight, it is `Err(TooLate)`. With the `cancel_race`

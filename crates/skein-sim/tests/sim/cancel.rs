@@ -7,6 +7,9 @@ use skein_sim::{Config, Faults};
 
 use crate::support::{World, received, recv_op};
 
+/// Every completion delivered a millisecond late: decided, but in flight.
+const SLOW: Faults = Faults { latency: 1000, latency_max: Duration::from_millis(1), ..Faults::NONE };
+
 /// The completions of a cancel and of its target, in delivery order.
 fn both(world: &mut World, pid: skein_sim::Pid, cancel: Token, target: Token) -> (Complete, Complete, bool) {
     let mut got = world.reap(pid);
@@ -35,18 +38,36 @@ fn a_cancel_of_a_waiting_accept_wins() {
 }
 
 #[test]
-fn a_cancel_of_an_accept_already_decided_is_too_late() {
+fn a_cancel_of_an_accept_decided_before_it_is_too_late() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (listener, addr) = world.listener(server);
+    let fd = world.socket(client);
+    world.sim.set_faults(SLOW);
+    let accept = world.submit(server, Op::Accept { fd: listener });
+    world.submit(client, Op::Connect { fd, addr });
+    world.enter(server);
+    let cancel = world.submit(server, Op::Cancel { target: accept });
+    while world.sim.advance() {}
+    let (of_cancel, of_target, _) = both(&mut world, server, cancel, accept);
+    assert_eq!(of_cancel.result, Err(Error::TooLate), "decided when the server entered, delivered late");
+    assert!(matches!(of_target.result, Ok(Done::Accepted { .. })), "the target says what it did");
+}
+
+#[test]
+fn a_cancel_of_an_accept_whose_connection_arrived_while_its_process_was_away_stops_it() {
     let mut world = World::calm();
     let (client, server) = (world.spawn(), world.spawn());
     let (listener, addr) = world.listener(server);
     let accept = world.submit(server, Op::Accept { fd: listener });
     let fd = world.socket(client);
-    assert_eq!(world.connect(client, fd, addr), Ok(Done::Nothing));
+    assert_eq!(world.connect(client, fd, addr), Ok(Done::Nothing), "the network establishes it at once");
     let cancel = world.submit(server, Op::Cancel { target: accept });
-    let (of_cancel, of_target, cancel_first) = both(&mut world, server, cancel, accept);
-    assert_eq!(of_cancel.result, Err(Error::TooLate));
-    assert!(matches!(of_target.result, Ok(Done::Accepted { .. })), "the target says what it did");
-    assert!(!cancel_first, "the accept was delivered before the cancel was submitted");
+    let (of_cancel, of_target, _) = both(&mut world, server, cancel, accept);
+    assert_eq!((of_cancel.result, of_target.result), (Ok(Done::Nothing), Err(Error::Cancelled)), "as on the ring");
+    let (accepted, _) = world.accept(server, listener);
+    assert_eq!(world.send(client, fd, b"kept"), Ok(Done::Count(4)));
+    assert_eq!(world.recv(server, accepted, 8), Ok(b"kept".to_vec()), "the connection waited for the next accept");
 }
 
 #[test]
@@ -67,12 +88,28 @@ fn a_cancel_of_a_recv_that_got_bytes_is_too_late() {
     let mut world = World::calm();
     let (client, server) = (world.spawn(), world.spawn());
     let (c, s) = world.pair(client, server);
+    world.sim.set_faults(SLOW);
+    let recv = world.submit(server, recv_op(s, 8));
+    world.submit(client, Op::Send { fd: c, bytes: Box::from(*b"data"), from: 0 });
+    world.enter(server);
+    let cancel = world.submit(server, Op::Cancel { target: recv });
+    while world.sim.advance() {}
+    let (of_cancel, of_target, _) = both(&mut world, server, cancel, recv);
+    assert_eq!(of_cancel.result, Err(Error::TooLate), "decided when the server entered, delivered late");
+    assert_eq!(received(of_target), Ok(b"data".to_vec()), "the target completes normally");
+}
+
+#[test]
+fn a_cancel_of_a_recv_whose_bytes_arrived_while_its_process_was_away_stops_it() {
+    let mut world = World::calm();
+    let (client, server) = (world.spawn(), world.spawn());
+    let (c, s) = world.pair(client, server);
     let recv = world.submit(server, recv_op(s, 8));
     assert_eq!(world.send(client, c, b"data"), Ok(Done::Count(4)));
     let cancel = world.submit(server, Op::Cancel { target: recv });
     let (of_cancel, of_target, _) = both(&mut world, server, cancel, recv);
-    assert_eq!(of_cancel.result, Err(Error::TooLate));
-    assert_eq!(received(of_target), Ok(b"data".to_vec()), "the target completes normally");
+    assert_eq!((of_cancel.result, of_target.result), (Ok(Done::Nothing), Err(Error::Cancelled)), "as on the ring");
+    assert_eq!(world.recv(server, s, 8), Ok(b"data".to_vec()), "the bytes wait for the next receive");
 }
 
 #[test]
@@ -133,6 +170,7 @@ fn a_raced_cancel_lands_late_and_may_lose() {
     let cancel = world.submit(server, Op::Cancel { target: recv });
     assert!(world.reap(server).is_empty(), "the cancel has not landed");
     assert_eq!(world.send(client, c, b"won"), Ok(Done::Count(3)));
+    world.enter(server);
     assert!(world.sim.advance(), "the cancel lands");
     let (of_cancel, of_target, cancel_first) = both(&mut world, server, cancel, recv);
     assert_eq!(of_cancel.result, Err(Error::TooLate), "the target completed first");

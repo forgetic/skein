@@ -378,10 +378,12 @@ with, or an `Error`), so every record comes back up whatever happened.
   what it did before the cancel landed. Until then, io keeps the entity
   *settling* (programming-style.md, 4.3).
 - **A cancel completes too,** before or after its target: it stopped
-  the target, which then completes cancelled; too late (the target had
-  completed or could not be stopped, and completes with its own result
-  or cancelled, if the kernel interrupted it); or not submitted at all,
-  when the backend failed, the target running on.
+  the target, which then completes cancelled, having taken nothing (bytes
+  or a connection that had arrived wait for the next receive or accept);
+  too late (the target had completed or could not be stopped, and
+  completes with its own result or cancelled, if the kernel interrupted
+  it); or not submitted at all, when the backend failed, the target
+  running on.
 - **Single-shot operations only, to start:** one submission, one
   completion, and every cancel takes an operation slot of its own. The
   completion queue can then be sized from io's operation slab, so it
