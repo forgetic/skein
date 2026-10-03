@@ -31,9 +31,11 @@
 //!   (programming-style.md, 4.3).
 //! - **A `Cancel` completes on its own,** before or after its target (the
 //!   simulator randomises which):
-//!   - `Ok(Nothing)`: it stopped the target, which completes `Err(Cancelled)`
-//!     having taken nothing: bytes or a connection that had arrived for it
-//!     wait for the next `Recv` or `Accept`;
+//!   - `Ok(Nothing)`: it stopped the target, which completes
+//!     `Err(Cancelled)`. A stopped `Recv`, `Send` or `Accept` took nothing:
+//!     bytes or a connection that had arrived wait for the next one. A
+//!     stopped `Connect` may still have reached its peer, which sees the
+//!     connection end when io closes the socket;
 //!   - `Err(TooLate)`: the target had completed or could no longer be
 //!     stopped, and completes with its own result, or `Err(Cancelled)` when
 //!     the kernel interrupted it;
@@ -322,8 +324,9 @@ pub enum Error {
     /// sockets (`ENOBUFS`, `ENOMEM`). A failed `Accept` consumed no waiting
     /// connection.
     NoBufferSpace,
-    /// Any operation but `Cancel`: a `Cancel` stopped it before it did
-    /// anything (`ECANCELED`, and `EINTR` on an operation io cancelled).
+    /// Any operation but `Cancel`: a `Cancel` stopped it (`ECANCELED`, and
+    /// `EINTR` on an operation io cancelled). It did nothing, but for a
+    /// `Connect`, which may still have reached its peer.
     Cancelled,
     /// `Cancel` only: the target had already completed, or was too far along
     /// to stop (`ENOENT`, `EALREADY`; on any other operation those are

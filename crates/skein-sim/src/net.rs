@@ -71,6 +71,9 @@ pub(crate) struct Stream {
     pub(crate) receiver: Option<Token>,
     /// The `Send` in flight that waits for room.
     pub(crate) sender: Option<Token>,
+    /// This end's `Connect`, established while its process was away: it
+    /// completes when the process enters, and a `Cancel` can still stop it.
+    pub(crate) connecting: Option<Token>,
 }
 
 /// Whether the connection broke, and whether this end has heard.
@@ -98,6 +101,7 @@ impl Stream {
             fate: Fate::Open,
             receiver: None,
             sender: None,
+            connecting: None,
         }
     }
 }

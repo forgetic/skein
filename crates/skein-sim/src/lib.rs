@@ -17,9 +17,11 @@
 //!   to its room.
 //! - Time moves only when asked: [`Sim::advance`] jumps to the next thing
 //!   due (a late completion, a raced cancel, a connect's SYN timeout),
-//!   [`Sim::advance_to`] to a given instant. When nothing is due, the world
-//!   is idle. A world that hosts services moves time to the earlier of
-//!   [`Sim::next_due`] and their earliest deadline.
+//!   [`Sim::advance_to`] to a given instant. The world is idle when nothing
+//!   is due and no process has [`deferred`](Sim::deferred) work, which
+//!   waits for the process to enter, not for time. A world that hosts
+//!   services moves time to the earlier of [`Sim::next_due`] and their
+//!   earliest deadline.
 //! - [`Sim::assert_quiescent`] and [`Sim::assert_no_open_fds`] check a
 //!   process at the end; [`Sim::render_trace`] prints the run with its seed,
 //!   every fault drawn included.
@@ -43,19 +45,27 @@
 //! - **Descriptors** count up from 3 in each process and are never reused,
 //!   up to `Config::max_fds` open at once.
 //! - **Effects happen when the operation is decided:** at submit, or for a
-//!   waiting operation once it can proceed and its process is in the
-//!   kernel (its `submit`, after the records, or its `reap`), as the ring
-//!   runs completions only when the loop enters it. Until then a `Cancel`
-//!   still stops it. What the network does meanwhile (bytes landing in a
-//!   buffer, a connection established into a queue) happens at once.
-//!   Latency delays only the delivery of the completion. A completion
-//!   decided but not reaped is still in flight.
+//!   waiting operation (a `Connect` whose connection was made among them)
+//!   once it can proceed and its process enters the kernel. The ring runs
+//!   such completions only when the loop enters it, after the entry's
+//!   submissions: so does the end of [`Sim::submit`]. [`Sim::reap`] decides
+//!   them too, standing in for the loop's wait inside its submit, since the
+//!   ring's own reap never enters it. Until then a `Cancel` still stops the
+//!   operation. Latency delays only the delivery of a completion. A
+//!   completion decided but not reaped is still in flight.
+//! - **Decided at once, whatever the process:** what the network does
+//!   (bytes landing in a buffer, a connection established into a
+//!   listener's queue, an end of stream or a reset reaching a socket), a
+//!   connect's SYN timeout, the refusal of the connects waiting on a
+//!   listener that closes, and a raced cancel landing.
 //! - **A cancel** of an operation still waiting wins (`Ok(Nothing)`, the
 //!   target `Err(Cancelled)`, in a random order). Of one already decided, or
-//!   of a token not in flight, it is `Err(TooLate)`. With the `cancel_race`
-//!   fault it lands late: the target may be decided first, or be interrupted
-//!   (`TooLate`, and the target `Cancelled`). With `cancel_unsubmitted` it
-//!   fails with `Other(11)` and the target runs on.
+//!   of a token not in flight, it is `Err(TooLate)`. A stopped `Connect`
+//!   whose connection was made leaves it made: the server accepts it, and
+//!   this end only closes. With the `cancel_race` fault it lands late: the
+//!   target may be decided first, or be interrupted (`TooLate`, and the
+//!   target `Cancelled`). With `cancel_unsubmitted` it fails with
+//!   `Other(11)` and the target runs on.
 //! - **Ports:** port 0 picks a free port of the ephemeral range from a random
 //!   start. Only a listener on an overlapping address clashes, as
 //!   `SO_REUSEADDR` makes it on Linux. The unspecified address binds, and
