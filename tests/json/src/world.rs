@@ -4,8 +4,9 @@
 //! - **The side below** receives the peer's bytes in pieces cut at random,
 //!   late, into an intake under its cap, and meets each demand exactly,
 //!   at most once. It ends when the peer's bytes run out, early when the
-//!   settings cut them, sometimes with nothing demanded; or it fails,
-//!   before its end or after it.
+//!   settings cut them, sometimes with nothing demanded, and then a demand
+//!   may cross the end on its way; or it fails, before its end or after
+//!   it.
 //! - **The side above** asks for one token at a time, when it feels like
 //!   it, stops asking for a while, and closes: after the outcome, or at a
 //!   moment the settings draw, whatever the tokenizer is doing then.
@@ -150,6 +151,8 @@ pub struct Run {
     pub failed: Option<Fault>,
     /// Whether the side below reported the end with nothing demanded.
     pub idle_end: bool,
+    /// Whether a demand crossed the end on its way, and was never answered.
+    pub crossed_end: bool,
     /// The most bytes the stream below held, nothing demanded, while the
     /// side above had stopped asking.
     pub held_back: u32,
@@ -184,7 +187,8 @@ pub fn run(document: &[u8], settings: &Settings, seed: u64) -> Run {
             unsent: settings.sent(document),
             intake: Intake::with_capacity(settings.cap),
             demand: None,
-            over: false,
+            life: Life::Open,
+            crossed: false,
             failed: None,
             idle_end: false,
             withdrawn: None,
@@ -218,6 +222,7 @@ pub fn run(document: &[u8], settings: &Settings, seed: u64) -> Run {
                 closed_while: world.above.closing.expect("closed after a close"),
                 failed: world.below.failed,
                 idle_end: world.below.idle_end,
+                crossed_end: world.below.crossed,
                 held_back: world.held_back,
                 iterations: world.iteration,
             };
@@ -278,13 +283,26 @@ struct Below<'a> {
     intake: Intake,
     /// The demand outstanding, met at most once.
     demand: Option<Read>,
-    /// Whether the stream ended or failed: nothing more is delivered.
-    over: bool,
+    life: Life,
+    /// Whether a demand crossed the end.
+    crossed: bool,
     failed: Option<Fault>,
     idle_end: bool,
     /// The demand a close withdrew, which a delivery already on its way
     /// may still meet.
     withdrawn: Option<Read>,
+}
+
+/// Where the stream below is in its life.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Life {
+    Open,
+    /// The end is on its way, decided with nothing demanded: a demand
+    /// stated meanwhile crosses it, and is never answered.
+    Ending,
+    /// The end or a failure arrived: nothing more is delivered but a
+    /// failure after the end.
+    Over,
 }
 
 /// The side above.
@@ -310,8 +328,8 @@ impl World<'_> {
         {
             self.up(Up::Bytes(bytes));
         }
-        if !self.below.over && self.rng.chance(500) {
-            self.below.over = true;
+        if self.below.life != Life::Over && self.rng.chance(500) {
+            self.below.life = Life::Over;
             self.up(Up::End);
         }
     }
@@ -325,18 +343,25 @@ impl World<'_> {
             below.intake.append(arrived).expect("within the room");
             below.unsent = rest;
         }
-        // A failure may come after the end too (json.md, 3.2), once.
+        // A failure may come after the end too (lib.md, 7), once.
         if let Some((at, fault)) = self.settings.failure
             && self.iteration >= at
             && below.failed.is_none()
         {
-            below.over = true;
+            below.life = Life::Over;
             below.demand = None;
             below.failed = Some(fault);
             self.up(Up::Failed(fault));
             return;
         }
-        if below.over {
+        if below.life == Life::Over {
+            return;
+        }
+        if below.life == Life::Ending {
+            // A demand that crossed the end stays unanswered.
+            below.life = Life::Over;
+            below.demand = None;
+            self.up(Up::End);
             return;
         }
         match below.demand {
@@ -347,16 +372,21 @@ impl World<'_> {
                     self.up(Up::Bytes(bytes));
                 } else if below.unsent.is_empty() {
                     // It can never be met.
-                    below.over = true;
+                    below.life = Life::Over;
                     below.demand = None;
                     self.up(Up::End);
                 }
             }
             None => {
                 if below.unsent.is_empty() && below.intake.is_empty() && self.rng.chance(self.settings.idle_end) {
-                    below.over = true;
                     below.idle_end = true;
-                    self.up(Up::End);
+                    // Now, or on its way, which a demand may cross.
+                    if self.rng.chance(500) {
+                        below.life = Life::Ending;
+                    } else {
+                        below.life = Life::Over;
+                        self.up(Up::End);
+                    }
                 }
             }
         }
@@ -482,7 +512,9 @@ impl Below<'_> {
         };
         assert!(!closing, "a close demands nothing");
         assert!(self.demand.is_none(), "one demand at a time: {read:?} over {:?}", self.demand);
-        assert!(!self.over, "nothing is demanded of a stream that ended or failed: {read:?}");
+        // One stated while the end is on its way crosses it (lib.md, 7).
+        assert!(self.life != Life::Over, "nothing is demanded once the stream's end or failure arrived: {read:?}");
+        self.crossed |= self.life == Life::Ending;
         assert!(wanted >= 1, "a demand is for something: {read:?}");
         assert!(wanted <= json::largest_demand(limits), "no demand past the largest declared: {read:?}");
         assert!(wanted <= self.intake.capacity(), "no demand past the cap below: {read:?}");

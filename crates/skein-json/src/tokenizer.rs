@@ -9,21 +9,9 @@
 //! past the document: one byte at a time between tokens and within a
 //! number, the rest of a literal after its first letter, and a string's
 //! text in scans to the next quote of at most [`Limits::chunk`] bytes. It
-//! sends nothing down, so it asks for no room. It relies on the stream's
-//! contract:
-//!
-//! - a demand is met at most once, with exactly the bytes demanded, and
-//!   the tokenizer states a new one for every delivery it wants;
-//! - `End` comes once the side below holds nothing a demand could take:
-//!   while the tokenizer reads, when its demand can never be met; while it
-//!   is idle, only with nothing buffered;
-//! - `Failed` may come at any time, before or after `End`;
-//! - `Bytes` never come without a demand, nor `Room` without room asked
-//!   for, except a delivery already on its way when a close withdrew the
-//!   demand it meets.
-//!
-//! A scan that meets no quote within its maximum is one piece of a long
-//! string, not the framing error it is for a line (lib.md, 7).
+//! sends nothing down, so it asks for no room. The side below meets the
+//! contract of a stream (lib.md, 7); a scan that meets no quote within its
+//! maximum is one piece of a long string, and the tokenizer reads on.
 //!
 //! Above, the service's decoder ([`Request`] down, [`Event`] up):
 //!

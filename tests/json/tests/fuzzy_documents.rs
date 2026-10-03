@@ -37,6 +37,9 @@ impl Seen {
         if run.idle_end {
             self.note("an end with nothing demanded".into());
         }
+        if run.crossed_end {
+            self.note("a demand crossed the end".into());
+        }
         if settings.cut.is_some() {
             self.note("a stream ended early".into());
         }
@@ -68,13 +71,14 @@ const EVERY_ERROR: [&str; 13] = [
     "failed Stream",
 ];
 
-const EVERY_NEIGHBOUR: [&str; 8] = [
+const EVERY_NEIGHBOUR: [&str; 9] = [
     "Done",
     "closed before the outcome",
     "closed while waiting for Next",
     "closed while waiting for Bytes",
     "closed while waiting for Close",
     "an end with nothing demanded",
+    "a demand crossed the end",
     "a stream ended early",
     "the stream below filled while the side above stopped",
 ];

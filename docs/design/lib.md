@@ -115,6 +115,36 @@ A `Fault` says why a stream broke as far as the side above can act on it:
 the peer reset it, the side below could not make sense of the peer's data
 (a TLS record that fails to decrypt), or anything else.
 
+**The contract of a stream.** Every side below meets it, io's and every
+machine's:
+
+- **A demand is answered at most once:** by `Bytes`, exactly what its
+  read asks for, or by `Room`, whichever the side below can give first;
+  either answer ends it, and nothing is outstanding until the side above
+  states its next. The side above states its next demand only after an
+  answer, never in place of one outstanding. A state that wants nothing
+  more after an answer states nothing (programming-model.md, 5.4).
+- **`Read::Nothing` with no room withdraws** the outstanding demand, and
+  only when the side above will read no more (it is closing). An answer
+  already on its way may still arrive, and the side above drops it:
+  dropping `Bytes` loses data, so only a reader giving up the stream may.
+  No other `Bytes` or `Room` come without a demand.
+- **`End` comes once nothing the side below holds can meet a demand:**
+  with one outstanding, when it can never be met; with none, only when
+  nothing is held. It comes once, and ends reading only: a read that
+  crosses it is never met, but room may still be granted after it, as the
+  stream can still send to a peer that only half-closed. A read larger
+  than what is left before the end is never met; a side above that must
+  see every byte reads by its framing (a scan, or fills no larger than
+  its framing says remain).
+- **`Failed` may come at any time,** a demand outstanding or not, and
+  nothing follows it. After `End` it says only that the stream can no
+  longer send: what was read stands.
+- **A scan that meets no delimiter within its maximum delivers exactly
+  the maximum.** What that means is the side above's: a framing error for
+  a line or a head, one piece of a longer text for a string scanned to its
+  quote (json.md, 3.2).
+
 **`Intake`** is the carry-over of a stream: the bytes the side below has
 received and the side above has not yet demanded, up to a cap fixed when
 it is made. It is allocated once, at the cap, and never grows.
@@ -124,7 +154,7 @@ it is made. It is allocated once, at the cap, and never grows.
 - It meets a fill or a scan as soon as it can, each delivery a box of
   exactly the demanded length. A scan that reaches its maximum with no
   delimiter delivers exactly the maximum: the side above sees a scan that
-  does not end with the delimiter, and treats it as a framing error.
+  does not end with the delimiter, and decides what it means.
 - A fill larger than the cap, or a scan whose maximum is shorter than the
   delimiter or longer than the cap, could never be met: the caller's bug,
   asserted.
