@@ -333,6 +333,13 @@ io keeps the contract of a stream (lib.md, 7) as the side below:
   output counts a `Send` in flight until all of it is sent. A `Send` past
   the output cap or `Limits::sends`, or after `Finish`, is the layer
   above's bug, asserted; so is room demanded after `Finish`.
+- **A `Send` is within the room granted** (lib.md, 7), and io holds the
+  layer above to it: each open stream keeps what its last `Room` granted,
+  less what was sent since. `Room` sets it to the room asked for, each
+  `Send` must fit within it and spends it, and a demand for no room leaves
+  it as it is. A `Send` past it is the layer above's bug, asserted, in
+  every world: it is what keeps the output under its cap by the layer
+  above's asking, not by io's refusing.
 - **`Failed` is told at once,** and drops what the intake held and the
   output queued: the peer is gone.
 - **Discarding starts with the close,** not after the half-close, so that
@@ -433,7 +440,8 @@ Built, for sockets:
 - **Step tests** (`crates/skein-io/src/tests/`): each cell of both
   machines driven by hand, the refusals at a full slab, stale tokens
   dropped going down and asserted going up, every outcome of a cancel in
-  every order, each call with exactly its `MAX_OUT` of room.
+  every order, each call with exactly its `MAX_OUT` of room; sends within
+  the room granted, and one past it, or with none granted, asserted.
 - **io worlds** (`tests/io`, `skein-io-world`): a loop over the
   simulator drives each process's io and a scripted owner, which runs
   each connection by a plan of sends within the room granted and demands

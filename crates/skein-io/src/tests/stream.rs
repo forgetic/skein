@@ -18,7 +18,19 @@ fn ask(rig: &mut Rig, socket: Token, read: Read, room: u32) -> Out {
     rig.down(Request::Stream { stream: socket, down: Down::Demand { read, room } })
 }
 
+/// Sends `bytes` as an owner must: within room asked for and granted
+/// (lib.md, 7), unless there are none.
 fn give(rig: &mut Rig, socket: Token, bytes: &[u8]) -> Out {
+    if !bytes.is_empty() {
+        let room = u32::try_from(bytes.len()).unwrap();
+        ask(rig, socket, Read::Nothing, room).nothing();
+        assert_eq!(rig.next().events, [up(Up::Room)], "room for {room} bytes, granted");
+    }
+    push(rig, socket, bytes)
+}
+
+/// A `Send` as it stands, granted room or not.
+fn push(rig: &mut Rig, socket: Token, bytes: &[u8]) -> Out {
     rig.down(Request::Stream { stream: socket, down: Down::Send(Box::from(bytes)) })
 }
 
@@ -254,7 +266,7 @@ fn a_send_after_finish_is_the_owner_s_bug() {
     let mut rig = Rig::new(limits());
     let (socket, _recv) = connected(&mut rig, owner(1), FD);
     let _shutdown = rig.down(Request::Stream { stream: socket, down: Down::Finish });
-    let _send = give(&mut rig, socket, b"late");
+    let _send = push(&mut rig, socket, b"late");
 }
 
 #[test]
@@ -267,12 +279,46 @@ fn room_after_finish_is_the_owner_s_bug() {
 }
 
 #[test]
-#[should_panic(expected = "no more than the output cap")]
-fn a_send_past_the_output_cap_is_the_owner_s_bug() {
+#[should_panic(expected = "a Send within the room granted: no more than the last Room")]
+fn a_send_with_no_room_granted_is_the_owner_s_bug() {
     let mut rig = Rig::new(limits());
     let (socket, _recv) = connected(&mut rig, owner(1), FD);
-    let _send = give(&mut rig, socket, b"12345");
-    let _past = give(&mut rig, socket, b"6789");
+    let _send = push(&mut rig, socket, b"unasked");
+}
+
+#[test]
+#[should_panic(expected = "a Send within the room granted: no more than the last Room")]
+fn a_send_past_the_room_granted_is_the_owner_s_bug() {
+    let mut rig = Rig::new(limits());
+    let (socket, _recv) = connected(&mut rig, owner(1), FD);
+    ask(&mut rig, socket, Read::Nothing, 4).nothing();
+    assert_eq!(rig.next().events, [up(Up::Room)]);
+    let _within = push(&mut rig, socket, b"123");
+    let _past = push(&mut rig, socket, b"45");
+}
+
+#[test]
+fn room_granted_is_spent_by_sends_and_a_demand_for_none_leaves_it() {
+    let mut rig = Rig::new(limits());
+    let (socket, _recv) = connected(&mut rig, owner(1), FD);
+    ask(&mut rig, socket, Read::Nothing, 5).nothing();
+    assert_eq!(rig.next().events, [up(Up::Room)]);
+    let _first = push(&mut rig, socket, b"ab").take(Kind::Send);
+    // A read alone leaves the grant: three bytes of it are still held.
+    ask(&mut rig, socket, Read::Fill(1), 0).nothing();
+    push(&mut rig, socket, b"cde").nothing();
+}
+
+#[test]
+#[should_panic(expected = "a Send within the room granted: no more than the last Room")]
+fn a_new_grant_replaces_what_was_left_of_the_last() {
+    let mut rig = Rig::new(limits());
+    let (socket, _recv) = connected(&mut rig, owner(1), FD);
+    ask(&mut rig, socket, Read::Nothing, 3).nothing();
+    assert_eq!(rig.next().events, [up(Up::Room)]);
+    ask(&mut rig, socket, Read::Nothing, 1).nothing();
+    assert_eq!(rig.next().events, [up(Up::Room)]);
+    let _past = push(&mut rig, socket, b"ab");
 }
 
 #[test]
@@ -280,8 +326,12 @@ fn a_send_past_the_output_cap_is_the_owner_s_bug() {
 fn a_send_past_the_queue_is_the_owner_s_bug() {
     let mut rig = Rig::new(limits());
     let (socket, _recv) = connected(&mut rig, owner(1), FD);
+    // Room for four bytes, spent in sends of one: more sends than the queue
+    // holds, though within the room.
+    ask(&mut rig, socket, Read::Nothing, 4).nothing();
+    assert_eq!(rig.next().events, [up(Up::Room)]);
     for _ in 0..4_u32 {
-        let _send = give(&mut rig, socket, b"a");
+        let _send = push(&mut rig, socket, b"a");
     }
 }
 
@@ -374,7 +424,7 @@ fn a_failure_is_told_once_and_the_stream_waits_for_its_owner_s_close() {
     assert_eq!(out.events, [up(Up::Failed(Fault::Reset))]);
     assert!(out.subs.is_empty(), "nothing is received or sent any more");
     rig.complete(send, Err(Kernel::BrokenPipe)).nothing();
-    give(&mut rig, socket, b"dropped").nothing();
+    push(&mut rig, socket, b"dropped").nothing();
     ask(&mut rig, socket, Read::Fill(1), 1).nothing();
     rig.next().nothing();
     let close = rig.down(Request::Close { entity: socket }).take(Kind::Close);
@@ -598,7 +648,7 @@ fn requests_after_a_close_are_dropped_and_an_abort_escalates_it() {
     let (socket, recv) = connected(&mut rig, owner(1), FD);
     let shutdown = rig.down(Request::Close { entity: socket }).take(Kind::Shutdown);
     ask(&mut rig, socket, Read::Fill(1), 1).nothing();
-    give(&mut rig, socket, b"late").nothing();
+    push(&mut rig, socket, b"late").nothing();
     rig.down(Request::Stream { stream: socket, down: Down::Finish }).nothing();
     rig.down(Request::Close { entity: socket }).nothing();
     let cancel = rig.down(Request::Abort { entity: socket }).take(Kind::Cancel);
