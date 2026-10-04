@@ -1,0 +1,21 @@
+[package]
+name = "skein-world"
+description = "The world harness: processes' iterate in one loop over the simulator or the real ring, the referee, the trace, and the heap against the worst cases"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-io.workspace = true
+skein-sim.workspace = true
+skein-shell.workspace = true
+skein-heap.workspace = true
+
+# Ordinary Rust (programming-model.md, 10.2), held to the step crates' lints
+# as the other crates under testing/ are: its own clippy.toml lets in the std
+# types, closures, traits and formatting a harness needs, and the subset's
+# other checks stay on.
+[lints]
+workspace = true

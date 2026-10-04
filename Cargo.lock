@@ -199,3 +199,14 @@ dependencies = [
  "skein-lib",
  "skein-sim",
 ]
+
+[[package]]
+name = "skein-world"
+version = "0.0.0"
+dependencies = [
+ "skein-heap",
+ "skein-io",
+ "skein-lib",
+ "skein-shell",
+ "skein-sim",
+]
