@@ -960,9 +960,9 @@ pub struct Limits {
   each with what the server must make of it, served by a side above that
   reads each body to its end and answers `200`: the call or the
   rejection, the body, and the outcome. Each is written by hand after the
-  public format of its client, and says so. Thirty-two:
-  - curl's: a GET, a HEAD, a JSON POST, a large body that waits for a 100
-    (Continue), a chunked upload from standard input that waits for one
+  public format of its client, and says so. Thirty-six:
+  - curl's: a GET, a HEAD, a JSON POST, a body that waits for a 100
+    (Continue), its `Expect` asked for, a chunked upload from standard input that waits for one
     too, HTTP/1.0, two requests on one connection, and `Connection:
     close` before a request never read;
   - an LLM client's POST with a JSON body, as Anthropic's and OpenAI's
@@ -972,9 +972,10 @@ pub struct Limits {
     either order and with whitespace before a colon, a bad request line,
     HTTP/2's preface, a method not implemented, no `Host` and two, a
     fold, a NUL and a bare CR in a field, a coding not undone, a body
-    past the limit, a head and a body cut short, a chunk without its line
-    ending, a trailer section that never ends, two lengths, and too many
-    fields.
+    past the limit, by length and in chunks, a head and a body cut short,
+    a chunk without its line ending, a trailer section that never ends,
+    chunk extensions past the head in all, two lengths, a length with a
+    sign, a `Host` that names no host, and too many fields.
 
   Each comes to its expectation through the server's world under several
   seeds, read a byte at a time, and cut anywhere, as the reference reads

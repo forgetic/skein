@@ -253,7 +253,7 @@ refuse; each call is held to a reference reader of requests, and what
 the server wrote, byte for byte, to a writer of the test's own. The event
 stream writer runs in one too, and what it writes reads back, by the
 reference reader and by the reader's own world, as it was written.
-Thirty-two request transcripts, curl's, two LLM SDKs' JSON POSTs, and
+Thirty-six request transcripts, curl's, two LLM SDKs' JSON POSTs, and
 hostile ones, come to their expectations in the focused suite. The fuzzy
 suite runs 10,000 connections of generated, mutated and corrupted
 requests, the request transcripts cut and mutated, and 5,000 runs of the
