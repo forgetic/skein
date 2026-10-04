@@ -358,35 +358,24 @@ pub struct Events {
     pub retry: Option<u64>,
     /// The last event ID, as the last blank line left it.
     pub last_id: Vec<u8>,
+    /// Where in the bytes a failure arose: the byte that passed a limit.
+    pub failed_at: Option<usize>,
 }
 
 /// What `bytes`, the whole of a body, come to as an event stream under
-/// `limits` (WHATWG HTML, 9.2.6), as far as the reader's scans see them.
+/// `limits` (WHATWG HTML, 9.2.6): read a byte at a time by the standard,
+/// with the reader's limits on lines, events and fields. Bytes after the
+/// last line end are an incomplete line, which the end of the stream
+/// drops.
 #[must_use]
 pub fn events(bytes: &[u8], limits: &sse::Limits) -> Events {
     let mut stream = Stream::new();
-    let chunk = usize::try_from(limits.chunk).expect("fits a usize");
-    let mut at = 0;
-    loop {
-        // The next delivery: through the first byte the last line ended
-        // with, within a scan's maximum; or a scan's maximum; or, short of
-        // it before the end, never seen.
-        let rest = &bytes[at..];
-        let window = &rest[..chunk.min(rest.len())];
-        let until = if stream.cr_mode { b'\r' } else { b'\n' };
-        let len = match window.iter().position(|&byte| byte == until) {
-            Some(found) => found + 1,
-            None if window.len() == chunk => chunk,
-            None => break,
-        };
-        for &byte in &window[..len] {
-            if let Err(error) = stream.byte(byte, limits) {
-                return stream.ended(Ending::Failed(error));
-            }
+    for (at, &byte) in bytes.iter().enumerate() {
+        if let Err(error) = stream.byte(byte, limits) {
+            return stream.ended(Ending::Failed(error), Some(at));
         }
-        at += len;
     }
-    stream.ended(Ending::Ended)
+    stream.ended(Ending::Ended, None)
 }
 
 /// The standard's parser, a byte at a time.
@@ -396,7 +385,6 @@ struct Stream {
     bom_over: bool,
     line: Vec<u8>,
     after_cr: bool,
-    cr_mode: bool,
     size: u64,
     data: Vec<u8>,
     name: Vec<u8>,
@@ -415,7 +403,6 @@ impl Stream {
             bom_over: false,
             line: Vec::new(),
             after_cr: false,
-            cr_mode: false,
             size: 0,
             data: Vec::new(),
             name: Vec::new(),
@@ -425,8 +412,8 @@ impl Stream {
         }
     }
 
-    fn ended(self, ending: Ending) -> Events {
-        Events { events: self.events, ending, retry: self.retry, last_id: self.last_id }
+    fn ended(self, ending: Ending, failed_at: Option<usize>) -> Events {
+        Events { events: self.events, ending, retry: self.retry, last_id: self.last_id, failed_at }
     }
 
     fn byte(&mut self, byte: u8, limits: &sse::Limits) -> Result<(), sse::Error> {
@@ -445,11 +432,12 @@ impl Stream {
     }
 
     fn line_byte(&mut self, byte: u8, limits: &sse::Limits) -> Result<(), sse::Error> {
+        // A line ends at CRLF, at LF, or at CR alone: an LF right after a CR
+        // is the CRLF's.
         let paired = self.after_cr && byte == b'\n';
-        if self.after_cr && !paired {
-            self.cr_mode = true;
-        }
         self.after_cr = false;
+        // Every byte counts against the event, endings included, from the
+        // line end that dispatched the last one.
         self.size += 1;
         if self.size > u64::from(limits.event) {
             return Err(sse::Error::EventTooLong);
@@ -464,7 +452,6 @@ impl Stream {
                 Ok(())
             }
             b'\n' => {
-                self.cr_mode = false;
                 self.end_line();
                 Ok(())
             }

@@ -87,19 +87,21 @@ fn the_side_above_closes_in_every_state() {
 }
 
 #[test]
-fn a_stream_of_lines_ended_by_cr_alone_is_read_as_it_comes() {
-    let bytes = b"data: 1\r\rdata: 2\r\r: ping\r\rdata: 3\r\r";
-    let mut scanned_to_cr = 0;
-    for seed in 0..20 {
-        let mut rng = Rng::new(seed);
-        let settings = Settings::calm(&mut rng, Limits { chunk: 8, ..LIMITS });
-        let run = sse_world::check(bytes, &settings, seed);
-        assert_eq!(run.events.len(), 3, "seed {seed}");
-        if run.fell.scanned_to_cr {
-            scanned_to_cr += 1;
+fn streams_of_lines_ended_by_cr_alone_or_crlf_are_read_as_they_come() {
+    // Each shorter than one scan: every line is read as its end arrives,
+    // and a CRLF's LF comes alone, after its CR.
+    let streams: [(&[u8], usize, bool); 2] =
+        [(b"data: 1\r\rdata: 2\r\r: ping\r\rdata: 3\r\r", 3, false), (b"data: 1\r\n\r\ndata: 2\r\n\r\n", 2, true)];
+    for (bytes, events, lone_lf) in streams {
+        for seed in 0..20 {
+            let mut rng = Rng::new(seed);
+            let settings = Settings::calm(&mut rng, Limits { chunk: 64, ..LIMITS });
+            let run = sse_world::check(bytes, &settings, seed);
+            assert_eq!(run.outcome, Some(Ending::Ended), "seed {seed}");
+            assert_eq!(run.events.len(), events, "seed {seed}");
+            assert_eq!(run.fell.lone_lf, lone_lf, "seed {seed}");
         }
     }
-    assert_eq!(scanned_to_cr, 20, "after the first CR alone, every scan is to CR");
 }
 
 #[test]

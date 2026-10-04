@@ -384,8 +384,8 @@ fn the_reader_holds_no_more_than_its_worst_case_at_its_limits() {
     let limits = sse::Limits { line: 64, event: 200, field: 16, chunk: 24 };
     let mut at_limits = Vec::new();
     // An event at its limit, its data one line at the line limit and more,
-    // its type and id at theirs, lines ended every way, held rests among
-    // them.
+    // its type and id at theirs, lines ended every way, a whole chunk
+    // delivered among them.
     at_limits.extend_from_slice(b"\xef\xbb\xbfevent: ");
     at_limits.extend_from_slice(&[b't'; 16]);
     at_limits.extend_from_slice(b"\r\nid: ");
@@ -407,6 +407,8 @@ fn the_reader_holds_no_more_than_its_worst_case_at_its_limits() {
         (&never_ends, "an event that never ends"),
         (b"event: 01234567890123456789\ndata\n\n", "a type past its limit"),
     ];
+    let bound = sse::worst_case(&limits).expect("the limits are honoured");
+    assert_eq!(events(limits, &at_limits, None), bound, "at its limits, its peak is its worst case exactly");
     for (stream, what) in cases {
         let most = events(limits, stream, None);
         assert!(most > 0, "{what}");

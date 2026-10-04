@@ -335,23 +335,25 @@ pub enum Error { LineTooLong, EventTooLong, FieldTooLong, Stream(Fault) }
 
 ### 4.1 Lines, fields and events
 
-- **A line ends at LF, at CRLF, or at CR alone,** wherever it falls in
-  what a scan delivers. A CR ends its line at once; an LF right after it
-  is its pair, and ends nothing.
-- **The reader scans to the byte that ended the last line:** to LF, the
-  ending of every line in practice and the pair of a CRLF; to CR after a
-  line that ended with a CR alone. Each scan is of at most
-  `Limits::chunk`. A stream of LF, of CRLF or of CR alone is so read as
-  it comes, a line in each scan once its convention is known. One whose
-  lines change convention is read a scan's worth later after each
-  change; and at the end of the stream, what follows a change that the
-  last scan did not deliver is never seen (lib.md, 7), as a line cut by
-  the end would not be.
-- **A delivery may hold more than the event asked for:** lines ended by
-  a CR alone within a scan to LF. The reader then holds the rest of the
-  delivery, at most a scan, and reads it before it demands more. Before
-  the stream's end, a failure overrides what is held, as the tokenizer's
-  does; after it, what was read stands.
+- **A line ends at LF, at CRLF, or at CR alone.** A CR ends its line at
+  once; an LF right after it is its pair, and ends nothing.
+- **The reader reads a line at a time,** by line scans of at most
+  `Limits::chunk` (`Read::Line`, lib.md, 7): each delivery ends at the
+  first CR or LF, or is a chunk of a line longer than one. Every line is
+  read as soon as its end arrives, whatever the stream's convention, and
+  a stream shorter than a scan as it comes. An LF-only or a CR-only
+  stream is one delivery a line; a CRLF is two, the line to its CR and
+  then the LF alone, which the reader skips as the CR's pair.
+- **An event ends its delivery,** as the line end that dispatches it is
+  a delivery's last byte, so the reader keeps nothing of a delivery past
+  the step that reads it. An end or a failure that comes while the reader
+  demands nothing answers the next `Next`; after the end, a failure says
+  only that the stream can no longer send, and what was read stands.
+- **At the end of the stream, only an incomplete last line goes unread,**
+  as the standard drops it: a line scan larger than what is left is never
+  met (lib.md, 7). Of a last line longer than a chunk, the whole chunks
+  are read, so one that passes a limit fails if a whole chunk past the
+  limit came, and otherwise ends the stream.
 - **Fields** (WHATWG HTML, 9.2.6), each value going where it belongs as
   its bytes come: `data` into the event's data, an LF after each line;
   `event` into its type; `id` into a value held until its line ends, then
@@ -376,7 +378,7 @@ pub struct Limits {
     pub event: u32,   // the bytes read from the end of the last event to the blank line of this one,
                       // endings included: past it, EventTooLong
     pub field: u32,   // the longest event type or id: past it, FieldTooLong
-    pub chunk: u32,   // the most demanded at once: each scan's maximum, and the most held; at least one
+    pub chunk: u32,   // the most demanded at once: each line scan's maximum; at least one
 }
 ```
 
@@ -386,9 +388,9 @@ pub struct Limits {
   by comment blocks runs on.
 - **`worst_case(&limits)`** is the event's data (`event`), its type, an
   `id` value, the last event ID buffer and the last event ID (`field`
-  each), all allocated with the reader, and the delivery it reads or holds
-  the rest of (`chunk`). An event's boxes are the side above's from when
-  it goes up. `None` for a chunk of zero.
+  each), all allocated with the reader, and the delivery it reads
+  (`chunk`), dropped by the step that reads it. An event's boxes are
+  handed out when it goes up. `None` for a chunk of zero.
 - **`largest_demand`** is `chunk`.
 - **`UP_MAX_OUT` and `DOWN_MAX_OUT`** are one event and one request each:
   only a `Close` while reading emits both, `Closed` and the demand
@@ -419,10 +421,11 @@ Not built yet (section 9). As planned:
   the upload, a response that comes first, the stream ending and failing
   in each state, a close in each state, `waiting()`, and each bug of the
   side above's asserted. The reader: every field, every line ending and
-  a scan that follows them, the rest of a delivery held, the end and a
-  failure while idle and while reading, every limit at its edge, the
-  byte order mark, every cut of a stream reading the same, and a close in
-  each state; and `sse::Data`.
+  the line scans that read them, a CR's LF skipped, streams of LF, CR,
+  CRLF and mixed endings shorter than one scan and the deliveries they
+  take, the end and a failure while idle and while reading, every limit
+  at its edge, the byte order mark, every cut of a stream reading the
+  same, and a close in each state; and `sse::Data`.
 - **Machine worlds** (testing-strategy.md, 2.4) in `tests/http`
   (`skein-http-world`), one machine from a seed in one loop with both its
   neighbours:
@@ -435,10 +438,10 @@ Not built yet (section 9). As planned:
     response before it took the body would wait for ever; the stream ends
     when the bytes run out, early at a cut, idle or with a read on its
     way, and fails, before its end or after it; after a close it may
-    still answer what was on its way. Above, a user makes
-    the calls, uploads each body in pieces within the room granted, reads
-    with fills and scans to LF, CRLF and a quote of every size, slowly,
-    withdraws a demand and discards, discards the rest now and then,
+    still answer what was on its way. Above, a user makes the calls,
+    uploads each body in pieces within the room granted, reads with
+    fills, line scans and scans to LF, CRLF and a quote of every size,
+    slowly, withdraws a demand and discards, discards the rest now and then,
     sends a withdrawal or a discard that crosses its answer, the body's
     end among them, stops for a while, and closes after the last exchange
     or at any moment. The world checks `MAX_OUT` on each call; below, one
@@ -456,10 +459,15 @@ Not built yet (section 9). As planned:
     unless the stream failed or the side above closed first, with a
     connection whose upload stopped, or whose stream ended or failed
     during the exchange, not used again.
-  - **The reader's** does the same for an event stream, against a
-    reference that follows the standard's parser a byte at a time and
-    mirrors only what the reader promises: which bytes its scans see, and
-    the order of errors at one byte.
+  - **The reader's** does the same for an event stream, each demand a
+    line scan of the chunk, against a reference that reads by the
+    standard's parser a byte at a time, with the reader's limits, and
+    knows nothing of scans. The events, the outcome, the reconnection
+    time and the last event ID are the reference's, unless the stream
+    failed or the side above closed first; the one exception is the
+    incomplete line a stream may end with (4.1), of which only whole
+    chunks are read, so a failure the reference finds past them reads
+    as the end.
   - A seed replays to the same run.
 - **Transcripts** in `tests/http/transcripts/`, each `<name>.http` beside
   `<name>.expect`, what it must decode to: the head, the body or the
@@ -522,9 +530,9 @@ Not built yet (section 9). As planned:
   can end or fail below and what the machine waited for when it failed,
   a close while it waited for each thing, room granted while a response
   waited, a response read mid-upload, a withdrawal and an answer after
-  it, a discard, a connection reused, the rest of a delivery held, and a
-  scan to CR. It stands in for the fuzz targets, which wait for a
-  nightly toolchain.
+  it, a discard, a connection reused, a CR's LF delivered alone, and a
+  line longer than a chunk read in pieces. It stands in for the fuzz
+  targets, which wait for a nightly toolchain.
 
 ## 7. Decisions
 
@@ -565,16 +573,16 @@ Not built yet (section 9). As planned:
   event under `Limits::event`, which temper sizes for ChatGPT's large
   events (its llm.md, 3 and 13). Streaming an event's data to the
   tokenizer would hold a line instead, at the price of these.
-- **The reader holds the rest of a delivery** when it holds more than the
-  event asked for, at most a scan's worth, rather than reading a byte at
-  a time: a demand met is a loop iteration, and a byte at a time would
-  cost one per byte of every event.
-- **The reader's scan follows the last line's ending.** A scan has one
-  delimiter, and a line may end at CR or LF. Scanning to LF always would
+- **lib's line scan, for the reader's lines.** A line ends at LF, CRLF
+  or CR alone, and a scan has one delimiter. Scanning to LF always would
   read a stream of CR alone only when a scan filled, and lose its last
-  events at the end; following the last ending reads every convention as
-  it comes, and costs a stream that mixes them a scan's worth of delay at
-  each change.
+  events at the end. Following the last line's ending, as the reader
+  first did, cost a stream that mixed endings a scan's delay at each
+  change, a rest of a delivery held, and at the end what followed a
+  change. A read that stops at either byte is lib's own (`Read::Line`),
+  met by the intake's search as any scan is: every line is read as its
+  end arrives, a line a demand rather than a byte, at the price of a
+  one-byte delivery for a CRLF's LF; and nothing is held.
 - **Every byte read counts against the event,** comments included, so an
   event that never ends fails whatever the stream sends it as.
 - **The reader does not decode UTF-8,** and so does not replace what is

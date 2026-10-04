@@ -247,7 +247,7 @@ pub fn parse(text: &[u8]) -> Result<Parsed, String> {
         (events, Some(ending)) => {
             let last_id =
                 events.as_ref().and_then(|events| events.last()).map(|event| event.id.clone()).unwrap_or_default();
-            Some(Events { events: events.unwrap_or_default(), ending, retry: None, last_id })
+            Some(Events { events: events.unwrap_or_default(), ending, retry: None, last_id, failed_at: None })
         }
         (Some(_), None) => return Err("events without an sse outcome".into()),
     };

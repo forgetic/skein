@@ -5,14 +5,15 @@
 //! # Its two sides
 //!
 //! Below, a `lib::stream` (lib.md, 7): a response body, from the HTTP
-//! client. The reader demands what the lines need: scans of at most
-//! [`Limits::chunk`] to the byte that ended the last line, an LF, or a CR
-//! after a line that ended with a CR alone, so that a stream is read as it
-//! comes whichever ending it uses. A line ends at LF, CRLF or CR, wherever
-//! it falls in what a scan delivers; when a delivery holds more than the
-//! event the side above asked for, the reader holds the rest, at most a
-//! scan's worth, and reads it before it demands more. It sends nothing, so
-//! it asks for no room.
+//! client. The reader demands a line at a time: a scan to the first line
+//! end, a CR or an LF ([`Read::Line`]), of at most [`Limits::chunk`], so a
+//! delivery holds one line end at most, as its last byte, and a line longer
+//! than a chunk comes in several. A line ends at LF, at CRLF, or at CR
+//! alone: a CR ends its line at once, and a lone LF delivered right after
+//! it is the CRLF's second byte, and is skipped. An LF-only stream is read
+//! a delivery a line, as is a CR-only one; a CRLF one, two. The reader
+//! keeps nothing of a delivery past the step that reads it, and sends
+//! nothing, so it asks for no room.
 //!
 //! Above, the service's protocol layer ([`Request`] down, [`Event`] up):
 //!
@@ -45,7 +46,7 @@ use core::mem;
 
 use alloc::boxed::Box;
 
-use skein_lib::stream::{Delimiter, Down, Fault, Read, Up};
+use skein_lib::stream::{Down, Fault, Read, Up};
 use skein_lib::{Env, List, Queue};
 
 use crate::MaxOut;
@@ -54,7 +55,7 @@ mod data;
 mod lines;
 
 pub use data::Data;
-use lines::{Ending, Lines, Step};
+use lines::{Lines, Step};
 
 /// The reader's limits (programming-model.md, 7): the same for every step
 /// and for [`Reader::new`], which allocates by them.
@@ -69,8 +70,8 @@ pub struct Limits {
     pub event: u32,
     /// The longest event type or id: past it, [`Error::FieldTooLong`].
     pub field: u32,
-    /// The most bytes demanded at once: each scan's maximum, and the most
-    /// the reader holds of a delivery. At least one.
+    /// The most bytes demanded at once: each scan's maximum, so the most a
+    /// delivery holds. At least one.
     pub chunk: u32,
 }
 
@@ -91,8 +92,8 @@ pub fn largest_demand(limits: &Limits) -> u32 {
 /// It is the event's data, at most [`Limits::event`]; its type, an `id`
 /// field's value, the last event ID buffer and the last event ID, each at
 /// most [`Limits::field`], all allocated with the reader; and the delivery
-/// it reads or holds the rest of, at most [`Limits::chunk`]. An event's
-/// boxes are the side above's to count from when it is emitted.
+/// it reads, at most [`Limits::chunk`], dropped by the step that reads it.
+/// An event's boxes are handed out when it goes up.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
     if limits.chunk == 0 {
@@ -192,7 +193,7 @@ impl Reader {
     #[must_use]
     pub fn new(limits: &Limits) -> Reader {
         assert!(limits.chunk > 0, "a scan holds the byte it ends at");
-        Reader { state: State::Idle(Held::Nothing), lines: Lines::new(limits) }
+        Reader { state: State::Idle(Below::Open), lines: Lines::new(limits) }
     }
 
     /// What it is waiting for: a function of its state alone.
@@ -229,15 +230,15 @@ pub fn up(reader: &mut Reader, env: &Env<Limits>, ev: Up, above: &mut Queue<Even
     let was = Was::of(&state);
     reader.state = match state {
         State::Reading => match ev {
-            Up::Bytes(piece) => read(lines, limits, Rest { piece, at: 0 }, After::Open, above),
+            Up::Bytes(delivery) => read(lines, limits, &delivery, above),
             Up::End => ended(lines, above),
             Up::Failed(fault) => fail(lines, Error::Stream(fault), above),
             Up::Room => unreachable!("the reader asks for no room"),
         },
-        State::Idle(held) => match ev {
+        State::Idle(told) => match ev {
             Up::Bytes(_) => unreachable!("bytes delivered without a read demand"),
-            Up::End => State::Idle(held_end(held)),
-            Up::Failed(fault) => State::Idle(held_failed(held, fault)),
+            Up::End => State::Idle(told.ended()),
+            Up::Failed(fault) => State::Idle(told.failed(fault)),
             Up::Room => unreachable!("the reader asks for no room"),
         },
         State::Over => match ev {
@@ -251,7 +252,7 @@ pub fn up(reader: &mut Reader, env: &Env<Limits>, ev: Up, above: &mut Queue<Even
             Up::Room => unreachable!("the reader asks for no room"),
         },
     };
-    demand(was, &reader.state, lines, limits, below);
+    demand(was, &reader.state, limits, below);
 }
 
 /// A request from the side above. Emits at most [`DOWN_MAX_OUT`].
@@ -262,22 +263,22 @@ pub fn down(reader: &mut Reader, env: &Env<Limits>, rq: Request, above: &mut Que
     let was = Was::of(&state);
     reader.state = match rq {
         Request::Next => match state {
-            State::Idle(held) => next(lines, limits, held, above),
+            State::Idle(told) => next(lines, told, above),
             State::Reading => unreachable!("a Next before the last one was answered"),
             State::Over => unreachable!("a Next after the stream's outcome"),
             State::Closed => unreachable!("a Next after Closed"),
         },
         Request::Close => close(lines, state, above),
     };
-    demand(was, &reader.state, lines, limits, below);
+    demand(was, &reader.state, limits, below);
 }
 
 /// What the reader is doing about the side above's demand.
 #[derive(Debug)]
 enum State {
     /// Waiting for the side above to ask for the next event, with nothing
-    /// demanded below, and holding what came before it asked.
-    Idle(Held),
+    /// demanded below, and what the side below told meanwhile.
+    Idle(Below),
     /// Reading for the side above's `Next`, with a demand below.
     Reading,
     /// The stream's outcome, `Ended` or `Failed`, went up.
@@ -302,33 +303,36 @@ impl Was {
     }
 }
 
-/// What an idle reader holds for the next `Next`.
-#[derive(Debug)]
-enum Held {
+/// What the side below told an idle reader, for its next `Next`: with no
+/// demand outstanding, it may still end or fail (lib.md, 7).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Below {
     /// Nothing: the next event begins with the next byte demanded.
-    Nothing,
-    /// The rest of a delivery that held more than the last event.
-    Rest(Rest),
-    /// That rest, and the stream's end after it.
-    RestThenEnd(Rest),
+    Open,
     /// The stream ended.
-    End,
-    /// The stream failed before it ended, whatever was held before.
+    Ended,
+    /// The stream failed before it ended.
     Failed(Fault),
 }
 
-/// What is left of a delivery to read.
-#[derive(Debug)]
-struct Rest {
-    piece: Box<[u8]>,
-    at: usize,
-}
+impl Below {
+    /// The stream ended. Nothing comes after an end or a failure, a second
+    /// end included.
+    fn ended(self) -> Below {
+        match self {
+            Below::Open => Below::Ended,
+            Below::Ended | Below::Failed(_) => self,
+        }
+    }
 
-/// Whether the stream ended after what is being read.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum After {
-    Open,
-    Ended,
+    /// The stream failed. After the end, a failure says only that the
+    /// stream can no longer send: what was read stands.
+    fn failed(self, fault: Fault) -> Below {
+        match self {
+            Below::Open => Below::Failed(fault),
+            Below::Ended | Below::Failed(_) => self,
+        }
+    }
 }
 
 /// States what the state `after` a transition demands below, in one place
@@ -336,15 +340,9 @@ enum After {
 /// states its demand, as every transition into one follows a delivery that
 /// met the last, or leaves `Idle`, which has none; a close withdraws the
 /// demand of a state that was reading.
-fn demand(was: Was, after: &State, lines: &Lines, limits: &Limits, below: &mut Queue<Down>) {
+fn demand(was: Was, after: &State, limits: &Limits, below: &mut Queue<Down>) {
     let read = match after {
-        State::Reading => {
-            let until = match lines.ending() {
-                Ending::Lf => Delimiter::LF,
-                Ending::Cr => CR,
-            };
-            Read::Scan { until, max: limits.chunk }
-        }
+        State::Reading => Read::Line { max: limits.chunk },
         State::Closed => match was {
             Was::Reading => Read::Nothing,
             Was::NotReading => return,
@@ -354,65 +352,26 @@ fn demand(was: Was, after: &State, lines: &Lines, limits: &Limits, below: &mut Q
     below.push(Down::Demand { read, room: 0 });
 }
 
-const CR: Delimiter = Delimiter::new(b"\r").expect("one byte");
-
 /// `Next`, while idle.
-fn next(lines: &mut Lines, limits: &Limits, held: Held, above: &mut Queue<Event>) -> State {
-    match held {
-        Held::Nothing => State::Reading,
-        Held::Rest(rest) => read(lines, limits, rest, After::Open, above),
-        Held::RestThenEnd(rest) => read(lines, limits, rest, After::Ended, above),
-        Held::End => ended(lines, above),
-        Held::Failed(fault) => fail(lines, Error::Stream(fault), above),
+fn next(lines: &mut Lines, told: Below, above: &mut Queue<Event>) -> State {
+    match told {
+        Below::Open => State::Reading,
+        Below::Ended => ended(lines, above),
+        Below::Failed(fault) => fail(lines, Error::Stream(fault), above),
     }
 }
 
-/// Reads `rest` for the side above's `Next`, up to the next event, and
-/// holds what is left of it after one.
-fn read(lines: &mut Lines, limits: &Limits, rest: Rest, after: After, above: &mut Queue<Event>) -> State {
-    let (step, at) = lines.read(limits, &rest.piece, rest.at);
-    match step {
+/// Reads a delivery for the side above's `Next`: a line, or a chunk of
+/// one. Its one line end is its last byte, so it is read whole, and an
+/// event it dispatches is the last thing in it.
+fn read(lines: &mut Lines, limits: &Limits, delivery: &[u8], above: &mut Queue<Event>) -> State {
+    match lines.read(limits, delivery) {
         Step::Message(message) => {
             above.push(Event::Message(message));
-            let left = if at < rest.piece.len() { Some(Rest { piece: rest.piece, at }) } else { None };
-            let held = match left {
-                Some(rest) => match after {
-                    After::Open => Held::Rest(rest),
-                    After::Ended => Held::RestThenEnd(rest),
-                },
-                None => match after {
-                    After::Open => Held::Nothing,
-                    After::Ended => Held::End,
-                },
-            };
-            State::Idle(held)
+            State::Idle(Below::Open)
         }
         Step::Fail(error) => fail(lines, error, above),
-        Step::More => match after {
-            After::Open => State::Reading,
-            After::Ended => ended(lines, above),
-        },
-    }
-}
-
-/// What an idle reader holds once the stream has ended.
-fn held_end(held: Held) -> Held {
-    match held {
-        Held::Nothing => Held::End,
-        Held::Rest(rest) => Held::RestThenEnd(rest),
-        // Nothing comes after an end or a failure, a second end included.
-        Held::RestThenEnd(_) | Held::End | Held::Failed(_) => held,
-    }
-}
-
-/// What an idle reader holds once the stream has failed. After the end, a
-/// failure says only that the stream can no longer send: what was read
-/// stands. Before it, the failure overrides what is held, as the
-/// tokenizer's does (json.md, 3.1).
-fn held_failed(held: Held, fault: Fault) -> Held {
-    match held {
-        Held::Nothing | Held::Rest(_) => Held::Failed(fault),
-        Held::RestThenEnd(_) | Held::End | Held::Failed(_) => held,
+        Step::More => State::Reading,
     }
 }
 

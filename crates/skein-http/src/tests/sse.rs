@@ -1,18 +1,18 @@
-//! The server-sent events reader (http.md, 4): fields, line endings,
-//! dispatch, every limit at and past its edge, the rest of a delivery held,
-//! the stream's end and failure, and closing in each state.
+//! The server-sent events reader (http.md, 4): fields, line endings and
+//! the line scans that read them, dispatch, every limit at and past its
+//! edge, the stream's end and failure, and closing in each state.
 
 #![expect(clippy::disallowed_types, reason = "a test collects what it reads in a Vec")]
 
 use alloc::vec::Vec;
 
-use skein_lib::stream::{Delimiter, Down, Fault, Read, Up};
+use skein_lib::Intake;
+use skein_lib::stream::{Down, Fault, Read, Up};
 
 use super::{Events, boxed, stream};
 use crate::sse::{Error, Event, Limits, Message, Request, Waiting};
 
 const LIMITS: Limits = Limits { line: 64, event: 128, field: 16, chunk: 8 };
-const CR: Delimiter = Delimiter::new(b"\r").expect("one byte");
 
 fn message(name: &[u8], data: &[u8], id: &[u8]) -> Event {
     Event::Message(Message { name: boxed(name), data: boxed(data), id: boxed(id) })
@@ -32,9 +32,43 @@ fn failure(bytes: &[u8], limits: Limits) -> Error {
     }
 }
 
+/// The one demand the reader makes: a line scan of `max`.
 #[expect(clippy::unnecessary_wraps, reason = "compared with what a call sent below, an Option")]
-fn scan(until: Delimiter) -> Option<Down> {
-    Some(Down::Demand { read: Read::Scan { until, max: LIMITS.chunk }, room: 0 })
+fn line(max: u32) -> Option<Down> {
+    Some(Down::Demand { read: Read::Line { max }, room: 0 })
+}
+
+/// The messages a stream comes to, which must end cleanly, and the
+/// deliveries it took.
+fn read_counting(bytes: &[u8], limits: Limits) -> (Vec<Event>, usize) {
+    let mut events = Events::new(limits);
+    let mut intake = Intake::with_capacity(u32::try_from(bytes.len()).unwrap().max(limits.chunk));
+    intake.append(bytes).unwrap();
+    let mut out = Vec::new();
+    let mut deliveries = 0;
+    let (mut event, mut down) = events.down(Request::Next);
+    for _ in 0..bytes.len().saturating_mul(2).saturating_add(8) {
+        match event {
+            None => {}
+            Some(Event::Message(_)) => {
+                out.push(event.take().unwrap());
+                (event, down) = events.down(Request::Next);
+                continue;
+            }
+            Some(Event::Ended) => return (out, deliveries),
+            other => panic!("{} came to {other:?}", bytes.escape_ascii()),
+        }
+        let Some(Down::Demand { read, .. }) = down else { panic!("a demand while reading") };
+        let answer = match intake.meet(read) {
+            Some(piece) => {
+                deliveries = deliveries.saturating_add(1);
+                Up::Bytes(piece)
+            }
+            None => Up::End,
+        };
+        (event, down) = events.up(answer);
+    }
+    panic!("{} read in a few steps a line", bytes.escape_ascii());
 }
 
 #[test]
@@ -92,7 +126,7 @@ fn retry_sets_the_reconnection_time_from_digits_only() {
         (b"retry: 1\nretry: 2\n\n", Some(2)),
     ] {
         let mut events = Events::new(LIMITS);
-        let mut intake = skein_lib::Intake::with_capacity(64);
+        let mut intake = Intake::with_capacity(64);
         intake.append(bytes).unwrap();
         let (_, mut down) = events.down(Request::Next);
         for _ in 0..64_u32 {
@@ -117,60 +151,76 @@ fn lines_end_at_lf_crlf_or_cr_alone() {
 }
 
 #[test]
-fn the_scan_follows_the_last_line_s_ending() {
+fn each_demand_is_a_line_scan_and_a_cr_s_lf_is_skipped() {
     let mut events = Events::new(LIMITS);
-    assert_eq!(events.down(Request::Next), (None, scan(Delimiter::LF)));
-    assert_eq!(events.bytes(b"data: a\n"), (None, scan(Delimiter::LF)));
-    assert_eq!(
-        events.bytes(b"data: b\r"),
-        (None, scan(Delimiter::LF)),
-        "a CR at the end: alone or a pair, not yet known"
-    );
-    assert_eq!(events.bytes(b"\n"), (None, scan(Delimiter::LF)), "a pair");
-    assert_eq!(events.bytes(b"data: c\r"), (None, scan(Delimiter::LF)));
-    assert_eq!(events.bytes(b"\r"), (Some(message(b"message", b"a\nb\nc", b"")), None), "alone: the blank line");
-    assert_eq!(events.down(Request::Next), (None, scan(CR)), "a CR alone ended a line: scan to CR");
-    assert_eq!(events.bytes(b"data: d\r"), (None, scan(CR)));
-    assert_eq!(events.bytes(b"\ndata:e\n"), (None, scan(Delimiter::LF)), "an LF alone ended a line");
-    assert_eq!(events.bytes(b"\n"), (Some(message(b"message", b"d\ne", b"")), None));
+    assert_eq!(events.down(Request::Next), (None, line(8)));
+    assert_eq!(events.bytes(b"data: a\n"), (None, line(8)));
+    assert_eq!(events.bytes(b"data: b\r"), (None, line(8)), "a CR ends its line at once");
+    assert_eq!(events.bytes(b"\n"), (None, line(8)), "the CR's pair: skipped");
+    assert_eq!(events.bytes(b"data: c\r"), (None, line(8)));
+    assert_eq!(events.bytes(b"\r"), (Some(message(b"message", b"a\nb\nc", b"")), None), "a blank line, at once");
+    assert_eq!(events.down(Request::Next), (None, line(8)));
+    assert_eq!(events.bytes(b"\n"), (None, line(8)), "the blank line's pair: skipped, no second blank line");
+    assert_eq!(events.bytes(b"data: d\r"), (None, line(8)));
+    assert_eq!(events.bytes(b"\n"), (None, line(8)));
+    assert_eq!(events.bytes(b"\n"), (Some(message(b"message", b"d", b"")), None), "an LF alone: the blank line");
+    assert_eq!(events.down(Request::Next), (None, line(8)));
+    assert_eq!(events.bytes(b"data: lo"), (None, line(8)), "a line longer than a chunk comes in several");
+    assert_eq!(events.bytes(b"ng\r"), (None, line(8)));
+    assert_eq!(events.bytes(b"\r"), (Some(message(b"message", b"long", b"")), None));
 }
 
 #[test]
-fn a_delivery_with_more_than_one_event_is_held_and_read_before_more_is_demanded() {
+fn streams_shorter_than_one_scan_are_read_whatever_their_endings() {
+    let limits = Limits { chunk: 64, ..LIMITS };
+    let expected = [message(b"one", b"1\n2", b""), message(b"message", b"3", b"")];
+    for (bytes, deliveries, what) in [
+        (&b"event: one\ndata: 1\ndata: 2\n\ndata: 3\n\n"[..], 6, "LF: one delivery a line"),
+        (b"event: one\rdata: 1\rdata: 2\r\rdata: 3\r\r", 6, "CR: one delivery a line"),
+        (b"event: one\r\ndata: 1\r\ndata: 2\r\n\r\ndata: 3\r\n\r\n", 12, "CRLF: two"),
+        (b"event: one\r\ndata: 1\rdata: 2\n\r\ndata: 3\n\r", 8, "mixed"),
+    ] {
+        assert!(bytes.len() < 64, "{what}");
+        let (read, taken) = read_counting(bytes, limits);
+        assert_eq!((&read[..], taken), (&expected[..], deliveries), "{what}");
+    }
+    let (read, taken) = read_counting(b"data: x\r", limits);
+    assert_eq!((&read[..], taken), (&[][..], 1), "a CR at the very end ends its line");
+    let (read, taken) = read_counting(b"data: x\r\r", limits);
+    assert_eq!((&read[..], taken), (&[message(b"message", b"x", b"")][..], 2));
+}
+
+#[test]
+fn an_event_ends_its_delivery_so_nothing_is_held_between_events() {
     let mut events = Events::new(Limits { chunk: 16, ..LIMITS });
-    let (_, down) = events.down(Request::Next);
-    assert_eq!(down, Some(Down::Demand { read: Read::Scan { until: Delimiter::LF, max: 16 }, room: 0 }));
-    assert_eq!(events.bytes(b"data:1\r\rdata:2\r\r"), (Some(message(b"message", b"1", b"")), None));
+    assert_eq!(events.down(Request::Next), (None, line(16)));
+    assert_eq!(events.bytes(b"data:1\r"), (None, line(16)));
+    assert_eq!(events.bytes(b"\r"), (Some(message(b"message", b"1", b"")), None));
     assert_eq!(events.reader.waiting(), Waiting::Next);
-    assert_eq!(events.down(Request::Next), (Some(message(b"message", b"2", b"")), None), "from what was held");
+    assert_eq!(events.down(Request::Next), (None, line(16)), "the next event begins with the next byte demanded");
+}
+
+#[test]
+fn an_end_or_a_failure_while_idle_answers_the_next_next() {
+    let idle = || {
+        let mut events = Events::new(Limits { chunk: 16, ..LIMITS });
+        events.down(Request::Next);
+        events.bytes(b"data:1\n");
+        assert_eq!(events.bytes(b"\n"), (Some(message(b"message", b"1", b"")), None));
+        events
+    };
+    let mut events = idle();
     assert_eq!(events.up(Up::End), (None, None));
     assert_eq!(events.down(Request::Next), (Some(Event::Ended), None));
-}
 
-#[test]
-fn an_end_after_a_held_rest_comes_once_the_rest_is_read() {
-    let mut events = Events::new(Limits { chunk: 16, ..LIMITS });
-    events.down(Request::Next);
-    assert_eq!(events.bytes(b"data:1\r\rdata:2\r"), (Some(message(b"message", b"1", b"")), None));
-    assert_eq!(events.up(Up::End), (None, None));
-    assert_eq!(events.down(Request::Next), (Some(Event::Ended), None), "data:2 had no blank line: dropped");
-}
-
-#[test]
-fn a_failure_before_the_end_overrides_a_held_rest_and_after_it_does_not() {
-    let mut events = Events::new(Limits { chunk: 16, ..LIMITS });
-    events.down(Request::Next);
-    events.bytes(b"data:1\r\rdata:2\r\r");
+    let mut events = idle();
     assert_eq!(events.up(Up::Failed(Fault::Reset)), (None, None));
     assert_eq!(events.down(Request::Next), (Some(Event::Failed(Error::Stream(Fault::Reset))), None));
 
-    let mut events = Events::new(Limits { chunk: 16, ..LIMITS });
-    events.down(Request::Next);
-    events.bytes(b"data:1\r\rdata:2\r\r");
+    let mut events = idle();
     assert_eq!(events.up(Up::End), (None, None));
     assert_eq!(events.up(Up::Failed(Fault::Reset)), (None, None));
-    assert_eq!(events.down(Request::Next), (Some(message(b"message", b"2", b"")), None), "what was read stands");
-    assert_eq!(events.down(Request::Next), (Some(Event::Ended), None));
+    assert_eq!(events.down(Request::Next), (Some(Event::Ended), None), "after the end, what was read stands");
 }
 
 #[test]
@@ -255,15 +305,12 @@ fn every_cut_of_the_stream_reads_the_same() {
 fn the_last_event_id_is_the_buffer_at_the_last_blank_line() {
     let mut events = Events::new(Limits { chunk: 64, ..LIMITS });
     events.down(Request::Next);
-    assert_eq!(events.bytes(b"id: 1\n\nid: 2\n"), (None, scan_of(64)));
+    for delivery in [&b"id: 1\n"[..], b"\n", b"id: 2\n"] {
+        assert_eq!(events.bytes(delivery), (None, line(64)));
+    }
     assert_eq!(events.reader.last_event_id(), b"1", "the block that set 2 has not ended");
-    assert_eq!(events.bytes(b"\n"), (None, scan_of(64)));
+    assert_eq!(events.bytes(b"\n"), (None, line(64)));
     assert_eq!(events.reader.last_event_id(), b"2");
-}
-
-#[expect(clippy::unnecessary_wraps, reason = "compared with what a call sent below, an Option")]
-fn scan_of(max: u32) -> Option<Down> {
-    Some(Down::Demand { read: Read::Scan { until: Delimiter::LF, max }, room: 0 })
 }
 
 #[test]

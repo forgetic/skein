@@ -15,13 +15,14 @@
 //! 6): `MAX_OUT` on each call; one answer per `Next`, at most one outcome,
 //! `Closed` once, last; one demand at a time, none past the largest
 //! declared or the cap below, none once the stream ended, one withdrawn
-//! only by a close; no room asked for and nothing sent; and the reader
-//! waiting for exactly what its neighbours see. [`check`] holds a run to
-//! the reference reader.
+//! only by a close; each a line scan of the chunk; no room asked for and
+//! nothing sent; and the reader waiting for exactly what its neighbours
+//! see. [`check`] holds a run to the reference reader, which reads by the
+//! standard.
 
 use skein_http::MaxOut;
 use skein_http::sse::{self, Error, Event, Limits, Reader, Request, Waiting};
-use skein_lib::stream::{Delimiter, Down, Fault, Read, Up};
+use skein_lib::stream::{Down, Fault, Read, Up};
 use skein_lib::{Env, Intake, Queue, Rng, Time, Wall};
 
 use crate::reference::{self, Ending};
@@ -148,10 +149,12 @@ pub struct Fell {
     pub late_delivery: bool,
     pub failed_after_end: bool,
     pub failed_while: Option<Waiting>,
-    /// An event came from what a delivery held after the last one.
-    pub held_rest: bool,
-    /// A scan was to CR, after a line that ended with a CR alone.
-    pub scanned_to_cr: bool,
+    /// A lone LF was delivered right after a delivery that ended with a CR:
+    /// a CRLF's second byte, or a blank line after a CR alone.
+    pub lone_lf: bool,
+    /// A delivery of a whole chunk with no line end: a line longer than a
+    /// chunk, read in pieces.
+    pub long_line: bool,
 }
 
 /// Runs the world over `stream`, a body's bytes, with `settings`, from
@@ -174,6 +177,7 @@ pub fn run(stream: &[u8], settings: &Settings, seed: u64) -> Run {
             life: Life::Open,
             failed: None,
             withdrawn: None,
+            after_cr: false,
         },
         above: Above { pending: false, events: Vec::new(), outcome: None, closing: None, closed: false },
         fell: Fell::default(),
@@ -217,12 +221,14 @@ pub fn run(stream: &[u8], settings: &Settings, seed: u64) -> Run {
 
 /// Runs the world as [`run`], and checks what the side above received
 /// against the reference reader's reading of what the body held: the
-/// events in order, and the outcome, unless the stream failed or the side
-/// above closed first.
+/// events in order, and the outcome, the reconnection time and the last
+/// event ID, unless the stream failed or the side above closed first.
 #[must_use]
 pub fn check(stream: &[u8], settings: &Settings, seed: u64) -> Run {
     let run = run(stream, settings, seed);
-    let expected = reference::events(settings.sent(stream), &settings.limits);
+    let sent = settings.sent(stream);
+    let expected = reference::events(sent, &settings.limits);
+    let ending = outcome(&expected, sent, settings.limits.chunk);
     let replay = || format!("seed {seed}, {settings:?}, stream {}", stream.escape_ascii());
     assert!(
         expected.events.starts_with(&run.events),
@@ -236,15 +242,28 @@ pub fn check(stream: &[u8], settings: &Settings, seed: u64) -> Run {
             assert_eq!(run.failed, Some(fault), "the stream's own fault; {}", replay());
         }
         Some(outcome) => {
-            assert_eq!(outcome, expected.ending, "the reference's outcome; {}", replay());
+            assert_eq!(outcome, ending, "the reference's outcome; {}", replay());
             assert_eq!(run.events.len(), expected.events.len(), "all the reference's events; {}", replay());
-            if outcome == Ending::Ended {
-                assert_eq!((run.retry, &run.last_id), (expected.retry, &expected.last_id), "{}", replay());
-            }
+            assert_eq!((run.retry, &run.last_id), (expected.retry, &expected.last_id), "{}", replay());
         }
         None => assert!(settings.close.is_some(), "only an early close leaves no outcome; {}", replay()),
     }
     run
+}
+
+/// The outcome a reader that reads `bytes` by line scans of `chunk` comes
+/// to, the reference having read them as `expected`. It is the reference's
+/// but for a failure in the incomplete line the bytes may end with: of a
+/// line with no end, a line scan delivers only whole chunks (lib.md, 7),
+/// and what is left of it at the end is never read, as the standard drops
+/// it. A failure the reference found there reads as the stream's end.
+#[must_use]
+pub fn outcome(expected: &reference::Events, bytes: &[u8], chunk: u32) -> Ending {
+    let Some(at) = expected.failed_at else { return expected.ending };
+    let last = bytes.iter().rposition(|&byte| byte == b'\r' || byte == b'\n').map_or(0, |end| end + 1);
+    let chunk = usize::try_from(chunk).expect("fits a usize");
+    let read = last + (bytes.len() - last) / chunk * chunk;
+    if at < read { expected.ending } else { Ending::Ended }
 }
 
 struct World<'a> {
@@ -268,6 +287,8 @@ struct Below<'a> {
     life: Life,
     failed: Option<Fault>,
     withdrawn: Option<Read>,
+    /// The last delivery ended with a CR.
+    after_cr: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -347,6 +368,10 @@ impl World<'_> {
             Some(read) => {
                 if let Some(bytes) = below.intake.meet(read) {
                     below.demand = None;
+                    self.fell.lone_lf |= below.after_cr && *bytes == *b"\n";
+                    self.fell.long_line |= bytes.len() == usize::try_from(self.settings.limits.chunk).expect("fits")
+                        && !bytes.iter().any(|&byte| byte == b'\r' || byte == b'\n');
+                    below.after_cr = bytes.last() == Some(&b'\r');
                     self.up(Up::Bytes(bytes));
                 } else if below.unsent.is_empty() {
                     self.end();
@@ -402,13 +427,8 @@ impl World<'_> {
     }
 
     fn down(&mut self, rq: Request) {
-        let held = rq == Request::Next && self.below.demand.is_none();
         let closing = rq == Request::Close;
         sse::down(&mut self.reader, &self.env, rq, &mut self.events, &mut self.requests);
-        // An event answered a Next at once: from what a delivery held.
-        if held && !self.events.is_empty() && self.requests.is_empty() {
-            self.fell.held_rest |= matches!(self.events.iter().next(), Some(Event::Message(_)));
-        }
         self.route(sse::DOWN_MAX_OUT, closing);
     }
 
@@ -422,8 +442,7 @@ impl World<'_> {
             // One stated while the end is on its way crosses it (lib.md, 7).
             let crossing = self.below.life == Life::Ending;
             let limits = &self.settings.limits;
-            let to_cr = self.below.receive(&request, closing, limits);
-            self.fell.scanned_to_cr |= to_cr;
+            self.below.receive(&request, closing, limits);
             self.fell.crossed_end |= crossing && self.below.demand.is_some();
         }
         let waiting = self.reader.waiting();
@@ -476,31 +495,28 @@ impl Above {
 }
 
 impl Below<'_> {
-    /// A request from the reader, checked; whether it scans to CR.
-    fn receive(&mut self, request: &Down, closing: bool, limits: &Limits) -> bool {
+    /// A request from the reader, checked.
+    fn receive(&mut self, request: &Down, closing: bool, limits: &Limits) {
         let &Down::Demand { read, room } = request else {
             panic!("the reader sends nothing down: {request:?}");
         };
         assert_eq!(room, 0, "the reader asks for no room");
-        let (until, max) = match read {
+        let max = match read {
             Read::Nothing => {
                 assert!(closing, "only a close withdraws a demand");
                 assert!(self.demand.is_some(), "only a demand outstanding is withdrawn");
                 self.withdrawn = self.demand.take();
-                return false;
+                return;
             }
             Read::Fill(n) => panic!("the reader scans, it does not fill: {n}"),
-            Read::Scan { until, max } => (until, max),
-            Read::Line { max } => panic!("the reader scans to LF or to CR: {max}"),
+            Read::Scan { until, max } => panic!("the reader scans to a line end, not to {until:?}: {max}"),
+            Read::Line { max } => max,
         };
         assert!(!closing, "a close demands nothing");
         assert!(self.demand.is_none(), "one demand at a time: {read:?} over {:?}", self.demand);
         assert!(self.life != Life::Over, "nothing is demanded once the stream's end or failure arrived: {read:?}");
         assert_eq!(max, sse::largest_demand(limits), "each scan of the chunk");
         assert!(max <= self.intake.capacity(), "no demand past the cap below");
-        let to_cr = until == Delimiter::new(b"\r").expect("one byte");
-        assert!(to_cr || until == Delimiter::LF, "a scan to the end of a line");
         self.demand = Some(read);
-        to_cr
     }
 }

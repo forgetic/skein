@@ -7,7 +7,7 @@
 //!
 //! A sweep asserts that what it injects fell (testing-strategy.md, 3): each
 //! way a stream can fail, each way it can end or fail below, a close in
-//! each state, the rest of a delivery held, and a scan to CR.
+//! each state, a CR's LF delivered alone, and a line read in pieces.
 
 use std::collections::BTreeMap;
 
@@ -40,8 +40,8 @@ impl Seen {
             (fell.crossed_end, "a demand crossed the end"),
             (fell.late_delivery, "a delivery after the close"),
             (fell.failed_after_end, "a failure after the end"),
-            (fell.held_rest, "an event from what a delivery held"),
-            (fell.scanned_to_cr, "a scan to CR"),
+            (fell.lone_lf, "a lone LF after a CR"),
+            (fell.long_line, "a line longer than a chunk"),
         ] {
             if flag {
                 self.note(what.into());
@@ -68,7 +68,7 @@ impl Seen {
     }
 }
 
-const EVERY: [&str; 25] = [
+const EVERY: [&str; 24] = [
     "Ended",
     "Failed(LineTooLong)",
     "Failed(EventTooLong)",
@@ -82,8 +82,8 @@ const EVERY: [&str; 25] = [
     "a demand crossed the end",
     "a delivery after the close",
     "a failure after the end",
-    "an event from what a delivery held",
-    "a scan to CR",
+    "a lone LF after a CR",
+    "a line longer than a chunk",
     "failed while waiting for Next",
     "failed while waiting for Bytes",
     "failed while waiting for Close",
@@ -93,7 +93,6 @@ const EVERY: [&str; 25] = [
     "failed with Other",
     "a stream ended early",
     "the stream below filled while the side above stopped",
-    "Failed(Stream(Reset))",
 ];
 
 #[test]
@@ -111,7 +110,7 @@ fn generated_and_mutated_streams_read_as_the_reference_reads_them_whatever_the_n
         let run = sse_world::check(&stream, &settings, seed);
         tally.record(&run, &settings);
     }
-    tally.assert_fell(&EVERY[..EVERY.len() - 1]);
+    tally.assert_fell(&EVERY);
 }
 
 #[test]

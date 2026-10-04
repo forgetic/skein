@@ -1,9 +1,10 @@
 //! An event stream's lines and fields (WHATWG HTML, 9.2.6): read a byte at
-//! a time from what the scans deliver, each line's field interpreted as
-//! its bytes come, an event dispatched at each blank line.
+//! a time from what the line scans deliver, each line's field interpreted
+//! as its bytes come, an event dispatched at each blank line.
 //!
 //! - **A line ends at LF, at CRLF, or at CR alone.** A CR ends its line at
-//!   once; an LF right after it is the CR's pair, and ends nothing.
+//!   once; an LF right after it is the CR's pair, and ends nothing. A line
+//!   scan stops at the CR, so the pair comes alone, in the next delivery.
 //! - **A field's value goes where it belongs as it comes:** `data` into the
 //!   event's data, `event` into its type, `id` into a value held until its
 //!   line ends (one with a NUL is ignored), `retry` into a number. A line
@@ -34,8 +35,6 @@ pub(super) struct Lines {
     /// Whether the last byte was a CR that ended a line: an LF now is its
     /// pair.
     after_cr: bool,
-    /// How the last line that told ended: what the reader scans to next.
-    ending: Ending,
     /// The bytes read since the last blank line, endings included.
     size: u32,
     /// The event's data: each `data` value and an LF after it.
@@ -60,15 +59,6 @@ pub(super) enum Step {
     /// A blank line dispatched an event.
     Message(Message),
     Fail(Error),
-}
-
-/// How a line ended, as far as the next scan's delimiter goes.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(super) enum Ending {
-    /// At an LF, alone or after a CR: scan to the next LF.
-    Lf,
-    /// At a CR with no LF after it: scan to the next CR.
-    Cr,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -123,7 +113,6 @@ impl Lines {
             line: Line::Start,
             length: 0,
             after_cr: false,
-            ending: Ending::Lf,
             size: 0,
             data: List::with_capacity(limits.event),
             name: List::with_capacity(limits.field),
@@ -132,10 +121,6 @@ impl Lines {
             last_id: List::with_capacity(limits.field),
             retry: None,
         }
-    }
-
-    pub(super) fn ending(&self) -> Ending {
-        self.ending
     }
 
     pub(super) fn retry(&self) -> Option<u64> {
@@ -154,17 +139,23 @@ impl Lines {
         self.id_value.clear();
     }
 
-    /// Reads `piece` from `at` until an event is dispatched, a limit is
-    /// passed, or it runs out: what it came to, and where it stopped.
-    pub(super) fn read(&mut self, limits: &Limits, piece: &[u8], at: usize) -> (Step, usize) {
-        for (offset, &byte) in piece.iter().enumerate().skip(at) {
-            let step = self.byte(limits, byte);
-            match step {
+    /// Reads `delivery`, a line scan's (lib.md, 7), until a limit is
+    /// passed or it runs out: what it came to. Its one line end, if it has
+    /// one, is its last byte, so an event it dispatches is the last thing in
+    /// it.
+    pub(super) fn read(&mut self, limits: &Limits, delivery: &[u8]) -> Step {
+        // Bounded by the delivery, at most a chunk.
+        for (at, &byte) in delivery.iter().enumerate() {
+            match self.byte(limits, byte) {
                 Step::More => {}
-                Step::Message(_) | Step::Fail(_) => return (step, offset.saturating_add(1)),
+                Step::Fail(error) => return Step::Fail(error),
+                Step::Message(message) => {
+                    assert!(at.checked_add(1) == Some(delivery.len()), "a line scan's one line end is its last byte");
+                    return Step::Message(message);
+                }
             }
         }
-        (Step::More, piece.len())
+        Step::More
     }
 
     /// A byte from the stream: the byte order mark first, if it begins
@@ -195,10 +186,6 @@ impl Lines {
     /// A byte of the stream's lines.
     fn stream_byte(&mut self, limits: &Limits, byte: u8) -> Step {
         let paired = self.after_cr && byte == b'\n';
-        if self.after_cr && !paired {
-            // The CR before it ended its line alone.
-            self.ending = Ending::Cr;
-        }
         self.after_cr = false;
         self.size = self.size.saturating_add(1);
         if self.size > limits.event {
@@ -212,10 +199,7 @@ impl Lines {
                 self.after_cr = true;
                 self.end()
             }
-            b'\n' => {
-                self.ending = Ending::Lf;
-                self.end()
-            }
+            b'\n' => self.end(),
             _ => {
                 self.length = self.length.saturating_add(1);
                 if self.length > limits.line {
