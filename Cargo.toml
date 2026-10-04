@@ -33,6 +33,7 @@ publish = false
 [workspace.dependencies]
 skein-lib = { path = "crates/skein-lib" }
 skein-io = { path = "crates/skein-io" }
+skein-http = { path = "crates/skein-http" }
 skein-json = { path = "crates/skein-json" }
 skein-shell = { path = "crates/skein-shell" }
 skein-sim = { path = "crates/skein-sim" }

@@ -1,0 +1,13 @@
+[package]
+name = "skein-http"
+description = "HTTP/1.1 and server-sent events for a connection's stack of protocol machines: the client, and the reader of an event stream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+
+[lints]
+workspace = true
