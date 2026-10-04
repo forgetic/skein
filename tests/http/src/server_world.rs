@@ -1064,6 +1064,10 @@ impl World<'_> {
                 return;
             }
             match (plan_when, exchange.body) {
+                // Having withdrawn, it discards the rest, or responds with
+                // the rest left as it is: given up, or, if the withdrawal
+                // crossed the body's last bytes, over.
+                (_, Face::Withdrawn) if self.rng.chance(500) => self.respond(),
                 (When::Discarding, Face::Idle | Face::Demanded(_)) | (_, Face::Withdrawn) => self.discard(),
                 (_, Face::Idle) => self.demand_body(),
                 (_, Face::Demanded(_)) => self.maybe_withdraw(),
