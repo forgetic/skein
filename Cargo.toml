@@ -7,6 +7,7 @@ members = [
     "examples/echo/domain",
     "examples/echo/protocol",
     "examples/echo/service",
+    "examples/echo/shell",
     "testing/skein-conformance",
     "testing/skein-heap",
     "tests/conformance/ring",
