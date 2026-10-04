@@ -267,8 +267,10 @@ impl Machine {
             }
             How::Create => {
                 let found = self.resolve(root, path, false)?;
+                // A path that ends at a directory of no name of its own
+                // (`.`, `a/..`) is taken: O_EXCL answers before O_CREAT.
                 let Some(name) = found.name else {
-                    return Err(Refusal::IsADirectory);
+                    return Err(Refusal::Exists);
                 };
                 if found.slash {
                     return Err(Refusal::IsADirectory);

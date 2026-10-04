@@ -5,10 +5,11 @@
 use std::collections::BTreeSet;
 
 use skein_conformance::{
-    Cancelling, Check, Pairing, Race, accept_past_the_descriptor_limit, address_in_use, backpressure, cancel_accept,
-    cancel_connect, cancel_connect_established_while_away, cancel_recv, closed_before_accept, full_accept_queue,
-    graceful_close, ipv6_only, lifecycle, listener_close_resets_waiting, refused, reset_after_end_of_stream,
-    send_after_peer_closed, unread_close_meets_recv, unread_close_meets_send, wrong_state,
+    Cancelling, Check, Pairing, Race, Shortness, accept_past_the_descriptor_limit, address_in_use, backpressure,
+    cancel_accept, cancel_connect, cancel_connect_established_while_away, cancel_recv, closed_before_accept, escapes,
+    file_lifecycle, full_accept_queue, graceful_close, ipv6_only, lifecycle, list, listener_close_resets_waiting,
+    make_directory, nested_roots, open_past_the_descriptor_limit, permissions, refused, remove, rename,
+    reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv, unread_close_meets_send, wrong_state,
 };
 use skein_conformance_sim::{
     CHAOS, RACES, Racing, Simulated, cancel_chaos, each_seed, loopback_chaos, racing_accept, racing_recv,
@@ -186,4 +187,66 @@ fn a_late_reset_lets_more_than_one_send_succeed() {
         }
     }
     assert!(late > 0, "no seed had a late reset");
+}
+
+#[test]
+fn a_file_is_made_written_at_offsets_read_back_and_stated() {
+    chaos(file_lifecycle);
+}
+
+#[test]
+fn renames_over_across_and_beneath() {
+    chaos(rename);
+}
+
+#[test]
+fn removes_of_files_directories_and_links() {
+    chaos(remove);
+}
+
+#[test]
+fn new_directories_and_one_removed_while_open() {
+    chaos(make_directory);
+}
+
+#[test]
+fn listings_whole_one_at_a_time_and_cut_short() {
+    chaos(list);
+}
+
+#[test]
+fn a_root_beneath_a_root() {
+    chaos(nested_roots);
+}
+
+#[test]
+fn paths_that_leave_their_root_and_paths_that_stay() {
+    chaos(escapes);
+}
+
+#[test]
+fn what_the_owner_may_not_do() {
+    chaos(permissions);
+}
+
+/// Simulator only: the ring's descriptor limit is the process's.
+#[test]
+fn an_open_past_the_descriptor_limit() {
+    each_seed(Config { max_fds: 4, ..loopback_chaos() }, CHAOS, open_past_the_descriptor_limit);
+}
+
+/// The simulator draws among the counts the contract allows a read and a
+/// write: over the seeds, each is cut short, and each counts every byte,
+/// which is what the ring does.
+#[test]
+fn the_simulator_cuts_reads_and_writes_short_and_whole_over_the_seeds() {
+    let mut reads = Shortness::default();
+    let mut writes = Shortness::default();
+    for seed in 0..CHAOS {
+        let seen = file_lifecycle(&mut Simulated::new(seed, loopback_chaos()));
+        reads = reads.and(seen.reads);
+        writes = writes.and(seen.writes());
+    }
+    let both = Shortness { short: true, full: true };
+    assert_eq!((reads, writes), (both, both), "every outcome of a count, over the seeds");
 }

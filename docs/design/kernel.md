@@ -288,8 +288,35 @@ for its backend.
   each race as the ring does.
 - **On the ring,** each scenario runs once, and fails, saying so, if
   io_uring is not usable.
-- What no record can observe (close-on-exec, `TCP_NODELAY`) is not
-  checked; `SO_REUSEADDR` and `IPV6_V6ONLY` are, by their effects.
+- What no record can observe (close-on-exec, `TCP_NODELAY`, the modes of
+  new files) is not checked; `SO_REUSEADDR` and `IPV6_V6ONLY` are, by
+  their effects.
+- **Files beneath a root of the scenario's own.** Each scenario on files
+  lays out its root from a tree in the suite's own vocabulary (files,
+  directories, symbolic links, each with its mode): on the ring, a scratch
+  directory made per scenario beneath the system's temporary directory,
+  with a directory beside it for a link to lead out to, and removed with
+  the backend; in the simulator, the minimal fake machine (testing.md, 4).
+  The scenarios: a file made, written at offsets over itself and past its
+  end, synced, read back and stated; renames over a file, across
+  directories, of a file over a directory and the other way, over a full
+  and an empty directory, beneath itself, over itself, and the idiom that
+  replaces a file whole; removals of files, directories, a link and a file
+  open; new directories, and one removed while open; listings whole, one
+  entry at a time, and cut short by long names; a root beneath a root;
+  thirty-two paths that leave their root or stay beneath it; and what the
+  owner may not do. Each names every error its operations can be made to
+  answer on a healthy scratch directory. The driver checks that every
+  path, name and buffer comes back in its `Box`, written only where the
+  count says.
+- **What only the simulator shows:** a disk beyond a healthy one (no
+  space, a filesystem gone read-only, an I/O error) is the simulator's
+  own tests' (simulator.md, 6), and an `Open` past the descriptor limit a
+  scenario on the simulator only. `EMLINK` (`TooManyLinks` on a `Rename`
+  or a `MakeDirectory`) neither backend provokes. Short reads and writes
+  are an outcome the simulator draws and the ring never gives on a
+  regular file: the fuzzy suite asserts both counts appear over its
+  seeds, and a calm world counts every byte, as the ring does.
 
 ## 9. Open questions
 
@@ -303,9 +330,6 @@ for its backend.
 
 ## 10. Not built yet
 
-- **Files in the simulator,** with their conformance scenarios, against
-  it and against the ring (a scratch directory as the root). Their
-  records and rules are built, with sockets', and so is the ring's side.
 - **The records for processes,** with their rules and their conformance
   scenarios, when io pulls them.
 - **The descriptor limit on the ring.** The simulator checks it; lowering

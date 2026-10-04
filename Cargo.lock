@@ -134,6 +134,7 @@ dependencies = [
  "skein-conformance",
  "skein-io",
  "skein-lib",
+ "skein-scratch",
  "skein-shell",
 ]
 
@@ -142,6 +143,7 @@ name = "skein-conformance-sim"
 version = "0.0.0"
 dependencies = [
  "skein-conformance",
+ "skein-fake-machine",
  "skein-io",
  "skein-lib",
  "skein-sim",

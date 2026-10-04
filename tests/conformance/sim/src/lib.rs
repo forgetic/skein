@@ -4,8 +4,9 @@
 //! `tests/conformance/ring`.
 //!
 //! What the test binaries share: [`Simulated`], the simulator as the suite's
-//! backend; the worlds the suite runs it in; and [`each_seed`], which names a
-//! failing seed with the end of its trace. The focused tests
+//! backend, with the minimal fake machine behind its seam for files; the
+//! worlds the suite runs it in; and [`each_seed`], which names a failing seed
+//! with the end of its trace. The focused tests
 //! (`tests/conformance.rs`) run each scenario over the calm seeds and a few
 //! of chaos; the fuzzy ones (`tests/fuzzy_conformance.rs`) over many seeds of
 //! chaos, and count the outcomes each race shows over them
@@ -13,10 +14,13 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use skein_conformance::{Backend, Cancelling, Check, Race, cancel_accept_racing_a_connect, cancel_recv_racing_bytes};
-use skein_io::kernel::{Complete, Submit};
+use skein_conformance::{
+    Backend, Cancelling, Check, Item, Made, Race, cancel_accept_racing_a_connect, cancel_recv_racing_bytes,
+};
+use skein_fake_machine::{Machine, serve};
+use skein_io::kernel::{Complete, Fd, Submit};
 use skein_lib::{Duration, Queue, Time};
-use skein_sim::{Config, Faults, Pid, Sim};
+use skein_sim::{Config, Faults, Handle, Pid, Sim};
 
 /// Seeds per scenario: a calm world draws only ports and the order of a
 /// cancel and its target; chaos draws much more, a few seeds of it in the
@@ -28,18 +32,19 @@ pub const CHAOS: u64 = 200;
 /// How many trace entries a failure prints.
 const TAIL: usize = 60;
 
-/// The simulator as the suite's backend: a world, and the processes the
-/// suite opened in it.
+/// The simulator as the suite's backend: a world, the minimal fake machine
+/// it passes files to, and the processes the suite opened in it.
 #[derive(Debug)]
 pub struct Simulated {
     sim: Sim,
+    machine: Machine,
     processes: Vec<Pid>,
 }
 
 impl Simulated {
     #[must_use]
     pub fn new(seed: u64, config: Config) -> Simulated {
-        Simulated { sim: Sim::new(seed, config), processes: Vec::new() }
+        Simulated { sim: Sim::new(seed, config), machine: Machine::new(), processes: Vec::new() }
     }
 
     #[must_use]
@@ -57,8 +62,11 @@ impl Backend for Simulated {
         pid
     }
 
+    /// Submits, then has the machine answer what the simulator asked of
+    /// it, as a world does after each submit (simulator.md, 3.1).
     fn submit(&mut self, process: Pid, records: &mut Queue<Submit>) {
         self.sim.submit(process, records);
+        serve(&mut self.machine, &mut self.sim);
     }
 
     fn reap(&mut self, process: Pid, completions: &mut Queue<Complete>) {
@@ -98,16 +106,43 @@ impl Backend for Simulated {
     fn assert_settled(&self, process: Pid) {
         self.sim.assert_quiescent(process);
         self.sim.assert_no_open_fds(process);
+        assert_eq!(self.machine.open_handles(), 0, "the machine has nothing open once every descriptor closed");
+    }
+
+    /// A root laid in the machine, its handle given to the process.
+    fn root(&mut self, process: Pid, tree: &[Item]) -> Fd {
+        let mut items = Vec::new();
+        for item in tree {
+            let made = match &item.made {
+                Made::File(bytes) => skein_fake_machine::Made::File(bytes.clone()),
+                Made::Directory => skein_fake_machine::Made::Directory,
+                Made::Link(target) => skein_fake_machine::Made::Link(target.clone()),
+            };
+            items.push(skein_fake_machine::Item { path: item.path.clone(), made, mode: item.mode });
+        }
+        let opened = self.machine.lay(&items);
+        self.sim.root(process, Handle::new(opened.raw()))
     }
 }
 
-/// The chaos loopback can show: [`Config::chaos`]'s small buffers and
-/// short backlog, latency, short receives and sends, raced cancels and late
-/// resets, without the faults that model a network beyond it.
+/// The chaos loopback and a healthy scratch directory can show:
+/// [`Config::chaos`]'s small buffers and short backlog, latency, short
+/// receives and sends, short reads and writes, raced cancels and late
+/// resets, without the faults that model a network or a disk beyond them.
 #[must_use]
 pub const fn loopback_chaos() -> Config {
     let chaos = Config::chaos();
-    let faults = Faults { reset: 0, refuse: 0, no_buffer: 0, timed_out: 0, cancel_unsubmitted: 0, ..chaos.faults };
+    let faults = Faults {
+        reset: 0,
+        refuse: 0,
+        no_buffer: 0,
+        timed_out: 0,
+        cancel_unsubmitted: 0,
+        no_space: 0,
+        read_only: 0,
+        io_error: 0,
+        ..chaos.faults
+    };
     Config { faults, ..chaos }
 }
 

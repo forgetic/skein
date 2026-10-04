@@ -1,19 +1,23 @@
 //! The conformance suite against the ring on the real kernel, on loopback
-//! (kernel.md, 8): every scenario of `skein_conformance` that loopback can
+//! and in scratch directories (kernel.md, 8): every scenario of
+//! `skein_conformance` that loopback and a healthy scratch directory can
 //! provoke, each process of a scenario a `Kernel` of its own. The same
 //! scenarios run against the simulator in `tests/conformance/sim`.
 //!
-//! Not here: a failed `Accept` past the descriptor limit, which needs the
-//! process's limit lowered, and so `unsafe` outside the ring adapter
-//! (programming-model.md, 2.1); it runs on the simulator only.
+//! Not here: a failed `Accept` or `Open` past the descriptor limit, which
+//! needs the process's limit lowered, and so `unsafe` outside the ring
+//! adapter (programming-model.md, 2.1); they run on the simulator only.
 //!
-//! A machine without `io_uring` fails every test here, saying so.
+//! A machine without `io_uring` fails every test here, saying so; so does
+//! a run as root, whom no mode stops, the scenario on permissions.
 
 use skein_conformance::{
-    Cancelling, Check, Pairing, Race, address_in_use, backpressure, cancel_accept, cancel_accept_racing_a_connect,
-    cancel_connect, cancel_connect_established_while_away, cancel_recv, cancel_recv_racing_bytes, closed_before_accept,
-    full_accept_queue, graceful_close, ipv6_only, lifecycle, listener_close_resets_waiting, refused,
-    reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv, unread_close_meets_send, wrong_state,
+    Cancelling, Check, Pairing, Race, Shortness, address_in_use, backpressure, cancel_accept,
+    cancel_accept_racing_a_connect, cancel_connect, cancel_connect_established_while_away, cancel_recv,
+    cancel_recv_racing_bytes, closed_before_accept, escapes, file_lifecycle, full_accept_queue, graceful_close,
+    ipv6_only, lifecycle, list, listener_close_resets_waiting, make_directory, nested_roots, permissions, refused,
+    remove, rename, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
+    unread_close_meets_send, wrong_state,
 };
 use skein_conformance_ring::Ring;
 use skein_io::kernel::Family;
@@ -146,4 +150,50 @@ fn a_cancel_of_a_connect_established_while_its_client_was_away() {
 #[test]
 fn closing_a_listener_resets_the_connections_waiting_on_it() {
     on_the_ring(listener_close_resets_waiting);
+}
+
+/// A regular file's reads and writes count every byte they could: one of
+/// the outcomes the contract allows, the one the calm simulator gives.
+#[test]
+fn a_file_is_made_written_at_offsets_read_back_and_stated() {
+    let seen = file_lifecycle(&mut Ring::new());
+    seen.check();
+    let whole = Shortness { short: false, full: true };
+    assert_eq!((seen.reads, seen.writes()), (whole, whole), "{seen:?}");
+}
+
+#[test]
+fn renames_over_across_and_beneath() {
+    on_the_ring(rename);
+}
+
+#[test]
+fn removes_of_files_directories_and_links() {
+    on_the_ring(remove);
+}
+
+#[test]
+fn new_directories_and_one_removed_while_open() {
+    on_the_ring(make_directory);
+}
+
+#[test]
+fn listings_whole_one_at_a_time_and_cut_short() {
+    on_the_ring(list);
+}
+
+#[test]
+fn a_root_beneath_a_root() {
+    on_the_ring(nested_roots);
+}
+
+#[test]
+fn paths_that_leave_their_root_and_paths_that_stay() {
+    on_the_ring(escapes);
+}
+
+#[test]
+fn what_the_owner_may_not_do() {
+    assert!(skein_conformance_ring::Ring::permissions_checked(), "run as root, whom no mode stops: run as a user");
+    on_the_ring(permissions);
 }

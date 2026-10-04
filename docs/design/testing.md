@@ -216,7 +216,7 @@ As of 2026-10-04.
 | io worlds | sockets, over the simulator; one exchange over the ring |
 | simulated worlds | the echo and its fake clients, seven scenarios |
 | real loop | the echo and its fake clients, on loopback |
-| conformance | sockets, against the simulator and the ring |
+| conformance | sockets and files, against the simulator and the ring |
 | the simulator's and the ring's own tests | sockets and files |
 | the counting allocator | built, with its own tests; lib's worst cases checked against it |
 
@@ -233,11 +233,18 @@ send after the peer closed, refused connects, `AddressInUse`, IPv6-only
 sockets, the wrong-state records, a full accept queue, closes with bytes
 unread, a reset after the end of stream, a client closed before accept,
 a listener closing on waiting connections, backpressure, and cancels of
-every waiting operation and every race (kernel.md, 8). Against the
-simulator, the focused suite runs each scenario over 16 calm seeds and 4
-of chaos, and the fuzzy suite over 200 of chaos, counting the pairings
-each race shows over them; against the ring, each runs once, in the
-focused suite.
+every waiting operation and every race (kernel.md, 8). It covers files
+beneath a root each scenario lays out for itself, a scratch directory on
+the ring and the minimal fake machine in the simulator: a file's life at
+its offsets, renames, removals, new directories, listings, a root beneath
+a root, paths that escape their root and paths that stay, and
+permissions, each error its operations can be made to answer on a
+healthy scratch directory, and an `Open` past the descriptor limit on
+the simulator. Against the simulator, the focused suite runs each
+scenario over 16 calm seeds and 4 of chaos, and the fuzzy suite over 200
+of chaos, counting the pairings each race shows over them, and the short
+and whole counts of reads and writes; against the ring, each runs once,
+in the focused suite.
 
 The JSON tokenizer runs in a machine world between a stream below that
 cuts the peer's bytes at random, ends early, idle or not, and fails, and
@@ -401,9 +408,8 @@ By tier, in the order temper pulls the parts (README.md):
   and programs and the simulator's processes, when the worker pulls them.
   Sockets are built, and so are the simulator's files, its machine seam
   and the minimal machine's files.
-- **Conformance** for files and processes, with a scratch directory as
-  the root, when io pulls them; against the readiness backend when it
-  exists.
+- **Conformance** for processes, when io pulls them; against the
+  readiness backend when it exists. Sockets and files are built.
 - **Fuzz targets** for every machine, JSON's, HTTP's and TLS's included,
   when a nightly toolchain is installed; and the heap metered in the
   protocol worlds, which meets the open question of heap handed between
