@@ -1,0 +1,7 @@
+# Written by hand: a response a broken or hostile server sends.
+# Drafted by the reference readers, then checked by hand.
+status HTTP/1.1 200
+header Content-Length "100"
+framing length 100
+body "forty bytes, not the hundred announced.."
+failed truncated

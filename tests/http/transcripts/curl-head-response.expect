@@ -1,0 +1,10 @@
+# Written by hand: a response curl reads without complaint, as the standards
+# allow (RFC 9110, 9112), though few servers write it so.
+# A response to HEAD: its Content-Length is the GET's, and it has no body
+# (RFC 9110, 9.3.2).
+method HEAD
+status HTTP/1.1 200
+header Content-Type "application/json"
+header Content-Length "4460"
+framing empty
+done keep

@@ -1,0 +1,7 @@
+HTTP/1.1 200 OK
+cOnTeNt-TyPe:	 text/html  
+X-EMPTY:
+x-utf8: café
+CONTENT-LENGTH:  6 
+
+<p>hi

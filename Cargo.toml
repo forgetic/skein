@@ -16,6 +16,7 @@ members = [
     "tests/conformance/sim",
     "tests/echo",
     "tests/heap",
+    "tests/http",
     "tests/io",
     "tests/json",
     "tests/lib",

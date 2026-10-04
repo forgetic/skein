@@ -1,0 +1,18 @@
+HTTP/1.1 200 OK
+Cache-Control: max-age=0, private, must-revalidate, no-transform
+Content-Type: application/json;charset=utf-8
+Vary: Origin
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+Date: Sat, 03 Oct 2026 10:12:44 GMT
+Link: <https://git.example.org/api/v1/repos/ai/skein/issues?limit=2&page=2&state=open>; rel="next",<https://git.example.org/api/v1/repos/ai/skein/issues?limit=2&page=19&state=open>; rel="last"
+X-Total-Count: 37
+Transfer-Encoding: chunked
+
+800
+[{"id":311,"url":"https://git.example.org/api/v1/repos/ai/skein/issues/14","html_url":"https://git.example.org/ai/skein/issues/14","number":14,"user":{"id":1,"login":"free","full_name":"","email":"free@noreply.git.example.org","avatar_url":"https://git.example.org/avatars/5f4e3d2c1b0a99887766554433221100","username":"free"},"original_author":"","original_author_id":0,"title":"Tokenizer: refuse a lone surrogate","body":"A `\\ud800` alone must fail as `Surrogate`, not decode to U+FFFD.\n\n```json\n[\"\\ud800\"]\n```","ref":"","assets":[],"labels":[{"id":5,"name":"kind/bug","exclusive":false,"is_archived":false,"color":"ee0701","description":"Something is not working","url":"https://git.example.org/api/v1/repos/ai/skein/labels/5"},{"id":9,"name":"priority/high","exclusive":true,"is_archived":false,"color":"b60205","description":"","url":"https://git.example.org/api/v1/repos/ai/skein/labels/9"}],"milestone":{"id":2,"title":"temper's LLM client","description":"What the agent's client pulls","state":"open","open_issues":3,"closed_issues":11,"created_at":"2026-09-01T10:00:00+02:00","updated_at":"2026-10-02T16:42:10+02:00","closed_at":null,"due_on":"2026-10-31T23:59:59+01:00"},"assignee":null,"assignees":null,"state":"open","is_locked":false,"comments":0,"created_at":"2026-10-02T16:42:10+02:00","updated_at":"2026-10-02T16:42:10+02:00","closed_at":null,"due_date":null,"pull_request":null,"repository":{"id":13,"name":"skein","owner":"ai","full_name":"ai/skein"},"pin_order":0},{"id":298,"url":"https://git.example.org/api/v1/repos/ai/skein/issues/9","html_url":"https://git.example.org/ai/skein/pulls/9","number":9,"user":{"id":7,"login":"agent","full_name":"Agent Smith","email":"agent@noreply.git.example.org","avatar_url":"https://git.example.org/avatars/9b2a5f3c4e1d0a8b7c6e5f4d3c2b1a09","username":"agent"},"original_author":"","original_author_id":0,"title":"Merge task 07: tests out of crates/","body":"Moves the worlds under tests/, in two suites:\n\n| suite | budget |\n|---|---|\n| focused | 15 s |\n| fuzzy | 60 s |\n\nTimi
+369
+ngs: 2.31 s and 2.72 s, idle.","ref":"","assets":[],"labels":[],"milestone":null,"assignee":{"id":1,"login":"free","full_name":"","email":"free@noreply.git.example.org","avatar_url":"https://git.example.org/avatars/5f4e3d2c1b0a99887766554433221100","username":"free"},"assignees":[{"id":1,"login":"free","full_name":"","email":"free@noreply.git.example.org","avatar_url":"https://git.example.org/avatars/5f4e3d2c1b0a99887766554433221100","username":"free"}],"state":"closed","is_locked":false,"comments":4,"created_at":"2026-09-28T09:15:00+02:00","updated_at":"2026-10-01T18:20:45+02:00","closed_at":"2026-10-01T18:20:45+02:00","due_date":null,"pull_request":{"merged":true,"merged_at":"2026-10-01T18:20:45+02:00","draft":false,"html_url":"https://git.example.org/ai/skein/pulls/9"},"repository":{"id":13,"name":"skein","owner":"ai","full_name":"ai/skein"},"pin_order":0}]
+
+0
+

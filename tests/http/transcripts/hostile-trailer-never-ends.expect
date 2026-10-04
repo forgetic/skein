@@ -1,0 +1,7 @@
+# Written by hand: a response a broken or hostile server sends.
+# Drafted by the reference readers, then checked by hand.
+status HTTP/1.1 200
+header Transfer-Encoding "chunked"
+framing chunked
+body "ok"
+failed trailer

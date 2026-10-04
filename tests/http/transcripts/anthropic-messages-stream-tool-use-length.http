@@ -1,0 +1,62 @@
+HTTP/1.1 200 OK
+Date: Sat, 03 Oct 2026 10:12:44 GMT
+Content-Type: text/event-stream; charset=utf-8
+Content-Length: 1815
+Connection: keep-alive
+Cache-Control: no-cache
+anthropic-ratelimit-requests-limit: 4000
+anthropic-ratelimit-requests-remaining: 3999
+anthropic-ratelimit-requests-reset: 2026-10-03T10:12:44Z
+anthropic-ratelimit-input-tokens-limit: 400000
+anthropic-ratelimit-input-tokens-remaining: 400000
+anthropic-ratelimit-input-tokens-reset: 2026-10-03T10:12:44Z
+anthropic-ratelimit-output-tokens-limit: 80000
+anthropic-ratelimit-output-tokens-remaining: 80000
+anthropic-ratelimit-output-tokens-reset: 2026-10-03T10:12:44Z
+request-id: req_011CTwGjTqh8bXq3pZf4mK2v
+anthropic-organization-id: 9b0f4c1e-2d7a-4b6e-8f3c-5a1d2e9b7c40
+via: 1.1 google
+cf-cache-status: DYNAMIC
+X-Robots-Tag: none
+Server: cloudflare
+CF-RAY: 9871e0b5cf6e2a1c-LHR
+
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_014p7gG3wDgGV9EUtLvnow3U","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":472,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I'll check the weather in Paris."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01T1x1fJ34qAmk2tNTrN7Up6","name":"get_weather","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"location\":"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":" \"Paris, Fr"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ance\", \"unit\": \"c"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"elsius\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":89}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

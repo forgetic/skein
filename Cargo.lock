@@ -137,6 +137,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-http-world"
+version = "0.0.0"
+dependencies = [
+ "skein-heap",
+ "skein-http",
+ "skein-json",
+ "skein-json-world",
+ "skein-lib",
+]
+
+[[package]]
 name = "skein-io"
 version = "0.0.0"
 dependencies = [

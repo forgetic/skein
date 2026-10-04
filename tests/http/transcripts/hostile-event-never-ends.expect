@@ -1,0 +1,9 @@
+# Written by hand: a response a broken or hostile server sends.
+# Drafted by the reference readers, then checked by hand.
+status HTTP/1.1 200
+header Content-Type "text/event-stream"
+header Cache-Control "no-cache"
+header Content-Length "22000"
+framing length 22000
+sse failed event-too-long
+done keep

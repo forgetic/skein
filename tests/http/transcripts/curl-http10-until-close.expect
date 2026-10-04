@@ -1,0 +1,9 @@
+# Written by hand: a response curl reads without complaint, as the standards
+# allow (RFC 9110, 9112), though few servers write it so.
+# Drafted by the reference readers, then checked by hand.
+status HTTP/1.0 200
+header Content-Type "text/plain"
+framing until-end
+body "the body runs\n"
+body "to the end of the stream\n"
+done close

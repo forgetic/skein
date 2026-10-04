@@ -1,0 +1,11 @@
+# Written by hand: a response curl reads without complaint, as the standards
+# allow (RFC 9110, 9112), though few servers write it so.
+# Drafted by the reference readers, then checked by hand.
+status HTTP/1.1 200
+header cOnTeNt-TyPe "text/html"
+header X-EMPTY ""
+header x-utf8 "café"
+header CONTENT-LENGTH "6"
+framing length 6
+body "<p>hi\n"
+done keep

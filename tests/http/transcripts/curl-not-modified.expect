@@ -1,0 +1,8 @@
+# Written by hand: a response curl reads without complaint, as the standards
+# allow (RFC 9110, 9112), though few servers write it so.
+# Drafted by the reference readers, then checked by hand.
+status HTTP/1.1 304
+header ETag "\"33a64df551425fcc55e4d42a148795d9f25f89d4\""
+header Content-Length "4096"
+framing empty
+done keep
