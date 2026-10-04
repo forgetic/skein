@@ -157,17 +157,19 @@ pub(crate) fn start(conn: &mut Conn, owner: Token, server: Addr, down: &mut Queu
 pub(crate) fn abort(conn: &mut Conn, now: Time, down: &mut Queue<Io>) -> After {
     conn.aborted = true;
     let state = mem::replace(&mut conn.state, State::Done);
-    conn.state = match state {
+    let (next, after) = match state {
+        // Not connected: it never will be.
         State::Waiting => {
             conn.seen.done = Some(now);
-            return After::Done;
+            (State::Done, After::Done)
         }
-        State::Connecting { .. } => State::Connecting { abort: true },
-        State::Dialing { socket } => close(socket, true, down),
-        State::Open(open) => close(open.socket, true, down),
-        state @ (State::Failing | State::Closing | State::Done) => state,
+        State::Connecting { .. } => (State::Connecting { abort: true }, After::Nothing),
+        State::Dialing { socket } => (close(socket, true, down), After::Nothing),
+        State::Open(open) => (close(open.socket, true, down), After::Nothing),
+        state @ (State::Failing | State::Closing | State::Done) => (state, After::Nothing),
     };
-    After::Nothing
+    conn.state = next;
+    after
 }
 
 /// The plan's time to start reading: the next demand reads.
