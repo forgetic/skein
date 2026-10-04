@@ -21,6 +21,9 @@ document is the design behind it.
   cancel is an operation of its own.
 - **Sockets behave as Linux's do,** and the simulator matches them; one
   conformance suite holds every backend to the contract.
+- **Files stay beneath a root.** A root is an open directory. Only `Open`
+  takes a path, which the kernel resolves beneath its root; every other
+  operation on a name acts on one entry of an open directory.
 
 ## 2. In skein
 
@@ -50,7 +53,7 @@ pub struct Submit   { pub op: Token, pub kind: Op }
 pub struct Complete { pub op: Token, pub kind: Op, pub result: Result<Done, Error> }
 
 // one success shape per operation
-pub enum Done { Nothing, Count(u32), Fd(Fd), Accepted { fd: Fd, peer: Addr }, Bound(Addr) }
+pub enum Done { Nothing, Count(u32), Fd(Fd), Accepted { fd: Fd, peer: Addr }, Bound(Addr), Stat(Stat) }
 
 pub enum Op {
     // sockets
@@ -63,13 +66,16 @@ pub enum Op {
     Send     { fd: Fd, bytes: Box<[u8]>, from: u32 },
     Shutdown { fd: Fd },
     Close    { fd: Fd },
-    // files, beneath a root
-    Open     { root: Fd, path: Box<[u8]>, how: OpenHow },
-    Read     { fd: Fd, buf: Box<[u8]>, at: u64 },
-    Write    { fd: Fd, bytes: Box<[u8]>, from: u32, at: u64 },
-    Sync     { fd: Fd },
-    Stat     { root: Fd, path: Box<[u8]> },
-    // ... rename, remove, make a directory, list a directory
+    // files, beneath a root (section 6.1)
+    Open          { root: Fd, path: Box<[u8]>, how: OpenHow },   // Read, Directory, Create
+    Read          { fd: Fd, buf: Box<[u8]>, at: u64 },
+    Write         { fd: Fd, bytes: Box<[u8]>, from: u32, at: u64 },
+    Sync          { fd: Fd },
+    Stat          { fd: Fd },
+    Rename        { from_dir: Fd, from: Box<[u8]>, to_dir: Fd, to: Box<[u8]> },
+    Remove        { dir: Fd, name: Box<[u8]>, directory: bool },
+    MakeDirectory { dir: Fd, name: Box<[u8]> },
+    List          { fd: Fd, entries: Box<[Entry]>, names: Box<[u8]> },  // synchronous
     // processes
     Wait     { pidfd: Fd },
     // ... spawn, signal, make a pipe: synchronous (section 6)
@@ -100,6 +106,9 @@ error means the operation did nothing usable: a failed `Socket` or
   in-flight table, beside the record. They are decoded into plain values
   (`Addr`, `Stat`, `Exit`) before they go up. A backend for another
   kernel translates.
+- **A path or a name is bytes,** a `Box<[u8]>` in the record with no NUL
+  in it. The NUL-terminated string the kernel reads is the backend's own
+  copy, held beside the record until its completion.
 - **Errors cross as a skein enum:** the errors io handles by name, plus an
   `Other` code. Each backend maps its kernel's error numbers onto it, per
   operation: the same number can mean different things on a cancel and
@@ -163,6 +172,76 @@ error means the operation did nothing usable: a failed `Socket` or
 - **Timers are not operations.** The shell waits for completions with one
   timeout: the earliest deadline over every layer.
 
+### 6.1 Files beneath a root
+
+What the records promise is stated exactly in the kernel module's
+documentation, with each operation's errors; the decisions behind it:
+
+- **A root is an open directory:** one the shell opened at startup
+  (shell.md, 6), or one an `Open` of a directory made beneath another. A
+  root opened beneath a root is a root like any other: nothing it opens
+  leaves it, though its parent's other entries lie just above.
+- **`Open` resolves beneath its root, and follows the symbolic links that
+  stay there.** It is `openat2` with `RESOLVE_BENEATH` and
+  `RESOLVE_NO_MAGICLINKS`: `..` above the root, an absolute path, and a
+  link leading out of the root fail with `Escape` (`EXDEV`), checked by
+  the kernel as it resolves, so no race with a rename gets out. Links that
+  stay beneath the root are followed, since a workspace holds them (a
+  repository's `CLAUDE.md -> AGENTS.md`); `RESOLVE_NO_SYMLINKS` would
+  refuse those too and keep nothing more in. Magic links (`/proc/*/fd/*`)
+  are refused outright, though `RESOLVE_BENEATH` refuses them today, as
+  the man page asks.
+- **Every other operation on a name acts on one entry of an open
+  directory.** `renameat`, `unlinkat`, `mkdirat` and `statx` take no
+  `RESOLVE_*` flags, and a path with a `/` in it could leave the root
+  through `..` or a link. So `Rename`, `Remove` and `MakeDirectory` take a
+  name, never a path (no `/`, not `.` or `..`, which `Op::is_valid`
+  holds), and `Stat` takes a descriptor. io opens the directory a name
+  lies in first, beneath the root (io.md, 5). None of them follows the
+  entry it names: removing a link removes the link.
+- **The opens io makes, not `open`'s flags.** `OpenHow` is `Read` (an
+  existing file or directory), `Directory` (an existing directory: a
+  root, or one to list) or `Create` (a new file, exclusively, to write).
+  Each is one well-defined case for the simulator and the suite to hold,
+  and more come when a user pulls them: opening a path only to stat it
+  (`O_PATH`), say, which `Read` cannot when the file is unreadable.
+- **Reads and writes are at an offset,** never at the descriptor's
+  position, so concurrent ones need no order. Both may be short: a `Read`
+  at the end of the file, and whenever the backend says (POSIX allows it;
+  Linux does not cut a regular file's read short but at its end, and the
+  simulator draws it); a `Write` likewise, continued by io from where it
+  stopped, as a `Send` is. An offset that would pass `i64::MAX` is an
+  invalid record: the kernel's offsets are signed, and the ring would read
+  `u64::MAX` as the descriptor's position.
+- **`Rename` is the atomic step.** It replaces its target whole, so the
+  idiom that replaces a file is: `Create` a temporary in the same
+  directory, `Write` it, `Sync` it, `Close` it, `Rename` it over the old
+  name, `Sync` the directory. A reader sees the old file or the new, and
+  after the last `Sync` the new one survives a crash.
+- **`List` hands back entries as plain values,** `getdents64`'s structures
+  staying in the backend: each entry's kind and its name, packed into the
+  record's `names`, at most `entries.len()` of them, `.` and `..` left
+  out, from where the last `List` of the descriptor stopped. It is
+  synchronous: `getdents64` is not a ring operation. A `names` of at
+  least 255 bytes always takes the next entry, so a `List` stops short but
+  never makes no progress while entries are left; `Count(0)` is the end.
+- **Files complete promptly and are never cancelled.** No file operation
+  waits on a peer, so io waits for each, as it does a `Socket` or a
+  `Close`, and a `Cancel` of one is a broken invariant. What lies beneath
+  a root is files, directories and links: a FIFO's `Open` would block,
+  and is outside the contract.
+- **Errors are named per operation,** on a table the module documentation
+  keeps and `Complete::is_valid` checks: an operation on files answers its
+  own errors, never a socket's or `Cancelled`, and an operation on sockets
+  never answers a file's. The same number means different things per
+  operation: `EXDEV` is `Escape` on an `Open` and `Other` on a `Rename`
+  (two filesystems); `ENOENT` is `NotFound` on a file and `TooLate` on a
+  cancel; `EEXIST` is `Exists` on a `Create` and `NotEmpty` on a `Rename`
+  over a directory.
+- **Modes are backend defaults,** as socket options are: a new file is
+  `0o666` and a new directory `0o777`, less the process's umask, and every
+  descriptor is close-on-exec.
+
 ## 7. Broken invariants
 
 Some mistakes io never makes, so a backend may assume they never happen:
@@ -175,7 +254,12 @@ Some mistakes io never makes, so a backend may assume they never happen:
 - any operation but close after a failed connect, a connect on a socket
   that is not fresh, a listen on an unbound socket;
 - a half-close on a socket that is not a connection, or during a send;
-- a close with anything else in flight.
+- an operation on files on a socket's descriptor, or one on sockets on a
+  file's; a read on a descriptor not opened to read, a write on one not
+  opened to create, a list on one opened to create;
+- a cancel of an operation on files;
+- a close with anything else in flight on its descriptor, an operation on
+  files being on every descriptor it names.
 
 The simulator fails the world on each; the ring checks the first two at
 submit.
@@ -211,12 +295,19 @@ for its backend.
 
 - **Fixed files** change what an `Fd` names: a slot in the ring's table
   instead of a descriptor. Decide when it has been measured.
+- **What else lies beneath a root.** An `Open` of a FIFO blocks until a
+  writer comes, which no deadline above can stop, since io never cancels
+  a file's operation. If a service's roots may hold one, the backend opens
+  with `O_NONBLOCK`, or io refuses what a `Stat` says is neither a file
+  nor a directory.
 
 ## 10. Not built yet
 
-- **The records for files and processes,** with their rules and their
-  conformance scenarios (a scratch directory as the root), when io pulls
-  them. Sockets are built.
+- **Files on the ring and in the simulator,** with their conformance
+  scenarios (a scratch directory as the root). Their records and rules
+  are built, with sockets'.
+- **The records for processes,** with their rules and their conformance
+  scenarios, when io pulls them.
 - **The descriptor limit on the ring.** The simulator checks it; lowering
   a process's limit on the real kernel takes `unsafe` outside the ring
   adapter, or a child process, and neither is allowed.

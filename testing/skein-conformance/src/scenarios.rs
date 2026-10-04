@@ -86,7 +86,7 @@ fn settles(
 fn sent(answer: Result<Done, Error>) -> bool {
     match answer {
         Ok(Done::Count(_)) => true,
-        Ok(Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_)) | Err(_) => false,
+        Ok(Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) | Err(_) => false,
     }
 }
 

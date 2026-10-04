@@ -433,7 +433,7 @@ pub(crate) fn unsubmitted(result: Result<Done, kernel::Error>) -> bool {
     match result {
         Ok(Done::Nothing) | Err(kernel::Error::TooLate) => false,
         Err(kernel::Error::InvalidArgument | kernel::Error::Other(_)) => true,
-        Ok(Done::Count(_) | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_)) => {
+        Ok(Done::Count(_) | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
             unreachable!("a cancel answers with nothing")
         }
         Err(
@@ -447,7 +447,18 @@ pub(crate) fn unsubmitted(result: Result<Done, kernel::Error>) -> bool {
             | kernel::Error::TimedOut
             | kernel::Error::TooManyOpenFiles
             | kernel::Error::NoBufferSpace
-            | kernel::Error::Cancelled,
+            | kernel::Error::Cancelled
+            | kernel::Error::NotFound
+            | kernel::Error::Exists
+            | kernel::Error::NotADirectory
+            | kernel::Error::IsADirectory
+            | kernel::Error::NotEmpty
+            | kernel::Error::Permission
+            | kernel::Error::NoSpace
+            | kernel::Error::ReadOnly
+            | kernel::Error::TooManyLinks
+            | kernel::Error::NameTooLong
+            | kernel::Error::Escape,
         ) => unreachable!("a cancel fails only too late or unsubmitted (kernel.md, 5)"),
     }
 }

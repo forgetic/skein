@@ -213,6 +213,15 @@ fn succeed(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         Op::Listen { .. } | Op::Connect { .. } | Op::Shutdown { .. } | Op::Close { .. } | Op::Cancel { .. } => {
             Ok(Done::Nothing)
         }
+        Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. } => panic!("io submits no operation on files yet"),
     }
 }
 
@@ -225,6 +234,15 @@ fn stopped(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         | Op::Listen { .. }
         | Op::Shutdown { .. }
         | Op::Close { .. }
+        | Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. }
         | Op::Cancel { .. } => succeed(op, fd),
     }
 }

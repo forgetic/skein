@@ -1,16 +1,19 @@
 //! The records' rules (kernel.md, 3 to 5): each operation's one success
-//! shape, what a completion may count, which errors answer a cancel, and the
-//! buffer handed back whatever the result.
+//! shape, what a completion may count, which errors answer which operation,
+//! and the buffer handed back whatever the result.
 
 use alloc::boxed::Box;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use skein_lib::Token;
 
-use crate::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, Shape};
+use crate::kernel::{
+    Addr, Complete, Done, Entry, Error, Family, Fd, Kind, LONGEST_NAME, Op, OpenHow, Shape, Stat, is_name,
+};
 
 const FD: Fd = Fd::new(3);
 const NEW: Fd = Fd::new(4);
+const STAT: Stat = Stat { kind: Kind::File, size: 5 };
 
 fn v4() -> Addr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 8080))
@@ -20,13 +23,21 @@ fn bytes(len: usize) -> Box<[u8]> {
     Box::from(&[7; 8][..len])
 }
 
+fn name(text: &[u8]) -> Box<[u8]> {
+    Box::from(text)
+}
+
+fn list(entries: usize) -> Op {
+    Op::List { fd: FD, entries: Box::from(&[Entry::BLANK; 4][..entries]), names: Box::from(&[0; 256][..]) }
+}
+
 fn complete(kind: Op, result: Result<Done, Error>) -> Complete {
     Complete { op: Token::new(1), kind, result }
 }
 
 /// One of every operation, valid. A new operation makes the match in
 /// `documented` fail to build until it is added there, and here.
-fn every_op() -> [Op; 10] {
+fn every_op() -> [Op; 19] {
     [
         Op::Socket { family: Family::Ipv4 },
         Op::Bind { fd: FD, addr: v4() },
@@ -37,6 +48,15 @@ fn every_op() -> [Op; 10] {
         Op::Send { fd: FD, bytes: bytes(4), from: 1 },
         Op::Shutdown { fd: FD },
         Op::Close { fd: FD },
+        Op::Open { root: FD, path: name(b"a/b"), how: OpenHow::Read },
+        Op::Read { fd: FD, buf: bytes(4), at: 9 },
+        Op::Write { fd: FD, bytes: bytes(4), from: 1, at: 9 },
+        Op::Sync { fd: FD },
+        Op::Stat { fd: FD },
+        Op::Rename { from_dir: FD, from: name(b"a"), to_dir: NEW, to: name(b"b") },
+        Op::Remove { dir: FD, name: name(b"a"), directory: false },
+        Op::MakeDirectory { dir: FD, name: name(b"a") },
+        list(2),
         Op::Cancel { target: Token::new(2) },
     ]
 }
@@ -45,41 +65,82 @@ fn every_op() -> [Op; 10] {
 /// exhaustive match.
 fn documented(op: &Op) -> Done {
     match op {
-        Op::Socket { .. } => Done::Fd(NEW),
+        Op::Socket { .. } | Op::Open { .. } => Done::Fd(NEW),
         Op::Accept { .. } => Done::Accepted { fd: NEW, peer: v4() },
-        Op::Recv { .. } | Op::Send { .. } => Done::Count(1),
+        Op::Recv { .. } | Op::Send { .. } | Op::Read { .. } | Op::Write { .. } => Done::Count(1),
+        Op::List { .. } => Done::Count(0),
         Op::Bind { .. } => Done::Bound(v4()),
-        Op::Listen { .. } | Op::Connect { .. } | Op::Shutdown { .. } | Op::Close { .. } | Op::Cancel { .. } => {
-            Done::Nothing
-        }
+        Op::Stat { .. } => Done::Stat(STAT),
+        Op::Listen { .. }
+        | Op::Connect { .. }
+        | Op::Shutdown { .. }
+        | Op::Close { .. }
+        | Op::Sync { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::Cancel { .. } => Done::Nothing,
     }
 }
 
 #[test]
 fn every_operation_succeeds_with_its_documented_shape_and_no_other() {
-    let candidates =
-        [Done::Nothing, Done::Count(1), Done::Fd(NEW), Done::Accepted { fd: NEW, peer: v4() }, Done::Bound(v4())];
+    let shapes = [
+        Done::Nothing,
+        Done::Count(0),
+        Done::Fd(NEW),
+        Done::Accepted { fd: NEW, peer: v4() },
+        Done::Bound(v4()),
+        Done::Stat(STAT),
+    ];
     for op in every_op() {
-        assert!(op.is_valid(), "the examples are valid");
+        assert!(op.is_valid(), "the examples are valid: {op:?}");
         let expected = documented(&op);
         assert_eq!(op.shape(), expected.shape());
-        let mut kind = op;
-        for done in candidates {
-            let answer = complete(kind, Ok(done));
-            assert_eq!(answer.is_valid(), done == expected, "only the documented shape fits");
-            kind = answer.kind;
+        let answer = complete(op, Ok(expected));
+        assert!(answer.is_valid(), "the documented success fits: {answer:?}");
+        let mut kind = answer.kind;
+        for done in shapes {
+            if done.shape() != expected.shape() {
+                let answer = complete(kind, Ok(done));
+                assert!(!answer.is_valid(), "only the documented shape fits: {answer:?}");
+                kind = answer.kind;
+            }
         }
     }
 }
 
 #[test]
 fn the_shapes_are_as_the_table_on_op_says() {
-    let [socket, bind, listen, accept, connect, recv, send, shutdown, close, cancel] = every_op();
-    assert_eq!(socket.shape(), Shape::Fd);
+    let [
+        socket,
+        bind,
+        listen,
+        accept,
+        connect,
+        recv,
+        send,
+        shutdown,
+        close,
+        open,
+        read,
+        write,
+        sync,
+        stat,
+        rename,
+        remove,
+        make_directory,
+        list,
+        cancel,
+    ] = every_op();
+    assert_eq!((socket.shape(), open.shape()), (Shape::Fd, Shape::Fd));
     assert_eq!(accept.shape(), Shape::Accepted);
     assert_eq!(bind.shape(), Shape::Bound);
-    assert_eq!((recv.shape(), send.shape()), (Shape::Count, Shape::Count));
-    for op in [listen, connect, shutdown, close, cancel] {
+    assert_eq!(stat.shape(), Shape::Stat);
+    for op in [recv, send, read, write, list] {
+        assert_eq!(op.shape(), Shape::Count);
+    }
+    for op in [listen, connect, shutdown, close, sync, rename, remove, make_directory, cancel] {
         assert_eq!(op.shape(), Shape::Nothing);
     }
 }
@@ -177,4 +238,295 @@ fn the_family_follows_the_address() {
 fn a_descriptor_is_its_raw_number() {
     assert_eq!(Fd::new(-1).raw(), -1_i32);
     assert_eq!(Fd::new(7), Fd::new(7));
+}
+
+/// The errors each operation on files names, beyond `NoBufferSpace`,
+/// `InvalidArgument` and `Other`: the module documentation's table, written
+/// out again.
+fn named(op: &Op) -> &'static [Error] {
+    match op {
+        Op::Open { .. } => &[
+            Error::NotFound,
+            Error::Exists,
+            Error::NotADirectory,
+            Error::IsADirectory,
+            Error::Permission,
+            Error::NoSpace,
+            Error::ReadOnly,
+            Error::TooManyLinks,
+            Error::NameTooLong,
+            Error::Escape,
+            Error::TooManyOpenFiles,
+        ],
+        Op::Read { .. } => &[Error::IsADirectory],
+        Op::Write { .. } => &[Error::NoSpace, Error::ReadOnly],
+        Op::Sync { .. } => &[Error::NoSpace],
+        Op::Rename { .. } => &[
+            Error::NotFound,
+            Error::NotADirectory,
+            Error::IsADirectory,
+            Error::NotEmpty,
+            Error::Permission,
+            Error::NoSpace,
+            Error::ReadOnly,
+            Error::TooManyLinks,
+            Error::NameTooLong,
+        ],
+        Op::Remove { .. } => &[
+            Error::NotFound,
+            Error::NotADirectory,
+            Error::IsADirectory,
+            Error::NotEmpty,
+            Error::Permission,
+            Error::ReadOnly,
+            Error::NameTooLong,
+        ],
+        Op::MakeDirectory { .. } => &[
+            Error::NotFound,
+            Error::Exists,
+            Error::NotADirectory,
+            Error::Permission,
+            Error::NoSpace,
+            Error::ReadOnly,
+            Error::TooManyLinks,
+            Error::NameTooLong,
+        ],
+        Op::List { .. } => &[Error::NotFound, Error::NotADirectory],
+        Op::Socket { .. }
+        | Op::Bind { .. }
+        | Op::Listen { .. }
+        | Op::Accept { .. }
+        | Op::Connect { .. }
+        | Op::Recv { .. }
+        | Op::Send { .. }
+        | Op::Shutdown { .. }
+        | Op::Close { .. }
+        | Op::Stat { .. }
+        | Op::Cancel { .. } => &[],
+    }
+}
+
+const SOCKETS_ERRORS: [Error; 9] = [
+    Error::Refused,
+    Error::Reset,
+    Error::BrokenPipe,
+    Error::NotConnected,
+    Error::AddressInUse,
+    Error::AddressNotAvailable,
+    Error::Unreachable,
+    Error::TimedOut,
+    Error::Cancelled,
+];
+
+const FILES_ERRORS: [Error; 11] = [
+    Error::NotFound,
+    Error::Exists,
+    Error::NotADirectory,
+    Error::IsADirectory,
+    Error::NotEmpty,
+    Error::Permission,
+    Error::NoSpace,
+    Error::ReadOnly,
+    Error::TooManyLinks,
+    Error::NameTooLong,
+    Error::Escape,
+];
+
+#[test]
+fn each_operation_on_files_answers_the_errors_its_table_names_and_no_other() {
+    for op in every_op() {
+        if !op.is_file() {
+            continue;
+        }
+        let mut kind = op;
+        for error in [Error::NoBufferSpace, Error::InvalidArgument, Error::Other(5)] {
+            let answer = complete(kind, Err(error));
+            assert!(answer.is_valid(), "any operation may answer {error:?}: {answer:?}");
+            kind = answer.kind;
+        }
+        for error in FILES_ERRORS.into_iter().chain([Error::TooManyOpenFiles]) {
+            let answer = complete(kind, Err(error));
+            assert_eq!(answer.is_valid(), named(&answer.kind).contains(&error), "{answer:?}");
+            kind = answer.kind;
+        }
+        for error in SOCKETS_ERRORS.into_iter().chain([Error::TooLate]) {
+            let answer = complete(kind, Err(error));
+            assert!(!answer.is_valid(), "never cancelled, never a socket's error: {answer:?}");
+            kind = answer.kind;
+        }
+    }
+}
+
+#[test]
+fn an_operation_on_sockets_never_answers_a_files_error() {
+    for op in every_op() {
+        if op.is_file() {
+            continue;
+        }
+        let mut kind = op;
+        for error in FILES_ERRORS {
+            let answer = complete(kind, Err(error));
+            assert!(!answer.is_valid(), "{answer:?}");
+            kind = answer.kind;
+        }
+    }
+    assert!(complete(Op::Socket { family: Family::Ipv4 }, Err(Error::TooManyOpenFiles)).is_valid());
+}
+
+#[test]
+fn the_operations_on_files_are_those_on_names_beneath_a_root() {
+    let files: [bool; 19] = [
+        false, false, false, false, false, false, false, false, false, true, true, true, true, true, true, true, true,
+        true, false,
+    ];
+    for (op, file) in every_op().into_iter().zip(files) {
+        assert_eq!(op.is_file(), file, "{op:?}");
+    }
+}
+
+#[test]
+fn a_name_is_one_entry_of_a_directory_and_nothing_more() {
+    for good in [&b"a"[..], b"a.txt", b"...", b".hidden", b"with space", &[b'x'; 300]] {
+        assert!(is_name(good), "{good:?}");
+    }
+    for bad in [&b""[..], b".", b"..", b"a/b", b"/", b"a/", b"nul\0"] {
+        assert!(!is_name(bad), "{bad:?}");
+    }
+    let op = |name: &[u8]| Op::MakeDirectory { dir: FD, name: Box::from(name) };
+    assert!(op(b"fine").is_valid());
+    assert!(!op(b"../out").is_valid(), "no lookup beyond the entry");
+    assert!(!Op::Remove { dir: FD, name: name(b".."), directory: true }.is_valid());
+    let rename =
+        |from: &[u8], to: &[u8]| Op::Rename { from_dir: FD, from: Box::from(from), to_dir: FD, to: Box::from(to) };
+    assert!(rename(b"a", b"b").is_valid());
+    assert!(!rename(b"a", b"x/b").is_valid());
+    assert!(!rename(b".", b"b").is_valid());
+}
+
+#[test]
+fn an_open_path_holds_no_nul_byte_and_may_be_anything_else() {
+    let open = |path: &[u8]| Op::Open { root: FD, path: Box::from(path), how: OpenHow::Create };
+    for path in [&b""[..], b"..", b"/etc/passwd", b"a//b/", &[b'x'; 5000]] {
+        assert!(open(path).is_valid(), "the kernel answers it: {path:?}");
+    }
+    assert!(!open(b"a\0b").is_valid());
+}
+
+#[test]
+fn a_read_buffer_is_never_empty_nor_past_the_largest_offset() {
+    let largest = u64::try_from(i64::MAX).unwrap();
+    assert_eq!(Op::read(FD, bytes(0), 0), Err(bytes(0)));
+    assert_eq!(Op::read(FD, bytes(3), 7), Ok(Op::Read { fd: FD, buf: bytes(3), at: 7 }));
+    assert_eq!(Op::read(FD, bytes(3), largest - 3), Ok(Op::Read { fd: FD, buf: bytes(3), at: largest - 3 }));
+    assert_eq!(Op::read(FD, bytes(3), largest - 2), Err(bytes(3)));
+    assert_eq!(Op::read(FD, bytes(3), u64::MAX), Err(bytes(3)), "the descriptor's position, on the ring");
+    assert!(!Op::Read { fd: FD, buf: bytes(0), at: 0 }.is_valid());
+}
+
+#[test]
+fn a_write_has_something_left_to_write_within_the_largest_offset() {
+    let largest = u64::try_from(i64::MAX).unwrap();
+    assert_eq!(Op::write(FD, bytes(3), 1, 4), Ok(Op::Write { fd: FD, bytes: bytes(3), from: 1, at: 4 }));
+    assert_eq!(Op::write(FD, bytes(3), 3, 4), Err(bytes(3)));
+    assert_eq!(Op::write(FD, bytes(0), 0, 0), Err(bytes(0)));
+    assert!(Op::write(FD, bytes(3), 1, largest - 2).is_ok(), "two bytes left end at the largest offset");
+    assert_eq!(Op::write(FD, bytes(3), 1, largest - 1), Err(bytes(3)));
+    assert!(!Op::Write { fd: FD, bytes: bytes(3), from: 0, at: u64::MAX }.is_valid());
+}
+
+#[test]
+fn a_read_count_is_at_most_its_buffer_and_zero_is_the_end_of_the_file() {
+    for (n, valid) in [(0, true), (1, true), (4, true), (5, false)] {
+        let answer = complete(Op::Read { fd: FD, buf: bytes(4), at: 100 }, Ok(Done::Count(n)));
+        assert_eq!(answer.is_valid(), valid, "count {n}");
+    }
+}
+
+#[test]
+fn a_write_count_is_at_least_one_and_at_most_what_was_left() {
+    for (n, valid) in [(0, false), (1, true), (3, true), (4, false)] {
+        let answer = complete(Op::Write { fd: FD, bytes: bytes(4), from: 1, at: 0 }, Ok(Done::Count(n)));
+        assert_eq!(answer.is_valid(), valid, "count {n}");
+    }
+}
+
+#[test]
+fn a_list_has_room_for_an_entry_and_the_longest_name() {
+    assert!(list(1).is_valid());
+    assert!(!list(0).is_valid(), "no room for an entry");
+    let names = [0; 256];
+    let short = Op::List { fd: FD, entries: Box::new([Entry::BLANK]), names: Box::from(&names[..LONGEST_NAME - 1]) };
+    assert!(!short.is_valid(), "room for fewer bytes than the longest name");
+    let enough = Op::List { fd: FD, entries: Box::new([Entry::BLANK]), names: Box::from(&names[..LONGEST_NAME]) };
+    assert!(enough.is_valid());
+}
+
+/// A `List` that counts `n` of `entries`, with `names`.
+fn listed(entries: &[Entry], names: &[u8], n: u32) -> Complete {
+    complete(Op::List { fd: FD, entries: Box::from(entries), names: Box::from(names) }, Ok(Done::Count(n)))
+}
+
+#[test]
+fn a_list_counts_entries_whose_names_lie_in_order_within_its_names() {
+    let mut names = [0_u8; 256];
+    for (slot, byte) in names.iter_mut().zip(b"onetwo...") {
+        *slot = *byte;
+    }
+    let one = Entry { kind: Kind::File, start: 0, len: 3 };
+    let two = Entry { kind: Kind::Directory, start: 3, len: 3 };
+    let dots = Entry { kind: Kind::Symlink, start: 6, len: 3 };
+    assert!(listed(&[one, two, Entry::BLANK], &names, 2).is_valid());
+    assert!(listed(&[one, two, dots], &names, 3).is_valid(), "`...` is a name");
+    assert!(listed(&[one, two], &names, 0).is_valid(), "the end");
+    assert!(!listed(&[one, two], &names, 3).is_valid(), "more than the entries");
+    assert!(!listed(&[two, one], &names, 2).is_valid(), "names out of order");
+    assert!(!listed(&[one, one], &names, 2).is_valid(), "a name shared");
+    assert!(!listed(&[Entry::BLANK], &names, 1).is_valid(), "an empty name");
+    let dot = Entry { kind: Kind::Directory, start: 6, len: 1 };
+    assert!(!listed(&[dot], &names, 1).is_valid(), "`.` is left out");
+    let past = Entry { kind: Kind::File, start: 250, len: 7 };
+    assert!(!listed(&[past], &names, 1).is_valid(), "a name past the end of names");
+    let wide = Entry { kind: Kind::File, start: u32::MAX, len: u32::MAX };
+    assert!(!listed(&[wide], &names, 1).is_valid(), "a range that overflows");
+}
+
+#[test]
+fn an_entry_names_its_bytes_of_names() {
+    let names = b"alphabeta";
+    assert_eq!(Entry { kind: Kind::File, start: 5, len: 4 }.name(names), Some(&b"beta"[..]));
+    assert_eq!(Entry { kind: Kind::File, start: 5, len: 5 }.name(names), None);
+    assert_eq!(Entry::BLANK.name(names), Some(&b""[..]));
+}
+
+#[test]
+fn a_stat_answers_any_kind_and_size() {
+    for kind in [Kind::File, Kind::Directory, Kind::Symlink, Kind::Other] {
+        let answer = complete(Op::Stat { fd: FD }, Ok(Done::Stat(Stat { kind, size: u64::MAX })));
+        assert!(answer.is_valid(), "{answer:?}");
+    }
+}
+
+#[test]
+fn an_error_hands_every_buffer_and_path_back_too() {
+    let rename = || Op::Rename { from_dir: FD, from: name(b"a"), to_dir: NEW, to: name(b"b") };
+    let answer = complete(rename(), Err(Error::NotFound));
+    assert!(answer.is_valid());
+    assert_eq!(answer.kind, rename());
+    let answer = complete(list(3), Err(Error::NotADirectory));
+    assert!(answer.is_valid());
+    assert_eq!(answer.kind, list(3));
+}
+
+#[test]
+fn a_cancel_never_answers_a_files_error() {
+    for error in FILES_ERRORS {
+        assert!(!complete(Op::Cancel { target: Token::new(2) }, Err(error)).is_valid(), "{error:?}");
+    }
+}
+
+#[test]
+fn the_examples_of_each_kind_are_distinct() {
+    let ip = Ipv6Addr::LOCALHOST;
+    assert_ne!(Family::of(&SocketAddr::from((ip, 1))), Family::of(&v4()));
+    assert_ne!(OpenHow::Read, OpenHow::Directory);
 }

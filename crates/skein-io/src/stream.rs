@@ -629,7 +629,7 @@ fn decode(landed: Landed) -> Happened {
     match purpose {
         Purpose::Socket => Happened::Socket(match result {
             Ok(Done::Fd(fd)) => Ok(fd),
-            Ok(Done::Nothing | Done::Count(_) | Done::Accepted { .. } | Done::Bound(_)) => {
+            Ok(Done::Nothing | Done::Count(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
                 unreachable!("a socket answers with its descriptor")
             }
             Err(error) => Err(error),
@@ -645,6 +645,15 @@ fn decode(landed: Landed) -> Happened {
             | Op::Send { .. }
             | Op::Shutdown { .. }
             | Op::Close { .. }
+            | Op::Open { .. }
+            | Op::Read { .. }
+            | Op::Write { .. }
+            | Op::Sync { .. }
+            | Op::Stat { .. }
+            | Op::Rename { .. }
+            | Op::Remove { .. }
+            | Op::MakeDirectory { .. }
+            | Op::List { .. }
             | Op::Cancel { .. } => unreachable!("a completion hands back its own operation"),
         },
         Purpose::Send => match kind {
@@ -657,6 +666,15 @@ fn decode(landed: Landed) -> Happened {
             | Op::Recv { .. }
             | Op::Shutdown { .. }
             | Op::Close { .. }
+            | Op::Open { .. }
+            | Op::Read { .. }
+            | Op::Write { .. }
+            | Op::Sync { .. }
+            | Op::Stat { .. }
+            | Op::Rename { .. }
+            | Op::Remove { .. }
+            | Op::MakeDirectory { .. }
+            | Op::List { .. }
             | Op::Cancel { .. } => unreachable!("a completion hands back its own operation"),
         },
         Purpose::Shutdown => Happened::Shut { flight, result: nothing(result) },
@@ -673,7 +691,7 @@ fn decode(landed: Landed) -> Happened {
 fn nothing(result: Result<Done, kernel::Error>) -> Result<(), kernel::Error> {
     match result {
         Ok(Done::Nothing) => Ok(()),
-        Ok(Done::Count(_) | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_)) => {
+        Ok(Done::Count(_) | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
             unreachable!("a connect or a shutdown answers with nothing")
         }
         Err(error) => Err(error),
@@ -684,7 +702,7 @@ fn nothing(result: Result<Done, kernel::Error>) -> Result<(), kernel::Error> {
 fn counted(result: Result<Done, kernel::Error>) -> Result<u32, kernel::Error> {
     match result {
         Ok(Done::Count(n)) => Ok(n),
-        Ok(Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_)) => {
+        Ok(Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
             unreachable!("a receive or a send answers with a count")
         }
         Err(error) => Err(error),

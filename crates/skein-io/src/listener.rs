@@ -326,21 +326,21 @@ fn decode(io: &mut Io, landed: Landed) -> Happened {
     match purpose {
         Purpose::Socket => Happened::Socket(match result {
             Ok(Done::Fd(fd)) => Ok(fd),
-            Ok(Done::Nothing | Done::Count(_) | Done::Accepted { .. } | Done::Bound(_)) => {
+            Ok(Done::Nothing | Done::Count(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
                 unreachable!("a socket answers with its descriptor")
             }
             Err(error) => Err(error),
         }),
         Purpose::Bind => Happened::Bound(match result {
             Ok(Done::Bound(addr)) => Ok(addr),
-            Ok(Done::Nothing | Done::Count(_) | Done::Fd(_) | Done::Accepted { .. }) => {
+            Ok(Done::Nothing | Done::Count(_) | Done::Fd(_) | Done::Accepted { .. } | Done::Stat(_)) => {
                 unreachable!("a bind answers with the address bound")
             }
             Err(error) => Err(error),
         }),
         Purpose::Listen => Happened::Listened(match result {
             Ok(Done::Nothing) => Ok(()),
-            Ok(Done::Count(_) | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_)) => {
+            Ok(Done::Count(_) | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
                 unreachable!("a listen answers with nothing")
             }
             Err(error) => Err(error),
@@ -373,7 +373,7 @@ fn outcome(io: &mut Io, listener: Id<Entity>, result: Result<Done, kernel::Error
                 Err(_refused) => Outcome::NoSlot(fd),
             }
         }
-        Ok(Done::Nothing | Done::Count(_) | Done::Fd(_) | Done::Bound(_)) => {
+        Ok(Done::Nothing | Done::Count(_) | Done::Fd(_) | Done::Bound(_) | Done::Stat(_)) => {
             unreachable!("an accept answers with a socket and its peer")
         }
         Err(kernel::Error::TooManyOpenFiles) => Outcome::Starved,
@@ -391,6 +391,19 @@ fn outcome(io: &mut Io, listener: Id<Entity>, result: Result<Done, kernel::Error
             | kernel::Error::InvalidArgument,
         ) => Outcome::Stopped,
         Err(kernel::Error::TooLate) => unreachable!("only a cancel is too late"),
+        Err(
+            kernel::Error::NotFound
+            | kernel::Error::Exists
+            | kernel::Error::NotADirectory
+            | kernel::Error::IsADirectory
+            | kernel::Error::NotEmpty
+            | kernel::Error::Permission
+            | kernel::Error::NoSpace
+            | kernel::Error::ReadOnly
+            | kernel::Error::TooManyLinks
+            | kernel::Error::NameTooLong
+            | kernel::Error::Escape,
+        ) => unreachable!("an operation on sockets never fails with a file's error (skein_io::kernel)"),
     }
 }
 

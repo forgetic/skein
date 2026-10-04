@@ -161,6 +161,15 @@ impl Rig {
                 return;
             }
             Op::Bind { .. } | Op::Listen { .. } | Op::Accept { .. } => panic!("the client listens to no one"),
+            Op::Open { .. }
+            | Op::Read { .. }
+            | Op::Write { .. }
+            | Op::Sync { .. }
+            | Op::Stat { .. }
+            | Op::Rename { .. }
+            | Op::Remove { .. }
+            | Op::MakeDirectory { .. }
+            | Op::List { .. } => panic!("the client opens no file"),
         };
         self.done.push(Complete { op, kind, result });
     }

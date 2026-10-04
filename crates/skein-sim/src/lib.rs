@@ -87,4 +87,4 @@ mod trace;
 
 pub use config::{Config, Faults};
 pub use sim::{Pid, Sim};
-pub use trace::{Entry, Event, Fault, Summary, render};
+pub use trace::{Entry, Event, Fault, Summary, Text, render};

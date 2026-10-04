@@ -58,6 +58,15 @@ pub(crate) fn buffer(op: &Op) -> (&[u8], u32) {
         | Op::Connect { .. }
         | Op::Shutdown { .. }
         | Op::Close { .. }
+        | Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. }
         | Op::Cancel { .. } => panic!("no buffer in {op:?}"),
     }
 }
@@ -89,6 +98,17 @@ pub(crate) const fn kind(op: &Op) -> Kind {
         Op::Shutdown { .. } => Kind::Shutdown,
         Op::Close { .. } => Kind::Close,
         Op::Cancel { .. } => Kind::Cancel,
+        Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. } => {
+            panic!("io submits no operation on files yet (io.md, 9)")
+        }
     }
 }
 

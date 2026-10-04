@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::mem;
 
-use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, Submit};
+use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, OpenHow, Submit};
 use skein_lib::{Duration, Queue, Time, Token};
 
 use crate::Backend;
@@ -262,7 +262,7 @@ impl<'b, B: Backend> Run<'b, B> {
                 None
             }
             (_, Ok(Done::Fd(fd) | Done::Accepted { fd, .. })) => Some(*fd),
-            (_, Ok(Done::Nothing | Done::Count(_) | Done::Bound(_)) | Err(_)) => None,
+            (_, Ok(Done::Nothing | Done::Count(_) | Done::Bound(_) | Done::Stat(_)) | Err(_)) => None,
         };
         if let Some(fd) = opened {
             assert!(self.open.insert((process, fd)), "a new descriptor is not one already open in its process");
@@ -448,6 +448,15 @@ enum Summary {
     Send { fd: Fd, len: usize, from: u32 },
     Shutdown { fd: Fd },
     Close { fd: Fd },
+    Open { root: Fd, path: usize, how: OpenHow },
+    Read { fd: Fd, len: usize, at: u64 },
+    Write { fd: Fd, len: usize, from: u32, at: u64 },
+    Sync { fd: Fd },
+    Stat { fd: Fd },
+    Rename { from_dir: Fd, from: usize, to_dir: Fd, to: usize },
+    Remove { dir: Fd, name: usize, directory: bool },
+    MakeDirectory { dir: Fd, name: usize },
+    List { fd: Fd, entries: usize, names: usize },
     Cancel { target: Token },
 }
 
@@ -463,6 +472,19 @@ impl Summary {
             Op::Send { fd, bytes, from } => Summary::Send { fd: *fd, len: bytes.len(), from: *from },
             Op::Shutdown { fd } => Summary::Shutdown { fd: *fd },
             Op::Close { fd } => Summary::Close { fd: *fd },
+            Op::Open { root, path, how } => Summary::Open { root: *root, path: path.len(), how: *how },
+            Op::Read { fd, buf, at } => Summary::Read { fd: *fd, len: buf.len(), at: *at },
+            Op::Write { fd, bytes, from, at } => Summary::Write { fd: *fd, len: bytes.len(), from: *from, at: *at },
+            Op::Sync { fd } => Summary::Sync { fd: *fd },
+            Op::Stat { fd } => Summary::Stat { fd: *fd },
+            Op::Rename { from_dir, from, to_dir, to } => {
+                Summary::Rename { from_dir: *from_dir, from: from.len(), to_dir: *to_dir, to: to.len() }
+            }
+            Op::Remove { dir, name, directory } => {
+                Summary::Remove { dir: *dir, name: name.len(), directory: *directory }
+            }
+            Op::MakeDirectory { dir, name } => Summary::MakeDirectory { dir: *dir, name: name.len() },
+            Op::List { fd, entries, names } => Summary::List { fd: *fd, entries: entries.len(), names: names.len() },
             Op::Cancel { target } => Summary::Cancel { target: *target },
         }
     }
@@ -487,6 +509,15 @@ fn buffer(op: &Op) -> Option<&[u8]> {
         | Op::Connect { .. }
         | Op::Shutdown { .. }
         | Op::Close { .. }
+        | Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. }
         | Op::Cancel { .. } => None,
     }
 }

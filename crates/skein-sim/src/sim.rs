@@ -342,6 +342,9 @@ impl Sim {
         if self.process(pid).flights.contains_key(&token) {
             self.fail(pid, &format!("{token:?} is already in flight"));
         }
+        if kind.is_file() {
+            self.fail(pid, &format!("{summary:?}: this simulator plays no files yet"));
+        }
         let socket = self.check(pid, summary);
         let serial = self.next_serial;
         self.next_serial = serial.checked_add(1).expect("fewer than 2^64 submissions");
@@ -358,6 +361,15 @@ impl Sim {
             Op::Shutdown { .. } => self.shutdown(pid, token, kind, on(socket)),
             Op::Close { fd } => self.close(pid, token, kind, fd, on(socket)),
             Op::Cancel { target } => self.cancel(pid, token, kind, target),
+            Op::Open { .. }
+            | Op::Read { .. }
+            | Op::Write { .. }
+            | Op::Sync { .. }
+            | Op::Stat { .. }
+            | Op::Rename { .. }
+            | Op::Remove { .. }
+            | Op::MakeDirectory { .. }
+            | Op::List { .. } => self.bug("an operation on files passed the checks"),
         }
     }
 
@@ -425,6 +437,15 @@ impl Sim {
             | Summary::Send { .. }
             | Summary::Shutdown { .. }
             | Summary::Close { .. }
+            | Summary::Open { .. }
+            | Summary::Read { .. }
+            | Summary::Write { .. }
+            | Summary::Sync { .. }
+            | Summary::Stat { .. }
+            | Summary::Rename { .. }
+            | Summary::Remove { .. }
+            | Summary::MakeDirectory { .. }
+            | Summary::List { .. }
             | Summary::Cancel { .. } => None,
         };
         if let Some(broken) = broken {
@@ -721,6 +742,15 @@ impl Sim {
             | Op::Listen { .. }
             | Op::Shutdown { .. }
             | Op::Close { .. }
+            | Op::Open { .. }
+            | Op::Read { .. }
+            | Op::Write { .. }
+            | Op::Sync { .. }
+            | Op::Stat { .. }
+            | Op::Rename { .. }
+            | Op::Remove { .. }
+            | Op::MakeDirectory { .. }
+            | Op::List { .. }
             | Op::Cancel { .. } => self.bug("only accepts, connects, receives and sends wait"),
         };
         let socket = self.socket_mut(id);

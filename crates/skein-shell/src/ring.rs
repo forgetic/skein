@@ -492,6 +492,17 @@ fn prepare(flight: &mut Flight, tokens: &BTreeMap<Token, u64>, cancelled: &mut B
         }
         Op::Shutdown { fd } => opcode::Shutdown::new(types::Fd(fd.raw()), libc::SHUT_WR).build(),
         Op::Close { fd } => opcode::Close::new(types::Fd(fd.raw())).build(),
+        Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. } => {
+            panic!("the ring takes no operation on files yet (kernel.md, 10)")
+        }
         Op::Cancel { target } => {
             let Some(target_data) = tokens.get(target) else {
                 return Prepared::Done(Err(Error::TooLate));
@@ -555,6 +566,17 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
         Op::Listen { .. } | Op::Connect { .. } | Op::Shutdown { .. } | Op::Close { .. } | Op::Cancel { .. } => {
             Ok(Done::Nothing)
         }
+        Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. } => {
+            unreachable!("the ring takes no operation on files yet")
+        }
     }
 }
 
@@ -576,7 +598,16 @@ fn error(kind: &Op, errno: i32, cancelled: bool) -> Error {
         | Op::Recv { .. }
         | Op::Send { .. }
         | Op::Shutdown { .. }
-        | Op::Close { .. } => match errno {
+        | Op::Close { .. }
+        | Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. } => match errno {
             libc::ECANCELED => Error::Cancelled,
             libc::EINTR if cancelled => Error::Cancelled,
             libc::ENOBUFS | libc::ENOMEM => Error::NoBufferSpace,
@@ -624,7 +655,16 @@ fn operation_error(kind: &Op, errno: i32) -> Error {
             libc::ENOTCONN => Some(Error::NotConnected),
             _ => None,
         },
-        Op::Close { .. } => None,
+        Op::Close { .. }
+        | Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. } => None,
         Op::Cancel { .. } => unreachable!("a Cancel's errors are mapped apart"),
     };
     named.unwrap_or(Error::Other(errno))
