@@ -113,7 +113,8 @@
 //!   following a final symbolic link; `Directory` an existing directory;
 //!   `Create` a new, empty file, to write, which fails with `Exists` if the
 //!   name is taken by anything, a dangling symbolic link included. New files
-//!   are made `0o666` and directories `0o777`, less the process's umask.
+//!   are made with the mode `Create` asks for, or `0o666`, and directories
+//!   `0o777`, less the process's umask.
 //! - **`Read` and `Write` are at an offset,** never at the descriptor's
 //!   position. A `Read` counts the bytes read into `buf[..n]`: fewer than
 //!   it asked for at the end of the file, and whenever the backend chooses
@@ -125,16 +126,17 @@
 //! - **`Sync`** flushes the file, or a directory's entries, to storage:
 //!   once it completes, what was written or renamed before it survives a
 //!   crash.
-//! - **`Stat`** answers the [`Kind`] and size of what is open on its
-//!   descriptor: for a file, its length in bytes; for anything else,
-//!   whatever its filesystem says.
+//! - **`Stat`** answers the [`Kind`], size and permission bits of what is
+//!   open on its descriptor: for a file, its length in bytes; for anything
+//!   else, whatever its filesystem says.
 //! - **`Rename` is atomic:** `to` names the old entry or the moved one,
 //!   never neither and never a mix. It replaces a file with a file, and an
 //!   empty directory with a directory; one entry renamed over another that
 //!   is the same file is left as it is. A directory never moves beneath
-//!   itself. Hence the idiom that replaces a file whole: `Create` a new
-//!   one, `Write` it, `Sync` it, `Close` it, `Rename` it over the old, then
-//!   `Sync` the directory.
+//!   itself. A symbolic link at `to` is replaced, not followed. Hence the
+//!   idiom that replaces a file whole: `Stat` the old one for its mode,
+//!   `Create` a new one with it beside the old, `Write` it, `Sync` it,
+//!   `Close` it, `Rename` it over the old, then `Sync` the directory.
 //! - **`List`** hands back the next entries of the directory open on `fd`,
 //!   from where the last `List` of that descriptor stopped (the start, once
 //!   opened), `.` and `..` left out: at most `entries.len()`, each with its
@@ -429,8 +431,11 @@ pub enum OpenHow {
     /// An existing directory: a root beneath this one, or a directory to
     /// `List` (`O_RDONLY | O_DIRECTORY`).
     Directory,
-    /// A new, empty file, to `Write` (`O_WRONLY | O_CREAT | O_EXCL`).
-    Create,
+    /// A new, empty file, to `Write` (`O_WRONLY | O_CREAT | O_EXCL`), made
+    /// with `mode`'s permission bits (`0o777` at most), or `0o666` without
+    /// one, less the process's umask: to keep an old file's when replacing
+    /// it.
+    Create { mode: Option<u32> },
 }
 
 /// What a name beneath a root names.
@@ -452,7 +457,12 @@ pub struct Stat {
     /// A file's length in bytes; for anything else, whatever its filesystem
     /// says.
     pub size: u64,
+    /// Its permission bits (`0o777` at most).
+    pub mode: u32,
 }
+
+/// The permission bits a mode may hold: an `OpenHow::Create`'s, a `Stat`'s.
+pub const PERMISSIONS: u32 = 0o777;
 
 /// One entry a `List` handed back: its kind, and where its name lies in the
 /// `List`'s `names`, after the names of the entries before it.
@@ -709,7 +719,8 @@ impl Op {
 
     /// Whether the record is one the kernel can be handed: a `Recv`, `Send`,
     /// `Read` or `Write` that [`Op::recv`], [`Op::send`], [`Op::read`] and
-    /// [`Op::write`] would build; an `Open` whose path has no NUL byte; a
+    /// [`Op::write`] would build; an `Open` whose path has no NUL byte, and
+    /// whose mode, to create, holds only [`PERMISSIONS`]; a
     /// `Rename`, `Remove` or `MakeDirectory` of names that are each an
     /// [`is_name`]; a `List` with room for an entry, `names` of at least
     /// [`LONGEST_NAME`] bytes, and both no longer than a count can say.
@@ -719,7 +730,13 @@ impl Op {
         match self {
             Op::Recv { buf, .. } => !buf.is_empty() && u32::try_from(buf.len()).is_ok(),
             Op::Send { bytes, from, .. } => u32::try_from(bytes.len()).is_ok() && left(bytes, *from).is_some(),
-            Op::Open { path, .. } => !path.contains(&0),
+            Op::Open { path, how, .. } => {
+                let mode = match how {
+                    OpenHow::Create { mode: Some(mode) } => *mode & !PERMISSIONS == 0,
+                    OpenHow::Create { mode: None } | OpenHow::Read | OpenHow::Directory => true,
+                };
+                !path.contains(&0) && mode
+            }
             Op::Read { buf, at, .. } => reads(buf, *at),
             Op::Write { bytes, from, at, .. } => writes(bytes, *from, *at),
             Op::Rename { from, to, .. } => is_name(from) && is_name(to),
@@ -1010,7 +1027,8 @@ fn fits(op: &Op, done: &Done) -> bool {
             Err(_) => false,
         },
         Done::Bound(bound) => binds(op, bound),
-        Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Stat(_) => true,
+        Done::Stat(stat) => stat.mode & !PERMISSIONS == 0,
+        Done::Nothing | Done::Fd(_) | Done::Accepted { .. } => true,
     }
 }
 

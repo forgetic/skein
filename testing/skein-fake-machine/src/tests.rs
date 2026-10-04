@@ -77,8 +77,8 @@ fn a_listing_resumes_after_the_last_name_it_handed_back() {
     let (mut machine, root) = machine(&[Item::file(b"b", b""), Item::file(b"d", b"")]);
     let first = machine.list(root, 1, 255).unwrap();
     assert_eq!(first, [(Is::File, b"b".to_vec().into_boxed_slice())]);
-    let a = machine.open(root, b"a", How::Create).unwrap();
-    let c = machine.open(root, b"c", How::Create).unwrap();
+    let a = machine.open(root, b"a", How::Create { mode: 0o644 }).unwrap();
+    let c = machine.open(root, b"c", How::Create { mode: 0o644 }).unwrap();
     let rest: Vec<_> = machine.list(root, 8, 255).unwrap().into_iter().map(|(_, name)| name.to_vec()).collect();
     assert_eq!(rest, [b"c".to_vec(), b"d".to_vec()], "a name made before the cursor is not seen");
     assert!(machine.list(root, 8, 255).unwrap().is_empty());

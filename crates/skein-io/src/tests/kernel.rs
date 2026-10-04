@@ -13,7 +13,7 @@ use crate::kernel::{
 
 const FD: Fd = Fd::new(3);
 const NEW: Fd = Fd::new(4);
-const STAT: Stat = Stat { kind: Kind::File, size: 5 };
+const STAT: Stat = Stat { kind: Kind::File, size: 5, mode: 0o644 };
 
 fn v4() -> Addr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 8080))
@@ -434,7 +434,7 @@ fn a_name_is_one_entry_of_a_directory_and_nothing_more() {
 
 #[test]
 fn an_open_path_holds_no_nul_byte_and_may_be_anything_else() {
-    let open = |path: &[u8]| Op::Open { root: FD, path: Box::from(path), how: OpenHow::Create };
+    let open = |path: &[u8]| Op::Open { root: FD, path: Box::from(path), how: OpenHow::Create { mode: None } };
     for path in [&b""[..], b"..", b"/etc/passwd", b"a//b/", &[b'x'; 5000]] {
         assert!(open(path).is_valid(), "the kernel answers it: {path:?}");
     }
@@ -530,8 +530,10 @@ fn an_entry_names_its_bytes_of_names() {
 #[test]
 fn a_stat_answers_any_kind_and_size() {
     for kind in [Kind::File, Kind::Directory, Kind::Symlink, Kind::Other] {
-        let answer = complete(Op::Stat { fd: FD }, Ok(Done::Stat(Stat { kind, size: u64::MAX })));
+        let answer = complete(Op::Stat { fd: FD }, Ok(Done::Stat(Stat { kind, size: u64::MAX, mode: 0o777 })));
         assert!(answer.is_valid(), "{answer:?}");
+        let answer = complete(Op::Stat { fd: FD }, Ok(Done::Stat(Stat { kind, size: 0, mode: 0o4755 })));
+        assert!(!answer.is_valid(), "permission bits only: {answer:?}");
     }
 }
 
@@ -558,4 +560,14 @@ fn the_examples_of_each_kind_are_distinct() {
     let ip = Ipv6Addr::LOCALHOST;
     assert_ne!(Family::of(&SocketAddr::from((ip, 1))), Family::of(&v4()));
     assert_ne!(OpenHow::Read, OpenHow::Directory);
+}
+
+#[test]
+fn a_create_asks_for_permission_bits_only() {
+    let create = |mode| Op::Open { root: FD, path: name(b"f"), how: OpenHow::Create { mode } };
+    assert!(create(None).is_valid());
+    assert!(create(Some(0o640)).is_valid());
+    assert!(create(Some(0o777)).is_valid());
+    assert!(!create(Some(0o4644)).is_valid(), "no set-user-ID bit");
+    assert!(!create(Some(0o10644)).is_valid(), "no file type");
 }

@@ -59,6 +59,9 @@ pub struct FileLifecycle {
     /// A `Sync` of the file, and of a directory.
     pub synced: [Result<Done, Error>; 2],
     pub stat_written: Result<Stat, Error>,
+    /// The owner's bits of a file made with `0o640`, which no usual umask
+    /// takes, and the bits of a file laid `0o604`.
+    pub modes: [Result<u32, Error>; 2],
     pub read_back: Result<Vec<u8>, Error>,
     pub reads: Shortness,
     /// `Read`s at the end of the file, and past it.
@@ -74,12 +77,18 @@ pub struct FileLifecycle {
 
 #[must_use]
 pub fn file_lifecycle<B: Backend>(backend: &mut B) -> FileLifecycle {
-    let tree = [Item::file(b"a.txt", b"hello"), Item::directory(b"d"), Item::file(b"d/inner", b"inside")];
+    let tree = [
+        Item::file(b"a.txt", b"hello"),
+        Item::directory(b"d"),
+        Item::file(b"d/inner", b"inside"),
+        Item::file(b"odd", b"").mode(0o604),
+    ];
     let mut run = Run::new(backend);
     let process = run.process();
     let root = run.root(process, &tree);
+    let modes = [created_mode(&mut run, process, root), laid_mode(&mut run, process, root)];
 
-    let new = run.open(process, root, b"new", OpenHow::Create).expect("a new file in the root");
+    let new = run.open(process, root, b"new", OpenHow::Create { mode: None }).expect("a new file in the root");
     let writes = [
         run.write_all(process, new, 0, b"abcdef"),
         run.write_all(process, new, 2, b"XY"),
@@ -110,6 +119,7 @@ pub fn file_lifecycle<B: Backend>(backend: &mut B) -> FileLifecycle {
         writes,
         synced: [synced_file, synced_directory],
         stat_written,
+        modes,
         read_back,
         reads,
         at_the_end,
@@ -118,6 +128,22 @@ pub fn file_lifecycle<B: Backend>(backend: &mut B) -> FileLifecycle {
         directories: [as_directory, as_read],
         read_of_directory,
     }
+}
+
+/// The owner's bits of a file created with `0o640`.
+fn created_mode<B: Backend>(run: &mut Run<'_, B>, process: B::Process, root: Fd) -> Result<u32, Error> {
+    let file = run.open(process, root, b"made", OpenHow::Create { mode: Some(0o640) })?;
+    let stat = run.stat(process, file);
+    run.close(process, file);
+    stat.map(|stat| stat.mode & 0o700)
+}
+
+/// The permission bits of the file laid `0o604`.
+fn laid_mode<B: Backend>(run: &mut Run<'_, B>, process: B::Process, root: Fd) -> Result<u32, Error> {
+    let file = run.open(process, root, b"odd", OpenHow::Read)?;
+    let stat = run.stat(process, file);
+    run.close(process, file);
+    stat.map(|stat| stat.mode)
 }
 
 /// One `Read` of 8 bytes at `at`.
@@ -150,12 +176,16 @@ impl Check for FileLifecycle {
             rule(written.is_ok(), "a Write writes, a short one continued from where it stopped", written);
         }
         assert_eq!(self.synced, [NOTHING, NOTHING], "the contract: Sync flushes a file, or a directory's entries");
-        let length = Ok(Stat { kind: Kind::File, size: 10 });
-        assert_eq!(self.stat_written, length, "the contract: Stat answers a file's kind and length");
+        let length = Ok((Kind::File, 10));
+        let written = self.stat_written.map(|stat| (stat.kind, stat.size));
+        assert_eq!(written, length, "the contract: Stat answers a file's kind and length");
+        let modes = [Ok(0o600), Ok(0o604)];
+        assert_eq!(self.modes, modes, "the contract: Create makes the mode asked for, and Stat answers it");
         let expected = file(b"abXYef\0\0\0Z");
         assert_eq!(self.read_back, expected, "the contract: Write at an offset, zeros in a gap past the end");
         assert_eq!(self.at_the_end, [Ok(Vec::new()), Ok(Vec::new())], "the contract: a Read at or past the end is 0");
-        assert_eq!(self.stat_read, length, "the contract: Stat answers a file's kind and length");
+        let read = self.stat_read.map(|stat| (stat.kind, stat.size));
+        assert_eq!(read, length, "the contract: Stat answers a file's kind and length");
         assert_eq!(self.planted, [file(b"hello"), file(b"inside")], "the root's files, beneath it");
         for stat in &self.directories {
             let kind = stat.map(|stat| stat.kind);
@@ -231,7 +261,7 @@ pub fn rename<B: Backend>(backend: &mut B) -> Renames {
     let too_long = run.rename(process, (root, &too_long()), (root, b"y"));
     let missing_to_too_long = run.rename(process, (root, b"missing"), (root, &far_too_long()));
 
-    let tmp = run.open(process, root, b"tmp", OpenHow::Create).expect("a temporary");
+    let tmp = run.open(process, root, b"tmp", OpenHow::Create { mode: None }).expect("a temporary");
     run.write_all(process, tmp, 0, b"fresh").expect("the temporary written");
     let synced = run.sync(process, tmp);
     run.close(process, tmp);
@@ -421,7 +451,7 @@ pub fn make_directory<B: Backend>(backend: &mut B) -> MakeDirectories {
     let too_long = run.make_directory(process, root, &too_long());
     let gone = run.open(process, root, b"gone", OpenHow::Directory).expect("a directory");
     let removed = run.remove(process, root, b"gone", true);
-    let create = match run.open(process, gone, b"x", OpenHow::Create) {
+    let create = match run.open(process, gone, b"x", OpenHow::Create { mode: None }) {
         Ok(fd) => {
             run.close(process, fd);
             NOTHING
@@ -434,7 +464,7 @@ pub fn make_directory<B: Backend>(backend: &mut B) -> MakeDirectories {
     };
     let in_removed = [run.make_directory(process, gone, b"x"), create, listed];
     let removed_long = opens(&mut run, process, gone, &far_too_long(), OpenHow::Read);
-    let removed_slash = opens(&mut run, process, gone, b"x/", OpenHow::Create);
+    let removed_slash = opens(&mut run, process, gone, b"x/", OpenHow::Create { mode: None });
     run.close(process, gone);
     run.close(process, root);
     run.finish();
@@ -580,7 +610,7 @@ pub fn nested_roots<B: Backend>(backend: &mut B) -> Nested {
     let down_and_up = run.contents(process, nested, b"deeper/../inner");
     let down_and_out = opens(&mut run, process, nested, b"deeper/../../top", OpenHow::Read);
     let from_the_outer = run.contents(process, root, b"sub/inner");
-    let made = opens(&mut run, process, nested, b"made", OpenHow::Create);
+    let made = opens(&mut run, process, nested, b"made", OpenHow::Create { mode: None });
     let made = made.and_then(|()| run.contents(process, root, b"sub/made"));
     let deeper = run.open(process, nested, b"deeper", OpenHow::Directory).expect("a root beneath that one");
     let leaf = run.contents(process, deeper, b"leaf");
@@ -640,12 +670,12 @@ fn escape_cases() -> Vec<(Vec<u8>, OpenHow, Outcome)> {
         (b"l40".to_vec(), OpenHow::Read, a()),
         (b"l41".to_vec(), OpenHow::Read, refused(Error::TooManyLinks)),
         (b"dangle".to_vec(), OpenHow::Read, refused(Error::NotFound)),
-        (b"dangle".to_vec(), OpenHow::Create, refused(Error::Exists)),
-        (b"in".to_vec(), OpenHow::Create, refused(Error::Exists)),
-        (b"sub".to_vec(), OpenHow::Create, refused(Error::Exists)),
-        (b".".to_vec(), OpenHow::Create, refused(Error::Exists)),
-        (b"new/".to_vec(), OpenHow::Create, refused(Error::IsADirectory)),
-        (b"sub/new".to_vec(), OpenHow::Create, Outcome::Opened),
+        (b"dangle".to_vec(), OpenHow::Create { mode: None }, refused(Error::Exists)),
+        (b"in".to_vec(), OpenHow::Create { mode: None }, refused(Error::Exists)),
+        (b"sub".to_vec(), OpenHow::Create { mode: None }, refused(Error::Exists)),
+        (b".".to_vec(), OpenHow::Create { mode: None }, refused(Error::Exists)),
+        (b"new/".to_vec(), OpenHow::Create { mode: None }, refused(Error::IsADirectory)),
+        (b"sub/new".to_vec(), OpenHow::Create { mode: None }, Outcome::Opened),
         (b".".to_vec(), OpenHow::Directory, Outcome::Opened),
         (b"sub/..".to_vec(), OpenHow::Directory, Outcome::Opened),
         (b"sub/".to_vec(), OpenHow::Directory, Outcome::Opened),
@@ -654,13 +684,13 @@ fn escape_cases() -> Vec<(Vec<u8>, OpenHow, Outcome)> {
         (b"a.txt/x".to_vec(), OpenHow::Read, refused(Error::NotADirectory)),
         (b"missing".to_vec(), OpenHow::Read, refused(Error::NotFound)),
         (b"missing/x".to_vec(), OpenHow::Read, refused(Error::NotFound)),
-        (b"missing/x".to_vec(), OpenHow::Create, refused(Error::NotFound)),
+        (b"missing/x".to_vec(), OpenHow::Create { mode: None }, refused(Error::NotFound)),
         (Vec::new(), OpenHow::Read, refused(Error::NotFound)),
         (long_name, OpenHow::Read, refused(Error::NameTooLong)),
         (long_path, OpenHow::Read, refused(Error::NameTooLong)),
-        (longest_name, OpenHow::Create, Outcome::Opened),
+        (longest_name, OpenHow::Create { mode: None }, Outcome::Opened),
         (longest_path, OpenHow::Read, a()),
-        (slashed, OpenHow::Create, refused(Error::IsADirectory)),
+        (slashed, OpenHow::Create { mode: None }, refused(Error::IsADirectory)),
         // `..` steps from where a link led, not back along the path.
         (b"deep/../x".to_vec(), OpenHow::Read, Outcome::File(b"x".to_vec())),
         (b"deep/../../a.txt".to_vec(), OpenHow::Read, a()),
@@ -668,7 +698,7 @@ fn escape_cases() -> Vec<(Vec<u8>, OpenHow, Outcome)> {
         (b"pipe".to_vec(), OpenHow::Read, refused(Error::NotAFile)),
         (b"to-pipe".to_vec(), OpenHow::Read, refused(Error::NotAFile)),
         (b"pipe".to_vec(), OpenHow::Directory, refused(Error::NotADirectory)),
-        (b"pipe".to_vec(), OpenHow::Create, refused(Error::Exists)),
+        (b"pipe".to_vec(), OpenHow::Create { mode: None }, refused(Error::Exists)),
         (b"pipe/x".to_vec(), OpenHow::Read, refused(Error::NotADirectory)),
     ]
 }
@@ -723,7 +753,7 @@ pub fn escapes<B: Backend>(backend: &mut B) -> Escapes {
                     Err(error) => Outcome::Refused(error),
                 }
             }
-            (Ok(fd), OpenHow::Directory | OpenHow::Create) => {
+            (Ok(fd), OpenHow::Directory | OpenHow::Create { .. }) => {
                 run.close(process, fd);
                 Outcome::Opened
             }
@@ -788,7 +818,7 @@ pub fn permissions<B: Backend>(backend: &mut B) -> Permissions {
     let process = run.process();
     let root = run.root(process, &tree);
     let unreadable = opens(&mut run, process, root, b"locked", OpenHow::Read);
-    let create = opens(&mut run, process, root, b"ro/new", OpenHow::Create).map(|()| Done::Nothing);
+    let create = opens(&mut run, process, root, b"ro/new", OpenHow::Create { mode: None }).map(|()| Done::Nothing);
     let ro = run.open(process, root, b"ro", OpenHow::Directory).expect("a directory that may be read");
     let unwritable = [
         create,

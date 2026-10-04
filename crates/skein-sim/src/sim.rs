@@ -526,8 +526,12 @@ impl Sim {
         let how = process.files.get(&fd).expect("checked open, and not a socket's").how;
         let broken = match kind {
             Summary::Read { .. } if how != OpenHow::Read => Some("a Read on a descriptor not opened to read"),
-            Summary::Write { .. } if how != OpenHow::Create => Some("a Write on a descriptor not opened to create"),
-            Summary::List { .. } if how == OpenHow::Create => Some("a List on a descriptor opened to create"),
+            Summary::Write { .. } if !matches!(how, OpenHow::Create { .. }) => {
+                Some("a Write on a descriptor not opened to create")
+            }
+            Summary::List { .. } if matches!(how, OpenHow::Create { .. }) => {
+                Some("a List on a descriptor opened to create")
+            }
             Summary::Open { .. }
             | Summary::Read { .. }
             | Summary::Write { .. }

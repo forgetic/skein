@@ -67,7 +67,7 @@ fn workload(seed: u64) -> World {
     let root = world.root(pid, &[Item::file(b"seed", b"planted"), Item::directory(b"sub")]);
     let bytes: Vec<u8> = (0..40_u8).collect();
     for n in 0..4_u8 {
-        let open = Op::Open { root, path: name(b'f', n), how: OpenHow::Create };
+        let open = Op::Open { root, path: name(b'f', n), how: OpenHow::Create { mode: None } };
         let Ok(Done::Fd(file)) = settle(&mut world, pid, open).result else { continue };
         let written = write_all(&mut world, pid, file, &bytes);
         let _ = settle(&mut world, pid, Op::Sync { fd: file });

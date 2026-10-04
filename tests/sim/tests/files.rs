@@ -40,11 +40,11 @@ fn close_all(world: &mut World, pid: Pid, fds: &[Fd]) {
 #[test]
 fn a_file_is_made_written_read_listed_renamed_and_removed_through_the_machine() {
     let (mut world, pid, root) = rooted();
-    let file = world.open(pid, root, b"new", OpenHow::Create).unwrap();
+    let file = world.open(pid, root, b"new", OpenHow::Create { mode: None }).unwrap();
     assert_eq!(world.write(pid, file, 0, b"abcdef"), Ok(Done::Count(6)));
     assert_eq!(world.write(pid, file, 8, b"Z"), Ok(Done::Count(1)), "past the end: zeros fill the gap");
     assert_eq!(world.call(pid, Op::Sync { fd: file }).result, Ok(Done::Nothing));
-    assert_eq!(world.stat(pid, file), Ok(Stat { kind: Kind::File, size: 9 }));
+    assert_eq!(world.stat(pid, file), Ok(Stat { kind: Kind::File, size: 9, mode: 0o644 }));
     world.close(pid, file);
     let file = world.open(pid, root, b"new", OpenHow::Read).unwrap();
     assert_eq!(world.read(pid, file, 2, 64), Ok(b"cdef\0\0Z".to_vec()));
@@ -115,7 +115,7 @@ fn opens_in_flight_hold_their_descriptors_against_the_limit() {
 fn each_failure_falls_on_the_operations_that_may_answer_it() {
     let every = Faults { no_space: 1000, ..Faults::NONE };
     let (mut world, pid, root) = faulty(every);
-    assert_eq!(world.open(pid, root, b"new", OpenHow::Create), Err(Error::NoSpace));
+    assert_eq!(world.open(pid, root, b"new", OpenHow::Create { mode: None }), Err(Error::NoSpace));
     assert_eq!(world.open(pid, root, b"a.txt", OpenHow::Read).map(|_| ()).err(), None, "not on a read");
     let make = Op::MakeDirectory { dir: root, name: Box::from(&b"m"[..]) };
     assert_eq!(world.call(pid, make).result, Err(Error::NoSpace));
@@ -142,7 +142,7 @@ fn each_failure_falls_on_the_operations_that_may_answer_it() {
 #[test]
 fn a_short_read_and_a_short_write_count_at_least_one_byte() {
     let (mut world, pid, root) = faulty(Faults { short_read: 1000, short_write: 1000, ..Faults::NONE });
-    let file = world.open(pid, root, b"new", OpenHow::Create).unwrap();
+    let file = world.open(pid, root, b"new", OpenHow::Create { mode: None }).unwrap();
     let Ok(Done::Count(wrote)) = world.write(pid, file, 0, b"abcdef") else { panic!("a write") };
     assert!((1..6).contains(&wrote), "short: {wrote}");
     assert_eq!(world.write(pid, file, 0, b"x"), Ok(Done::Count(1)), "one byte cannot be cut");
@@ -197,7 +197,7 @@ fn a_seed_replays_a_world_of_files() {
         let pid = world.spawn();
         let root = world.root(pid, &tree());
         for n in 0..8_u8 {
-            let open = Op::Open { root, path: Box::from(&[b'f', b'0' + n][..]), how: OpenHow::Create };
+            let open = Op::Open { root, path: Box::from(&[b'f', b'0' + n][..]), how: OpenHow::Create { mode: None } };
             if let Ok(Done::Fd(file)) = settle(&mut world, pid, open).result {
                 settle(&mut world, pid, Op::write(file, Box::from(&b"some bytes"[..]), 0, u64::from(n)).unwrap());
                 settle(&mut world, pid, Op::Sync { fd: file });
@@ -222,7 +222,7 @@ fn a_seed_replays_a_world_of_files() {
 fn a_hung_operation_on_files_waits_until_a_cancel_stops_it() {
     let (mut world, pid, root) = rooted();
     let read = world.open(pid, root, b"a.txt", OpenHow::Read).unwrap();
-    let write = world.open(pid, root, b"new", OpenHow::Create).unwrap();
+    let write = world.open(pid, root, b"new", OpenHow::Create { mode: None }).unwrap();
     world.sim.set_faults(Faults { hung: 1000, ..Faults::NONE });
     let ops = [
         Op::Open { root, path: Box::from(&b"a.txt"[..]), how: OpenHow::Read },
@@ -286,7 +286,7 @@ fn an_operation_on_sockets_on_a_files_descriptor() {
 #[should_panic(expected = "a Read on a descriptor not opened to read")]
 fn a_read_of_a_file_opened_to_create() {
     let (mut world, pid, root) = rooted();
-    let file = world.open(pid, root, b"new", OpenHow::Create).unwrap();
+    let file = world.open(pid, root, b"new", OpenHow::Create { mode: None }).unwrap();
     world.submit(pid, Op::Read { fd: file, buf: Box::from([0; 4]), at: 0 });
 }
 
@@ -309,7 +309,7 @@ fn a_write_of_a_file_opened_to_read() {
 #[should_panic(expected = "a List on a descriptor opened to create")]
 fn a_list_of_a_file_opened_to_create() {
     let (mut world, pid, root) = rooted();
-    let file = world.open(pid, root, b"new", OpenHow::Create).unwrap();
+    let file = world.open(pid, root, b"new", OpenHow::Create { mode: None }).unwrap();
     world.submit(pid, Op::List { fd: file, entries: Box::from([Entry::BLANK]), names: vec![0; 255].into() });
 }
 

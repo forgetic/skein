@@ -25,10 +25,16 @@ const READ: u32 = 0o4;
 const WRITE: u32 = 0o2;
 const SEARCH: u32 = 0o1;
 
-/// What a new file and a new directory are made with, less no umask: the
-/// owner's bits of `0o666` and `0o777`.
-const NEW_FILE: u32 = READ | WRITE;
-const NEW_DIRECTORY: u32 = READ | WRITE | SEARCH;
+/// The permission bits a node keeps.
+const PERMISSIONS: u32 = 0o777;
+
+/// The umask the machine makes new files and directories under: the usual
+/// one. A test that compares a new file's mode with the kernel's looks at
+/// its owner's bits, which no usual umask takes.
+const UMASK: u32 = 0o022;
+
+/// What a new directory is made with, less the umask.
+const NEW_DIRECTORY: u32 = 0o777;
 
 /// The machine's name for something it opened: a handle, issued once.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -54,8 +60,9 @@ pub enum How {
     Read,
     /// An existing directory, to list or to open beneath.
     Directory,
-    /// A new, empty file, to write: its name must be free.
-    Create,
+    /// A new, empty file, to write, its name free, made with `mode`'s
+    /// permission bits less the umask.
+    Create { mode: u32 },
 }
 
 /// What a name names.
@@ -77,6 +84,8 @@ pub struct Facts {
     pub is: Is,
     /// A file's length; 0 for a directory.
     pub size: u64,
+    /// Its permission bits.
+    pub mode: u32,
 }
 
 /// What the machine refuses, as Linux would beneath a root.
@@ -167,7 +176,7 @@ type NodeId = u64;
 #[derive(Debug)]
 pub(crate) struct Node {
     body: Body,
-    /// The owner's permission bits.
+    /// Its permission bits, of which the machine checks the owner's.
     mode: u32,
     /// The directory holding a directory: what `..` leads to.
     parent: Option<NodeId>,
@@ -297,7 +306,7 @@ impl Machine {
                 }
                 node
             }
-            How::Create => {
+            How::Create { mode } => {
                 let found = self.resolve(root, path, true)?;
                 // A path that ends at a directory of no name of its own
                 // (`.`, `a/..`) is taken: O_EXCL answers before O_CREAT.
@@ -310,7 +319,7 @@ impl Machine {
                 if !self.may(found.parent, WRITE) {
                     return Err(Refusal::Permission);
                 }
-                self.make(found.parent, name, Body::File(Vec::new()), NEW_FILE << 6_u32)
+                self.make(found.parent, name, Body::File(Vec::new()), mode & !UMASK)
             }
         };
         Ok(self.issue(node, how))
@@ -352,9 +361,13 @@ impl Machine {
     /// What `file` has open: its kind and size.
     #[must_use]
     pub fn stat(&self, file: Opened) -> Facts {
-        match &self.node(self.handle(file).node).body {
-            Body::File(bytes) => Facts { is: Is::File, size: u64::try_from(bytes.len()).expect("a usize fits a u64") },
-            Body::Directory { .. } => Facts { is: Is::Directory, size: 0 },
+        let node = self.node(self.handle(file).node);
+        let mode = node.mode;
+        match &node.body {
+            Body::File(bytes) => {
+                Facts { is: Is::File, size: u64::try_from(bytes.len()).expect("a usize fits a u64"), mode }
+            }
+            Body::Directory { .. } => Facts { is: Is::Directory, size: 0, mode },
             Body::Link(_) | Body::Special(_) => fail("a handle is never to a link, a FIFO or a device"),
         }
     }
@@ -443,7 +456,7 @@ impl Machine {
             return Err(Refusal::Permission);
         }
         let body = Body::Directory { entries: BTreeMap::new(), removed: false };
-        self.make(dir, Box::from(name), body, NEW_DIRECTORY << 6_u32);
+        self.make(dir, Box::from(name), body, NEW_DIRECTORY & !UMASK);
         Ok(())
     }
 
@@ -629,8 +642,7 @@ impl Machine {
             Body::Directory { .. } => Some(parent),
             Body::File(_) | Body::Link(_) | Body::Special(_) => None,
         };
-        let owner = (mode >> 6_u32) & 0o7;
-        self.nodes.insert(id, Node { body, mode: owner, parent: parent_of, named: true });
+        self.nodes.insert(id, Node { body, mode: mode & PERMISSIONS, parent: parent_of, named: true });
         let previous = self.entries_mut(parent).insert(name, id);
         assert!(previous.is_none(), "a name is made only where none is");
         id
@@ -726,7 +738,7 @@ impl Machine {
 
     /// Whether the owner may do all of `bits` to `node`.
     fn may(&self, node: NodeId, bits: u32) -> bool {
-        self.node(node).mode & bits == bits
+        (self.node(node).mode >> 6_u32) & bits == bits
     }
 }
 

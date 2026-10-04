@@ -390,7 +390,7 @@ what the containers report (programming-model.md, 6.3).
 - **Whole-file operations come first:**
   - read a file, up to a stated maximum;
   - write a file, replacing it atomically: write a temporary, sync it,
-    rename it;
+    rename it (below);
   - stat;
   - list a directory, up to a stated count;
   - make a directory;
@@ -406,6 +406,21 @@ what the containers report (programming-model.md, 6.3).
   until an open for a path only is pulled. Reads and writes may be short,
   and io continues them; a listing comes an entry count at a time, and
   io's stated count is a limit it checks as the entries come.
+- **Replacing a file, in order:** `Stat` the old file, opened to read, for
+  its permission bits; `Create` the temporary, beside the target in its
+  directory, with those bits; `Write` it all; `Sync` it; `Close` it;
+  `Rename` it over the target; `Sync` the directory. A reader sees the old
+  file or the new, never part of either, and after the last `Sync` the
+  new one survives a crash (kernel.md, 6.1).
+  - The temporary is named from the target's name and a suffix drawn
+    from io's seeded randomness; a `Create` that finds the name taken
+    (`Exists`) draws another.
+  - The old file's permission bits are kept. A target that does not
+    exist, or cannot be opened to read, is made with the default,
+    `0o666` less the umask.
+  - A symbolic link at the target is replaced by the file, not written
+    through: the link's own name gets the new file. Writing through links
+    is not offered.
 - **A deadline can give up on a file** (kernel.md, 6.1). An `Open`,
   `Read`, `Write` or `Sync` on a filesystem that stalls may wait for good,
   so a whole-file operation has a deadline, and at it io cancels what is

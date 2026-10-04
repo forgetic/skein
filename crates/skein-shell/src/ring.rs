@@ -78,7 +78,7 @@ use std::path::Path;
 use std::ptr;
 
 use io_uring::{EnterFlags, IoUring, Probe, opcode, squeue, types};
-use skein_io::kernel::{Addr, Complete, Done, Entry, Error, Family, Fd, Kind, Op, OpenHow, Stat, Submit};
+use skein_io::kernel::{Addr, Complete, Done, Entry, Error, Family, Fd, Kind, Op, OpenHow, PERMISSIONS, Stat, Submit};
 use skein_lib::{Queue, Time, Token};
 
 /// How large a [`Kernel`] is.
@@ -263,8 +263,9 @@ const LISTING: usize = 32 << 10;
 /// The path a `Stat` names with `AT_EMPTY_PATH`: the descriptor itself.
 const EMPTY: &CStr = c"";
 
-/// The new file's mode a `Create` asks for, and a `MakeDirectory`'s, both
-/// less the umask (`skein_io::kernel`, backend defaults).
+/// The new file's mode a `Create` that asks for none is made with, and a
+/// `MakeDirectory`'s, both less the umask (`skein_io::kernel`, backend
+/// defaults).
 const FILE_MODE: u64 = 0o666;
 const DIRECTORY_MODE: libc::mode_t = 0o777;
 
@@ -636,7 +637,7 @@ fn prepare(
         Op::Sync { fd } => opcode::Fsync::new(types::Fd(fd.raw())).build(),
         Op::Stat { fd } => opcode::Statx::new(types::Fd(fd.raw()), EMPTY.as_ptr(), statx.get().cast())
             .flags(libc::AT_EMPTY_PATH)
-            .mask(libc::STATX_TYPE | libc::STATX_SIZE)
+            .mask(libc::STATX_TYPE | libc::STATX_SIZE | libc::STATX_MODE)
             .build(),
         Op::Rename { from_dir, from, to_dir, to } => {
             *path = c_path(from);
@@ -984,7 +985,13 @@ fn open(how: OpenHow) -> types::OpenHow {
     let (flags, mode) = match how {
         OpenHow::Read => (libc::O_RDONLY, 0),
         OpenHow::Directory => (libc::O_RDONLY | libc::O_DIRECTORY, 0),
-        OpenHow::Create => (libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, FILE_MODE),
+        OpenHow::Create { mode } => {
+            let mode = match mode {
+                Some(mode) => u64::from(mode),
+                None => FILE_MODE,
+            };
+            (libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode)
+        }
     };
     let flags = flags | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
     let flags = u64::try_from(flags).expect("open's flags are positive");
@@ -994,7 +1001,8 @@ fn open(how: OpenHow) -> types::OpenHow {
 /// What a `Stat`'s `statx` found.
 fn stat(raw: &libc::statx) -> Stat {
     let kind = if raw.stx_mask & libc::STATX_TYPE == 0 { Kind::Other } else { kind_of(u32::from(raw.stx_mode)) };
-    Stat { kind, size: raw.stx_size }
+    let mode = if raw.stx_mask & libc::STATX_MODE == 0 { 0 } else { u32::from(raw.stx_mode) & PERMISSIONS };
+    Stat { kind, size: raw.stx_size, mode }
 }
 
 /// The kind of a file whose mode is `mode`.

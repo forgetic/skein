@@ -88,11 +88,14 @@ fn done(result: Result<(), Refusal>) -> Result<Reply, Error> {
     }
 }
 
+/// How the machine opens: a file created with the mode asked for, or the
+/// one the kernel's contract gives when none is.
 const fn how_of(how: OpenHow) -> How {
     match how {
         OpenHow::Read => How::Read,
         OpenHow::Directory => How::Directory,
-        OpenHow::Create => How::Create,
+        OpenHow::Create { mode: Some(mode) } => How::Create { mode },
+        OpenHow::Create { mode: None } => How::Create { mode: 0o666 },
     }
 }
 
@@ -106,7 +109,7 @@ const fn kind(is: Is) -> Kind {
 }
 
 const fn stat(facts: Facts) -> Stat {
-    Stat { kind: kind(facts.is), size: facts.size }
+    Stat { kind: kind(facts.is), size: facts.size, mode: facts.mode }
 }
 
 /// A refusal as the kernel names it (`skein_io::kernel::Error`).

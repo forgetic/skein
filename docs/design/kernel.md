@@ -224,10 +224,16 @@ documentation, with each operation's errors; the decisions behind it:
   invalid record: the kernel's offsets are signed, and the ring would read
   `u64::MAX` as the descriptor's position.
 - **`Rename` is the atomic step.** It replaces its target whole, so the
-  idiom that replaces a file is: `Create` a temporary in the same
-  directory, `Write` it, `Sync` it, `Close` it, `Rename` it over the old
-  name, `Sync` the directory. A reader sees the old file or the new, and
-  after the last `Sync` the new one survives a crash.
+  idiom that replaces a file is: `Stat` the old file for its permission
+  bits, `Create` a temporary in the same directory with them, `Write` it,
+  `Sync` it, `Close` it, `Rename` it over the old name, `Sync` the
+  directory. A reader sees the old file or the new, and after the last
+  `Sync` the new one survives a crash. Its pieces are io's decisions
+  (io.md, 5): the temporary's name drawn from the seed, drawn again on
+  `Exists`; the old file's bits kept, which is why `Create` takes a mode
+  and `Stat` answers one; a symbolic link at the target replaced by the
+  file, as `Rename` replaces a link and does not follow it, since writing
+  through links is not offered.
 - **`List` hands back entries as plain values,** `getdents64`'s structures
   staying in the backend: each entry's kind and its name, packed into the
   record's `names`, at most `entries.len()` of them, `.` and `..` left
@@ -273,9 +279,11 @@ documentation, with each operation's errors; the decisions behind it:
   (two filesystems); `ENOENT` is `NotFound` on a file and `TooLate` on a
   cancel; `EEXIST` is `Exists` on a `Create` and `NotEmpty` on a `Rename`
   over a directory.
-- **Modes are backend defaults,** as socket options are: a new file is
-  `0o666` and a new directory `0o777`, less the process's umask, and every
-  descriptor is close-on-exec.
+- **Modes are backend defaults,** as socket options are, but for the one
+  a `Create` asks for: a new file is `0o666` unless asked otherwise, and a
+  new directory `0o777`, less the process's umask, and every descriptor
+  is close-on-exec. The fake machine keeps a umask of `0o022`; the suite
+  compares a created file's owner bits, which no usual umask takes.
 
 ## 7. Broken invariants
 

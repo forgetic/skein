@@ -122,7 +122,7 @@ fn a_large_file_is_written_and_read_back_at_its_offsets() {
     let mut world = World::new(4);
     let dir = root(scratch.path());
     let bytes = pattern(LEN);
-    let file = open(&mut world, dir, b"large", OpenHow::Create);
+    let file = open(&mut world, dir, b"large", OpenHow::Create { mode: None });
     let mut from = 0_u32;
     while usize::try_from(from).unwrap() < LEN {
         let op = Op::write(file, bytes.clone(), from, u64::from(from)).unwrap();
@@ -220,7 +220,7 @@ fn an_open_through_dot_dot_racing_renames_is_submitted_again() {
     let mut made = 0_u32;
     let mut open = || {
         made += 1;
-        Op::Open { root: dir, path: format!("sub/../c{made}").into_bytes().into(), how: OpenHow::Create }
+        Op::Open { root: dir, path: format!("sub/../c{made}").into_bytes().into(), how: OpenHow::Create { mode: None } }
     };
     let mut renaming = std::collections::BTreeMap::new();
     let mut flipped = [false; RENAMERS];
