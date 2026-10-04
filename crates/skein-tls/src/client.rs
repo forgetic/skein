@@ -185,8 +185,9 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
 
 /// [`up`]'s: above, `Ready`; an answer on the plaintext stream; or the
 /// stream told it failed and `Failed`; or `Closed`. Below, what TLS owes
-/// sent in the room that came, the stream finished once that was
-/// `close_notify`, and the next demand.
+/// sent in the room that came, or a read the stream's end crossed
+/// withdrawn; the stream finished once `close_notify` went; and the next
+/// demand.
 pub const UP_MAX_OUT: MaxOut = MaxOut { above: 2, below: 3 };
 
 /// [`down`]'s: above, an answer on the plaintext stream, the stream told it

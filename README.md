@@ -48,8 +48,8 @@ skein-sim      lib, io
 
 The crates from outside skein are few, and each is an exception the
 programming model names (its 2.1 and 3): `io-uring` and `libc`, the
-shell's, for the ring adapter; and `rustls`, with `ring` for its
-cryptography, the TLS client's.
+shell's, for the ring adapter; and `rustls` and its dependencies, `ring`
+among them for its cryptography, the TLS client's.
 
 - **A kit, not a framework.** skein has no service trait, no generic loop,
   no scheduler and no callbacks. A service calls the parts by name, in

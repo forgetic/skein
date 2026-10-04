@@ -143,9 +143,10 @@ accept, connect, read, write, open, close, waiting for a child.
 - **The ring adapter is the only `unsafe` code a service runs,** since it
   makes every kernel call: ring operations through the `io-uring` crate,
   the other syscalls through `libc`. With rustls in the TLS machine, and
-  the `ring` crate beneath it for its cryptography (section 3), these are
-  the only crates from outside skein and the service; `ring`'s `unsafe`
-  code and the entropy it draws from the kernel are that exception's. In
+  its dependencies, the `ring` crate among them for its cryptography
+  (section 3), these are the only crates from outside skein and the
+  service; `ring`'s `unsafe` code and the entropy it draws from the kernel
+  are that exception's. In
   tests, the only `unsafe` is the counting allocator's `unsafe impl
   GlobalAlloc` (skein's testing.md, section 6).
 - **No std handle types that close on drop.** `OwnedFd`, `File`,

@@ -74,15 +74,21 @@ pub enum Event {
   demanded before `Ready`: its demands wait for the handshake. A
   connection that holds a call while it handshakes (temper's llm.md, 8)
   makes the call on `Ready`.
-- **The plaintext stream** keeps lib.md, 7: each demand answered at most
-  once, exactly, from the client's intake; `End` once the server's
-  `close_notify` was read and nothing held meets a demand; `Room` once
-  room for the records of what the side above demanded came below. A
-  `Room` grants one `Send`, as io's does (io.md, 3.3); a demand of room
-  comes only once the last grant was sent within, and a grant the side
-  above sent nothing in gives way to the next.
-- **`Finish`** sends `close_notify`, then finishes the stream below. The
-  side above may read on.
+- **The plaintext stream** keeps lib.md, 7, and holds the side above to
+  it as io does: each demand answered at most once, exactly, from the
+  client's intake; `End` once the server's `close_notify` was read and
+  nothing held meets a demand; `Room` once room for the records of what
+  the side above demanded came below. A `Room` grants one `Send`, as io's
+  does (io.md, 3.3), and a demand of room comes only once the last grant
+  was sent within, by a `Send`, empty or not, or given up by `Finish`. A
+  read that crosses `End` is never met and stays outstanding until the
+  side above withdraws it, as io's does: a side above that writes on
+  after the end withdraws it first.
+- **`Finish`** sends `close_notify`, then finishes the stream below. It
+  comes with no demand outstanding, unless a read that crossed `End`: a
+  read the client is still reading below for would hold `close_notify`
+  behind it, against a server that waits for the end of what it is sent
+  before it answers. The side above may read on after it.
 - **`Close` ends the client in any state.** Once the handshake is done,
   and unless the stream below was finished, it writes `close_notify`
   (unless it was written), sends what TLS owes below within room it
@@ -114,6 +120,10 @@ pub enum Event {
   intake does not meet. A read stated alone, ahead of a demand, would
   hold a demand that room for the side above's next `Send` could not join
   (http.md, 3.1).
+- **At the stream's end,** a read outstanding crosses it and stays
+  outstanding below, never met, as io keeps it: the client reads nothing
+  more, so it withdraws it, which leaves it free to demand room after the
+  end (a peer that only half-closed still reads).
 - **Room, in one demand with the read:** for what TLS owes (a flight of
   the handshake, `close_notify`), alone and first; or, once the handshake
   is done, for the side above's demand of `n` bytes of room, `room_for(n)`:
@@ -181,16 +191,19 @@ pub struct Limits {
   bound. `None` for a read or room of nothing, or records shorter than one.
 - **`largest_room`** is the larger of `room_for(send)` and `FLIGHT`.
 - **`UP_MAX_OUT`** is two events and three requests: `Ready` or an answer,
-  or the stream told it failed and `Failed`; below, what TLS owes sent,
-  the stream finished, and the next demand. **`DOWN_MAX_OUT`** is two and
-  two.
+  or the stream told it failed and `Failed`; below, what TLS owes sent or
+  a read the end crossed withdrawn, the stream finished, and the next
+  demand. **`DOWN_MAX_OUT`** is two and two.
 
 ## 4. The exception
 
-- **rustls, and ring beneath it,** are the only step code from outside
-  skein and the service. ring builds with `cc`, without cmake and without
+- **rustls and its dependencies,** ring's among them, are the only step
+  code from outside skein and the service: rustls-webpki,
+  rustls-pki-types, ring, untrusted, getrandom, libc, cfg-if, subtle,
+  zeroize and once_cell. ring builds with `cc`, without cmake and without
   std; aws-lc-rs, rustls's default, would bring a C build skein does not
-  need. rustls is pinned (0.23.41), and ring by `Cargo.lock` (0.17.14).
+  need. rustls is pinned (0.23.41), the rest by `Cargo.lock` (ring
+  0.17.14).
 - **Not deterministic:** ring draws its randoms and keys from the kernel,
   through `getrandom`: the only kernel calls step code makes, when the
   handshake starts and as it runs. That is the documented exception;
@@ -232,10 +245,15 @@ wall time each test chooses.
   against its scenario: the plaintext each side received, the server's
   ending (`close_notify`, a truncation, a corrupted record, nothing), a
   key update, certificates refused at the wall time handed in, a chain
-  longer than the records held, and `close_notify` sent on a finish or a
-  close. Focused tests aim at one outcome each: every version, a retry,
-  ALPN, an alert, every split of the ciphertext a byte at a time, a slow
-  reader that fills the stream below, and closes in every state.
+  longer than the records held, `close_notify` sent on a finish or a
+  close, the server reading every record the client sends, and, left
+  alone, the end the server makes reached and the request all sent, so
+  that a client that waits for ever fails. Focused tests aim at one
+  outcome each: every version, a retry, ALPN, an alert, every split of
+  the ciphertext a byte at a time, a slow reader that fills the stream
+  below, closes in every state, a read that crosses the end held until
+  withdrawn, and a renegotiation request, sealed with the server's keys
+  taken out, refused alone or in front of the side above's data.
 - **Not replayed:** what rustls draws from the kernel changes a record's
   length, and with it where the pieces fall. The worlds assert only what
   does not depend on it.
@@ -279,6 +297,16 @@ wall time each test chooses.
   one `Send` a grant, as io grants one; what arose while the side above
   held its grant goes in front of the side above's `Send`, within
   `room_for`'s slack.
+- **A read that crosses the end stays outstanding,** both ways, as io's
+  does (lib.md, 7 says it is never met; io keeps it until it is
+  withdrawn): the client withdraws its own, as it reads no more after the
+  end, and holds the side above to withdrawing its, so that a side above
+  that works over TLS works over a socket.
+- **`Finish` comes with no read outstanding,** but one that crossed the
+  end, rather than `close_notify` waiting behind a read below.
+- **The length of what rustls encrypts is asked twice:** a query that
+  finds the keys at their limit schedules a key update that the next call
+  writes before the data, and the second query counts it.
 - **A truncation fails the stream as invalid,** never ends it, once what
   was deciphered is delivered; a peer's fatal alert is a reset.
 - **No session resumed,** and no alert sent after a failure.
