@@ -9,14 +9,25 @@ use alloc::vec::Vec;
 use skein_lib::stream::{Delimiter, Down, Fault, Read, Up};
 
 use super::{Drive, LIMITS, Machine, boxed, call, exchange, get};
-use crate::client::{Body, Error, Event, Method, Request, Reuse, Waiting};
+use crate::client::{self, Body, Error, Event, Limits, Method, Request, Reuse, Waiting};
 
 const OK: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
 const LINE: Read = Read::Fill(1);
 const HEAD_LINE: Read = Read::Scan { until: Delimiter::LF, max: 256 };
 
-fn post(len: u64) -> crate::client::Call {
+fn post(len: u64) -> client::Call {
     call(Method::Post, Body::Length(len))
+}
+
+#[test]
+fn limits_that_cannot_be_honoured_have_no_worst_case() {
+    assert!(client::worst_case(&LIMITS).is_some());
+    assert!(client::worst_case(&Limits { head: 2, ..LIMITS }).is_some(), "a blank line at least");
+    assert_eq!(client::worst_case(&Limits { head: 1, ..LIMITS }), None);
+    assert_eq!(client::worst_case(&Limits { read: 0, ..LIMITS }), None, "a read of nothing");
+    assert_eq!(client::worst_case(&Limits { send: 0, ..LIMITS }), None, "room for nothing of a body");
+    let largest = Limits { request: u32::MAX, head: u32::MAX, read: u32::MAX, ..LIMITS };
+    assert!(client::worst_case(&largest).is_some(), "the largest limits fit a u64");
 }
 
 #[test]

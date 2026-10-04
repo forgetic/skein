@@ -276,7 +276,7 @@ pub struct Limits {
                         // also the longest chunk size line, and the longest trailer section
     pub headers: u32,   // fields in a head: past it, TooManyHeaders
     pub read: u32,      // the most the side above demands of the body at once: the intake's cap
-    pub send: u32,      // the most room the side above demands at once for the request body
+    pub send: u32,      // the most room the side above demands at once for the request body; at least 1
 }
 ```
 
@@ -289,8 +289,9 @@ pub struct Limits {
   `2 × head` already counted). A delivery is the client's to count
   (lib.md, 7); a call is the side above's, read and dropped by the step
   that writes it; what goes up is the side above's from when it is
-  emitted. `None` for a head shorter than a blank line or a read of
-  nothing.
+  emitted. `None` for a head shorter than a blank line, a read of
+  nothing, or room for nothing of a request body (`send` of 0), which
+  no upload could get past.
 - **`largest_read`** is the larger of `head` and `read`, and at least 2;
   **`largest_room`** the larger of `request` and `send`.
 - **`UP_MAX_OUT`** is two events and two requests: a response and the

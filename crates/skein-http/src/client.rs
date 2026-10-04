@@ -87,6 +87,7 @@ pub struct Limits {
     /// the body's carry-over. At least 1.
     pub read: u32,
     /// The most room the side above demands at once for the request body.
+    /// At least 1: with none, no body could be sent.
     pub send: u32,
 }
 
@@ -110,8 +111,8 @@ pub fn largest_room(limits: &Limits) -> u32 {
 
 /// The most memory a client holds under `limits`, in bytes
 /// (programming-model.md, 6.3), or `None` if it does not fit a `u64` or
-/// the limits cannot be honoured: a head shorter than a blank line, or a
-/// read of nothing.
+/// the limits cannot be honoured: a head shorter than a blank line, a read
+/// of nothing, or room for nothing of a request body.
 ///
 /// It is the intake of the body's carry-over, allocated with the client;
 /// the request head, held until room comes for it, with the list of the
@@ -126,7 +127,7 @@ pub fn largest_room(limits: &Limits) -> u32 {
 /// response, the body's bytes) is the side above's from when it is emitted.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
-    if limits.head < 2 || limits.read == 0 {
+    if limits.head < 2 || limits.read == 0 || limits.send == 0 {
         return None;
     }
     let intake = Intake::worst_case(limits.read)?;
