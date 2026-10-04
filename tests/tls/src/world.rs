@@ -102,13 +102,22 @@ impl Scenario {
     #[must_use]
     pub fn refusal(&self) -> Option<Error> {
         let named = match self.server.chain {
-            pki::Chain::Leaf | pki::Chain::Untrusted | pki::Chain::Padded(_) => {
-                self.name == "skein.test" || self.name == "127.0.0.1"
-            }
+            pki::Chain::Leaf
+            | pki::Chain::Untrusted
+            | pki::Chain::Padded(_)
+            | pki::Chain::SelfSigned
+            | pki::Chain::CaAsLeaf
+            | pki::Chain::ClientOnly => self.name == "skein.test" || self.name == "127.0.0.1",
             pki::Chain::Big => self.name == "big.skein.test",
         };
-        let certificate = if self.server.chain == pki::Chain::Untrusted {
-            Some(Certificate::Issuer)
+        // The chain is judged before the time and the name.
+        let chain = match self.server.chain {
+            pki::Chain::Untrusted | pki::Chain::SelfSigned => Some(Certificate::Issuer),
+            pki::Chain::CaAsLeaf | pki::Chain::ClientOnly => Some(Certificate::Invalid),
+            pki::Chain::Leaf | pki::Chain::Big | pki::Chain::Padded(_) => None,
+        };
+        let certificate = if chain.is_some() {
+            chain
         } else if self.wall >= pki::EXPIRED {
             Some(Certificate::Expired)
         } else if self.wall <= pki::EARLY {

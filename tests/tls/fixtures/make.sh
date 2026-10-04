@@ -9,6 +9,10 @@
 # - big.der: the same key, for big.skein.test and 1,500 more names, about
 #   40 KB, so that the message carrying it spans several records.
 # - other.der: the same key, for skein.test, signed by a root no one trusts.
+# - self.der: the same key, for skein.test, signed by itself.
+# - ca.der: the same key, for skein.test, a CA the root signed: not a leaf.
+# - client.der: the same key, for skein.test, signed by the intermediate,
+#   for client authentication only.
 #
 # Every certificate is valid from 2026-01-01 to 2036-01-01: a world checks
 # them at the wall time it chooses (env.wall), never the clock.
@@ -71,7 +75,27 @@ openssl req -x509 -new -key "$scratch/leaf.pem" -subj "/CN=skein.test" \
     -addext "extendedKeyUsage=serverAuth" -addext "subjectAltName=DNS:skein.test,IP:127.0.0.1" \
     -out "$scratch/other.crt"
 
-for name in root intermediate leaf big other; do
+openssl req -x509 -new -key "$scratch/leaf.pem" -subj "/CN=skein.test" \
+    -not_before $from -not_after $until \
+    -addext "basicConstraints=critical,CA:FALSE" -addext "keyUsage=critical,digitalSignature" \
+    -addext "extendedKeyUsage=serverAuth" -addext "subjectAltName=DNS:skein.test,IP:127.0.0.1" \
+    -out "$scratch/self.crt"
+
+openssl req -x509 -new -key "$scratch/leaf.pem" -subj "/CN=skein.test" \
+    -CA "$scratch/root.crt" -CAkey "$scratch/root.pem" \
+    -not_before $from -not_after $until \
+    -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,digitalSignature" \
+    -addext "extendedKeyUsage=serverAuth" -addext "subjectAltName=DNS:skein.test,IP:127.0.0.1" \
+    -out "$scratch/ca.crt"
+
+openssl req -x509 -new -key "$scratch/leaf.pem" -subj "/CN=skein.test" \
+    -CA "$scratch/intermediate.crt" -CAkey "$scratch/intermediate.pem" \
+    -not_before $from -not_after $until \
+    -addext "basicConstraints=critical,CA:FALSE" -addext "keyUsage=critical,digitalSignature" \
+    -addext "extendedKeyUsage=clientAuth" -addext "subjectAltName=DNS:skein.test,IP:127.0.0.1" \
+    -out "$scratch/client.crt"
+
+for name in root intermediate leaf big other self ca client; do
     openssl x509 -in "$scratch/$name.crt" -outform DER -out "$name.der"
 done
 openssl pkcs8 -topk8 -nocrypt -in "$scratch/leaf.pem" -outform DER -out leaf.key

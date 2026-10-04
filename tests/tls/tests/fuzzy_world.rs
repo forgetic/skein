@@ -38,11 +38,14 @@ fn scenario(rng: &mut Rng) -> Scenario {
         scenario.server.chain = Chain::Big;
         scenario.name = "big.skein.test".into();
     }
-    match rng.below(40) {
+    match rng.below(50) {
         0 => scenario.wall = pki::EXPIRED,
         1 => scenario.wall = pki::EARLY,
         2 => scenario.name = "other.test".into(),
         3 => scenario.server.chain = Chain::Untrusted,
+        4 => scenario.server.chain = Chain::SelfSigned,
+        5 => scenario.server.chain = Chain::CaAsLeaf,
+        6 => scenario.server.chain = Chain::ClientOnly,
         _ => {}
     }
     scenario
@@ -122,6 +125,7 @@ fn exchanges_swept() {
         "refused NotYetValid",
         "refused Name",
         "refused Issuer",
+        "refused Invalid",
         "ended",
         "agreed Tls12",
         "agreed Tls13",

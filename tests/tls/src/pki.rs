@@ -29,6 +29,12 @@ pub const LEAF: &[u8] = include_bytes!("../fixtures/leaf.der");
 pub const BIG: &[u8] = include_bytes!("../fixtures/big.der");
 /// A certificate for skein.test that a root no one trusts signed.
 pub const OTHER: &[u8] = include_bytes!("../fixtures/other.der");
+/// A certificate for skein.test that signed itself.
+pub const SELF: &[u8] = include_bytes!("../fixtures/self.der");
+/// A CA's certificate for skein.test, which the root signed.
+pub const CA: &[u8] = include_bytes!("../fixtures/ca.der");
+/// A certificate for skein.test, for client authentication only.
+pub const CLIENT: &[u8] = include_bytes!("../fixtures/client.der");
 /// The key of every one of them.
 pub const KEY: &[u8] = include_bytes!("../fixtures/leaf.key");
 
@@ -128,6 +134,13 @@ pub enum Chain {
     Big,
     /// A certificate a root the client does not trust signed.
     Untrusted,
+    /// A certificate for skein.test that signed itself.
+    SelfSigned,
+    /// A CA's certificate for skein.test, which the root signed: not a leaf.
+    CaAsLeaf,
+    /// A leaf for skein.test, the intermediate's, for client authentication
+    /// only.
+    ClientOnly,
     /// The leaf and the intermediate, then this many empty certificates: a
     /// hostile server's, which rustls decodes into an element each.
     Padded(usize),
@@ -183,6 +196,9 @@ impl Server {
             Chain::Leaf => vec![CertificateDer::from(LEAF), CertificateDer::from(INTERMEDIATE)],
             Chain::Big => vec![CertificateDer::from(BIG), CertificateDer::from(INTERMEDIATE)],
             Chain::Untrusted => vec![CertificateDer::from(OTHER)],
+            Chain::SelfSigned => vec![CertificateDer::from(SELF)],
+            Chain::CaAsLeaf => vec![CertificateDer::from(CA)],
+            Chain::ClientOnly => vec![CertificateDer::from(CLIENT), CertificateDer::from(INTERMEDIATE)],
             Chain::Padded(empty) => {
                 let mut chain = vec![CertificateDer::from(LEAF), CertificateDer::from(INTERMEDIATE)];
                 chain.resize(empty + 2, CertificateDer::from(Vec::new()));

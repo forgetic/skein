@@ -124,9 +124,18 @@ fn a_certificate_for_another_name_or_from_an_unknown_root_is_refused() {
     let config = pki::client(&[]);
     let mut other = pair(&pki::Server::plain(), "other.test", pki::VALID, &config, LIMITS);
     assert_eq!(handshake(&mut other), failed(Error::Certificate(Certificate::Name)));
-    let untrusted = pki::Server { chain: Chain::Untrusted, ..pki::Server::plain() };
-    let mut unknown = pair(&untrusted, "skein.test", pki::VALID, &config, LIMITS);
-    assert_eq!(handshake(&mut unknown), failed(Error::Certificate(Certificate::Issuer)));
+    // A root the client does not trust, no root at all, a CA's certificate
+    // where a leaf goes, and a leaf for client authentication only.
+    for (chain, refused) in [
+        (Chain::Untrusted, Certificate::Issuer),
+        (Chain::SelfSigned, Certificate::Issuer),
+        (Chain::CaAsLeaf, Certificate::Invalid),
+        (Chain::ClientOnly, Certificate::Invalid),
+    ] {
+        let server = pki::Server { chain, ..pki::Server::plain() };
+        let mut refusing = pair(&server, "skein.test", pki::VALID, &config, LIMITS);
+        assert_eq!(handshake(&mut refusing), failed(Error::Certificate(refused)), "{chain:?}");
+    }
     // An IP address the certificate names.
     let mut address = pair(&pki::Server::plain(), "127.0.0.1", pki::VALID, &config, LIMITS);
     assert_eq!(handshake(&mut address), ready(Version::Tls13, None));
