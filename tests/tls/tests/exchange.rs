@@ -1,5 +1,5 @@
 //! Exchanges with a rustls server in the client's machine world (tls.md,
-//! 6): every split of the ciphertext, room granted late, a slow reader
+//! 5): every split of the ciphertext, room granted late, a slow reader
 //! above, the server's endings (`close_notify`, a truncation, a corrupted
 //! record), a key update, a finish, and closes in every state.
 //!

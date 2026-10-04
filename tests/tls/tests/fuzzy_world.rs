@@ -1,4 +1,4 @@
-//! The client's machine world, swept (testing-strategy.md, 8; tls.md, 6):
+//! The client's machine world, swept (testing-strategy.md, 8; tls.md, 5):
 //! exchanges with a rustls server of every version, with retries, ALPN,
 //! a big chain, key updates, every ending and refused certificates, under
 //! limits and neighbours drawn from each seed, each run held to its

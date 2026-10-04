@@ -33,7 +33,7 @@ starts from.
 | the world harness | `skein-world` | for tests: each process's `iterate` in one loop, over the simulator or the ring, with a referee | [examples.md](docs/design/examples.md) |
 | HTTP | `skein-http` | HTTP/1.1 client and server, server-sent events | [http.md](docs/design/http.md) |
 | JSON | `skein-json` | a bounded tokenizer, a sized writer | [json.md](docs/design/json.md) |
-| TLS | `skein-tls` | a TLS stream over rustls | [tls.md](docs/design/tls.md) |
+| TLS | `skein-tls` | the TLS client, a stream over rustls's unbuffered connection, with ring | [tls.md](docs/design/tls.md) |
 
 ```
 crate          depends on
@@ -41,10 +41,15 @@ skein-lib      nothing
 skein-io       lib
 skein-http     lib
 skein-json     lib
-skein-tls      lib, rustls
+skein-tls      lib, rustls (and ring beneath it)
 skein-shell    lib, io, io-uring, libc
 skein-sim      lib, io
 ```
+
+The crates from outside skein are few, and each is an exception the
+programming model names (its 2.1 and 3): `io-uring` and `libc`, the
+shell's, for the ring adapter; and `rustls`, with `ring` for its
+cryptography, the TLS client's.
 
 - **A kit, not a framework.** skein has no service trait, no generic loop,
   no scheduler and no callbacks. A service calls the parts by name, in

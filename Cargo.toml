@@ -69,7 +69,7 @@ overflow-checks = true
 
 # rustls is built in tests as it ships: its debug assertions hold an alert
 # after close_notify to be a bug, which a half-closed connection reading a
-# corrupted record reaches (tls.md, 7).
+# corrupted record reaches (tls.md, 6).
 [profile.dev.package.rustls]
 debug-assertions = false
 

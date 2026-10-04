@@ -1,6 +1,6 @@
 //! Bytes held in one slice, for rustls, which deciphers and joins the
 //! records it reads in place, and writes its own output into a slice it is
-//! given (tls.md, 3).
+//! given (tls.md, 3.2).
 
 use alloc::boxed::Box;
 

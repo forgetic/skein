@@ -26,7 +26,7 @@ tested in its own tier is in that part's document.
 | Tier | In skein | Its design |
 |---|---|---|
 | step tests | lib's containers and value types; each crate's step functions | lib.md, 10 |
-| machine worlds | HTTP, server-sent events, JSON, each side alone | http.md, 6; json.md, 6 |
+| machine worlds | HTTP, server-sent events, JSON, each side alone; the TLS client, against rustls's server in memory | http.md, 6; json.md, 6; tls.md, 5 |
 | protocol worlds | an LLM client's HTTP, server-sent events and JSON against a server's | http.md, 9 |
 | io worlds | io over the simulator, with a scripted owner | io.md, 8 |
 | simulated worlds | the examples' `iterate`, each a process of the simulator | section 3 |
@@ -121,7 +121,7 @@ second, which is why it is skein's (testing-strategy.md, 7).
 ## 6. Layout
 
 ```
-crates/*/src/tests.rs           step tests; lib's, io's, JSON's and HTTP's in a module per area, under src/tests/
+crates/*/src/tests.rs           step tests; lib's, io's, JSON's, HTTP's and TLS's in a module per area, under src/tests/
 testing/skein-conformance       the conformance suite: the backend interface, the scenarios, the driver, the checks
 testing/skein-heap              the counting allocator, the meter that checks a step against its worst case, and the span a world meters its processes with
 testing/skein-world             the world harness: processes' iterate over the simulator or the real ring, the referee, the trace, the heap
@@ -139,6 +139,8 @@ tests/json                      the JSON tokenizer's machine worlds, the writer 
 tests/json/transcripts          its transcripts, each with what it must decode to
 tests/http                      the HTTP client's and the event stream reader's machine worlds, a reference reader of each, the two stacked with JSON, and their worst cases against the counting allocator, skein-http-world
 tests/http/transcripts          its transcripts, each with what it must decode to
+tests/tls                       the TLS client's machine worlds against a rustls server in memory, the HTTP client stacked on it, and its worst case against the counting allocator, skein-tls-world
+tests/tls/fixtures              its certificates and key, and the script that makes them
 tests/**/tests/*.rs             a crate's focused tests
 tests/**/tests/fuzzy_*.rs       its fuzzy tests: sweeps over many seeds
 tests/clippy.toml               what the crates under tests/ may not use
@@ -191,8 +193,8 @@ As of 2026-10-04.
 
 | Tier | Built |
 |---|---|
-| step tests | lib: every container and value type; io: the kernel records' rules, and every cell of its listener and stream; JSON: the tokenizer and the writer; HTTP: the client and the event stream reader; the echo: its domain, every cell of its connection and listener, its `iterate`, its startup checks, and its fake client |
-| machine worlds | JSON: the tokenizer, with its transcripts, and the writer against it; HTTP: the client and the event stream reader, with their transcripts |
+| step tests | lib: every container and value type; io: the kernel records' rules, and every cell of its listener and stream; JSON: the tokenizer and the writer; HTTP: the client and the event stream reader; TLS: its limits and configuration, and the client fed by hand; the echo: its domain, every cell of its connection and listener, its `iterate`, its startup checks, and its fake client |
+| machine worlds | JSON: the tokenizer, with its transcripts, and the writer against it; HTTP: the client and the event stream reader, with their transcripts; TLS: the client against a rustls server in memory, not replayed |
 | protocol worlds | none; the HTTP client, the event stream reader and JSON stacked over transcripts, a step towards them |
 | io worlds | sockets, over the simulator; one exchange over the ring |
 | simulated worlds | the echo and its fake clients, seven scenarios |
@@ -242,6 +244,21 @@ the reader and a JSON tokenizer per event, stacked. The fuzzy suite runs
 20,000 connections of generated, mutated and corrupted exchanges, 12,000
 event streams, and the transcripts cut and mutated, asserting that every
 fault fell.
+
+The TLS client runs in a machine world against rustls's own server, in
+memory, with a test root, an intermediate and the server's certificates
+as fixtures (tls.md, 5): the server's ciphertext cut at random, room
+granted late, ended or failed below; a user above that reads with demands
+of every shape, slowly, writes within the room granted, finishes, and
+closes in every state. Each run is held to its scenario: the plaintext
+each side received, the server's ending (`close_notify`, a truncation, a
+corrupted record), certificates refused at the wall time handed in, and
+`close_notify` sent on a finish or a close. Focused tests handshake each
+version, retry, agree ALPN, refuse each kind of certificate and a chain
+longer than the records held, cut the ciphertext a byte at a time, and
+stack the HTTP client on the TLS client; the fuzzy suite runs 600 drawn
+scenarios, asserting that each outcome and each oddity of the neighbours
+fell.
 
 io's worlds run io over the simulator with a scripted owner above it and
 a referee beside it, every process in one loop (io.md, 8). Their harness
@@ -295,13 +312,16 @@ from the same seeds in the fuzzy suite.
 
 Replay: a seed replays to the same trace of submissions and completions,
 and a JSON world, an HTTP world, an io world and an echo world to the
-same run. No state digest yet.
+same run; a TLS world does not, as rustls draws from the kernel. No state
+digest yet.
 
 Memory: the counting allocator is temper's heap meter, ported with its
 own tests. Each of lib's containers is checked against its worst case
 (lib.md, 10), in the focused suite, and so are the JSON tokenizer's and
 writer's and the HTTP client's and event stream reader's, a call of an
-entry point at a time (json.md, 6; http.md, 6), and io (io.md,
+entry point at a time (json.md, 6; http.md, 6), and the TLS client's,
+rustls's heap included, with the server it talks to measured apart by a
+span (tls.md, 5), and io (io.md,
 8): driven by hand to its limits and back, every call a step of the
 meter, as an io world's simulator would allocate on the same thread. The
 echo's simulated worlds check memory at every iteration: each process's
@@ -331,10 +351,12 @@ By tier, in the order temper pulls the parts (README.md):
   exists.
 - **Machine worlds** for the HTTP server and the event writer, with
   their transcripts, when the fake LLM provider pulls them (http.md, 9);
-  **fuzz targets** for every machine, JSON's and HTTP's included, when a
-  nightly toolchain is installed; and **protocol worlds**, an LLM
+  **fuzz targets** for every machine, JSON's, HTTP's and TLS's included,
+  when a nightly toolchain is installed; and **protocol worlds**, an LLM
   client's stack against a server's, once the server is built.
-- **TLS's own tests,** when the TLS client is built.
+- **TLS in the real loop,** a loopback exchange through the shell against
+  a local rustls server (tls.md, 8). A TLS that replays is an open
+  question (notes.md).
 - **The HTTP examples' simulated worlds and real loop,** with skein-http.
   The echo's are built; the real loop's signals, child processes, scratch
   directory and TLS wait for the parts that pull them.

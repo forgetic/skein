@@ -1,5 +1,5 @@
 //! The TLS client's machine worlds (testing-strategy.md, 2.4 and 4.4;
-//! tls.md, 6).
+//! tls.md, 5).
 //!
 //! What the test binaries share:
 //!

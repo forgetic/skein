@@ -1,4 +1,4 @@
-//! The client's worst case against the counting allocator (tls.md, 6;
+//! The client's worst case against the counting allocator (tls.md, 5;
 //! programming-model.md, 6.3): every call of an entry point a step of the
 //! meter, and what the client held of its own, rustls's heap included,
 //! never more than its `worst_case`.

@@ -1,4 +1,4 @@
-//! rustls's unbuffered client connection, driven in place (tls.md, 3): the
+//! rustls's unbuffered client connection, driven in place (tls.md, 3.2): the
 //! records received go in one slice, which rustls deciphers and joins in
 //! place; what it deciphers goes to the intake; what it writes goes to the
 //! output TLS owes the stream below.

@@ -1,4 +1,4 @@
-//! Handshakes against a rustls server (tls.md, 6): each version, a retry,
+//! Handshakes against a rustls server (tls.md, 5): each version, a retry,
 //! ALPN, certificates checked against the wall time handed in, a chain
 //! longer than the records held, peers that are not TLS or give up, and the
 //! stream ending or failing before the handshake and during it.

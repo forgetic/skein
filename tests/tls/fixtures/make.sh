@@ -1,5 +1,5 @@
 #!/bin/sh
-# Makes the certificates the TLS worlds use (tls.md, 6), with OpenSSL 3.4 or
+# Makes the certificates the TLS worlds use (tls.md, 5), with OpenSSL 3.4 or
 # later. They are kept as DER, and made again only when one must change.
 #
 # - root.der: the root the client trusts, "skein test root".

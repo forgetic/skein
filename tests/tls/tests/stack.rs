@@ -1,4 +1,4 @@
-//! The HTTP client stacked on the TLS client (tls.md, 6; http.md, 2), as a
+//! The HTTP client stacked on the TLS client (tls.md, 5; http.md, 2), as a
 //! connection routes between them, against a rustls server in memory that
 //! answers one HTTP response: the handshake, then the call once `Ready`
 //! came, its body uploaded through TLS's room, the response read through

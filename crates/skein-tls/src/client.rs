@@ -78,7 +78,7 @@ pub const LARGEST_READ: u32 = MAX_BODY;
 /// an alert and `close_notify`. The longest flight is a `ClientHello` of a
 /// server name of 253 bytes and protocols of [`ALPN`](crate::ALPN) bytes,
 /// measured at 738 bytes, and 809 once a `HelloRetryRequest` asks for a
-/// larger key share (tls.md, 6).
+/// larger key share (tls.md, 5).
 pub const FLIGHT: u32 = 2_048;
 
 /// The most a record adds to the plaintext it carries, of ring's suites:
@@ -97,7 +97,7 @@ const SLACK: u32 = 2 * 27;
 /// works on: its states, keys, transcript and configuration, measured at
 /// 10 KB at most, with the longest ALPN list; and what a step that
 /// deciphers or encrypts a record of 16 KB holds past that record, as
-/// [`LARGEST_READ`] is counted for it, about 5 KB more (tls.md, 6).
+/// [`LARGEST_READ`] is counted for it, about 5 KB more (tls.md, 5).
 const RUSTLS: u64 = 16 * 1_024;
 
 /// rustls holds the server's certificates twice while it reads them, as
@@ -163,7 +163,7 @@ fn intake_cap(limits: &Limits) -> Option<u32> {
 /// pleases, so its part is measured against the counting allocator, over
 /// handshakes of either version, a retry, the longest ALPN list, the
 /// longest chain the records hold, and records of every size each way
-/// (tls.md, 6): its own state ([`RUSTLS`]), and twice the server's
+/// (tls.md, 5): its own state ([`RUSTLS`]), and twice the server's
 /// certificates, which the records held bound, as they hold the message
 /// that carries them whole.
 #[must_use]

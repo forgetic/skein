@@ -1,4 +1,4 @@
-//! What a service hands the TLS client as data (tls.md, 3; shell.md, 6):
+//! What a service hands the TLS client as data (tls.md, 3.4; shell.md, 6):
 //! the roots it trusts and the protocols it offers by ALPN, made once at
 //! startup into a [`Config`] every connection shares, and each connection's
 //! server name, a [`Name`].
