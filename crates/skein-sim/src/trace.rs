@@ -73,15 +73,15 @@ pub enum Summary {
 }
 
 /// The start of a path or a name, and its length: enough of it to read a
-/// trace by.
+/// trace by, and small, as every entry of a trace holds a summary.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Text {
     head: [u8; Text::HEAD],
-    len: usize,
+    len: u32,
 }
 
 impl Text {
-    const HEAD: usize = 32;
+    const HEAD: usize = 16;
 
     #[must_use]
     pub fn of(bytes: &[u8]) -> Text {
@@ -89,16 +89,17 @@ impl Text {
         for (slot, byte) in head.iter_mut().zip(bytes) {
             *slot = *byte;
         }
-        Text { head, len: bytes.len() }
+        Text { head, len: u32::try_from(bytes.len()).unwrap_or(u32::MAX) }
     }
 }
 
 impl fmt::Debug for Text {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let shown = self.head.get(..self.len.min(Text::HEAD)).unwrap_or_default();
+        let len = usize::try_from(self.len).unwrap_or(usize::MAX);
+        let shown = self.head.get(..len.min(Text::HEAD)).unwrap_or_default();
         write!(f, "\"{}\"", shown.escape_ascii())?;
-        if self.len > Text::HEAD {
-            write!(f, "..({} bytes)", self.len)?;
+        if len > Text::HEAD {
+            write!(f, "..({len} bytes)")?;
         }
         Ok(())
     }
