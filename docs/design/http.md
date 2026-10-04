@@ -877,24 +877,30 @@ pub struct Limits {
   - **The server's** runs one connection for one request after another.
     Below, the client's stream: its bytes arrive in pieces cut at random,
     late, and meet each read exactly; room is granted late and each
-    `Send` held to it as io holds it, one a grant; the client pipelines
+    `Send` held to it as io holds it, one a grant, made before room is
+    demanded again, and a read past the end outstanding until withdrawn,
+    as TLS holds it; the client pipelines
     its requests, or is patient and sends each once the last exchange is
     over; one that asks for a 100 (Continue) holds its body back until
     the 100 comes, sends none once a final response comes first, and now
     and then tires of waiting; the stream ends when the bytes run out,
     early at a cut, idle or with a read on its way, after a request or
-    mid-way, and fails, before its end or after it; an answer to a
-    demand the server withdrew may still come, before its close or after.
+    mid-way, and fails, before its end or after it, or the first time the
+    server waits for a thing drawn; an answer to a demand the server
+    withdrew may still come, before its close or after.
     Above, a service asks for each request when it feels like it, reads
     the body with demands of every shape, slowly, withdraws a demand and
-    discards, responds at the moment its plan draws (at once, while a
+    discards, now and then a withdrawal that crosses the piece it would
+    have read, responds at the moment its plan draws (at once, while a
     demand of its on the body is outstanding, partway through the body,
-    once it read it, or once it discarded it) with a response now and
+    once it read it, once it discarded it, or at once without touching
+    the body, which it discards a while later) with a response now and
     then one the server must refuse, writes the reply in pieces within the
-    room granted, withdraws the reply's demand now and then, as a machine
-    stacked on it does when it closes, and closes then or a while after,
-    stops for a while, and closes after the last request or at any
-    moment. The world checks both sides' contracts as the client's does,
+    room granted, finishes in place of a grant's `Send` now and then,
+    withdraws the reply's demand now and then, as a machine stacked on it
+    does when it closes, and closes then or a while after, stops for a
+    while, and closes after the last request or at any moment. The wall
+    clock the server dates its heads by is drawn from each seed. The world checks both sides' contracts as the client's does,
     a 100 before any read of a body its client holds back among them, and
     `waiting()` against what the neighbours see. Each call is held to a
     reference reader of requests, which shares nothing with the server:
@@ -1040,7 +1046,11 @@ pub struct Limits {
   body, a rejection and a body cut short, each read with three demands,
   responded to before and after its body, and closed, failed and
   discarded after every step; and the carry-over held with a delivery.
-  The writer's peak at its limits is its worst case exactly.
+  The server's peak is its worst case exactly in either phase, under
+  limits where it is the larger: a request line filling the head, with
+  its target's copy; and a response head at its limit, held while a
+  discard reads a piece of the most a read is. The writer's peak at its
+  limits is its worst case exactly.
 - **The fuzzy suite** (`tests/http/tests/fuzzy_*.rs`): 20,000 connections
   of one to four generated exchanges, valid, mutated, and corrupted where
   a random edit seldom lands (another major version, a code past 599, an
