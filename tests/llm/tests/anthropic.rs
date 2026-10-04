@@ -57,6 +57,20 @@ fn completion(world: &World) -> &Completion {
 }
 
 #[test]
+fn anthropic_requires_an_explicit_event_stream_content_type() {
+    let body = named_events(&[START, TEXT_START, TEXT_DELTA, BLOCK_STOP, END_TURN, STOP]);
+    let mut world = World::new(anthropic_call(1), limits(), response(200, "", &body, true), 23);
+    world.request(client::Request::Start);
+    world.run();
+    world.assert_once();
+    assert!(world.seen.iter().any(|event| matches!(
+        event,
+        client::Event::Failed { failure: Failure::Protocol, detail, .. }
+            if detail.as_ref() == b"response is not an event stream"
+    )));
+}
+
+#[test]
 fn oauth_request_text_usage_and_http_fragmentation() {
     for chunked in [false, true] {
         for fragment in [1, 257] {

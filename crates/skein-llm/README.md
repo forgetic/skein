@@ -83,3 +83,35 @@ The [design](../../docs/design/llm.md) defines lifecycle and memory contracts.
 stack; the world crate's fuzzy profile varies fragmentation, flow control and
 close races. Archived response fixtures document their capture provenance.
 Offline verification does not claim current live subscription admission.
+
+The opt-in live suite exercises `client::Client` against the real Codex and
+Anthropic OAuth endpoints over certificate-verified TLS. It checks streamed
+text and token usage, multi-turn replay, tool-argument streaming and tool-result
+replay, HTTP connection reuse, and invalid-token failures for each provider.
+There are no retries or credential refreshes. Positive tests use subscription
+quota and require valid, unexpired OAuth access tokens, rather than API keys.
+
+Set these environment variables, then run:
+
+```sh
+export SKEIN_TEST_LIVE_OPENAI_ACCESS_TOKEN="$(jq -er '.tokens.access_token' ~/.codex/auth.json)"
+export SKEIN_TEST_LIVE_OPENAI_ACCOUNT_ID="$(jq -er '.tokens.account_id' ~/.codex/auth.json)"
+export SKEIN_TEST_LIVE_ANTHROPIC_ACCESS_TOKEN="$(jq -er '.claudeAiOauth.accessToken' ~/.claude/.credentials.json)"
+cargo nextest run --workspace --profile live
+```
+
+The tests consume only environment variables; they never read those auth files
+themselves. Missing credentials fail the live run. The default, fuzzy and
+measure profiles exclude the `live` binary, and its tests perform no network
+I/O outside `NEXTEST_PROFILE=live`, including under `cargo test`.
+The live profile selects only these tests, runs them serially, and allows ten
+minutes overall with a three-minute per-test limit and 30-second socket timeouts.
+
+Optional `SKEIN_TEST_LIVE_OPENAI_MODEL` and `SKEIN_TEST_LIVE_ANTHROPIC_MODEL`
+override `gpt-5.5` and `claude-haiku-4-5`. `SKEIN_TEST_LIVE_CA_FILE` overrides
+the default Linux CA bundle at `/etc/ssl/certs/ca-certificates.crt`.
+The Anthropic tests explicitly opt in to the archived Claude Code identity
+with only the `claude-code-20250219,oauth-2025-04-20` betas; the full archived
+set includes long-context access that some subscriptions reject.
+Codex's successful subscription responses can omit `Content-Type`; the client
+accepts that omission for Codex while validating any explicitly supplied type.

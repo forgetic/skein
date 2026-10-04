@@ -13,6 +13,8 @@ skein-llm.workspace = true
 
 [dev-dependencies]
 skein-heap.workspace = true
+# Caller-owned, certificate-verified transport for the opt-in live suite.
+rustls = { workspace = true, features = ["std"] }
 
 [lints.rust]
 unsafe_code = "forbid"

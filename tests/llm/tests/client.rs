@@ -192,6 +192,35 @@ fn cancellation_waits_for_actual_settlement() {
 }
 
 #[test]
+fn codex_accepts_sse_without_content_type_but_rejects_explicit_wrong_or_duplicate_types() {
+    let body =
+        events(&[skein_llm_world::TEXT_ADDED, skein_llm_world::TEXT_DELTA, skein_llm_world::TEXT_DONE, TERMINAL]);
+    for chunked in [false, true] {
+        let mut world = World::new(call(1), limits(), response(200, "", &body, chunked), 23);
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Completed { .. })));
+        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Reusable)));
+    }
+    for headers in [
+        "Content-Type: application/json\r\n",
+        "Content-Type: text/event-stream\r\ncontent-type: text/event-stream\r\n",
+        "Content-Type: text/event-stream\r\ncontent-type: application/json\r\n",
+    ] {
+        let mut world = World::new(call(1), limits(), response(200, headers, &body, true), 23);
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        assert!(world.seen.iter().any(|event| matches!(
+            event,
+            client::Event::Failed { failure: Failure::Protocol, detail, .. }
+                if detail.as_ref() == b"response is not an event stream"
+        )));
+    }
+}
+
+#[test]
 fn malformed_truncated_and_oversized_streams_fail_once() {
     let mut small = limits();
     small.sse.line = 32;

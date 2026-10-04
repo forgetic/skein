@@ -562,7 +562,10 @@ fn response_head(
         fail(client, Failure::Protocol, bytes::copy_of(b"unsupported content encoding"), above);
         closing(client, env, above, below);
     } else if (200..300).contains(&response.status) {
-        if media_type(&response.headers, b"text/event-stream") {
+        // The Codex subscription route can omit Content-Type on a valid SSE
+        // response. Still reject explicit wrong or duplicate media types, and
+        // require Anthropic's documented event-stream type.
+        if media_type(&response.headers, b"text/event-stream", client.provider == Provider::OpenAiCodex) {
             client.state = State::Streaming;
         } else {
             fail(client, Failure::Protocol, bytes::copy_of(b"response is not an event stream"), above);
@@ -1058,7 +1061,7 @@ fn identity_encoding(headers: &[Header]) -> bool {
     true
 }
 
-fn media_type(headers: &[Header], expected: &[u8]) -> bool {
+fn media_type(headers: &[Header], expected: &[u8], allow_missing: bool) -> bool {
     let mut found = false;
     for header in headers {
         if header.is(b"content-type") {
@@ -1076,7 +1079,7 @@ fn media_type(headers: &[Header], expected: &[u8]) -> bool {
             found = true;
         }
     }
-    found
+    found || allow_missing
 }
 
 fn trim(mut value: &[u8]) -> &[u8] {

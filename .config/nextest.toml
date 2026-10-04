@@ -5,7 +5,7 @@
 # tests it stopped; a test past its slow period is flagged SLOW as it runs.
 
 [profile.default]
-default-filter = "not binary(/^fuzzy_/)"
+default-filter = "not binary(/^fuzzy_/) and not binary(=live)"
 global-timeout = "15s"
 slow-timeout = { period = "3s" }
 
@@ -26,3 +26,13 @@ slow-timeout = { period = "20s" }
 [profile.measure]
 global-timeout = "1h"
 slow-timeout = { period = "60s" }
+
+# Real subscription endpoints; requires SKEIN_TEST_LIVE_* OAuth credentials.
+# Keep network latency and subscription usage out of the offline suites.
+[profile.live]
+default-filter = "package(skein-llm-world) and binary(=live)"
+global-timeout = "10m"
+slow-timeout = { period = "60s", terminate-after = 3 }
+test-threads = 1
+retries = 0
+fail-fast = false

@@ -304,6 +304,7 @@ dependencies = [
 name = "skein-llm-world"
 version = "0.0.0"
 dependencies = [
+ "rustls",
  "skein-heap",
  "skein-http",
  "skein-lib",
