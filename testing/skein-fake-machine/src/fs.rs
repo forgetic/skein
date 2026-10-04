@@ -64,6 +64,8 @@ pub enum Is {
     File,
     Directory,
     Link,
+    Fifo,
+    Device,
 }
 
 /// One entry a `list` hands back: what it is, and its name.
@@ -93,6 +95,8 @@ pub enum Refusal {
     NameTooLong,
     /// The path leads out of its root.
     Escape,
+    /// What the path names is neither a file nor a directory.
+    NotAFile,
     /// A directory renamed beneath itself.
     Beneath,
 }
@@ -113,6 +117,11 @@ pub enum Made {
     Directory,
     /// A symbolic link, to the path it holds.
     Link(Vec<u8>),
+    /// A FIFO, which opens as no file.
+    Fifo,
+    /// A device, which opens as no file: as on a filesystem not mounted
+    /// `nodev`.
+    Device,
 }
 
 impl Item {
@@ -132,6 +141,18 @@ impl Item {
     #[must_use]
     pub fn link(path: &[u8], target: &[u8]) -> Item {
         Item { path: path.to_vec(), made: Made::Link(target.to_vec()), mode: 0o777 }
+    }
+
+    /// A FIFO, mode `0o644`.
+    #[must_use]
+    pub fn fifo(path: &[u8]) -> Item {
+        Item { path: path.to_vec(), made: Made::Fifo, mode: 0o644 }
+    }
+
+    /// A device, mode `0o666`.
+    #[must_use]
+    pub fn device(path: &[u8]) -> Item {
+        Item { path: path.to_vec(), made: Made::Device, mode: 0o666 }
     }
 
     /// The same, with `mode`.
@@ -157,8 +178,13 @@ pub(crate) struct Node {
 #[derive(Debug)]
 enum Body {
     File(Vec<u8>),
-    Directory { entries: BTreeMap<Box<[u8]>, NodeId>, removed: bool },
+    Directory {
+        entries: BTreeMap<Box<[u8]>, NodeId>,
+        removed: bool,
+    },
     Link(Box<[u8]>),
+    /// A FIFO or a device: nothing the machine opens.
+    Special(Is),
 }
 
 /// What a handle has open, and where a listing of it stopped.
@@ -237,6 +263,8 @@ impl Machine {
                 Made::File(bytes) => Body::File(bytes.clone()),
                 Made::Directory => Body::Directory { entries: BTreeMap::new(), removed: false },
                 Made::Link(target) => Body::Link(target.clone().into_boxed_slice()),
+                Made::Fifo => Body::Special(Is::Fifo),
+                Made::Device => Body::Special(Is::Device),
             };
             self.make(parent, Box::from(last), body, item.mode);
         }
@@ -262,6 +290,10 @@ impl Machine {
                 }
                 if !self.may(node, READ) {
                     return Err(Refusal::Permission);
+                }
+                // Opened without blocking, then refused for what it is.
+                if let Body::Special(_) = self.node(node).body {
+                    return Err(Refusal::NotAFile);
                 }
                 node
             }
@@ -290,7 +322,7 @@ impl Machine {
         let bytes = match &self.node(self.handle(file).node).body {
             Body::File(bytes) => bytes,
             Body::Directory { .. } => return Err(Refusal::IsADirectory),
-            Body::Link(_) => fail("a handle is never to a symbolic link"),
+            Body::Link(_) | Body::Special(_) => fail("a handle is never to a link, a FIFO or a device"),
         };
         let start = usize::try_from(at).unwrap_or(usize::MAX).min(bytes.len());
         let end = start.saturating_add(usize::try_from(len).expect("a u32 fits a usize")).min(bytes.len());
@@ -323,7 +355,7 @@ impl Machine {
         match &self.node(self.handle(file).node).body {
             Body::File(bytes) => Facts { is: Is::File, size: u64::try_from(bytes.len()).expect("a usize fits a u64") },
             Body::Directory { .. } => Facts { is: Is::Directory, size: 0 },
-            Body::Link(_) => fail("a handle is never to a symbolic link"),
+            Body::Link(_) | Body::Special(_) => fail("a handle is never to a link, a FIFO or a device"),
         }
     }
 
@@ -426,7 +458,7 @@ impl Machine {
             Body::Directory { removed: true, .. } => return Err(Refusal::NotFound),
             Body::Directory { entries, removed: false } => entries,
             Body::File(_) => return Err(Refusal::NotADirectory),
-            Body::Link(_) => fail("a handle is never to a symbolic link"),
+            Body::Link(_) | Body::Special(_) => fail("a handle is never to a link, a FIFO or a device"),
         };
         let mut listed = Vec::new();
         let mut left = usize::try_from(room).expect("a u32 fits a usize");
@@ -542,8 +574,8 @@ impl Machine {
                     todo = expanded;
                 }
                 Body::Directory { .. } if !last => dir = node,
-                Body::File(_) | Body::Link(_) if !last => return Err(Refusal::NotADirectory),
-                Body::File(_) | Body::Link(_) | Body::Directory { .. } => {
+                Body::File(_) | Body::Link(_) | Body::Special(_) if !last => return Err(Refusal::NotADirectory),
+                Body::File(_) | Body::Link(_) | Body::Special(_) | Body::Directory { .. } => {
                     return Ok(Found { parent: dir, name: Some(name), node: Some(node), slash });
                 }
             }
@@ -595,7 +627,7 @@ impl Machine {
         self.next_node = id.checked_add(1).expect("fewer than 2^64 nodes");
         let parent_of = match body {
             Body::Directory { .. } => Some(parent),
-            Body::File(_) | Body::Link(_) => None,
+            Body::File(_) | Body::Link(_) | Body::Special(_) => None,
         };
         let owner = (mode >> 6_u32) & 0o7;
         self.nodes.insert(id, Node { body, mode: owner, parent: parent_of, named: true });
@@ -654,14 +686,14 @@ impl Machine {
     fn entries_mut(&mut self, dir: NodeId) -> &mut BTreeMap<Box<[u8]>, NodeId> {
         match &mut self.node_mut(dir).body {
             Body::Directory { entries, .. } => entries,
-            Body::File(_) | Body::Link(_) => fail("only a directory holds names"),
+            Body::File(_) | Body::Link(_) | Body::Special(_) => fail("only a directory holds names"),
         }
     }
 
     fn lookup(&self, dir: NodeId, name: &[u8]) -> Option<NodeId> {
         match &self.node(dir).body {
             Body::Directory { entries, .. } => entries.get(name).copied(),
-            Body::File(_) | Body::Link(_) => None,
+            Body::File(_) | Body::Link(_) | Body::Special(_) => None,
         }
     }
 
@@ -670,6 +702,7 @@ impl Machine {
             Body::File(_) => Is::File,
             Body::Directory { .. } => Is::Directory,
             Body::Link(_) => Is::Link,
+            Body::Special(is) => is,
         }
     }
 
@@ -680,14 +713,14 @@ impl Machine {
     fn removed(&self, node: NodeId) -> bool {
         match self.node(node).body {
             Body::Directory { removed, .. } => removed,
-            Body::File(_) | Body::Link(_) => false,
+            Body::File(_) | Body::Link(_) | Body::Special(_) => false,
         }
     }
 
     fn has_entries(&self, node: NodeId) -> bool {
         match &self.node(node).body {
             Body::Directory { entries, .. } => !entries.is_empty(),
-            Body::File(_) | Body::Link(_) => false,
+            Body::File(_) | Body::Link(_) | Body::Special(_) => false,
         }
     }
 

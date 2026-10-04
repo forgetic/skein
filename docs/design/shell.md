@@ -107,7 +107,9 @@ Before its loop, a service's `main`, with the kit:
 3. blocks the termination signals that io will read, so they arrive as
    `Shutdown` events (io.md);
 4. opens the first roots for io's files, from configuration, with
-   `open_root` (io.md, 5; kernel.md, 6.1);
+   `open_root` (io.md, 5; kernel.md, 6.1). A root, a workspace, belongs
+   on a filesystem mounted `nodev`: the ring refuses to open a device
+   beneath it, but only after the device's own `open` has run;
 5. resolves the configured peer names into addresses (io.md);
 6. reads certificates, keys and root stores for TLS (tls.md);
 7. reads the seed and opens the kernel.

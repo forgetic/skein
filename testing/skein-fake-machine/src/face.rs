@@ -101,6 +101,7 @@ const fn kind(is: Is) -> Kind {
         Is::File => Kind::File,
         Is::Directory => Kind::Directory,
         Is::Link => Kind::Symlink,
+        Is::Fifo | Is::Device => Kind::Other,
     }
 }
 
@@ -121,6 +122,7 @@ const fn error(refusal: Refusal) -> Error {
         Refusal::Loop => Error::TooManyLinks,
         Refusal::NameTooLong => Error::NameTooLong,
         Refusal::Escape => Error::Escape,
+        Refusal::NotAFile => Error::NotAFile,
         // EINVAL, as renameat2 answers a directory moved beneath itself.
         Refusal::Beneath => Error::InvalidArgument,
     }

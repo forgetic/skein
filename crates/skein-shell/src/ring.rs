@@ -43,8 +43,9 @@
 //!   `sockaddr_in` or `sockaddr_in6` its family names: the storage is larger
 //!   and at least as aligned as either.
 //! - **The synchronous calls** (`setsockopt`, `getsockname`, `close`,
-//!   `open`, `getdents64`, `lseek`, `fstatat`, `clock_gettime`,
-//!   `getrandom`) are given pointers to locals, to strings or to the
+//!   `open`, `getdents64`, `lseek`, `fstatat`, `fstat`, `fcntl`,
+//!   `clock_gettime`, `getrandom`) are given pointers to locals, to strings
+//!   or to the
 //!   table's listing buffer, each of which lives across the call, with their
 //!   true sizes. `getdents64` is not a ring operation, so a `List` runs at
 //!   its submit and completes at the next reap.
@@ -719,7 +720,7 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
         Op::Recv { .. } | Op::Send { .. } | Op::Read { .. } | Op::Write { .. } => {
             Ok(Done::Count(u32::try_from(res).expect("a non-negative i32 fits in a u32")))
         }
-        Op::Open { .. } => Ok(Done::Fd(Fd::new(res))),
+        Op::Open { .. } => opened(res),
         Op::Stat { .. } => Ok(Done::Stat(stat(statx.get_mut()))),
         Op::Listen { .. }
         | Op::Connect { .. }
@@ -845,6 +846,8 @@ fn file_error(kind: &Op, errno: i32) -> Error {
             libc::ENAMETOOLONG => Some(Error::NameTooLong),
             // RESOLVE_BENEATH's answer to a path out of its root.
             libc::EXDEV => Some(Error::Escape),
+            // A socket, or a device with no driver.
+            libc::ENXIO => Some(Error::NotAFile),
             libc::EMFILE | libc::ENFILE => Some(Error::TooManyOpenFiles),
             _ => None,
         },
@@ -930,15 +933,59 @@ fn c_path(bytes: &[u8]) -> Box<[u8]> {
     path.into_boxed_slice()
 }
 
-/// What `openat2` is told for each way io opens: close-on-exec always, and
-/// resolved beneath the root, without magic links (kernel.md, 6.1).
+/// What an `Open` that the kernel answered with the descriptor `fd` comes
+/// to: a file or a directory, or `NotAFile`, the descriptor closed. A file
+/// blocks again, so that io_uring sends a read it cannot do at once to its
+/// worker rather than answer `EAGAIN`.
+fn opened(fd: i32) -> Result<Done, Error> {
+    // SAFETY: `libc::stat` is a plain C struct of integers, for which all
+    // zeroes is a valid value.
+    let mut raw: libc::stat = unsafe { mem::zeroed() };
+    // SAFETY: `raw` is a live, exclusive borrow of a `stat`, which the
+    // kernel writes during the call only; `fd` was just opened for this
+    // adapter.
+    let stated = unsafe { libc::fstat(fd, ptr::from_mut(&mut raw)) };
+    let checked = if stated != 0 {
+        Err(Error::Other(last_errno()))
+    } else {
+        match kind_of(raw.st_mode) {
+            Kind::File => blocking(fd),
+            Kind::Directory => Ok(()),
+            Kind::Symlink | Kind::Other => Err(Error::NotAFile),
+        }
+    };
+    match checked {
+        Ok(()) => Ok(Done::Fd(Fd::new(fd))),
+        Err(error) => {
+            close(fd);
+            Err(error)
+        }
+    }
+}
+
+/// Clears `O_NONBLOCK` from the file open on `fd`.
+fn blocking(fd: i32) -> Result<(), Error> {
+    // SAFETY: integers only.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(Error::Other(last_errno()));
+    }
+    // SAFETY: integers only.
+    let set = unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+    if set < 0 { Err(Error::Other(last_errno())) } else { Ok(()) }
+}
+
+/// What `openat2` is told for each way io opens: close-on-exec always,
+/// without blocking or taking a controlling terminal, and resolved beneath
+/// the root, without magic links (kernel.md, 6.1).
 fn open(how: OpenHow) -> types::OpenHow {
     let (flags, mode) = match how {
         OpenHow::Read => (libc::O_RDONLY, 0),
         OpenHow::Directory => (libc::O_RDONLY | libc::O_DIRECTORY, 0),
         OpenHow::Create => (libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, FILE_MODE),
     };
-    let flags = u64::try_from(flags | libc::O_CLOEXEC).expect("open's flags are positive");
+    let flags = flags | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
+    let flags = u64::try_from(flags).expect("open's flags are positive");
     types::OpenHow::new().flags(flags).mode(mode).resolve(libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS)
 }
 

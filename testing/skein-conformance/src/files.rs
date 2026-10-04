@@ -492,6 +492,7 @@ pub fn list<B: Backend>(backend: &mut B) -> Listing {
         Item::file(b"l/two", b"2"),
         Item::directory(b"l/three"),
         Item::link(b"l/four", b"one"),
+        Item::fifo(b"l/five"),
         Item::directory(b"e"),
         Item::directory(b"n"),
         Item::file(&[b"n/".as_slice(), &long_a].concat(), b"a"),
@@ -529,6 +530,7 @@ impl Check for Listing {
             (b"two", Kind::File),
             (b"three", Kind::Directory),
             (b"four", Kind::Symlink),
+            (b"five", Kind::Other),
         ]);
         assert_eq!(self.whole, Ok(expected.clone()), "the contract: List hands back every entry and its kind");
         assert_eq!(self.again_at_the_end, Ok(Vec::new()), "the contract: Count(0) at the end, and after it");
@@ -661,12 +663,19 @@ fn escape_cases() -> Vec<(Vec<u8>, OpenHow, Outcome)> {
         // `..` steps from where a link led, not back along the path.
         (b"deep/../x".to_vec(), OpenHow::Read, Outcome::File(b"x".to_vec())),
         (b"deep/../../a.txt".to_vec(), OpenHow::Read, a()),
+        // Only files and directories open.
+        (b"pipe".to_vec(), OpenHow::Read, refused(Error::NotAFile)),
+        (b"to-pipe".to_vec(), OpenHow::Read, refused(Error::NotAFile)),
+        (b"pipe".to_vec(), OpenHow::Directory, refused(Error::NotADirectory)),
+        (b"pipe".to_vec(), OpenHow::Create, refused(Error::Exists)),
+        (b"pipe/x".to_vec(), OpenHow::Read, refused(Error::NotADirectory)),
     ]
 }
 
 /// Paths that leave their root, and paths that stay: `..`, absolute paths,
 /// symbolic links out and in, a loop, forty links and one more, a dangling
-/// link, a final `/`, names and paths too long.
+/// link, a final `/`, names and paths too long; and a FIFO, which opens as
+/// no file.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Escapes {
     pub outcomes: Vec<(Vec<u8>, OpenHow, Outcome)>,
@@ -689,6 +698,8 @@ pub fn escapes<B: Backend>(backend: &mut B) -> Escapes {
         Item::directory(b"sub/deeper"),
         Item::link(b"deep", b"sub/deeper"),
         Item::file(b"sub/x", b"x"),
+        Item::fifo(b"pipe"),
+        Item::link(b"to-pipe", b"pipe"),
     ];
     // A chain of links, `l41` to `l1` and on to `a.txt`.
     let mut tree = tree.to_vec();

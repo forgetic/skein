@@ -458,7 +458,8 @@ pub(crate) fn unsubmitted(result: Result<Done, kernel::Error>) -> bool {
             | kernel::Error::ReadOnly
             | kernel::Error::TooManyLinks
             | kernel::Error::NameTooLong
-            | kernel::Error::Escape,
+            | kernel::Error::Escape
+            | kernel::Error::NotAFile,
         ) => unreachable!("a cancel fails only too late or unsubmitted (kernel.md, 5)"),
     }
 }

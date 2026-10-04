@@ -256,6 +256,7 @@ fn named(op: &Op) -> &'static [Error] {
             Error::TooManyLinks,
             Error::NameTooLong,
             Error::Escape,
+            Error::NotAFile,
             Error::TooManyOpenFiles,
         ],
         Op::Read { .. } => &[Error::IsADirectory],
@@ -318,7 +319,7 @@ const SOCKETS_ERRORS: [Error; 9] = [
     Error::Cancelled,
 ];
 
-const FILES_ERRORS: [Error; 11] = [
+const FILES_ERRORS: [Error; 12] = [
     Error::NotFound,
     Error::Exists,
     Error::NotADirectory,
@@ -330,6 +331,7 @@ const FILES_ERRORS: [Error; 11] = [
     Error::TooManyLinks,
     Error::NameTooLong,
     Error::Escape,
+    Error::NotAFile,
 ];
 
 #[test]

@@ -97,3 +97,18 @@ fn a_moved_directory_finds_its_new_parent_by_dot_dot() {
     assert_eq!(machine.read(mark, 0, 8).unwrap(), b"here");
     assert_eq!(machine.rename(root, b"to", to, b"x"), Err(Refusal::Beneath));
 }
+
+/// A device opens as no file, as on a filesystem not mounted `nodev`, and
+/// lists as itself; a FIFO likewise.
+#[test]
+fn a_device_and_a_fifo_open_as_no_file() {
+    let (mut machine, root) = machine(&[Item::device(b"null"), Item::fifo(b"pipe")]);
+    assert_eq!(machine.open(root, b"null", How::Read), Err(Refusal::NotAFile));
+    assert_eq!(machine.open(root, b"pipe", How::Read), Err(Refusal::NotAFile));
+    assert_eq!(machine.open(root, b"pipe", How::Directory), Err(Refusal::NotADirectory));
+    let listed = machine.list(root, 8, 255).unwrap();
+    let kinds: Vec<_> = listed.into_iter().map(|(is, _)| is).collect();
+    assert_eq!(kinds, [Is::Device, Is::Fifo]);
+    machine.remove(root, b"null", false).unwrap();
+    machine.close(root);
+}

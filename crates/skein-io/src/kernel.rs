@@ -153,9 +153,14 @@
 //!   fail with `NotFound`.
 //! - **A file operation completes by itself, promptly:** none waits on a
 //!   peer, and io never cancels one.
-//! - **What lies beneath a root** is files, directories and symbolic links.
-//!   Anything else (a FIFO, a device) is outside the contract: opening one
-//!   may block.
+//! - **Only files and directories open.** An `Open` of anything else beneath
+//!   a root (a FIFO, a device, a socket) fails with `NotAFile`: the backend
+//!   opens without blocking and never as a controlling terminal
+//!   (`O_NONBLOCK | O_NOCTTY`), looks at what it opened, and closes what is
+//!   neither, so no `Read` ever waits on a FIFO's writer. A device's own
+//!   `open` may still do something; roots belong on a filesystem mounted
+//!   `nodev`, where the kernel refuses a device with `Permission`. A file
+//!   opened is blocking again for its `Read`s and `Write`s.
 //!
 //! The errors each operation names, beyond `NoBufferSpace`,
 //! `InvalidArgument` and `Other`, which any operation but `Cancel` may
@@ -165,7 +170,7 @@
 //! | Op | Errors |
 //! |---|---|
 //! | the socket operations, and `Close` | any, but `TooLate` and the files' errors below |
-//! | `Open` | `NotFound`, `Exists`, `NotADirectory`, `IsADirectory`, `Permission`, `NoSpace`, `ReadOnly`, `TooManyLinks`, `NameTooLong`, `Escape`, `TooManyOpenFiles` |
+//! | `Open` | `NotFound`, `Exists`, `NotADirectory`, `IsADirectory`, `Permission`, `NoSpace`, `ReadOnly`, `TooManyLinks`, `NameTooLong`, `Escape`, `NotAFile`, `TooManyOpenFiles` |
 //! | `Read` | `IsADirectory` |
 //! | `Write` | `NoSpace`, `ReadOnly` |
 //! | `Sync` | `NoSpace` |
@@ -209,8 +214,9 @@
 //! descriptors stay open until the process ends.
 //!
 //! Backend defaults, not records, until a service pulls one: every
-//! descriptor is close-on-exec; a new file is made `0o666` and a new
-//! directory `0o777`, less the umask; a socket that binds gets `SO_REUSEADDR`;
+//! descriptor is close-on-exec; an `Open` neither blocks nor takes a
+//! controlling terminal; a new file is made `0o666` and a new directory
+//! `0o777`, less the umask; a socket that binds gets `SO_REUSEADDR`;
 //! every IPv6 socket gets `IPV6_V6ONLY`, so families never mix: its `Bind`
 //! of an IPv4-mapped address fails with `InvalidArgument`, its `Connect`
 //! to one with `Unreachable`; connected and accepted sockets get
@@ -429,7 +435,8 @@ pub enum Kind {
     Directory,
     /// Seen by `List` only: an `Open` follows a symbolic link.
     Symlink,
-    /// Anything else: a FIFO, a socket, a device.
+    /// Anything else: a FIFO, a socket, a device. Seen by `List` only: an
+    /// `Open` of one fails with `NotAFile`.
     Other,
 }
 
@@ -625,6 +632,11 @@ pub enum Error {
     /// answers). `EXDEV` on a `Rename`, the two directories on different
     /// filesystems, is `Other`.
     Escape,
+    /// `Open`: the path names neither a file nor a directory, but a FIFO, a
+    /// device or a socket, which the backend refuses once it has opened it,
+    /// or, for a socket or a device with no driver, the kernel refuses
+    /// (`ENXIO`).
+    NotAFile,
     /// Any operation: the record was one the kernel refuses, such as `Listen`
     /// on a connected socket, or a `Rename` of a directory beneath itself
     /// (`EINVAL`, `EAFNOSUPPORT`). A bug in io, reported rather than
@@ -846,7 +858,8 @@ fn fails_a_cancel(error: Error) -> bool {
         | Error::ReadOnly
         | Error::TooManyLinks
         | Error::NameTooLong
-        | Error::Escape => false,
+        | Error::Escape
+        | Error::NotAFile => false,
     }
 }
 
@@ -876,6 +889,7 @@ fn fails_a_cancel_only(error: Error) -> bool {
         | Error::TooManyLinks
         | Error::NameTooLong
         | Error::Escape
+        | Error::NotAFile
         | Error::InvalidArgument
         | Error::Other(_) => false,
     }
@@ -894,7 +908,8 @@ fn names_a_file(error: Error) -> bool {
         | Error::ReadOnly
         | Error::TooManyLinks
         | Error::NameTooLong
-        | Error::Escape => true,
+        | Error::Escape
+        | Error::NotAFile => true,
         Error::Refused
         | Error::Reset
         | Error::BrokenPipe
@@ -917,7 +932,7 @@ fn names_a_file(error: Error) -> bool {
 fn fails_on_files(op: Files, error: Error) -> bool {
     match error {
         Error::NoBufferSpace | Error::InvalidArgument | Error::Other(_) => true,
-        Error::TooManyOpenFiles | Error::Escape => op == Files::Open,
+        Error::TooManyOpenFiles | Error::Escape | Error::NotAFile => op == Files::Open,
         Error::NotFound | Error::NotADirectory | Error::NameTooLong => {
             among(op, &[Files::Open, Files::Rename, Files::Remove, Files::MakeDirectory, Files::List])
         }

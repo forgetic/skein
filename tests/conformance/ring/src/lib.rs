@@ -9,6 +9,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
+use std::process::Command;
 
 use skein_conformance::{Backend, Item, Made};
 use skein_io::kernel::{Complete, Fd, Submit};
@@ -125,12 +126,20 @@ impl Backend for Ring {
                 Made::File(bytes) => fs::write(&path, bytes).expect("a file laid"),
                 Made::Directory => fs::create_dir(&path).expect("a directory laid"),
                 Made::Link(target) => symlink(OsStr::from_bytes(target), &path).expect("a symbolic link laid"),
+                // No FIFO without libc's mkfifo, which is unsafe: the
+                // program does it.
+                Made::Fifo => {
+                    let made = Command::new("mkfifo").arg(&path).status().expect("mkfifo runs");
+                    assert!(made.success(), "a FIFO laid");
+                }
             }
         }
         // Modes last, from the deepest, so that none stops the laying.
         for item in tree.iter().rev() {
             match item.made {
-                Made::File(_) | Made::Directory => mode(&root.join(OsStr::from_bytes(&item.path)), item.mode),
+                Made::File(_) | Made::Directory | Made::Fifo => {
+                    mode(&root.join(OsStr::from_bytes(&item.path)), item.mode);
+                }
                 Made::Link(_) => {}
             }
         }

@@ -117,6 +117,7 @@ impl Backend for Simulated {
                 Made::File(bytes) => skein_fake_machine::Made::File(bytes.clone()),
                 Made::Directory => skein_fake_machine::Made::Directory,
                 Made::Link(target) => skein_fake_machine::Made::Link(target.clone()),
+                Made::Fifo => skein_fake_machine::Made::Fifo,
             };
             items.push(skein_fake_machine::Item { path: item.path.clone(), made, mode: item.mode });
         }

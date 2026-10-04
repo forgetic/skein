@@ -112,6 +112,8 @@ pub enum Made {
     Directory,
     /// A symbolic link, to the path it holds.
     Link(Vec<u8>),
+    /// A FIFO.
+    Fifo,
 }
 
 impl Item {
@@ -131,6 +133,12 @@ impl Item {
     #[must_use]
     pub fn link(path: &[u8], target: &[u8]) -> Item {
         Item { path: path.to_vec(), made: Made::Link(target.to_vec()), mode: 0o777 }
+    }
+
+    /// A FIFO, mode `0o644`.
+    #[must_use]
+    pub fn fifo(path: &[u8]) -> Item {
+        Item { path: path.to_vec(), made: Made::Fifo, mode: 0o644 }
     }
 
     /// The same, with `mode`.

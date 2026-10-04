@@ -242,9 +242,20 @@ documentation, with each operation's errors; the decisions behind it:
   be set back after them.
 - **Files complete promptly and are never cancelled.** No file operation
   waits on a peer, so io waits for each, as it does a `Socket` or a
-  `Close`, and a `Cancel` of one is a broken invariant. What lies beneath
-  a root is files, directories and links: a FIFO's `Open` would block,
-  and is outside the contract.
+  `Close`, and a `Cancel` of one is a broken invariant.
+- **Only files and directories open.** A FIFO beneath a root opened to
+  read opens at once, and its first `Read` then waits for a writer's
+  bytes for good, which nothing above can stop. So every `Open` goes down
+  with `O_NONBLOCK | O_NOCTTY`, and the ring stats what it opened, at once,
+  in its own call, as a `List` makes its own: anything but a regular file
+  or a directory (a FIFO, a device) is closed and answered `NotAFile`,
+  and a regular file is made blocking again, so that io_uring sends a read
+  it cannot do at once to its worker rather than answer `EAGAIN`. A
+  socket, or a device with no driver, the kernel itself refuses (`ENXIO`,
+  `NotAFile` too). A device's own `open` may still act (a tape rewinds),
+  so roots belong on filesystems mounted `nodev`, where the kernel refuses
+  every device with `Permission`; the shell's startup says so
+  (shell.md, 6).
 - **Errors are named per operation,** on a table the module documentation
   keeps and `Complete::is_valid` checks: an operation on files answers its
   own errors, never a socket's or `Cancelled`, and an operation on sockets
@@ -319,7 +330,8 @@ for its backend.
   replaces a file whole; removals of files, directories, a link and a file
   open; new directories, and one removed while open; listings whole, one
   entry at a time, and cut short by long names; a root beneath a root;
-  thirty-nine paths that leave their root or stay beneath it; and what the
+  forty-four paths that leave their root, stay beneath it, or name a FIFO,
+  which opens as no file; and what the
   owner may not do. Each names every error its operations can be made to
   answer on a healthy scratch directory, and, where two could answer, the
   one Linux checks first: a removed directory before a name's length, a
@@ -343,11 +355,6 @@ for its backend.
 
 - **Fixed files** change what an `Fd` names: a slot in the ring's table
   instead of a descriptor. Decide when it has been measured.
-- **What else lies beneath a root.** An `Open` of a FIFO blocks until a
-  writer comes, which no deadline above can stop, since io never cancels
-  a file's operation. If a service's roots may hold one, the backend opens
-  with `O_NONBLOCK`, or io refuses what a `Stat` says is neither a file
-  nor a directory.
 
 ## 10. Not built yet
 
