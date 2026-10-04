@@ -1,0 +1,5 @@
+# Written by hand: a response a broken or hostile server sends.
+# Fields and no blank line: the head limit stops it before the fields' count
+# does.
+limits headers 1024
+failed head-too-long

@@ -557,6 +557,7 @@ impl Below<'_> {
                 assert_eq!(until, QUOTE, "a scan is to a string's quote");
                 max
             }
+            Read::Line { .. } => panic!("the tokenizer scans to a string's quote, not to a line's end: {read:?}"),
         };
         assert!(!closing, "a close demands nothing");
         assert!(self.demand.is_none(), "one demand at a time: {read:?} over {:?}", self.demand);
@@ -576,7 +577,7 @@ fn read_len(read: Read, bytes: &[u8]) -> usize {
     match read {
         Read::Nothing => 0,
         Read::Fill(n) => usize::try_from(n).expect("fits a usize"),
-        Read::Scan { max, .. } => {
+        Read::Scan { max, .. } | Read::Line { max } => {
             assert!(bytes.len() <= usize::try_from(max).expect("fits a usize"), "a scan delivers at most its maximum");
             bytes.len()
         }

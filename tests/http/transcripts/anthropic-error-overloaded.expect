@@ -1,0 +1,15 @@
+# Written by hand after the published format of Anthropic's Messages API
+# (streaming, server-sent events): no real response can be captured offline.
+# Drafted by the reference readers, then checked by hand.
+status HTTP/1.1 529
+header Date "Sat, 03 Oct 2026 10:12:44 GMT"
+header Content-Type "application/json"
+header Content-Length "120"
+header Connection "keep-alive"
+header x-should-retry "true"
+header request-id "req_011CSHoEeqs5C35K2UUqR7Fy"
+header Server "cloudflare"
+header CF-RAY "9871e0b5cf6e2a1d-LHR"
+framing length 120
+body "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"},\"request_id\":\"req_011CSHoEeqs5C35K2UUqR7Fy\"}\n"
+done keep

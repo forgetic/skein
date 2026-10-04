@@ -33,6 +33,14 @@ pub fn reference(stream: &[u8], read: Read) -> Option<usize> {
             }
             (stream.len() >= max).then_some(max)
         }
+        Read::Line { max } => {
+            let max = usize::try_from(max).expect("a u32 fits a usize");
+            let window = &stream[..stream.len().min(max)];
+            match window.iter().position(|&byte| byte == b'\r' || byte == b'\n') {
+                Some(at) => Some(at + 1),
+                None => (stream.len() >= max).then_some(max),
+            }
+        }
     }
 }
 

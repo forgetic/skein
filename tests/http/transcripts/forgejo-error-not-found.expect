@@ -1,0 +1,14 @@
+# Written by hand after the published format of Forgejo's API (/api/swagger)
+# and Go's net/http: no real response can be captured offline.
+# Drafted by the reference readers, then checked by hand.
+status HTTP/1.1 404
+header Cache-Control "max-age=0, private, must-revalidate, no-transform"
+header Content-Type "application/json;charset=utf-8"
+header Vary "Origin"
+header X-Content-Type-Options "nosniff"
+header X-Frame-Options "SAMEORIGIN"
+header Date "Sat, 03 Oct 2026 10:12:44 GMT"
+header Content-Length "102"
+framing length 102
+body "{\"errors\":null,\"message\":\"The target couldn't be found.\",\"url\":\"https://git.example.org/api/swagger\"}\n"
+done keep

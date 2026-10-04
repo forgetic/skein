@@ -15,17 +15,19 @@
 //!
 //! # A step's own
 //!
-//! What a step hands out in its requests is their receivers' to count: a
-//! payload moved into a request is no longer the step's (programming-model.md,
-//! 6.2), and the layer that holds it next counts it in its own worst case. So
-//! a step is checked at the most it held of its own: at each moment, what was
-//! live less what it had handed out by then. Which blocks it handed out is
-//! known only once the test drops its requests, after the step; so the meter
-//! numbers every allocation, in a header before the block, and keeps the
-//! moments the step's heap reached a new high, by the allocation that reached
-//! it (no other moment can hold more of the step's own, as what it hands out
-//! only grows). A block freed after the step was handed out by each of those
-//! moments that its number is no later than.
+//! An input moved into a step was counted by whoever made it; the step's
+//! bound covers what it keeps and what it allocates (testing.md, 5). What a
+//! step hands out in its requests is no longer its own (programming-model.md,
+//! 6.2), but the input of the step that takes it, which a test checks
+//! against its bound and that input. So a step is checked at the most it held
+//! of its own: at each moment, what was live less what it had handed out by
+//! then. Which blocks it handed out is known only once the test drops its
+//! requests, after the step; so the meter numbers every allocation, in a
+//! header before the block, and keeps the moments the step's heap reached a
+//! new high, by the allocation that reached it (no other moment can hold more
+//! of the step's own, as what it hands out only grows). A block freed after
+//! the step was handed out by each of those moments that its number is no
+//! later than.
 //!
 //! # Around a call
 //!

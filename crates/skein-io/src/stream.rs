@@ -864,7 +864,7 @@ fn deliver(
     let end = match open.reader {
         Reader::Ended => match open.demand.read {
             Read::Nothing => open.intake.is_empty(),
-            Read::Fill(_) | Read::Scan { .. } => true,
+            Read::Fill(_) | Read::Scan { .. } | Read::Line { .. } => true,
         },
         Reader::Receiving(_) | Reader::Full | Reader::Stalled | Reader::Told => false,
     };
@@ -898,10 +898,17 @@ fn demand(open: &mut Open, read: Read, room: u32, id: Id<Entity>, env: &Env<Limi
             );
             false
         }
+        Read::Line { max } => {
+            assert!(
+                max <= cap && max > 0,
+                "a scan within the intake's cap and long enough for its line end (Limits::largest_read)"
+            );
+            false
+        }
     };
     let outstanding = match open.demand.read {
         Read::Nothing => open.demand.room > 0,
-        Read::Fill(_) | Read::Scan { .. } => true,
+        Read::Fill(_) | Read::Scan { .. } | Read::Line { .. } => true,
     };
     assert!(
         withdrawal || !outstanding,

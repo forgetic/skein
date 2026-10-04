@@ -1,0 +1,6 @@
+HTTP/1.1 100 Continue
+
+HTTP/1.1 201 Created
+Location: /v1/files/42
+Content-Length: 0
+

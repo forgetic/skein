@@ -17,9 +17,10 @@ fn random_splits_demands_and_caps_meet_what_the_reference_meets() {
         }
         let mut demands = Vec::new();
         for _ in 0..rng.between(1, 40) {
-            let read = match rng.below(5) {
+            let read = match rng.below(6) {
                 0 => Read::Nothing,
                 1 => Read::Fill(u32::try_from(rng.below(u64::from(capacity) + 1)).unwrap()),
+                2 => Read::Line { max: u32::try_from(rng.between(1, u64::from(capacity))).unwrap() },
                 _ => {
                     let until = delimiters[usize::try_from(rng.below(4)).unwrap()];
                     let shortest = u64::try_from(until.as_bytes().len()).unwrap();
