@@ -72,6 +72,10 @@ pub struct Settings {
     /// demand, as a machine stacked on the reply does when it closes, and
     /// closes the server a while later.
     pub withdraw_reply: u32,
+    /// Per mille, per piece of the body: how likely the side above had
+    /// withdrawn its demand before the piece reached it, so that the two
+    /// cross (lib.md, 7). Drawn only for neighbours that withdraw.
+    pub cross: u32,
     /// Whether the client sends each request only once the last exchange is
     /// over, rather than pipelining them.
     pub patient: bool,
@@ -116,6 +120,7 @@ impl Settings {
             reads: if rng.chance(300) { Reads::Bytes } else { Reads::Any },
             withdraw: if rng.chance(300) { draw(rng, 0, 200) } else { 0 },
             withdraw_reply: 0,
+            cross: 0,
             patient: rng.chance(500),
             patience: rng.between(8, 400),
             cut: None,
@@ -132,6 +137,9 @@ impl Settings {
     pub fn chaotic(rng: &mut Rng, limits: Limits, len: usize) -> Settings {
         let mut settings = Settings::calm(rng, limits);
         let span = 6 * len as u64 + 64;
+        if settings.withdraw > 0 && rng.chance(300) {
+            settings.cross = draw(rng, 0, 300);
+        }
         if rng.chance(150) {
             settings.withdraw_reply = draw(rng, 0, 100);
         }
@@ -214,6 +222,8 @@ pub enum When {
     Discarding,
     /// While a demand of its on the body is outstanding.
     Midway,
+    /// At once, never reading the body, which it discards a while later.
+    Untouched,
 }
 
 /// A plan drawn at random: a response of [`requests::response`], given at
@@ -226,6 +236,7 @@ pub fn plan(rng: &mut Rng) -> Plan {
         1 => When::Midway,
         2 => When::Partway(draw(rng, 0, 4)),
         3 => When::Discarding,
+        4 => When::Untouched,
         _ => When::AfterBody,
     };
     Plan { response, reply, when }
@@ -332,6 +343,11 @@ pub struct Fell {
     /// The side above withdrew the reply's demand as it closed, as a
     /// machine stacked on the reply does.
     pub reply_withdrawn: bool,
+    /// A withdrawal crossed the body's piece it would have read.
+    pub crossed_withdrawal: bool,
+    /// A body the side above never touched, discarded a while after the
+    /// response.
+    pub untouched: bool,
 }
 
 /// Runs the world over `client`, the client's bytes for every request in
@@ -375,6 +391,7 @@ pub fn run(client: &[u8], plans: &[Plan], settings: &Settings, seed: u64) -> Run
             closed: false,
             spent: false,
             must_close: false,
+            crossing: false,
         },
         fell: Fell::default(),
         iteration: 0,
@@ -658,6 +675,8 @@ struct Above<'a> {
     /// The side above withdrew the reply's demand, as a machine stacked on
     /// it does when it closes: it closes the server next.
     must_close: bool,
+    /// A withdrawal the side above sent before the piece now reaching it.
+    crossing: bool,
 }
 
 /// The side above's side of an exchange.
@@ -676,6 +695,8 @@ struct Exchange {
     body: Face,
     /// How many pieces of the body went up.
     pieces: u32,
+    /// When a body never touched is discarded.
+    discard_at: u64,
     responded: bool,
     reply: Reply,
     /// How much of the reply went down.
@@ -974,7 +995,7 @@ impl World<'_> {
         let plan_when = exchange.plan.when;
         if !exchange.responded {
             let ready = match plan_when {
-                When::First => true,
+                When::First | When::Untouched => true,
                 When::Partway(after) => exchange.pieces >= after || exchange.body == Face::Over,
                 When::Midway => matches!(exchange.body, Face::Demanded(_) | Face::Over),
                 When::AfterBody | When::Discarding => exchange.body == Face::Over,
@@ -991,13 +1012,19 @@ impl World<'_> {
             }
             return;
         }
-        // Responded: the body, if still open, is read to its end or
-        // discarded; the reply is written.
+        // Responded: the body, if still open, is read to its end, or
+        // discarded late if never touched; one withdrawn the server ends
+        // itself, once it is all read below or given up.
         match exchange.body {
+            Face::Idle if plan_when == When::Untouched => {
+                if self.iteration >= exchange.discard_at {
+                    self.fell.untouched = true;
+                    self.discard();
+                }
+            }
             Face::Idle => self.demand_body(),
-            Face::Withdrawn => self.discard(),
             Face::Demanded(_) => self.maybe_withdraw(),
-            Face::Over => {}
+            Face::Withdrawn | Face::Over => {}
         }
         self.reply_acts();
     }
@@ -1058,10 +1085,12 @@ impl World<'_> {
             return;
         }
         assert!(refusal.is_none(), "a response the reference refuses: {refusal:?}");
+        let late = self.iteration + self.rng.between(1, 64);
         if let Some(exchange) = self.above.exchange.as_mut()
             && !exchange.terminal
         {
             exchange.reply = if sends { Reply::Idle } else { Reply::None };
+            exchange.discard_at = late;
         }
     }
 
@@ -1153,6 +1182,20 @@ impl World<'_> {
             self.send(request, stopping, ending);
         }
         self.check_waiting();
+        // A withdrawal the side above sent before the piece it would have
+        // read reached it: the server takes it after the piece.
+        if self.above.crossing {
+            self.above.crossing = false;
+            if let Some(exchange) = &mut self.above.exchange
+                && !exchange.terminal
+                && exchange.body == Face::Idle
+                && self.above.closing.is_none()
+            {
+                exchange.body = Face::Withdrawn;
+                self.fell.crossed_withdrawal = true;
+                self.down(Request::Body(Down::Demand { read: Read::Nothing, room: 0 }));
+            }
+        }
     }
 
     /// An event for the side above, checked against its contract.
@@ -1178,6 +1221,7 @@ impl World<'_> {
                     version: call.version,
                     body: Face::Idle,
                     pieces: 0,
+                    discard_at: 0,
                     responded: false,
                     reply: Reply::None,
                     written: 0,
@@ -1196,6 +1240,7 @@ impl World<'_> {
                 assert!(delivers(read, &bytes), "exactly what the demand reads: {read:?}, {}", bytes.escape_ascii());
                 exchange.body = Face::Idle;
                 exchange.pieces += 1;
+                self.above.crossing |= self.rng.chance(self.settings.cross);
                 self.current().expect("the exchange in progress").body.extend_from_slice(&bytes);
             }
             Event::Body(Up::End) => {

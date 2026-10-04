@@ -257,6 +257,23 @@ fn a_withdrawal_or_a_discard_that_crosses_the_body_s_end_is_dropped() {
 }
 
 #[test]
+fn a_withdrawal_that_crosses_the_body_s_last_bytes_then_a_response_is_done() {
+    // The side above demanded the whole body, and withdrew as the bytes
+    // that met it went up: the body is all read below, and it reads no more.
+    let mut machine = Machine::new(LIMITS);
+    machine.call(POST);
+    machine.down(Request::Body(Down::Demand { read: Read::Fill(8), room: 0 }));
+    let (events, _) = machine.bytes(b"12345678");
+    assert_eq!(events, [Event::Body(Up::Bytes(boxed(b"12345678")))]);
+    let (events, requests) = machine.down(Request::Body(Down::Demand { read: Read::Nothing, room: 0 }));
+    assert!(events.is_empty() && requests.is_empty());
+    let (events, requests) = machine.down(Request::Respond(response(204, Body::None)));
+    assert_eq!(events, [Event::Done(Reuse::Keep)], "the body is over: nothing is left to discard");
+    assert_eq!(requests.len(), 1, "the head");
+    assert_eq!(machine.server.waiting(), Waiting::Next);
+}
+
+#[test]
 #[should_panic(expected = "a Next while a request is in progress")]
 fn one_request_at_a_time() {
     let mut machine = Machine::new(LIMITS);

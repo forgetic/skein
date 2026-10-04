@@ -142,6 +142,9 @@ enum Routed {
     TokenizerBelow(Down),
     Writer(writer::Event),
     WriterBelow(Down),
+    /// The rest of the body discarded, once what the tokenizer emitted with
+    /// its close, a withdrawal among it, is routed.
+    Discard,
 }
 
 type Work = VecDeque<Routed>;
@@ -410,6 +413,11 @@ impl End {
                 Routed::TokenizerBelow(request) => self.server_down(server::Request::Body(request), &mut work),
                 Routed::Writer(event) => self.writer_event(event),
                 Routed::WriterBelow(request) => self.server_down(server::Request::Reply(request), &mut work),
+                Routed::Discard => {
+                    if self.exchange.is_some() {
+                        self.server_down(server::Request::Discard, &mut work);
+                    }
+                }
             }
         }
         panic!("routing settles in a few calls");
@@ -488,7 +496,13 @@ impl End {
                 self.seen.requests.push(std::mem::take(&mut self.tokens));
                 self.tokenizer_down(json::Request::Close, work);
             }
-            json::Event::Closed => self.tokenizer = None,
+            json::Event::Closed => {
+                self.tokenizer = None;
+                // What the tokenizer left of the body, if it stopped short of
+                // its end, is discarded: the exchange is done only once the
+                // body is (http.md, 5.3).
+                work.push_back(Routed::Discard);
+            }
         }
     }
 

@@ -177,7 +177,10 @@ pub enum Request {
     Next,
     /// The response's head, for the call in progress, once: written and
     /// sent below once the request body is all read below, or given up. A
-    /// refused one writes nothing, and `Refused` answers it.
+    /// refused one writes nothing, and `Refused` answers it. `Done` follows
+    /// once the response is all queued, and only once the side above read
+    /// the body's `End`, discarded it, or withdrew from a body all read
+    /// below: a side above that never reads the body discards it.
     Respond(Response),
     /// The request body's stream, read (lib.md, 7): a demand of at most
     /// [`Limits::read`] and no room, or its withdrawal, after which the
@@ -222,7 +225,10 @@ pub enum Event {
     /// was: the side above may respond again.
     Refused(Refusal),
     /// For a `Call`: the exchange is over, and whether the connection may
-    /// carry another. If not, the server waits for its close.
+    /// carry another. If not, the server waits for its close. It waits for
+    /// the response all queued below and for the request body's `End`, read
+    /// by the side above, or its `Discard`, or a withdrawal once the body is
+    /// all read below, or the body given up by a response that came first.
     Done(Reuse),
     /// For a `Call`, or for a `Next` that no `Call` answered: the exchange
     /// failed, or the request was rejected with an answer of the server's
@@ -1169,12 +1175,15 @@ fn settle(
         if let Some(up) = up {
             above.push(Event::Body(up));
         }
-        match pumped {
-            Pumped::Open => {}
-            Pumped::Over => {
-                exchange.body = None;
-                body::drain(intake);
-            }
+        // A body the side above withdrew, all read below, is over as well:
+        // it reads no more, and nothing is left for a discard to read.
+        let over = match pumped {
+            Pumped::Over => true,
+            Pumped::Open => incoming.face == Face::Withdrawn && incoming.rest.is_over(),
+        };
+        if over {
+            exchange.body = None;
+            body::drain(intake);
         }
     }
     if exchange.aside == Aside::Held && body_over_below(&exchange) {
