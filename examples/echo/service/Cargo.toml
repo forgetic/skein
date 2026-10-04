@@ -1,0 +1,16 @@
+[package]
+name = "skein-echo-service"
+description = "The echo example's service: its iterate over io, the protocol layer and the domain, its limits and the sum of their worst cases"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-io.workspace = true
+skein-echo-domain.workspace = true
+skein-echo-protocol.workspace = true
+
+[lints]
+workspace = true
