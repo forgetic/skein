@@ -201,6 +201,7 @@ dependencies = [
  "skein-json",
  "skein-json-world",
  "skein-lib",
+ "skein-world",
 ]
 
 [[package]]

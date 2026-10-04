@@ -4,8 +4,9 @@
 //! writer on its response body, each event's data a document the JSON
 //! writer wrote; routed as a connection routes between its machines, each
 //! call held to its `MAX_OUT`; and a scripted user at the top, which reads
-//! each request and answers with a stream of events, or at once with an
-//! error, and closes when it is done or when it is told to.
+//! each request, slowly or not, and answers with a stream of events, or at
+//! once with an error, on a connection kept for the next, and closes when
+//! it is done or when it is told to.
 
 use std::collections::VecDeque;
 
@@ -39,20 +40,33 @@ impl Limits {
     }
 }
 
-/// An event as the server's user writes it: its type, and its data.
-pub type Written = (Box<[u8]>, Box<[u8]>);
+/// An event as the server's user writes it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Item {
+    pub name: Box<[u8]>,
+    /// A document the JSON writer wrote.
+    pub data: Box<[u8]>,
+    /// Its id, if it has one: what the reader's last event ID becomes.
+    pub id: Option<Box<[u8]>>,
+    /// Its reconnection time, if it sets one.
+    pub retry: Option<u64>,
+}
 
 /// What the server's user does.
 #[derive(Clone, Debug)]
 pub struct Script {
-    /// The events it answers with: each one's type and data, a document the
-    /// JSON writer wrote.
-    pub events: Vec<Written>,
+    /// The events it answers each request with, in the order the requests
+    /// come.
+    pub answers: Vec<Vec<Item>>,
     /// A comment to keep the stream alive before every this many events.
     pub ping: Option<usize>,
-    /// An error it answers with at once, before it reads the body: a status
-    /// and a document.
+    /// An error it answers the first request with at once, before it reads
+    /// the body: a status and a document.
     pub early: Option<(u16, Box<[u8]>)>,
+    /// Once it has this many tokens of the first request, the user stops
+    /// asking for the next for this many iterations: a slow consumer of
+    /// the upload.
+    pub stall: Option<(usize, u64)>,
     /// From this iteration on, the user closes, whatever its stack is
     /// doing.
     pub close: Option<u64>,
@@ -63,10 +77,19 @@ pub struct Script {
 pub struct Seen {
     /// The tokens of each request's body.
     pub requests: Vec<Vec<Token>>,
-    /// How many events went down whole, `Sent`.
+    /// How many calls came.
+    pub calls: usize,
+    /// How many events went down whole, `Sent`, in all.
     pub sent: usize,
     /// The bytes of each event as the writer frames it, for those sent.
     pub framed: u64,
+    /// Since when the event the user handed the writer has waited to go
+    /// down whole, if one has.
+    pub writing_since: Option<u64>,
+    /// When the user stopped asking for the request's tokens, if it did.
+    pub stalled: Option<u64>,
+    /// When it asked again.
+    pub resumed: Option<u64>,
     /// How the stream's failure reached the writer, if it did.
     pub writer_failed: bool,
     /// Each terminal event and each answer to a `Next` with no call.
@@ -109,7 +132,7 @@ struct Exchange {
     /// The next event to write.
     next: usize,
     /// What the writer is writing, if anything.
-    writing: Option<Item>,
+    writing: Option<Writing>,
     /// The event a comment went before last.
     pinged: Option<usize>,
     finished: bool,
@@ -119,7 +142,7 @@ struct Exchange {
 
 /// What the writer writes for the user.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Item {
+enum Writing {
     Comment,
     /// The event at this index.
     Event(usize),
@@ -178,14 +201,8 @@ impl End {
             && self.server.waiting() == server::Waiting::Nothing
     }
 
-    /// Whether the writer waits for room below: the client is not reading.
-    #[must_use]
-    pub fn writer_blocked(&self) -> bool {
-        self.writer.as_ref().is_some_and(|writer| writer.waiting() == writer::Waiting::Room)
-    }
-
-    /// The user's turn at `now`: the next request, the response, the next
-    /// event, or the close.
+    /// The user's turn at `now`: the next request, the next token of one,
+    /// the response, the next event, or the close.
     pub fn act(&mut self, now: u64) {
         self.now = now;
         if self.seen.closed {
@@ -196,6 +213,19 @@ impl End {
             return;
         }
         let mut work = Work::new();
+        if let (Some(from), Some((_, iterations))) = (self.seen.stalled, self.script.stall)
+            && self.seen.resumed.is_none()
+        {
+            if now < from + iterations {
+                return;
+            }
+            self.seen.resumed = Some(now);
+            if self.tokenizer.is_some() {
+                self.tokenizer_down(json::Request::Next, &mut work);
+                self.drain(work);
+                return;
+            }
+        }
         match &mut self.exchange {
             None => {
                 if !self.asked {
@@ -206,7 +236,7 @@ impl End {
             Some(exchange) if exchange.error.is_some() => self.error_acts(&mut work),
             Some(exchange) => {
                 if !exchange.responded {
-                    if self.tokenizer.is_none() && !self.seen.requests.is_empty() {
+                    if self.tokenizer.is_none() && self.seen.requests.len() == self.seen.calls {
                         self.respond(&mut work);
                     }
                 } else if exchange.writing.is_none() && !exchange.finished && self.writer.is_some() {
@@ -235,7 +265,8 @@ impl End {
     fn write_next(&mut self, work: &mut Work) {
         let exchange = self.exchange.as_mut().expect("an exchange");
         let next = exchange.next;
-        if next == self.script.events.len() {
+        let events = &self.script.answers[self.seen.calls - 1];
+        if next == events.len() {
             exchange.finished = true;
             self.writer_down(writer::Request::Finish, work);
             return;
@@ -245,14 +276,16 @@ impl End {
             && exchange.pinged != Some(next)
         {
             exchange.pinged = Some(next);
-            exchange.writing = Some(Item::Comment);
+            exchange.writing = Some(Writing::Comment);
             self.writer_down(writer::Request::Comment(b"ping".as_slice().into()), work);
             return;
         }
-        exchange.writing = Some(Item::Event(next));
+        exchange.writing = Some(Writing::Event(next));
         exchange.next += 1;
-        let (name, data) = &self.script.events[next];
-        let outgoing = Outgoing { name: name.clone(), data: data.clone(), id: None, retry: None };
+        let item = &events[next];
+        let outgoing =
+            Outgoing { name: item.name.clone(), data: item.data.clone(), id: item.id.clone(), retry: item.retry };
+        self.seen.writing_since = Some(self.now);
         self.writer_down(writer::Request::Event(outgoing), work);
     }
 
@@ -302,9 +335,11 @@ impl End {
         self.seen.closed = true;
     }
 
-    /// The stream below's answer to the server, if it has one now; and, once
-    /// the server is closed, an answer to what it withdrew, on its way.
-    pub fn below_acts(&mut self, grant: bool) {
+    /// The stream below's answer to the server at `now`, if it has one;
+    /// and, once the server is closed, an answer to what it withdrew, on its
+    /// way.
+    pub fn below_acts(&mut self, now: u64, grant: bool) {
+        self.now = now;
         let up = if self.seen.closed { self.bottom.late() } else { self.bottom.answer(grant) };
         let Some(up) = up else { return };
         let mut work = Work::new();
@@ -429,11 +464,15 @@ impl End {
             server::Event::Call(call) => {
                 assert_eq!(call.header(b"content-type"), Some(&b"application/json"[..]), "a JSON request");
                 self.asked = false;
-                let error = self.script.early.as_ref().map(|(_, body)| (body.clone(), 0, Reply::Idle));
+                self.seen.calls += 1;
+                assert!(self.seen.calls <= self.script.answers.len(), "a call for each answer the user has");
+                let first = self.seen.calls == 1;
+                let error =
+                    self.script.early.as_ref().filter(|_| first).map(|(_, body)| (body.clone(), 0, Reply::Idle));
                 let early = error.is_some();
                 self.exchange =
                     Some(Exchange { responded: early, next: 0, writing: None, pinged: None, finished: false, error });
-                if let Some((status, body)) = &self.script.early {
+                if let Some((status, body)) = self.script.early.as_ref().filter(|_| first) {
                     let response = Response {
                         status: *status,
                         headers: Box::new([header(b"Content-Type", b"application/json")]),
@@ -490,6 +529,16 @@ impl End {
         match event {
             json::Event::Token(token) => {
                 self.tokens.push(token);
+                // A slow consumer stops asking, once, a while: the server
+                // reads no more of the body meanwhile.
+                if let Some((after, _)) = self.script.stall
+                    && self.seen.stalled.is_none()
+                    && self.seen.requests.is_empty()
+                    && self.tokens.len() >= after
+                {
+                    self.seen.stalled = Some(self.now);
+                    return;
+                }
                 self.tokenizer_down(json::Request::Next, work);
             }
             json::Event::Done | json::Event::Failed(_) => {
@@ -511,10 +560,10 @@ impl End {
         match event {
             writer::Event::Sent => {
                 let exchange = self.exchange.as_mut().expect("an exchange");
-                if let Some(Item::Event(index)) = exchange.writing.take() {
-                    let (name, data) = &self.script.events[index];
-                    self.seen.sent = index + 1;
-                    self.seen.framed += framed_len(name, data);
+                if let Some(Writing::Event(index)) = exchange.writing.take() {
+                    self.seen.sent += 1;
+                    self.seen.framed += framed_len(&self.script.answers[self.seen.calls - 1][index]);
+                    self.seen.writing_since = None;
                 }
             }
             writer::Event::Refused(refusal) => panic!("a sound event refused: {refusal:?}"),
@@ -541,14 +590,17 @@ fn queued<E>(
     }
 }
 
-/// The bytes the writer frames an event of `name` and `data` as, data with
-/// no line ending in it: its type's field, if it has one, its data's field,
-/// and the blank line.
+/// The bytes the writer frames `item` as, its data with no line ending in
+/// it: its type's field, if it has one, its id's and its reconnection
+/// time's, its data's field, and the blank line.
 #[must_use]
-pub fn framed_len(name: &[u8], data: &[u8]) -> u64 {
+pub fn framed_len(item: &Item) -> u64 {
+    let data = &item.data;
     assert!(!data.iter().any(|&byte| byte == b'\r' || byte == b'\n'), "a document the JSON writer wrote is one line");
-    let name = if name.is_empty() { 0 } else { "event: ".len() + name.len() + 1 };
-    (name + "data: ".len() + data.len() + 2) as u64
+    let name = if item.name.is_empty() { 0 } else { "event: ".len() + item.name.len() + 1 };
+    let id = item.id.as_ref().map_or(0, |id| "id: ".len() + id.len() + 1);
+    let retry = item.retry.map_or(0, |retry| "retry: ".len() + retry.to_string().len() + 1);
+    (name + id + retry + "data: ".len() + data.len() + 2) as u64
 }
 
 fn header(name: &[u8], value: &[u8]) -> Header {

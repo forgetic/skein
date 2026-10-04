@@ -1,15 +1,15 @@
 //! Scenarios (testing-strategy.md, 7), in the ends' own terms, from a
-//! seed: the request an LLM client writes and the events a provider
-//! answers with, both JSON the writer writes, with text of every kind in
-//! them; and what each end's user does, for each thing a protocol world
-//! aims at.
+//! seed: the requests an LLM client writes and the events a provider
+//! answers each with, all JSON the writer writes, with text of every kind
+//! in them, now and then an event with an id or a reconnection time; and
+//! what each end's user does, for each thing a protocol world aims at.
 
 use skein_json::Token;
 use skein_lib::Rng;
 
 use crate::client_end;
-use crate::server_end;
-use crate::world::{Expect, Scenario, json_limits};
+use crate::server_end::{self, Item};
+use crate::world::{Expect, Hold, Scenario, json_limits};
 
 fn key(name: &str) -> Token {
     Token::Key(name.as_bytes().into())
@@ -116,33 +116,65 @@ fn written(tokens: &[Token]) -> Box<[u8]> {
     skein_json_world::write(tokens, &json_limits()).expect("a document the writer writes")
 }
 
-/// A scenario from `request`'s and `events`' documents, neither user
-/// stalling nor closing early.
-fn plain(request: Vec<Token>, events: Vec<(Vec<u8>, Vec<Token>)>, rng: &mut Rng) -> Scenario {
-    let mut written_events = Vec::new();
-    for (name, tokens) in &events {
-        written_events.push((name.as_slice().into(), written(tokens)));
+/// A scenario of calls, each `requests`' document answered by the
+/// `answers`' of the same index, neither user stalling nor closing early.
+/// Now and then an event carries an id, which the reader's last event ID
+/// becomes, or a reconnection time.
+fn plain(requests: Vec<Vec<Token>>, answers: Vec<Vec<(Vec<u8>, Vec<Token>)>>, rng: &mut Rng) -> Scenario {
+    let mut items = Vec::new();
+    let mut count = 0;
+    for events in &answers {
+        let mut answer = Vec::new();
+        for (name, tokens) in events {
+            count += 1;
+            let id = if rng.chance(300) { Some(format!("evt_{count}").into_bytes().into()) } else { None };
+            let retry = if rng.chance(100) { Some(rng.below(60_000)) } else { None };
+            answer.push(Item { name: name.as_slice().into(), data: written(tokens), id, retry });
+        }
+        items.push(answer);
     }
     let ping = if rng.chance(300) { Some(usize::try_from(rng.between(1, 5)).expect("fits")) } else { None };
     Scenario {
-        client: client_end::Script { body: written(&request), stall: None, close: None },
-        server: server_end::Script { events: written_events, ping, early: None, close: None },
-        request,
-        events,
+        client: client_end::Script {
+            bodies: requests.iter().map(|request| written(request)).collect(),
+            stall: None,
+            close: None,
+        },
+        server: server_end::Script { answers: items, ping, early: None, stall: None, close: None },
+        requests,
+        answers,
         expect: Expect::Stream,
+        holds: None,
         linger: 0,
     }
+}
+
+/// `calls` streamed answers, of up to `turns` turns and `deltas` deltas.
+fn calls(rng: &mut Rng, calls: u64, turns: u64, deltas: u64) -> Scenario {
+    let mut requests = Vec::new();
+    let mut answers = Vec::new();
+    for _ in 0..calls {
+        let turns = rng.between(1, turns);
+        requests.push(request(rng, turns, 40));
+        let deltas = rng.between(0, deltas);
+        answers.push(events(rng, deltas, 30));
+    }
+    plain(requests, answers, rng)
 }
 
 /// A streamed answer, whole: the request goes up the server's stack and
 /// every event up the client's.
 #[must_use]
 pub fn stream(rng: &mut Rng) -> Scenario {
-    let turns = rng.between(1, 6);
-    let request = request(rng, turns, 40);
-    let deltas = rng.between(0, 30);
-    let events = events(rng, deltas, 30);
-    plain(request, events, rng)
+    calls(rng, 1, 6, 30)
+}
+
+/// Two or three calls, one after another on the connection the last one
+/// kept, each streamed whole through both stacks.
+#[must_use]
+pub fn several(rng: &mut Rng) -> Scenario {
+    let count = rng.between(2, 3);
+    calls(rng, count, 4, 12)
 }
 
 /// A slow reader: the client's user stops reading for a long while, far
@@ -152,9 +184,24 @@ pub fn stream(rng: &mut Rng) -> Scenario {
 pub fn slow_reader(rng: &mut Rng) -> Scenario {
     let request = request(rng, 1, 20);
     let events = events(rng, 120, 40);
-    let mut scenario = plain(request, events, rng);
+    let mut scenario = plain(vec![request], vec![events], rng);
     let after = usize::try_from(rng.between(0, 20)).expect("fits a usize");
     scenario.client.stall = Some((after, rng.between(600, 2_000)));
+    scenario.holds = Some(Hold::Writer);
+    scenario
+}
+
+/// A slow consumer: the server's user stops reading the request a while,
+/// partway through a body far larger than the caps between the ends hold;
+/// the client's upload must stop until it reads again.
+#[must_use]
+pub fn slow_consumer(rng: &mut Rng) -> Scenario {
+    let request = request(rng, 40, 400);
+    let events = events(rng, 4, 20);
+    let mut scenario = plain(vec![request], vec![events], rng);
+    let after = usize::try_from(rng.between(1, 30)).expect("fits a usize");
+    scenario.server.stall = Some((after, rng.between(600, 2_000)));
+    scenario.holds = Some(Hold::Upload);
     scenario
 }
 
@@ -164,7 +211,7 @@ pub fn slow_reader(rng: &mut Rng) -> Scenario {
 #[must_use]
 pub fn early(rng: &mut Rng) -> Scenario {
     let request = request(rng, 40, 400);
-    let mut scenario = plain(request, Vec::new(), rng);
+    let mut scenario = plain(vec![request], vec![Vec::new()], rng);
     let error = vec![
         Token::ObjectStart,
         key("type"),
@@ -185,16 +232,24 @@ pub fn early(rng: &mut Rng) -> Scenario {
 }
 
 /// One end closes partway, the client while the server writes or the
-/// server while the client uploads or reads, at a moment drawn.
+/// server while the client uploads or reads, in one of up to three calls,
+/// at a moment drawn.
 #[must_use]
 pub fn partway(rng: &mut Rng) -> Scenario {
-    let turns = rng.between(1, 20);
-    let request = request(rng, turns, 200);
-    let deltas = rng.between(0, 60);
-    let events = events(rng, deltas, 40);
-    let mut scenario = plain(request, events, rng);
+    let count = rng.between(1, 3);
+    let mut requests = Vec::new();
+    let mut answers = Vec::new();
+    let mut deltas = 0;
+    for _ in 0..count {
+        let turns = rng.between(1, 20);
+        requests.push(request(rng, turns, 200));
+        let these = rng.between(0, 60 / count);
+        deltas += these;
+        answers.push(events(rng, these, 40));
+    }
+    let mut scenario = plain(requests, answers, rng);
     // Within the span a run takes, about a dozen iterations an event.
-    let at = rng.between(0, 100 + 12 * deltas);
+    let at = rng.between(0, 100 * count + 12 * deltas);
     if rng.chance(500) {
         scenario.client.close = Some(at);
     } else {

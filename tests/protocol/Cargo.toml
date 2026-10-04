@@ -10,6 +10,8 @@ publish.workspace = true
 skein-lib.workspace = true
 skein-http.workspace = true
 skein-json.workspace = true
+# The referee's expectations and deadlines.
+skein-world.workspace = true
 # The writer's two passes over a token sequence, for the documents each end
 # writes.
 skein-json-world = { path = "../json" }

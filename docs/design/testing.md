@@ -194,7 +194,7 @@ As of 2026-10-04.
 |---|---|
 | step tests | lib: every container and value type; io: the kernel records' rules, and every cell of its listener and stream; JSON: the tokenizer and the writer; HTTP: the client and the server, the event stream reader and the writer; the echo: its domain, every cell of its connection and listener, its `iterate`, its startup checks, and its fake client |
 | machine worlds | JSON: the tokenizer, with its transcripts, and the writer against it; HTTP: the client and the server, with their transcripts of responses and of requests, and the event stream reader and the writer, the writer read back by the reader |
-| protocol worlds | an LLM client's stack (the HTTP client, the event stream reader, JSON) against a server's (the HTTP server, the event stream writer, JSON), five scenarios |
+| protocol worlds | an LLM client's stack (the HTTP client, the event stream reader, JSON) against a server's (the HTTP server, the event stream writer, JSON), seven scenarios |
 | io worlds | sockets, over the simulator; one exchange over the ring |
 | simulated worlds | the echo and its fake clients, seven scenarios |
 | real loop | the echo and its fake clients, on loopback |
@@ -262,14 +262,17 @@ writer, asserting that every outcome, rejection, refusal and fault fell.
 The protocol worlds (http.md, 6) build both ends of an LLM streaming
 exchange as two services would, the client's stack and the server's, a
 scripted user at each top, joined by a stream each way cut and joined at
-random, in one loop with a referee that holds what each top sent to what
-the other received, token for token, and the bytes the writer runs ahead
-of the reader to the caps between them. Five scenarios run in the focused
-suite: an answer streamed whole, a slow reader that stops the writer, a
+random, in one loop with `skein-world`'s referee, which holds what each
+top sent to what the other received, token for token, the reader's last
+event ID and reconnection time to the events', and the bytes the writer
+runs ahead of the reader to the caps between them, and each scenario's
+goals to their deadlines. Seven scenarios run in the focused suite: an
+answer streamed whole, two or three calls on one connection, a slow
+reader that stops the writer, a slow consumer that stops the upload, a
 response that comes mid-upload, an end closing while the other sends,
 and the wire resetting at any moment; 300 runs of them under caps drawn
 down to the least the stacks allow run in the fuzzy suite. They keep a
-small harness of their own, as `skein-world` drives processes over the
+loop of their own, as `skein-world`'s drives processes over the
 simulator's kernel records, which a world joined by bytes has none of.
 
 io's worlds run io over the simulator with a scripted owner above it and

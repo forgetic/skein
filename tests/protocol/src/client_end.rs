@@ -4,8 +4,9 @@
 //! each event's data through `sse::Data`, or for the body itself when it
 //! is no event stream; routed as a connection routes between its machines
 //! (programming-model.md, 4), each call held to its `MAX_OUT`; and a
-//! scripted user at the top, which uploads a JSON request, reads events
-//! slowly or not, and closes when it is done or when it is told to.
+//! scripted user at the top, which makes its calls one after another on a
+//! connection kept, each uploading a JSON request, reads events slowly or
+//! not, and closes when it is done or when it is told to.
 
 use std::collections::VecDeque;
 
@@ -43,8 +44,9 @@ impl Limits {
 /// What the client's user does.
 #[derive(Clone, Debug)]
 pub struct Script {
-    /// The request body, a JSON document the JSON writer wrote.
-    pub body: Box<[u8]>,
+    /// Each call's request body, a JSON document the JSON writer wrote: a
+    /// call after another while the connection is kept.
+    pub bodies: Vec<Box<[u8]>>,
     /// After this many events, the user stops asking for the next for this
     /// many iterations: a slow reader.
     pub stall: Option<(usize, u64)>,
@@ -53,25 +55,36 @@ pub struct Script {
     pub close: Option<u64>,
 }
 
-/// What the client's user saw.
+/// What the client's user saw, over all its calls.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Seen {
-    pub status: Option<u16>,
+    /// Each response's status.
+    pub statuses: Vec<u16>,
     /// Each event's type and data, in order.
     pub events: Vec<(Vec<u8>, Vec<u8>)>,
+    /// What the reader said its last event ID and its reconnection time
+    /// were, as each event came.
+    pub ids: Vec<(Vec<u8>, Option<u64>)>,
     /// The tokens of each document read: each event's data, or the body
     /// when it is no event stream.
     pub documents: Vec<Vec<Token>>,
-    /// How the event stream ended, if it did.
-    pub ended: Option<sse::Event>,
-    /// The fault the upload's stream failed with, if it did.
+    /// How each event stream ended.
+    pub ended: Vec<sse::Event>,
+    /// The fault an upload's stream failed with, if one did.
     pub upload_failed: Option<Fault>,
-    /// How much of the request body went down.
+    /// How much of the last call's request body went down.
     pub uploaded: usize,
-    /// The exchange's terminal event.
-    pub outcome: Option<Outcome>,
+    /// Since when the user's demand for room for its upload has waited, if
+    /// one has.
+    pub upload_since: Option<u64>,
+    /// Each call's terminal event.
+    pub outcomes: Vec<Outcome>,
     /// When the user stopped reading for a while.
     pub stalled: Option<u64>,
+    /// When it read again.
+    pub resumed: Option<u64>,
+    /// How many calls it made.
+    pub calls: usize,
     pub closed: bool,
 }
 
@@ -95,7 +108,8 @@ pub struct End {
     script: Script,
     pub seen: Seen,
     tokens: Vec<Token>,
-    called: bool,
+    /// How many calls the user made.
+    calls: usize,
     upload: Upload,
     /// A `Next` outstanding on the reader.
     asked: bool,
@@ -137,7 +151,7 @@ impl End {
             script,
             seen: Seen::default(),
             tokens: Vec::new(),
-            called: false,
+            calls: 0,
             upload: Upload::Idle,
             asked: false,
             now: 0,
@@ -153,26 +167,34 @@ impl End {
             && self.client.waiting() == client::Waiting::Nothing
     }
 
-    /// The user's turn at `now`: the call, the upload, the next event, or
-    /// the close.
+    /// The user's turn at `now`: the next call, the upload, the next
+    /// event, or the close.
     pub fn act(&mut self, now: u64) {
         self.now = now;
         if self.seen.closed {
             return;
         }
         let mut work = Work::new();
-        if self.script.close.is_some_and(|at| now >= at) || self.seen.outcome.is_some() {
+        if self.script.close.is_some_and(|at| now >= at) {
             self.close();
             return;
         }
-        if self.called {
-            self.upload_acts(&mut work);
-            if self.wants_next(now) {
-                self.asked = true;
-                self.reader_down(sse::Request::Next, &mut work);
+        let over = self.seen.outcomes.len() == self.calls;
+        if over {
+            // The next call once the last one's machines are closed, on a
+            // connection kept; or the close.
+            let kept = self.seen.outcomes.last().is_none_or(|outcome| *outcome == Outcome::Done(client::Reuse::Keep));
+            if !kept || self.calls == self.script.bodies.len() {
+                self.close();
+                return;
             }
-        } else {
-            self.called = true;
+            if self.reader.is_some() || self.tokenizer.is_some() {
+                return;
+            }
+            self.calls += 1;
+            self.seen.calls = self.calls;
+            self.upload = Upload::Idle;
+            self.seen.uploaded = 0;
             let call = Call {
                 method: Method::Post,
                 target: b"/v1/messages".as_slice().into(),
@@ -181,32 +203,47 @@ impl End {
                     header(b"Content-Type", b"application/json"),
                     header(b"Accept", b"text/event-stream"),
                 ]),
-                body: Body::Length(self.script.body.len() as u64),
+                body: Body::Length(self.body().len() as u64),
                 close: false,
             };
             self.client_down(client::Request::Call(call), &mut work);
+        } else {
+            self.upload_acts(&mut work);
+            if self.wants_next(now) {
+                self.asked = true;
+                self.reader_down(sse::Request::Next, &mut work);
+            }
         }
         self.drain(work);
+    }
+
+    /// The request body of the call in progress, or the last.
+    fn body(&self) -> &[u8] {
+        &self.script.bodies[self.calls - 1]
     }
 
     /// Whether the user asks the reader for the next event now: one is not
     /// outstanding nor being tokenized, the stream has not ended, and the
     /// user is not stalled.
     fn wants_next(&mut self, now: u64) -> bool {
-        if self.reader.is_none() || self.asked || self.tokenizer.is_some() || self.seen.ended.is_some() {
+        if self.reader.is_none() || self.asked || self.tokenizer.is_some() {
             return false;
         }
         match self.script.stall {
             Some((after, iterations)) if self.seen.events.len() >= after => {
                 let from = *self.seen.stalled.get_or_insert(now);
-                now >= from + iterations
+                let again = now >= from + iterations;
+                if again && self.seen.resumed.is_none() {
+                    self.seen.resumed = Some(now);
+                }
+                again
             }
             Some(_) | None => true,
         }
     }
 
     fn upload_acts(&mut self, work: &mut Work) {
-        let left = self.script.body.len() - self.seen.uploaded;
+        let left = self.body().len() - self.seen.uploaded;
         match self.upload {
             Upload::Idle if left == 0 => {
                 self.upload = Upload::Over;
@@ -215,11 +252,12 @@ impl End {
             Upload::Idle => {
                 let room = self.limits.client.send.min(u32::try_from(left).expect("fits a u32"));
                 self.upload = Upload::Wanted(room);
+                self.seen.upload_since = Some(self.now);
                 self.client_down(client::Request::Upload(Down::Demand { read: Read::Nothing, room }), work);
             }
             Upload::Granted(room) => {
                 let end = self.seen.uploaded + left.min(room as usize);
-                let piece: Box<[u8]> = self.script.body[self.seen.uploaded..end].into();
+                let piece: Box<[u8]> = self.body()[self.seen.uploaded..end].into();
                 self.seen.uploaded = end;
                 self.upload = Upload::Idle;
                 self.client_down(client::Request::Upload(Down::Send(piece)), work);
@@ -248,9 +286,11 @@ impl End {
         self.seen.closed = true;
     }
 
-    /// The stream below's answer to the client, if it has one now; and, once
-    /// the client is closed, an answer to what it withdrew, on its way.
-    pub fn below_acts(&mut self, grant: bool) {
+    /// The stream below's answer to the client at `now`, if it has one;
+    /// and, once the client is closed, an answer to what it withdrew, on its
+    /// way.
+    pub fn below_acts(&mut self, now: u64, grant: bool) {
+        self.now = now;
         let up = if self.seen.closed { self.bottom.late() } else { self.bottom.answer(grant) };
         let Some(up) = up else { return };
         let mut work = Work::new();
@@ -360,7 +400,7 @@ impl End {
     fn client_event(&mut self, event: client::Event, work: &mut Work) {
         match event {
             client::Event::Response(response) => {
-                self.seen.status = Some(response.status);
+                self.seen.statuses.push(response.status);
                 let streams = response
                     .header(b"content-type")
                     .is_some_and(|value| value.to_ascii_lowercase().starts_with(b"text/event-stream"));
@@ -374,10 +414,12 @@ impl End {
             client::Event::Upload(Up::Room) => {
                 let Upload::Wanted(room) = self.upload else { panic!("room for the upload's demand") };
                 self.upload = Upload::Granted(room);
+                self.seen.upload_since = None;
             }
             client::Event::Upload(Up::Failed(fault)) => {
                 self.upload = Upload::Over;
                 self.seen.upload_failed = Some(fault);
+                self.seen.upload_since = None;
             }
             client::Event::Upload(other @ (Up::Bytes(_) | Up::End)) => panic!("the upload is written: {other:?}"),
             client::Event::Body(up) => {
@@ -387,8 +429,8 @@ impl End {
                     self.tokenizer_up(up, work);
                 }
             }
-            client::Event::Done(reuse) => self.seen.outcome = Some(Outcome::Done(reuse)),
-            client::Event::Failed(error) => self.seen.outcome = Some(Outcome::Failed(error)),
+            client::Event::Done(reuse) => self.seen.outcomes.push(Outcome::Done(reuse)),
+            client::Event::Failed(error) => self.seen.outcomes.push(Outcome::Failed(error)),
             client::Event::Closed => {}
         }
     }
@@ -399,13 +441,17 @@ impl End {
         match event {
             sse::Event::Message(message) => {
                 self.asked = false;
+                // What the reader's own face says once the event came: what
+                // a client that reconnects would send, and wait.
+                let reader = self.reader.as_ref().expect("a reader");
+                self.seen.ids.push((reader.last_event_id().to_vec(), reader.retry()));
                 self.seen.events.push((message.name.to_vec(), message.data.to_vec()));
                 self.tokenizer = Some((Tokenizer::new(&self.limits.json), Some(Data::new(message.data))));
                 self.tokenizer_down(json::Request::Next, work);
             }
             sse::Event::Ended | sse::Event::Failed(_) => {
                 self.asked = false;
-                self.seen.ended = Some(event);
+                self.seen.ended.push(event);
                 self.reader_down(sse::Request::Close, work);
             }
             sse::Event::Closed => self.reader = None,

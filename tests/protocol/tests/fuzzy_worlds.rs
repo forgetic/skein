@@ -4,15 +4,16 @@
 //! held by the referee to what the other end's top sent.
 //!
 //! The sweep asserts that what it aims at fell (testing-strategy.md, 3): a
-//! writer held back by a slow reader, an upload stopped by a response that
-//! came first, a writer that heard its stream fail, a reset, and each
-//! outcome at each end.
+//! writer held back by a slow reader, an upload held back by a slow
+//! consumer, an upload stopped by a response that came first, a writer that
+//! heard its stream fail, a reset, a connection that carried several calls,
+//! events with an id or a reconnection time, and each outcome at each end.
 
 use std::collections::BTreeMap;
 
 use skein_lib::Rng;
 use skein_protocol_world::scenario;
-use skein_protocol_world::world::{self, Expect, Run, Settings};
+use skein_protocol_world::world::{self, Run, Settings};
 
 const ROUNDS: u64 = 300;
 
@@ -28,6 +29,9 @@ impl Seen {
         let fell = run.fell;
         for (flag, what) in [
             (fell.writer_held, "a writer held back by a slow reader"),
+            (fell.upload_held, "an upload held back by a slow consumer"),
+            (fell.calls > 1, "a connection that carried several calls"),
+            (fell.ids > 0, "an event's id or reconnection time checked"),
             (fell.upload_stopped, "an upload stopped by a response first"),
             (fell.writer_failed, "a writer that heard its stream fail"),
             (fell.reset, "a reset"),
@@ -36,9 +40,11 @@ impl Seen {
                 self.note(what.into());
             }
         }
-        match run.client.outcome {
-            Some(outcome) => self.note(format!("client {outcome:?}")),
-            None => self.note("client closed first".into()),
+        for outcome in &run.client.outcomes {
+            self.note(format!("client {outcome:?}"));
+        }
+        if run.client.outcomes.len() < run.client.calls || run.client.calls == 0 {
+            self.note("client closed first".into());
         }
         for outcome in &run.server.outcomes {
             self.note(format!("server {outcome:?}"));
@@ -52,11 +58,14 @@ fn every_scenario_holds_whatever_the_caps_and_the_wire() {
     for round in 0..ROUNDS {
         let seed = 0x00b0_0000 + round;
         let mut rng = Rng::new(seed);
-        // The slow reader, ten times as long a run, a tenth of them.
-        let mut scenario = match rng.below(10) {
+        // The slow reader and the slow consumer, ten times as long a run, a
+        // twentieth of them each.
+        let scenario = match rng.below(20) {
             0 => scenario::slow_reader(&mut rng),
-            1 | 2 => scenario::early(&mut rng),
-            3..=6 => scenario::partway(&mut rng),
+            1 => scenario::slow_consumer(&mut rng),
+            2..=4 => scenario::early(&mut rng),
+            5..=11 => scenario::partway(&mut rng),
+            12..=15 => scenario::several(&mut rng),
             _ => scenario::stream(&mut rng),
         };
         let mut settings = Settings::drawn(&mut rng);
@@ -69,13 +78,15 @@ fn every_scenario_holds_whatever_the_caps_and_the_wire() {
         }
         if rng.chance(100) {
             settings.reset = Some(rng.below(1_000));
-            scenario.expect = Expect::Partway;
         }
         let run = world::run(&scenario, &settings, seed);
         tally.record(&run);
     }
     for what in [
         "a writer held back by a slow reader",
+        "an upload held back by a slow consumer",
+        "a connection that carried several calls",
+        "an event's id or reconnection time checked",
         "an upload stopped by a response first",
         "a writer that heard its stream fail",
         "a reset",

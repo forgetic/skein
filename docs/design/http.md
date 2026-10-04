@@ -981,22 +981,37 @@ pub struct Limits {
   at random and joined in the receiving intake, each end's side below
   keeping the stream's contract as io keeps it; a closed end drains what
   comes for its linger, and what comes after resets the other's stream,
-  as on a socket. A referee watches what the users saw: what the top of
-  one end sent is what the top of the other received, the request and
-  every event, token for token; and what the writer sent and the reader's
-  user has not read is never more than the caps between them. The
-  scenarios: an answer streamed whole; a slow reader at the client's top,
-  far more events than the caps hold, which must stop the writer at the
-  server's; a response that comes mid-upload, an error before the body
-  is read, which stops the client's upload and is read; one end closing
-  while the other sends; and the wire resetting at any moment. Once both
-  ends are closed, every machine is, and each stack withdrew what it
-  demanded below before its owner closed the stream. A seed replays to
-  the same run. The worlds run in plaintext. `skein-world` drives
-  processes' `iterate` over the simulator, through the kernel's records,
-  which a world joined by bytes has none of, so these keep a small
-  harness of their own of the same shape: one loop, the contracts as it
-  goes, a referee for the scenario's expectations.
+  as on a socket, and a read past the end stays outstanding until it is
+  withdrawn, as TLS keeps it. The referee is `skein-world`'s
+  (`Referee`, `Expectations`), and watches what the users saw. Safety,
+  at every observation: what the top of one end sent is what the top of
+  the other received, each request and every event, token for token,
+  each event with the last event ID and reconnection time the reader's
+  face shows once it came; and what the writer sent and the reader's
+  user has not read is never more than the caps between them. Liveness,
+  goals with a deadline each, drawn from the bytes between the ends and
+  the pace of the wire and the users: each scenario's outcome, both ends
+  settled, the end that did not close hearing of it, and what a scenario
+  aims at, a write held back as its user sees it, an event or an upload
+  that waits while the other end's user does not read. The referee
+  injects the reset and ends the run once its goals are met, or fails it
+  with what is pending. The scenarios: an answer streamed whole; two or
+  three calls, one after another on the connection the last kept,
+  through both stacks; a slow reader at the client's top, far more
+  events than the caps hold, which must stop the writer at the server's;
+  a slow consumer at the server's top, which stops reading a request far
+  larger than the caps hold, and must stop the client's upload; a
+  response that comes mid-upload, an error before the body is read,
+  which stops the client's upload and is read; one end closing while the
+  other sends, in one of up to three calls; and the wire resetting at
+  any moment. Events carry an id or a reconnection time now and then.
+  Once both ends are closed, every machine is, and each stack withdrew
+  what it demanded below, but a read past the end, before its owner
+  closed the stream. A seed replays to the same run. The worlds run in
+  plaintext. `skein-world`'s `World` drives processes' `iterate` over the
+  simulator, through the kernel's records, which a world joined by bytes
+  has none of, so these keep their own loop, of the same shape: the
+  contracts as it goes, the referee beside it.
 - **Memory** (`tests/http/tests/memory.rs`, with the counting allocator,
   testing.md, 5): every call of an entry point a step of the meter. The
   client at its limits: a head at the head limit with folds among its
@@ -1047,9 +1062,10 @@ pub struct Limits {
   it, a failure idle and while writing, and a close in each state. The
   protocol worlds' (`tests/protocol/tests/fuzzy_worlds.rs`): 300 runs of
   the scenarios under caps drawn down to the least the stacks allow,
-  asserting that a writer was held back, an upload stopped, a writer
-  heard its stream fail, a stream reset, and each outcome at each end
-  fell. It stands in for the fuzz targets, which wait for a nightly
+  asserting that a writer and an upload were held back, an upload
+  stopped, a writer heard its stream fail, a stream reset, a connection
+  carried several calls, an event's id or reconnection time was checked,
+  and each outcome at each end fell. It stands in for the fuzz targets, which wait for a nightly
   toolchain.
 
 ## 7. Decisions
