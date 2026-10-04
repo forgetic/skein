@@ -100,10 +100,19 @@ const SLACK: u32 = 2 * 27;
 /// [`LARGEST_READ`] is counted for it, about 5 KB more (tls.md, 5).
 const RUSTLS: u64 = 16 * 1_024;
 
-/// rustls holds the server's certificates twice while it reads them, as
-/// measured: the message that carries them, which the records hold whole,
-/// decoded, and the chain it keeps.
-const CERTIFICATES: u64 = 2;
+/// The longest handshake message rustls reads: 64 KB of body (its
+/// `MAX_HANDSHAKE_SIZE`, 0xffff) and the message's header.
+pub const MAX_HANDSHAKE: u32 = 65_535 + 4;
+
+/// What rustls may hold for each byte of a handshake message as it decodes
+/// it, measured (tls.md, 5). A message of the shortest entries a list
+/// allows, 3 bytes each in TLS 1.2 and 5 in TLS 1.3 (empty certificates,
+/// names of a byte), decodes to an element of 24 or 48 bytes each, in a
+/// list that grows by doubling and is copied once; a chain is kept for the
+/// connection's life. A server sends such a message whole within the
+/// records held, so they bound it: 18 to 20 bytes for each of its bytes
+/// were measured past the delivery and rustls's own state.
+const HANDSHAKE: u64 = 20;
 
 /// The client's limits (programming-model.md, 7): the same for every step
 /// and for [`Client::new`], which allocates by them.
@@ -162,10 +171,11 @@ fn intake_cap(limits: &Limits) -> Option<u32> {
 /// up or down is handed out when it is emitted. rustls allocates as it
 /// pleases, so its part is measured against the counting allocator, over
 /// handshakes of either version, a retry, the longest ALPN list, the
-/// longest chain the records hold, and records of every size each way
-/// (tls.md, 5): its own state ([`RUSTLS`]), and twice the server's
-/// certificates, which the records held bound, as they hold the message
-/// that carries them whole.
+/// longest chain the records hold, records of every size each way, and a
+/// hostile server's messages of the shortest entries (tls.md, 5): its own
+/// state ([`RUSTLS`]), and the decoded form of the longest handshake
+/// message, [`HANDSHAKE`] bytes for each of the fewer of the records held
+/// and [`MAX_HANDSHAKE`].
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
     if limits.read == 0 || limits.send == 0 || limits.records < MAX_RECORD {
@@ -174,13 +184,13 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     room_for(limits.send)?;
     let intake = Intake::worst_case(intake_cap(limits)?)?;
     let records = u64::from(limits.records);
-    let certificates = records.checked_mul(CERTIFICATES)?;
+    let decoded = u64::from(limits.records.min(MAX_HANDSHAKE)).checked_mul(HANDSHAKE)?;
     intake
         .checked_add(records)?
         .checked_add(u64::from(FLIGHT))?
         .checked_add(u64::from(LARGEST_READ))?
         .checked_add(RUSTLS)?
-        .checked_add(certificates)
+        .checked_add(decoded)
 }
 
 /// [`up`]'s: above, `Ready`; an answer on the plaintext stream; or the

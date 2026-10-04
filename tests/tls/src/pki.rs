@@ -105,6 +105,9 @@ pub enum Chain {
     Big,
     /// A certificate a root the client does not trust signed.
     Untrusted,
+    /// The leaf and the intermediate, then this many empty certificates: a
+    /// hostile server's, which rustls decodes into an element each.
+    Padded(usize),
 }
 
 /// The versions a server allows.
@@ -157,6 +160,11 @@ impl Server {
             Chain::Leaf => vec![CertificateDer::from(LEAF), CertificateDer::from(INTERMEDIATE)],
             Chain::Big => vec![CertificateDer::from(BIG), CertificateDer::from(INTERMEDIATE)],
             Chain::Untrusted => vec![CertificateDer::from(OTHER)],
+            Chain::Padded(empty) => {
+                let mut chain = vec![CertificateDer::from(LEAF), CertificateDer::from(INTERMEDIATE)];
+                chain.resize(empty + 2, CertificateDer::from(Vec::new()));
+                chain
+            }
         };
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(KEY));
         let mut config = ServerConfig::builder_with_provider(Arc::new(provider))

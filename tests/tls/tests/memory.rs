@@ -16,6 +16,9 @@
 //! and dropped before the check.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
+
+use rustls::server::ServerConfig;
 
 use skein_heap::{Counting, Meter, Span};
 use skein_lib::stream::{Down, Fault, Read, Up};
@@ -111,6 +114,9 @@ struct Harness {
     events: Queue<Event>,
     requests: Queue<Down>,
     server: Server,
+    /// Kept for the whole case: rustls's server lets its configuration go
+    /// once its handshake is done, which was made before the meter.
+    _server_config: Arc<ServerConfig>,
     request: Vec<u8>,
     response: Vec<u8>,
     responded: bool,
@@ -139,6 +145,7 @@ fn measure(case: &Case, seed: u64) -> Measured {
     let config: Config = pki::client(&alpn);
     let name = Name::new(case.name).expect("a name");
     let bound = client::worst_case(&case.limits).expect("the limits are honoured");
+    let server_config = case.server.config();
     let mut harness = Harness {
         case: case.clone(),
         meter: Meter::new(),
@@ -149,7 +156,8 @@ fn measure(case: &Case, seed: u64) -> Measured {
         env: Env { now: Time::ZERO, wall: pki::VALID, limits: case.limits },
         events: Queue::with_capacity(8),
         requests: Queue::with_capacity(8),
-        server: Server::new(case.server.config()),
+        server: Server::new(Arc::clone(&server_config)),
+        _server_config: server_config,
         request: world::text(&mut rng, case.request),
         response: world::text(&mut rng, case.response),
         responded: false,
@@ -409,7 +417,7 @@ fn a_retry_and_the_longest_alpn_list() {
 }
 
 #[test]
-fn the_longest_chain_the_records_hold_reaches_most_of_the_worst_case() {
+fn the_longest_chain_the_records_hold_is_held_twice() {
     for versions in [Versions::Tls13, Versions::Tls12] {
         for records in [3 * client::MAX_RECORD, 4 * client::MAX_RECORD] {
             let mut big = Case::plain(Limits { records, ..LARGE }, 1_000, 1_000);
@@ -420,9 +428,6 @@ fn the_longest_chain_the_records_hold_reaches_most_of_the_worst_case() {
             assert_eq!(measured.failed, None, "{big:?}");
             // About 39 KB of certificates, twice, past the buffers.
             assert!(past(&measured) > 2 * 38_000, "{big:?}: {measured:?}");
-            if records == 3 * client::MAX_RECORD {
-                assert!(10 * measured.most >= 7 * measured.bound, "the bound is tight: {measured:?}");
-            }
         }
     }
     let mut short = Case::plain(SMALL, 10, 10);
@@ -446,6 +451,129 @@ fn failures_and_closes_in_every_state() {
                 case.server.versions = versions;
                 case.ending = ending;
                 let _: Measured = measure(&case, 6);
+            }
+        }
+    }
+}
+
+/// The client handed `message` as the server's first, in plaintext records
+/// of 16 KB, every call a step of the meter: rustls decodes a handshake
+/// message whole before it judges it, in TLS 1.2's forms until a version is
+/// agreed.
+fn hostile(limits: Limits, message: &[u8]) -> Measured {
+    let config = pki::client(&[]);
+    let name = Name::new("skein.test").expect("a name");
+    let env = Env { now: Time::ZERO, wall: pki::VALID, limits };
+    let bound = client::worst_case(&limits).expect("the limits are honoured");
+    let mut pieces = Vec::new();
+    for chunk in message.chunks(16_384) {
+        let mut header = vec![22, 3, 3];
+        header.extend_from_slice(&u16::try_from(chunk.len()).expect("fits").to_be_bytes());
+        pieces.push(header);
+        pieces.push(chunk.to_vec());
+    }
+    let mut events = Queue::with_capacity(4);
+    let mut requests = Queue::with_capacity(4);
+    let meter = Meter::new();
+    let mut most = 0;
+    meter.start();
+    let mut tls = Client::new(&config, name, &limits);
+    let step = meter.end();
+    most = most.max(meter.check(step, bound, &limits));
+    let mut failed = None;
+    let mut inputs = vec![Input::Down(Request::Handshake), Input::Up(Up::Room)];
+    inputs.extend(pieces.iter().map(|piece| Input::Up(Up::Bytes(piece.as_slice().into()))));
+    for input in inputs {
+        meter.start();
+        match input {
+            Input::Up(ev) => client::up(&mut tls, &env, ev, &mut events, &mut requests),
+            Input::Down(rq) => client::down(&mut tls, &env, rq, &mut events, &mut requests),
+        }
+        let step = meter.end();
+        while let Some(event) = events.pop() {
+            if let Event::Failed(error) = event {
+                failed = Some(error);
+            }
+        }
+        while let Some(request) = requests.pop() {
+            drop(request);
+        }
+        most = most.max(meter.check(step, bound, &limits));
+        if failed.is_some() {
+            break;
+        }
+    }
+    Measured { most, bound, failed, limits }
+}
+
+/// A handshake message of `kind` and `body`.
+fn message(kind: u8, body: &[u8]) -> Vec<u8> {
+    let mut message = vec![kind];
+    message.extend_from_slice(&u32::try_from(body.len()).expect("fits").to_be_bytes()[1..]);
+    message.extend_from_slice(body);
+    message
+}
+
+/// A list, after its length of `prefix` bytes, of as many items of `width`
+/// bytes as fit `room` bytes in all, the `n`th made by `item(n)`.
+fn list(room: usize, prefix: usize, width: usize, item: impl Fn(usize) -> Vec<u8>) -> Vec<u8> {
+    let items: Vec<u8> = (0..(room - prefix) / width).flat_map(item).collect();
+    let mut list = u32::try_from(items.len()).expect("fits").to_be_bytes()[4 - prefix..].to_vec();
+    list.extend_from_slice(&items);
+    list
+}
+
+/// The hostile messages a server may send first, in the clear, each of at
+/// most `size` bytes: a chain of empty certificates (RFC 5246, 7.4.2), a
+/// request of one-byte names (7.4.4), and a hello of unknown extensions
+/// (7.4.1.3), each of the fewest bytes a decoded element takes.
+fn hostile_messages(size: usize) -> [(&'static str, Vec<u8>); 3] {
+    let room = size - 4;
+    let certificates = message(11, &list(room, 3, 3, |_| vec![0, 0, 0]));
+    let mut request = vec![1, 1, 0, 2, 4, 3];
+    request.extend(list((room - request.len()).min(65_537), 2, 3, |_| vec![0, 1, 0x30]));
+    let mut hello = vec![3, 3];
+    hello.extend_from_slice(&[7; 32]);
+    hello.extend_from_slice(&[0, 0x13, 0x01, 0]);
+    hello.extend(list((room - hello.len()).min(65_537), 2, 4, |n| {
+        let kind = u16::try_from(0x8000 + n).expect("fits").to_be_bytes();
+        vec![kind[0], kind[1], 0, 0]
+    }));
+    [("certificates", certificates), ("names", message(13, &request)), ("extensions", message(2, &hello))]
+}
+
+#[test]
+fn hostile_messages_sent_first_are_priced() {
+    // The records of one record's message, and of the longest rustls reads.
+    for (records, size) in [(client::MAX_RECORD, 16_384), (4 * client::MAX_RECORD, 65_539)] {
+        let limits = Limits { records, ..SMALL };
+        for (what, message) in hostile_messages(size) {
+            let measured = hostile(limits, &message);
+            // Decoded whole, then refused: a hello of TLS 1.2 is expected.
+            assert_eq!(measured.failed, Some(Error::Protocol), "{what}");
+            if what != "extensions" {
+                let decoded = 18 * u64::try_from(message.len()).expect("fits");
+                assert!(past(&measured) > i64::try_from(decoded).expect("fits"), "{what}: {measured:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_hostile_chain_of_empty_certificates_is_priced_and_kept() {
+    for versions in [Versions::Tls12, Versions::Tls13] {
+        // Empty certificates after the leaf and the intermediate, to fill
+        // the records held, and the longest message rustls reads; rustls
+        // accepts the chain, and keeps it.
+        for (records, empty) in [(client::MAX_RECORD, 15_000), (4 * client::MAX_RECORD, 64_000)] {
+            let per = if versions == Versions::Tls12 { 3 } else { 5 };
+            let mut case = Case::plain(Limits { records, ..LARGE }, 1_000, 1_000);
+            case.server.chain = Chain::Padded(empty / per);
+            case.server.versions = versions;
+            let measured = measure(&case, 7);
+            assert_eq!(measured.failed, None, "{case:?}");
+            if versions == Versions::Tls12 && records == 4 * client::MAX_RECORD {
+                assert!(10 * measured.most >= 9 * measured.bound, "the bound is tight: {measured:?}");
             }
         }
     }

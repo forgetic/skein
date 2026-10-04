@@ -102,7 +102,9 @@ impl Scenario {
     #[must_use]
     pub fn refusal(&self) -> Option<Error> {
         let named = match self.server.chain {
-            pki::Chain::Leaf | pki::Chain::Untrusted => self.name == "skein.test" || self.name == "127.0.0.1",
+            pki::Chain::Leaf | pki::Chain::Untrusted | pki::Chain::Padded(_) => {
+                self.name == "skein.test" || self.name == "127.0.0.1"
+            }
             pki::Chain::Big => self.name == "big.skein.test",
         };
         let certificate = if self.server.chain == pki::Chain::Untrusted {

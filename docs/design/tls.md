@@ -192,8 +192,15 @@ pub struct Limits {
   held, `FLIGHT` (2,048 bytes) for what TLS owes, and the delivery it
   reads, at most `LARGEST_READ`, which a step that encrypts holds as much
   of rustls's instead; and rustls's, measured (section 5): 16 KB of its
-  own state, and twice the server's certificates, which the records held
-  bound. `None` for a read or room of nothing, or records shorter than one.
+  own state, and the decoded form of the longest handshake message,
+  20 bytes for each of its bytes, which the fewer of `Limits::records` and
+  rustls's 64 KB (`MAX_HANDSHAKE`, 65,539 with its header) bound: a server
+  sends a message whole within the records held. The factor is a hostile
+  server's: a message of the shortest entries a list allows, 3 bytes each
+  in TLS 1.2 and 5 in TLS 1.3 (empty certificates, names of a byte),
+  decodes to an element of 24 or 48 bytes each, in a list that grows by
+  doubling and is copied once, and a chain is kept. `None` for a read or
+  room of nothing, or records shorter than one.
 - **`largest_room`** is the larger of `room_for(send)` and `FLIGHT`.
 - **`UP_MAX_OUT`** is two events and three requests: `Ready` or an answer,
   or the stream told it failed and `Failed`; below, what TLS owes sent or
@@ -271,11 +278,17 @@ wall time each test chooses.
   the same thread, between the client's steps; its heap and the
   harness's are measured with a span around what is done between steps,
   and each step is checked against the bound plus that heap. This is how
-  rustls's part was measured: past the client's buffers, 6 KB for a
+  rustls's part was measured, past the client's buffers: 6 KB for a
   handshake, 10 KB with the longest ALPN list, 21 KB in a step that
   deciphers or encrypts a record of 16 KB, and 82 KB for the 39 KB chain,
-  held twice. The longest chain reaches three quarters of the worst case.
-  Dropped, the client frees what it held.
+  held twice. A hostile server's messages cost more: sent first, in the
+  clear, and decoded whole before rustls judges them, a chain of empty
+  certificates and a request of names of a byte reach 18 times their
+  length (298 and 303 KB for messages of 16 KB, 1.18 and 1.20 MB for
+  64 KB), unknown extensions 3.5 times; a chain padded with empty
+  certificates, which rustls accepts and keeps, 20 times in TLS 1.2 (1.30
+  MB past the buffers) and 18 in TLS 1.3. That chain reaches 97% of the
+  worst case. Dropped, the client frees what it held.
 - **The fuzzy suite** (`tests/tls/tests/fuzzy_world.rs`): 400 runs of
   scenarios and neighbours drawn from each seed, every version, retries,
   ALPN, the big chain, key updates, every ending and every refused

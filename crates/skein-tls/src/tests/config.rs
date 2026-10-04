@@ -27,10 +27,15 @@ fn room_for_a_send_counts_its_records_and_rustlss_slack() {
 fn the_worst_case_adds_the_buffers_and_rustlss_heap() {
     let worst = client::worst_case(&LIMITS).unwrap();
     // The intake (the read and a record's plaintext), the records, the
-    // output owed, a delivery, rustls's own, and the certificates twice.
+    // output owed, a delivery, rustls's own, and the decoded form of the
+    // longest handshake message the records hold.
     let buffers = 16 + 16_384 + u64::from(client::MAX_RECORD) + u64::from(client::FLIGHT);
-    let rustls = u64::from(client::LARGEST_READ) + 16 * 1_024 + 2 * u64::from(client::MAX_RECORD);
+    let rustls = u64::from(client::LARGEST_READ) + 16 * 1_024 + 20 * u64::from(client::MAX_RECORD);
     assert_eq!(worst, buffers + rustls);
+    // rustls reads no handshake message past 64 KB, whatever the records.
+    let large = Limits { records: 8 * client::MAX_RECORD, ..LIMITS };
+    let past = client::worst_case(&large).unwrap() - u64::from(7 * client::MAX_RECORD) - buffers;
+    assert_eq!(past, u64::from(client::LARGEST_READ) + 16 * 1_024 + 20 * u64::from(client::MAX_HANDSHAKE));
     // Each limit that cannot be honoured.
     for limits in [
         Limits { read: 0, ..LIMITS },
