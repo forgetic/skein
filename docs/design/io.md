@@ -164,7 +164,9 @@ kernel.
 - **One `Closed` per entity with an owner,** the last event naming that
   owner. A `Listen` or `Connect` that fails is told `Failed`, and io
   closes what it made by itself, since its owner may hold no token for
-  it. A rejected socket has no owner, and is closed without one.
+  it. A listener whose accept stops is told `Failed` too, but stays: its
+  owner, which holds its token, closes it. A rejected socket has no
+  owner, and is closed without one.
 - **`Failed` and `End` are told once each,** and never after `Closed`.
   After its owner's `Close` or `Abort`, an entity tells only `Closed`.
 - **Stale handles.** A request naming an entity that is gone, or closing,
@@ -436,19 +438,27 @@ Built, for sockets:
   simulator drives each process's io and a scripted owner, which runs
   each connection by a plan of sends within the room granted and demands
   of every kind; a referee holds each scenario's expectations; the harness
-  checks `MAX_OUT` at each call, io's contract with the owner in a ledger,
-  the invariants once settled, and replay. Nine scenarios: accept, bind
-  and reject; connects made, refused for a slot and by the peer; connects
-  waiting on a full backlog, cancelled; an exchange both ways; backpressure
-  through io; a refusal mid-upload that still reaches the peer; abort; the
-  close deadline; closes and aborts at random moments. A few seeds each,
+  checks `MAX_OUT` and the accept batch at each call, both halves of the
+  stream contract in a ledger (io's, and the owner's as the side above),
+  the invariants once settled, and replay. Thirteen scenarios: accept,
+  bind and reject; connects made, refused for a slot and by the peer;
+  connects waiting on a full backlog, cancelled; descriptors run out, so
+  a socket is refused and a listener starves; two listeners under one
+  accept batch; a socket discarded for want of a slot; a burst of
+  connects past the slab and the refusals; an exchange both ways;
+  backpressure through io; a refusal mid-upload that still reaches the
+  peer, which hears the end and no reset; abort; the close deadline;
+  closes and aborts at random moments. Each admission point's scenario
+  checks its trace for evidence the point was reached. A few seeds each,
   calm and chaotic, in the focused suite; 150 of each in the fuzzy one,
   which asserts that every fault fell and that a cancel of each operation
   io cancels was seen to stop it, to come too late, and to go
   unsubmitted.
 - **One exchange over the real ring**, in the focused suite.
 - **Memory:** io driven by hand to its limits and back, every call
-  checked against `worst_case` with the counting allocator.
+  checked against `worst_case` with the counting allocator, at four sets
+  of limits, one of them with receive buffers that dwarf the rest; and a
+  listener's life, its sockets announced, rejected, bound and discarded.
 
 ## 9. Not built yet
 

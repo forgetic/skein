@@ -61,8 +61,9 @@ pub enum Event {
     // Files, processes and signals go here when a user pulls them:
     // File { owner, result }, Spawned { owner, child, pipes },
     // Exited { owner, exit }, Shutdown { signal }.
-    /// A listen or a connect failed, or a listener can accept no more. Told
-    /// once, and `Closed` follows without a request.
+    /// Told once. A listen or a connect failed: io closes what it made, and
+    /// `Closed` follows without a request. Or a listener can accept no more:
+    /// it stays, and its owner closes it.
     Failed { owner: Token, error: Error },
     /// The entity is gone, nothing of it in flight: the last event for
     /// `owner`.

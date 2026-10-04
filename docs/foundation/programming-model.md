@@ -93,8 +93,9 @@ The sketch shows the main flow only. What it leaves out:
 
 - **Room first.** `take` hands a stage its inputs one at a time while the
   step's output queues have room for the most one input can produce, a
-  bound each entry point declares as `MAX_OUT`; whatever does not fit
-  waits for the next iteration.
+  bound each entry point declares as `MAX_OUT`, and while the layer can
+  take one more (io's `takes`, while it can hold a refusal: io.md, 2);
+  whatever does not fit waits for the next iteration.
 - **The order within a stage.** A stage first drains its layer's ready
   list, then takes its input events, then fires its expired timers
   (section 9).
@@ -785,7 +786,8 @@ domain and `iterate`) uses:
     (ordered, over B-trees), `Stack<T>`;
   - bytes: the `stream` vocabulary, `Intake`, `Reader`, `Writer` (sized)
     and its `Overflow`, `Decimal` (a count's digits, for text),
-    `bytes::copy_of`, and the byte search `bytes::find`, `find_from` and
+    `bytes::copy_of`, `bytes::zeroed` (a buffer for the side below to
+    fill), and the byte search `bytes::find`, `find_from` and
     `count` (linear time, no allocation);
   - time and randomness: `Time`, `Duration`, `Wall` (wall-clock time,
     never a deadline), `Deadlines`, `Rng`;

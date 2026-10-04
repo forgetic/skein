@@ -194,14 +194,18 @@ from each seed, and writes 5,000 documents and reads them back.
 
 io's worlds run io over the simulator with a scripted owner above it and
 a referee beside it, every process in one loop (io.md, 8). Their harness
-checks `MAX_OUT` at every call, io's contract with the owner as it goes,
-and, once settled, every slab empty, nothing in flight and every
-descriptor closed. Nine scenarios, with slabs of two or three sockets and
-caps of a few dozen bytes: accept, bind and reject; connects made, refused
-for a slot and by the peer; connects waiting on a full backlog,
-cancelled; an exchange both ways under demands of every kind;
-backpressure; a refusal mid-upload that still reaches the peer; abort;
-the close deadline; closes and aborts at random moments, in every state.
+checks `MAX_OUT` and the accept batch at every call, both halves of the
+stream contract as it goes, and, once settled, every slab empty, nothing
+in flight and every descriptor closed. Thirteen scenarios, with slabs of
+two to four sockets and caps of a few dozen bytes, reach every admission
+point, each checking its trace for the evidence: accept, bind and reject;
+connects made, refused for a slot and by the peer; connects waiting on a
+full backlog, cancelled; descriptors run out; two listeners under one
+accept batch; a socket discarded for want of a slot; a burst of connects
+past the slab and the refusals; an exchange both ways under demands of
+every kind; backpressure; a refusal mid-upload that still reaches the
+peer; abort; the close deadline; closes and aborts at random moments, in
+every state.
 The focused suite runs each over 4 calm seeds and 3 of chaos, and the
 fuzzy suite over 150 of each, asserting that every fault of the
 simulator fell and that a cancel of each operation io cancels was seen
