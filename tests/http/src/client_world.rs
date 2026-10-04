@@ -347,6 +347,18 @@ pub fn check(exchanges: &[Exchange], server: &[u8], settings: &Settings, seed: u
         if seen.finished && seen.upload_failed.is_none() && seen.outcome.is_some() {
             assert_eq!(seen.sent.len(), request.len(), "the request sent whole; {}", what());
         }
+        // A call the client must refuse is refused, unless the connection
+        // was closed first; one it need not is not.
+        let refusal = generate::refusal(&exchange.call, &settings.limits);
+        match seen.outcome {
+            Some(Outcome::Failed(Error::Refused(refused))) => {
+                assert_eq!(Some(refused), refusal, "the reference's refusal; {}", what());
+                assert!(seen.sent.is_empty(), "a refused call writes nothing; {}", what());
+                continue;
+            }
+            Some(Outcome::Failed(Error::Closed(_))) | None => {}
+            Some(_) => assert_eq!(refusal, None, "a call the reference refuses; {}", what()),
+        }
         // The response, as the reference reads what the server sent for it.
         let rest = &sent[offset.min(sent.len())..];
         let expected = reference::response(rest, exchange.call.method, exchange.call.close, &settings.limits);
@@ -384,15 +396,7 @@ pub fn check(exchanges: &[Exchange], server: &[u8], settings: &Settings, seed: u
                     None => assert!(rest.is_empty(), "closed only with nothing from the server; {}", what()),
                 }
             }
-            // Generated calls are refused only for a head past the limit,
-            // and nothing of them is written.
-            Some(Outcome::Failed(Error::Refused(refusal))) => {
-                let head = generate::request(&exchange.call).len();
-                assert_eq!(refusal, client::Refusal::TooLong, "{}", what());
-                assert!(head > usize::try_from(settings.limits.request).expect("fits a usize"), "{}", what());
-                assert!(seen.sent.is_empty(), "a refused call writes nothing; {}", what());
-                continue;
-            }
+            Some(Outcome::Failed(Error::Refused(_))) => unreachable!("checked above"),
             Some(Outcome::Done(reuse)) => {
                 let Outcome::Done(expected_reuse) = expected.outcome else {
                     panic!("the reference's outcome {:?}; {}", expected.outcome, what())

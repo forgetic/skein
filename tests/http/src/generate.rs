@@ -3,7 +3,7 @@
 //! the standards allow, and those mutated.
 
 use skein_http::Header;
-use skein_http::client::{Body, Call, Method};
+use skein_http::client::{Body, Call, Limits, Method, Refusal};
 use skein_lib::Rng;
 
 fn pick<'a, T>(rng: &mut Rng, items: &'a [T]) -> &'a T {
@@ -24,7 +24,8 @@ fn text(rng: &mut Rng, low: usize, high: usize, out: &mut Vec<u8>) {
     }
 }
 
-/// A call, and the body the side above uploads for it.
+/// A call, and the body the side above uploads for it. Now and then the
+/// call gets one thing wrong that the client refuses (http.md, 3.1).
 #[must_use]
 pub fn call(rng: &mut Rng) -> (Call, Vec<u8>) {
     let method = *pick(
@@ -69,8 +70,72 @@ pub fn call(rng: &mut Rng) -> (Call, Vec<u8>) {
         Some(body) => Body::Length(body.len() as u64),
         None => Body::None,
     };
+    if rng.chance(20) {
+        flaw(rng, &mut target, &mut headers);
+    }
     let call = Call { method, target: target.into(), headers: headers.into(), body, close: rng.chance(100) };
     (call, upload.unwrap_or_default())
+}
+
+/// One thing wrong with a call: its target, a field's name or value, a
+/// field the client writes itself, or its `Host`, none or two.
+fn flaw(rng: &mut Rng, target: &mut Vec<u8>, headers: &mut Vec<Header>) {
+    let header = |name: &[u8], value: &[u8]| Header { name: name.to_vec().into(), value: value.to_vec().into() };
+    let bad = match rng.below(6) {
+        0 => {
+            let at = draw(rng, 0, target.len());
+            match rng.below(3) {
+                0 => target.clear(),
+                1 => target.insert(at, *pick(rng, &[b' ', 0x7F, 0xC3, b'\r', b'\n', 0])),
+                _ => target.splice(at..at, b"\r\nX: y".iter().copied()).for_each(drop),
+            }
+            return;
+        }
+        1 => header(one_of(rng, &[b"", b"Bad Name", b"Name:", b"X\x01", b"caf\xC3\xA9"]), b"v"),
+        2 => header(b"X-Value", one_of(rng, &[b"a\r\nInjected: yes", b"a\nb", b"a\0b", b"\x7F", b"\x1B[0m"])),
+        3 => header(one_of(rng, &[b"Content-Length", b"transfer-encoding", b"CONNECTION"]), b"5"),
+        4 => {
+            headers.retain(|header| !header.name.eq_ignore_ascii_case(b"host"));
+            return;
+        }
+        _ => header(b"host", b"other.example"),
+    };
+    let at = draw(rng, 0, headers.len());
+    headers.insert(at, bad);
+}
+
+fn one_of(rng: &mut Rng, items: &[&'static [u8]]) -> &'static [u8] {
+    items[draw(rng, 0, items.len() - 1)]
+}
+
+/// Why the client must refuse `call` under `limits`, if it must: the first
+/// thing wrong, in the order of http.md, 3.1, read independently of the
+/// client's checks.
+#[must_use]
+pub fn refusal(call: &Call, limits: &Limits) -> Option<Refusal> {
+    if call.target.is_empty() || !call.target.iter().all(u8::is_ascii_graphic) {
+        return Some(Refusal::Target);
+    }
+    for header in &call.headers {
+        let token = |byte: &u8| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(byte);
+        if header.name.is_empty() || !header.name.iter().all(token) {
+            return Some(Refusal::Name);
+        }
+        if header.value.iter().any(|&byte| byte.is_ascii_control() && byte != b'\t') {
+            return Some(Refusal::Value);
+        }
+        let name = header.name.to_ascii_lowercase();
+        if [&b"content-length"[..], b"transfer-encoding", b"connection"].contains(&&name[..]) {
+            return Some(Refusal::Reserved);
+        }
+    }
+    if call.headers.iter().filter(|header| header.name.eq_ignore_ascii_case(b"host")).count() != 1 {
+        return Some(Refusal::Host);
+    }
+    if request(call).len() > usize::try_from(limits.request).expect("fits a usize") {
+        return Some(Refusal::TooLong);
+    }
+    None
 }
 
 /// The head a call must be written as: a writer of its own, independent of

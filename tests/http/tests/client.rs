@@ -149,7 +149,8 @@ fn the_stream_failing_at_any_moment_fails_the_exchange_in_progress() {
         let mut rng = Rng::new(at);
         let settings = Settings { failure: Some((at, Fault::Reset)), ..Settings::calm(&mut rng, LIMITS) };
         let run = client_world::check(&exchanges, &server, &settings, at);
-        if run.exchanges.iter().any(|seen| seen.outcome == Some(Outcome::Failed(Error::Stream(Fault::Reset)))) {
+        let reset = [Error::Stream(Fault::Reset), Error::Closed(Some(Fault::Reset))].map(Outcome::Failed).map(Some);
+        if run.exchanges.iter().any(|seen| reset.contains(&seen.outcome)) {
             failed += 1;
         }
     }

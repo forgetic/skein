@@ -456,8 +456,9 @@ Not built yet (section 9). As planned:
     and one terminal event per call, nothing sent for a call that failed
     `Closed`, `Closed` once and last; and `waiting()` against what the
     neighbours see. Each exchange is held to a reference
-    reader: the request written, against a writer of the test's own; the
-    head; the body, a prefix of the reference's, and when `End` came,
+    reader: the call refused, or not, as a check of the test's own
+    refuses it, one call in fifty getting one thing wrong; the request
+    written, against a writer of the test's own; the head; the body, a prefix of the reference's, and when `End` came,
     nothing left that meets the demand it answered; and the outcome,
     unless the stream failed or the side above closed first, with a
     connection whose upload stopped, or whose stream ended or failed
@@ -529,9 +530,10 @@ Not built yet (section 9). As planned:
   under limits and neighbours drawn from its seed; 12,000 event streams
   generated and mutated, and 2,000 of the transcripts' event bodies. Each
   sweep asserts that what it injects fell (testing-strategy.md, 3): every
-  outcome of an exchange and every error of a stream, each way a stream
-  can end or fail below and what the machine waited for when it failed,
-  a close while it waited for each thing, room granted while a response
+  outcome of an exchange, every refusal of a call and every error of a
+  stream, each way a stream can end or fail below and what the machine
+  waited for when it failed, each thing it waits for, a close while it
+  waited for each thing, room granted while a response
   waited, a response read mid-upload, a withdrawal and an answer after
   it, a discard, a connection reused, a CR's LF delivered alone, and a
   line longer than a chunk read in pieces. It stands in for the fuzz

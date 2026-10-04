@@ -34,7 +34,6 @@ impl Seen {
         for seen in &run.exchanges {
             match seen.outcome {
                 Some(Outcome::Failed(Error::Stream(_))) => self.note("failed Stream".into()),
-                Some(Outcome::Failed(Error::Refused(_))) => self.note("failed Refused".into()),
                 Some(Outcome::Failed(Error::Closed(Some(_)))) => self.note("failed Closed with a fault".into()),
                 Some(outcome) => self.note(format!("{outcome:?}")),
                 None => self.note("closed before the outcome".into()),
@@ -85,7 +84,7 @@ impl Seen {
     }
 }
 
-const EVERY_OUTCOME: [&str; 19] = [
+const EVERY_OUTCOME: [&str; 24] = [
     "Done(Keep)",
     "Done(Close)",
     "Failed(Closed(None))",
@@ -103,11 +102,16 @@ const EVERY_OUTCOME: [&str; 19] = [
     "Failed(Trailer)",
     "Failed(Upgrade)",
     "failed Stream",
-    "failed Refused",
+    "Failed(Refused(Target))",
+    "Failed(Refused(Name))",
+    "Failed(Refused(Value))",
+    "Failed(Refused(Reserved))",
+    "Failed(Refused(Host))",
+    "Failed(Refused(TooLong))",
     "closed before the outcome",
 ];
 
-const EVERY_NEIGHBOUR: [&str; 26] = [
+const EVERY_NEIGHBOUR: [&str; 28] = [
     "a body discarded",
     "the upload failed with Some(Other)",
     "the upload failed with Some(Invalid)",
@@ -133,6 +137,8 @@ const EVERY_NEIGHBOUR: [&str; 26] = [
     "failed while waiting for Response",
     "failed while waiting for Body",
     "failed while waiting for Above",
+    "failed while waiting for Close",
+    "failed while waiting for Nothing",
     "a stream ended early",
 ];
 
