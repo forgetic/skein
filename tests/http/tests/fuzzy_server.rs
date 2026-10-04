@@ -7,14 +7,18 @@
 //!
 //! A sweep asserts that what it injects fell (testing-strategy.md, 3): each
 //! way a request can end, each rejection and each refusal, each way a
-//! stream can end or fail below, a close in each state, a 100 (Continue),
-//! a client tired of waiting for one, a body given up, a head that waited
-//! for a discard, pipelining, and reuse.
+//! stream can end or fail below, each fault failing the exchange and each
+//! body's stream, a close in each state, a 100 (Continue), a client tired
+//! of waiting for one, a final response before a 100 that was due, a
+//! response to `HEAD`, a reply in chunks to HTTP/1.0 run to the end of the
+//! stream, a body given up, a head that waited for a discard, pipelining,
+//! and reuse.
 
 use std::collections::BTreeMap;
 
-use skein_http::server::Error;
-use skein_http_world::server_world::{self, Outcome, Plan, Run, Settings};
+use skein_http::server::{Body, Error};
+use skein_http::{Method, Version};
+use skein_http_world::server_world::{self, Outcome, Plan, Run, Seen as Served, Settings};
 use skein_http_world::{generate, request_transcript, requests};
 use skein_lib::Rng;
 
@@ -35,10 +39,14 @@ impl Seen {
     fn record(&mut self, run: &Run, settings: &Settings) {
         for seen in &run.seen {
             match seen.outcome {
-                Some(Outcome::Failed(Error::Stream(_))) => self.note("failed Stream".into()),
+                Some(Outcome::Failed(Error::Stream(fault))) => {
+                    self.note("failed Stream".into());
+                    self.note(format!("failed Stream({fault:?})"));
+                }
                 Some(outcome) => self.note(format!("{outcome:?}")),
                 None => self.note("closed before the outcome".into()),
             }
+            self.note_reply(seen);
             for (_, refusal) in &seen.refused {
                 self.note(format!("refused {refusal:?}"));
             }
@@ -85,6 +93,35 @@ impl Seen {
         }
         if settings.cut.is_some() {
             self.note("a stream ended early".into());
+        }
+    }
+
+    /// What the reply came to: one to `HEAD`, one in chunks to HTTP/1.0 run
+    /// to the end of the stream, or a final response that went before a 100
+    /// (Continue) the client waited for.
+    fn note_reply(&mut self, seen: &Served) {
+        let (Some(call), Some((response, _)), Some(Outcome::Done(_))) = (&seen.call, &seen.response, seen.outcome)
+        else {
+            return;
+        };
+        if call.method == Method::Head {
+            self.note("a response to HEAD".into());
+        }
+        if call.version == Version::Http10
+            && response.body == Body::Chunked
+            && requests::sends_body(call.method, response)
+            && seen.finished
+        {
+            self.note("a reply in chunks to HTTP/1.0, to the end of the stream".into());
+        }
+        let expects = call.version == Version::Http11
+            && call.body != Body::None
+            && call.body != Body::Length(0)
+            && call.headers.iter().any(|header| {
+                header.is(b"expect") && header.value.to_ascii_lowercase().windows(12).any(|w| w == b"100-continue")
+            });
+        if expects && !seen.sent.starts_with(b"HTTP/1.1 100") {
+            self.note("a final response before the 100 that was due".into());
         }
     }
 
@@ -137,7 +174,13 @@ fn generated_mutated_and_corrupted_requests_are_served_as_the_reference_reads_th
         "a chunked body past the limit, answered: true",
         "a chunked body past the limit, answered: false",
         "failed Stream",
+        "failed Stream(Reset)",
+        "failed Stream(Invalid)",
+        "failed Stream(Other)",
         "closed before the outcome",
+        "a response to HEAD",
+        "a reply in chunks to HTTP/1.0, to the end of the stream",
+        "a final response before the 100 that was due",
         "refused Status",
         "refused Name",
         "refused Value",
@@ -148,6 +191,7 @@ fn generated_mutated_and_corrupted_requests_are_served_as_the_reference_reads_th
         "the reply failed",
         "the body failed with Some(Other)",
         "the body failed with Some(Invalid)",
+        "the body failed with Some(Reset)",
         "closed while waiting for Next",
         "closed while waiting for Room",
         "closed while waiting for Request",
