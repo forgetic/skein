@@ -836,13 +836,16 @@ pub struct Limits {
     the 100 comes, sends none once a final response comes first, and now
     and then tires of waiting; the stream ends when the bytes run out,
     early at a cut, idle or with a read on its way, after a request or
-    mid-way, and fails, before its end or after it. Above, a service asks
-    for each request when it feels like it, reads the body with demands
-    of every shape, slowly, withdraws a demand and discards, responds at
-    the moment its plan draws (at once, partway through the body, once it
-    read it, or once it discarded it) with a response now and then one
-    the server must refuse, writes the reply in pieces within the room
-    granted, withdraws the reply's demand now and then as it closes,
+    mid-way, and fails, before its end or after it; an answer to a
+    demand the server withdrew may still come, before its close or after.
+    Above, a service asks for each request when it feels like it, reads
+    the body with demands of every shape, slowly, withdraws a demand and
+    discards, responds at the moment its plan draws (at once, while a
+    demand of its on the body is outstanding, partway through the body,
+    once it read it, or once it discarded it) with a response now and
+    then one the server must refuse, writes the reply in pieces within the
+    room granted, withdraws the reply's demand now and then, as a machine
+    stacked on it does when it closes, and closes then or a while after,
     stops for a while, and closes after the last request or at any
     moment. The world checks both sides' contracts as the client's does,
     a 100 before any read of a body its client holds back among them, and
