@@ -84,6 +84,7 @@ impl Seen {
             (fell.idle_end, "an end with nothing demanded"),
             (fell.early_response, "a response before the request was sent"),
             (fell.withdrew_after_end, "the read that crossed the end withdrawn"),
+            (fell.withdrew_room_after_end, "a demand of room withdrawn after the end"),
         ] {
             if flag {
                 self.note(what.into());
@@ -138,6 +139,7 @@ fn exchanges_swept() {
         "an end with nothing demanded",
         "a response before the request was sent",
         "the read that crossed the end withdrawn",
+        "a demand of room withdrawn after the end",
         "close_notify read by the server",
     ]);
 }

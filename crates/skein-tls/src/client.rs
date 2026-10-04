@@ -747,6 +747,19 @@ fn stream(
             assert!(room == 0 || open.above.grant.is_none(), "room is demanded once the last grant was sent within");
             assert!(room == 0 || open.writing == Writing::Open, "no room after Finish");
             open.above.demand = Some(Wanted { read, room });
+            // Room granted below for a demand the side above then withdrew
+            // is held: handed on now if it takes this demand's records, or
+            // given up, so that room is asked for again, as a grant not sent
+            // within gives way to the next (io.md, 3.3).
+            if room > 0 && open.below.granted > 0 {
+                if room_for(room).expect("checked by worst_case") <= open.below.granted {
+                    open.above.demand = None;
+                    open.above.grant = Some(room);
+                    above.push(Event::Stream(Up::Room));
+                } else {
+                    open.below.granted = 0;
+                }
+            }
         }
         Down::Send(bytes) => return sent(open, &bytes, buffers, above, below),
         Down::Finish => {

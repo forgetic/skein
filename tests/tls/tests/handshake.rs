@@ -243,6 +243,50 @@ fn a_demand_over_a_read_that_crossed_the_end_is_a_bug() {
     drop(pair.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 4 })));
 }
 
+/// A client ready, whose side above demanded a read and room, saw the read
+/// crossed by the server's end, and withdrew it before room came below:
+/// room held for no one.
+fn holding_room() -> Pair {
+    let mut pair = pair(&pki::Server::plain(), "skein.test", pki::VALID, &pki::client(&[]), LIMITS);
+    assert_eq!(handshake(&mut pair), ready(Version::Tls13, None));
+    pair.wire.server.close_notify();
+    pair.wire.pull();
+    pair.wire.eof = true;
+    assert_eq!(pair.down(Request::Stream(Down::Demand { read: Read::Fill(5), room: 4 })), vec![]);
+    // The server's tickets and its close_notify read, before room comes.
+    let mut events = Vec::new();
+    while events.is_empty() {
+        let answer = pair.wire.answer().expect("bytes");
+        assert!(matches!(answer, Up::Bytes(_)), "bytes, before room");
+        events.extend(pair.up(answer));
+    }
+    assert_eq!(events, vec![Event::Stream(Up::End)]);
+    assert_eq!(pair.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 0 })), vec![]);
+    assert_eq!(pair.wire.answer(), Some(Up::Room));
+    assert_eq!(pair.up(Up::Room), vec![], "room for a demand withdrawn: held");
+    pair
+}
+
+#[test]
+fn room_held_for_a_demand_withdrawn_is_handed_on_or_asked_for_again() {
+    // It holds the records of a demand as large: handed on at once.
+    let mut pair = holding_room();
+    assert_eq!(
+        pair.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 4 })),
+        vec![Event::Stream(Up::Room)]
+    );
+    assert_eq!(pair.down(Request::Stream(Down::Send(Box::from(&b"late"[..])))), vec![]);
+    assert_eq!(pair.wire.server.received, b"late");
+    // It does not hold a larger one's: given up, and room asked for again.
+    let mut pair = holding_room();
+    let mut events = pair.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 1_000 }));
+    events.extend(pair.settle());
+    assert_eq!(events, vec![Event::Stream(Up::Room)]);
+    let late = vec![b'l'; 1_000];
+    assert_eq!(pair.down(Request::Stream(Down::Send(late.clone().into()))), vec![]);
+    assert_eq!(pair.wire.server.received, late);
+}
+
 /// The records in `bytes`: each one's type and body's length.
 fn records(mut bytes: &[u8]) -> Vec<(u8, usize)> {
     let mut records = Vec::new();

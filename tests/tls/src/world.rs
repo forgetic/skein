@@ -287,6 +287,9 @@ pub struct Fell {
     pub early_response: bool,
     /// The side above withdrew the read that crossed the end, to write on.
     pub withdrew_after_end: bool,
+    /// It withdrew a demand that asked room too, after the end crossed its
+    /// read.
+    pub withdrew_room_after_end: bool,
 }
 
 struct World<'a> {
@@ -796,6 +799,15 @@ impl World<'_> {
                 if self.above.ended.is_some() && (left > 0 || self.settings.finish && !self.above.finished) =>
             {
                 self.fell.withdrew_after_end = true;
+                self.above.face = Face::Idle;
+                self.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 0 }));
+            }
+            // Now and then even one that asked room too, which it asks for
+            // again: room that comes below meanwhile is held for no one.
+            Face::Demanded(read, room)
+                if self.above.ended.is_some() && read != Read::Nothing && room > 0 && self.rng.chance(300) =>
+            {
+                self.fell.withdrew_room_after_end = true;
                 self.above.face = Face::Idle;
                 self.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 0 }));
             }

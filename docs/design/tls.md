@@ -132,7 +132,11 @@ pub enum Event {
   answers the server's and one rustls asks for itself, 27 bytes each; in
   TLS 1.2, the refusal of a renegotiation, 31. What TLS owes that arose
   while the side above held its grant goes in the same `Send`, in front:
-  records go in the order rustls sealed them.
+  records go in the order rustls sealed them. Room that comes for a
+  demand the side above withdrew meanwhile is held for no one: handed on
+  at its next demand of room if it takes that demand's records, or given
+  up, so that room is asked for again, as a grant not sent within gives
+  way to the next (io.md, 3.3).
 - **The ciphertext held** is one box of `Limits::records`, not an intake,
   as rustls reads and writes one slice: a record at least, and the
   records of a handshake message that spans several, the server's
