@@ -236,6 +236,13 @@ impl Service {
         self.protocol.failure()
     }
 
+    /// What refused the listen, while the listener waits to ask again: a
+    /// shortage, not a failure.
+    #[must_use]
+    pub const fn retrying(&self) -> Option<io::Error> {
+        self.protocol.retrying()
+    }
+
     /// Whether the service holds nothing: its listener closed, every slab
     /// empty, nothing in flight, every queue empty. Once it is, it will do
     /// nothing more.

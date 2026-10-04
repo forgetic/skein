@@ -126,6 +126,7 @@ fn run(configuration: &Configuration) -> Result<(), String> {
         configuration.memory
     );
     let mut told = false;
+    let mut short = false;
     loop {
         kernel.reap(svc.completions());
         let Now { now, wall } = clock.now();
@@ -146,6 +147,13 @@ fn run(configuration: &Configuration) -> Result<(), String> {
             eprintln!("skein-echo: listening at {addr}");
             told = true;
         }
+        // A shortage the listener waits out is said once, not each retry.
+        if !short && let Some(error) = svc.retrying() {
+            eprintln!(
+                "skein-echo: the listen was refused for want of resources ({error:?}); trying again until it is not"
+            );
+        }
+        short = svc.retrying().is_some() || (short && !told);
     }
     match svc.failure() {
         Some(error) => Err(format!("the listener at {} failed: {error:?}", configuration.addr)),

@@ -42,6 +42,7 @@ fn a_listen_refused_for_want_of_resources_is_asked_again_after_the_retry() {
     rig.up(Told::Failed { owner, error: Error::Busy }).nothing();
     rig.up(Told::Closed { owner }).nothing();
     assert_eq!(rig.proto.failure(), None, "a shortage is not a failure");
+    assert_eq!(rig.proto.retrying(), Some(Error::Busy), "but it is kept, for main to say if it lasts");
     assert!(!rig.proto.is_empty(), "it will listen again");
     let again = Time::ZERO.saturating_add(LIMITS.retry);
     assert_eq!(rig.proto.next_deadline(), Some(again));
@@ -49,6 +50,7 @@ fn a_listen_refused_for_want_of_resources_is_asked_again_after_the_retry() {
     rig.at(again);
     let out = rig.fire();
     assert_eq!(out.io, [Io::Listen { owner, addr: addr() }], "asked again, at the same address");
+    assert_eq!(rig.proto.retrying(), None, "asking again");
     rig.up(Told::Listening { owner, listener: LISTENER, addr: addr() }).nothing();
     assert_eq!(rig.proto.listening(), Some(addr()));
 }

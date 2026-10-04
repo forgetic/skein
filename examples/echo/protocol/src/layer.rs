@@ -63,10 +63,11 @@ enum Listener {
         error: Error,
         stop: bool,
     },
-    /// The listen was refused for want of resources (`Error::Busy`): it is
-    /// asked again at `at`.
+    /// The listen was refused for want of resources (`error`, `Busy`): it
+    /// is asked again at `at`.
     Backoff {
         at: Time,
+        error: Error,
     },
     Closed {
         error: Option<Error>,
@@ -137,7 +138,7 @@ impl Protocol {
     pub fn next_deadline(&self) -> Option<Time> {
         let idle = self.tables.deadlines.next();
         match self.listener {
-            Listener::Backoff { at } => match idle {
+            Listener::Backoff { at, .. } => match idle {
                 Some(idle) => Some(idle.min(at)),
                 None => Some(at),
             },
@@ -184,6 +185,21 @@ impl Protocol {
             Listener::Unopened | Listener::Opening { .. } | Listener::Listening { .. } | Listener::Backoff { .. } => {
                 None
             }
+        }
+    }
+
+    /// What refused the listen the listener waits to ask again, while it
+    /// waits: a shortage, which `main` reports if it lasts.
+    #[must_use]
+    pub const fn retrying(&self) -> Option<Error> {
+        match self.listener {
+            Listener::Backoff { error, .. } => Some(error),
+            Listener::Unopened
+            | Listener::Opening { .. }
+            | Listener::Listening { .. }
+            | Listener::Closing { .. }
+            | Listener::Failed { .. }
+            | Listener::Closed { .. } => None,
         }
     }
 
@@ -304,7 +320,7 @@ pub fn up(proto: &mut Protocol, env: &Env<Limits>, event: Told, up: &mut Queue<C
 /// idle connection is closed.
 pub fn fire(proto: &mut Protocol, env: &Env<Limits>, up: &mut Queue<Call>, down: &mut Queue<Io>) {
     match proto.listener {
-        Listener::Backoff { at } if at <= env.now => {
+        Listener::Backoff { at, .. } if at <= env.now => {
             proto.listener = listen(proto.addr, down);
             return;
         }
@@ -424,8 +440,8 @@ fn listener_failed(proto: &mut Protocol, error: Error, down: &mut Queue<Io>) {
 fn listener_closed(proto: &mut Protocol, env: &Env<Limits>) {
     let state = mem::replace(&mut proto.listener, CLOSED);
     proto.listener = match state {
-        Listener::Failed { error: Error::Busy, stop: false } => {
-            Listener::Backoff { at: env.now.saturating_add(env.limits.retry) }
+        Listener::Failed { error: error @ Error::Busy, stop: false } => {
+            Listener::Backoff { at: env.now.saturating_add(env.limits.retry), error }
         }
         // A shortage is not a failure, stopped or not; any other failure is
         // kept, whether a stop came meanwhile or not, as a closing

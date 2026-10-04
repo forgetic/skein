@@ -166,7 +166,18 @@ retires once io told `Closed`, no call is out, and its session was told
 gone: the bindings above and below have both ended (programming-model.md,
 5.2).
 
-**The listener.**
+**The listener.** The address it listens at is the layer's, from its
+making.
+
+| State | Holds | Deadline |
+|---|---|---|
+| Unopened | (on the ready list) | |
+| Opening | whether the domain asked it to stop | |
+| Listening | io's listener token, the address bound | |
+| Closing | its failure, if one came | |
+| Failed | its failure; whether the domain asked it to stop | |
+| Backoff | when it listens again; the shortage that refused it, for `main` to report | `retry` |
+| Closed | its failure, if one came | |
 
 | State | Event | Next, and what it does |
 |---|---|---|
@@ -191,7 +202,10 @@ later (io.md, 2): a listen refused for want of descriptors or buffers is a
 shortage, not a failure, so the listener listens again after `retry`.
 Any other failure stops it for good, and the service with it: `main` then
 says why and exits. A failure is kept whether a stop came meanwhile or
-not; a shortage never counts as one.
+not; a shortage never counts as one, but Backoff keeps it, and `main`
+says once that the listen is refused and retried, so that a shortage that
+lasts is seen. Retrying is the protocol layer's policy, kept where the
+listener is.
 
 **The session** is active from `Open` admitted to `Gone`, and counts the
 lines it answered. **The domain** admits until `Shutdown`, then answers
