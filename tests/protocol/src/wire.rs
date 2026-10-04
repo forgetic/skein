@@ -8,7 +8,11 @@
 //!   `End` comes once the other end will send nothing more and nothing
 //!   held can meet the read, or, with none outstanding, nothing is held.
 //! - **Room** is granted, late, while the output has it: one `Send` a
-//!   grant, within it, and a demand for no room leaves a grant as it is.
+//!   grant, within it, made before room is demanded again, and a demand for
+//!   no room leaves a grant as it is.
+//! - **A read that crosses the end** stays outstanding until it is
+//!   withdrawn, or room answers it if it asked for some, as TLS keeps it:
+//!   a stack that demands again over it breaks the contract.
 //! - **A close by the end's owner** sends what it queued, then ends the
 //!   other end's reading, and drops what comes from it for a while, its
 //!   linger; what comes after that resets the other end's stream, as on a
@@ -21,6 +25,7 @@ use skein_lib::stream::{Down, Fault, Read, Up};
 
 /// The side below one end's stack.
 #[derive(Debug)]
+#[expect(clippy::struct_excessive_bools, reason = "what the side below knows of the stream, a flag each")]
 pub struct Bottom {
     /// What arrived from the other end and the stack has not demanded.
     intake: Intake,
@@ -34,6 +39,10 @@ pub struct Bottom {
     granted: u32,
     /// The `Send`s since the last `Room`.
     sends: u32,
+    /// Whether the stack holds a grant it has not sent within.
+    held: bool,
+    /// Whether the read outstanding crossed the end.
+    crossed: bool,
     /// When the end's owner closed it, if it did.
     closed: Option<u64>,
     /// The other end will send nothing more, and all it sent has arrived.
@@ -60,6 +69,8 @@ impl Bottom {
             demand: None,
             granted: 0,
             sends: 0,
+            held: false,
+            crossed: false,
             closed: None,
             peer_over: false,
             told_end: false,
@@ -102,8 +113,12 @@ impl Bottom {
         assert!(self.closed.is_none(), "nothing goes below once its owner closed the stream: {request:?}");
         match request {
             Down::Demand { read: Read::Nothing, room: 0 } => {
-                assert!(stopping, "a withdrawal only as the stack stops reading");
+                assert!(
+                    stopping || self.crossed,
+                    "a withdrawal only as the stack stops reading, or of a read past the end"
+                );
                 self.withdrawn = Some(self.demand.take().expect("only a demand outstanding is withdrawn"));
+                self.crossed = false;
             }
             Down::Demand { read, room } => {
                 assert!(self.demand.is_none(), "one demand at a time: {read:?} over {:?}", self.demand);
@@ -114,6 +129,7 @@ impl Bottom {
                 };
                 assert!(wanted <= self.intake.capacity(), "no read past the intake's cap: {wanted}");
                 assert!(room <= self.output_cap, "no room past the output's cap: {room}");
+                assert!(room == 0 || !self.held, "room grants one Send, made before room is demanded again");
                 if read != Read::Nothing {
                     assert!(!self.told_end, "nothing read once the end was told");
                 }
@@ -125,6 +141,7 @@ impl Bottom {
                 let len = u32::try_from(bytes.len()).expect("fits a u32");
                 self.granted = self.granted.checked_sub(len).expect("a Send within the room granted");
                 self.sends += 1;
+                self.held = false;
                 assert!(self.sends <= 1, "one Send a grant");
                 self.sent += u64::from(len);
                 self.output.extend(bytes.iter());
@@ -148,6 +165,7 @@ impl Bottom {
             }
             self.told_failed = true;
             self.demand = None;
+            self.crossed = false;
             return Some(Up::Failed(fault));
         }
         if let Some((read, room)) = self.demand {
@@ -161,17 +179,18 @@ impl Bottom {
             let free = self.output_cap as usize - self.output.len();
             if room > 0 && grant && free >= room as usize {
                 self.demand = None;
+                self.crossed = false;
                 self.granted = room;
                 self.sends = 0;
+                self.held = true;
                 return Some(Up::Room);
             }
             if read != Read::Nothing && self.peer_over && !self.told_end {
-                // Nothing more comes, and nothing held meets the read: a read
-                // crosses the end, and room may still come after it.
+                // Nothing more comes, and nothing held meets the read: the
+                // read crosses the end and stays outstanding, until it is
+                // withdrawn or room comes for it.
                 self.told_end = true;
-                if room == 0 {
-                    self.demand = None;
-                }
+                self.crossed = true;
                 return Some(Up::End);
             }
             return None;
@@ -190,15 +209,21 @@ impl Bottom {
         if let Some(bytes) = self.intake.meet(read) {
             return Some(Up::Bytes(bytes));
         }
-        if room > 0 { Some(Up::Room) } else { None }
+        if room > 0 {
+            self.held = true;
+            Some(Up::Room)
+        } else {
+            None
+        }
     }
 
     /// The end's owner closes the stream at `now`: what it queued still
     /// goes; what comes is dropped.
     pub fn close(&mut self, now: u64) {
         assert!(
-            self.demand.is_none() || self.told_failed,
-            "a stack's close withdraws what it demanded below before its owner closes the stream: {:?}",
+            self.demand.is_none() || self.told_failed || self.crossed,
+            "a stack's close withdraws what it demanded below, but a read past the end, before its owner closes the \
+             stream: {:?}",
             self.demand
         );
         self.closed = Some(now);

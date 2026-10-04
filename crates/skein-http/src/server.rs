@@ -1108,10 +1108,10 @@ fn reply(
                 Reply::Chunked { room: Room::Granted(granted) } => {
                     assert!(len <= u64::from(granted), "a Send within the room granted");
                     // An empty chunk would be the last: an empty piece is no
-                    // chunk at all.
-                    if !bytes.is_empty() {
-                        below.push(Down::Send(response::chunk(&bytes)));
-                    }
+                    // chunk at all, and goes down as it came, to give up the
+                    // room granted below, which grants one Send (lib.md, 7).
+                    let send = if bytes.is_empty() { bytes } else { response::chunk(&bytes) };
+                    below.push(Down::Send(send));
                     Reply::Chunked { room: Room::Idle }
                 }
                 Reply::UntilEnd { room: Room::Granted(granted) } => {
@@ -1131,14 +1131,25 @@ fn reply(
                 assert!(left == 0 && room == Room::Idle, "Finish once the response's length is sent");
                 Reply::Finished
             }
-            Reply::Chunked { room } => {
-                assert!(room == Room::Idle, "Finish with no room outstanding");
-                Reply::Last
-            }
-            Reply::UntilEnd { room } => {
-                assert!(room == Room::Idle, "Finish with no room outstanding");
-                Reply::Finished
-            }
+            // A Finish may come in place of the one Send a grant allows
+            // (lib.md, 7): the room granted below holds the last chunk, or
+            // is given up with an empty Send.
+            Reply::Chunked { room } => match room {
+                Room::Idle => Reply::Last,
+                Room::Granted(_) => {
+                    below.push(Down::Send(bytes::copy_of(response::LAST_CHUNK)));
+                    Reply::Finished
+                }
+                Room::Wanted(_) => unreachable!("Finish with no room demand outstanding"),
+            },
+            Reply::UntilEnd { room } => match room {
+                Room::Idle => Reply::Finished,
+                Room::Granted(_) => {
+                    below.push(Down::Send(Box::default()));
+                    Reply::Finished
+                }
+                Room::Wanted(_) => unreachable!("Finish with no room demand outstanding"),
+            },
             Reply::Last | Reply::Finished => unreachable!("a Finish for a body that has none, or after Finish"),
             Reply::Withdrawn => unreachable!("a Finish after the reply's withdrawal"),
         },

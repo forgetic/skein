@@ -161,6 +161,31 @@ fn a_chunked_body_goes_down_a_chunk_a_send_and_ends_with_the_last_chunk() {
 }
 
 #[test]
+fn a_finish_in_place_of_the_send_a_grant_allows_uses_or_gives_up_the_room_below() {
+    // In chunks: the room granted below, a chunk's of at least a byte, holds
+    // the last chunk.
+    let mut machine = Machine::new(LIMITS);
+    machine.call(get());
+    machine.down(Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
+    machine.down(Request::Respond(response(200, Body::Chunked)));
+    machine.down(Request::Reply(Down::Demand { read: Read::Nothing, room: 1 }));
+    machine.up(Up::Room);
+    let (events, requests) = machine.down(Request::Reply(Down::Finish));
+    assert_eq!(requests, [Down::Send(boxed(b"0\r\n\r\n"))], "the last chunk, in the room granted");
+    assert_eq!(events, [Event::Done(Reuse::Keep)]);
+    // To the end of the stream: the room is given up.
+    let mut machine = Machine::new(LIMITS);
+    machine.call(b"GET / HTTP/1.0\r\n\r\n");
+    machine.down(Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
+    machine.down(Request::Respond(response(200, Body::Chunked)));
+    machine.down(Request::Reply(Down::Demand { read: Read::Nothing, room: 4 }));
+    machine.up(Up::Room);
+    let (events, requests) = machine.down(Request::Reply(Down::Finish));
+    assert_eq!(requests, [Down::Send(boxed(b""))], "an empty Send gives the room up");
+    assert_eq!(events, [Event::Done(Reuse::Close)]);
+}
+
+#[test]
 fn room_for_a_chunk_is_its_size_line_and_its_endings_and_an_empty_piece_is_no_chunk() {
     let mut machine = Machine::new(LIMITS);
     machine.call(get());
@@ -172,7 +197,8 @@ fn room_for_a_chunk_is_its_size_line_and_its_endings_and_an_empty_piece_is_no_ch
     let (events, _) = machine.up(Up::Room);
     assert_eq!(events, [Event::Reply(Up::Room)]);
     let (events, requests) = machine.down(Request::Reply(Down::Send(boxed(b""))));
-    assert!(events.is_empty() && requests.is_empty(), "no chunk for nothing");
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(requests, [Down::Send(boxed(b""))], "no chunk for nothing: an empty Send gives the room up below");
     machine.down(Request::Reply(Down::Demand { read: Read::Nothing, room: 9 }));
     machine.up(Up::Room);
     let (_, requests) = machine.down(Request::Reply(Down::Send(boxed(b"abcdefghi"))));

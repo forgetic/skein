@@ -689,9 +689,12 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
   within it, and finishes. By length, each `Send` goes down as it is, and
   `Finish` once the length is sent. In chunks, each `Send` is one chunk,
   framed into a box of its own, its size line, the bytes and a line
-  ending, below room asked for the chunk; an empty `Send` is no chunk;
-  `Finish` writes the last chunk, `0` and a blank line, with no trailer
-  section, within room asked for it. To an HTTP/1.0 client, which knows
+  ending, below room asked for the chunk; an empty `Send` is no chunk,
+  and goes down empty, giving up the room granted below, which grants one
+  `Send` (lib.md, 7); `Finish` writes the last chunk, `0` and a blank
+  line, with no trailer section, within room asked for it, or within the
+  room granted for a chunk if it comes in place of that grant's `Send`,
+  as the contract lets it. To an HTTP/1.0 client, which knows
   no chunks, a chunked response goes to the end of the stream instead
   (RFC 9112, 6.1), on a connection that ends with it. A response to
   `HEAD`, a 204, a 304 or one without a body has no reply stream: a

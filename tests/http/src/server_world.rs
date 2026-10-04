@@ -76,6 +76,10 @@ pub struct Settings {
     /// withdrawn its demand before the piece reached it, so that the two
     /// cross (lib.md, 7). Drawn only for neighbours that withdraw.
     pub cross: u32,
+    /// Per mille, per grant for a reply in chunks: how likely the side
+    /// above finishes in place of the one Send the grant allows, which the
+    /// contract lets it (lib.md, 7).
+    pub finish_early: u32,
     /// Whether the client sends each request only once the last exchange is
     /// over, rather than pipelining them.
     pub patient: bool,
@@ -127,6 +131,7 @@ impl Settings {
             withdraw: if rng.chance(300) { draw(rng, 0, 200) } else { 0 },
             withdraw_reply: 0,
             cross: 0,
+            finish_early: 0,
             patient: rng.chance(500),
             patience: rng.between(8, 400),
             cut: None,
@@ -147,6 +152,9 @@ impl Settings {
         let span = 6 * len as u64 + 64;
         if settings.withdraw > 0 && rng.chance(300) {
             settings.cross = draw(rng, 0, 300);
+        }
+        if rng.chance(150) {
+            settings.finish_early = draw(rng, 0, 300);
         }
         if rng.chance(150) {
             settings.withdraw_reply = draw(rng, 0, 100);
@@ -359,6 +367,8 @@ pub struct Fell {
     pub reply_withdrawn: bool,
     /// A withdrawal crossed the body's piece it would have read.
     pub crossed_withdrawal: bool,
+    /// A Finish came in place of the Send a grant allows.
+    pub finished_over_grant: bool,
     /// A body the side above never touched, discarded a while after the
     /// response.
     pub untouched: bool,
@@ -389,6 +399,8 @@ pub fn run(client: &[u8], plans: &[Plan], settings: &Settings, seed: u64) -> Run
             demand: None,
             granted: 0,
             sends: 0,
+            held: false,
+            crossed: false,
             life: Life::Open,
             failed: None,
             withdrawn: None,
@@ -663,6 +675,13 @@ struct Below<'a> {
     granted: u32,
     /// The `Send`s since the last `Room`.
     sends: u32,
+    /// Whether the server holds a grant it has not sent within: it sends,
+    /// or finishes, before it demands room again (lib.md, 7).
+    held: bool,
+    /// Whether the read outstanding crossed the end: it stays outstanding
+    /// until the server withdraws it (lib.md, 7), so the server demands
+    /// nothing over it.
+    crossed: bool,
     life: Life,
     failed: Option<Fault>,
     /// The demand the server withdrew, which an answer on its way may still
@@ -789,7 +808,7 @@ impl World<'_> {
     fn end(&mut self) {
         self.below.life = Life::Ended;
         if let Some((_, 0)) = self.below.demand {
-            self.below.demand = None;
+            self.below.crossed = true;
         }
         if let Some(seen) = self.current() {
             seen.below_over = true;
@@ -802,6 +821,7 @@ impl World<'_> {
         self.fell.failed_while = Some(self.server.waiting());
         self.below.life = Life::Failed;
         self.below.demand = None;
+        self.below.crossed = false;
         self.below.failed = Some(fault);
         if let Some(seen) = self.current() {
             seen.below_over = true;
@@ -910,6 +930,7 @@ impl World<'_> {
                 self.fell.late_answer = true;
                 self.below.granted = room;
                 self.below.sends = 0;
+                self.below.held = true;
                 self.up(Up::Room);
                 return;
             }
@@ -929,6 +950,7 @@ impl World<'_> {
                     below.demand = None;
                     below.granted = room;
                     below.sends = 0;
+                    below.held = true;
                     self.fell.room_after_end |= ended;
                     self.up(Up::Room);
                 } else if !ended && nothing_left && self.rng.chance(self.settings.idle_end) {
@@ -1131,10 +1153,26 @@ impl World<'_> {
     }
 
     fn reply_acts(&mut self) {
+        let chunked = self
+            .above
+            .seen
+            .last()
+            .and_then(|seen| seen.response.as_ref())
+            .is_some_and(|(response, _)| response.body == Body::Chunked);
         let exchange = self.above.exchange.as_mut().expect("an exchange");
         let left = exchange.plan.reply.len() - exchange.written;
         let sends_room = self.settings.limits.send;
         match exchange.reply {
+            // In place of the Send the grant allows, a Finish: the reply in
+            // chunks ends short of its plan.
+            Reply::Granted(_) if chunked && self.rng.chance(self.settings.finish_early) => {
+                exchange.reply = Reply::Over;
+                self.fell.finished_over_grant = true;
+                if let Some(seen) = self.current() {
+                    seen.finished = true;
+                }
+                self.down(Request::Reply(Down::Finish));
+            }
             Reply::Idle if left == 0 => {
                 exchange.reply = Reply::Over;
                 if let Some(seen) = self.current() {
@@ -1368,10 +1406,12 @@ impl World<'_> {
         match request {
             Down::Demand { read: Read::Nothing, room: 0 } => {
                 assert!(
-                    stopping != Stopping::No || ending,
-                    "a withdrawal only as the server stops reading: closes, ends an exchange, or gives up a body"
+                    stopping != Stopping::No || ending || below.crossed,
+                    "a withdrawal only as the server stops reading: closes, ends an exchange, gives up a body, or \
+                     withdraws a read past the end"
                 );
                 let withdrawn = below.demand.take().expect("only a demand outstanding is withdrawn");
+                below.crossed = false;
                 if stopping == Stopping::Maybe {
                     self.fell.gave_up = true;
                 }
@@ -1380,6 +1420,7 @@ impl World<'_> {
             Down::Demand { read, room } => {
                 assert!(below.demand.is_none(), "one demand at a time: {read:?} over {:?}", below.demand);
                 assert!(read == Read::Nothing || room == 0, "a read or room, never both");
+                assert!(room == 0 || !below.held, "room grants one Send, made before room is demanded again");
                 self.fell.crossed_end |= below.life == Life::Ending;
                 if read != Read::Nothing {
                     assert!(
@@ -1418,6 +1459,7 @@ impl World<'_> {
                 let len = u32::try_from(bytes.len()).expect("fits a u32");
                 below.granted = below.granted.checked_sub(len).expect("a Send within the room granted");
                 below.sends += 1;
+                below.held = false;
                 assert!(below.sends <= 1, "one Send a grant");
                 // What the client learns: a 100 lets it send a body it holds
                 // back; a final response first, never.
@@ -1446,7 +1488,7 @@ impl World<'_> {
         } else if over && !self.above.asked {
             Waiting::Next
         } else {
-            match self.below.demand {
+            match self.below.demand.filter(|_| !self.below.crossed) {
                 Some((_, room)) if room > 0 => Waiting::Room,
                 Some(_) if self.above.asked => Waiting::Request,
                 Some(_) => Waiting::Body,
