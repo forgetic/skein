@@ -254,12 +254,13 @@ closes in every state. Each run is held to its scenario: the plaintext
 each side received, the server's ending (`close_notify`, a truncation, a
 corrupted record), certificates refused at the wall time handed in, and
 `close_notify` sent on a finish or a close. Focused tests handshake each
-version, retry, agree ALPN, refuse each kind of certificate and a chain
-longer than the records held, cut the ciphertext a byte at a time, refuse
-a renegotiation sealed by hand in front of the side above's data, and
-stack the HTTP client on the TLS client; the fuzzy suite runs 400 drawn
-scenarios, asserting that each outcome and each oddity of the neighbours
-fell.
+version, retry, agree ALPN, refuse a certificate for each reason the
+client names and a chain longer than the records held, cut the
+ciphertext a byte at a time, refuse a renegotiation sealed by hand in
+front of the side above's data, and stack the HTTP client on the TLS
+client; the fuzzy suite runs 400 drawn scenarios, asserting that the
+outcomes it draws and each oddity of the neighbours fell. No test reaches
+rustls failing for a reason of its own (tls.md, 5).
 
 io's worlds run io over the simulator with a scripted owner above it and
 a referee beside it, every process in one loop (io.md, 8). Their harness

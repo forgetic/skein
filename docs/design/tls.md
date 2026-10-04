@@ -227,6 +227,15 @@ pub struct Limits {
   through `getrandom`: the only kernel calls step code makes, when the
   handshake starts and as it runs. That is the documented exception;
   nothing else impure comes in.
+- **`getrandom` on Linux** makes the getrandom(2) system call. Where it
+  cannot, a kernel older than 3.17 (below the shell's floor, shell.md, 4)
+  or a seccomp filter that refuses it with `EPERM`, it falls back to
+  `/dev/urandom`, once a poll of `/dev/random` says the pool is ready: it
+  opens the file the first time it draws, under a lock of its own, and
+  keeps the descriptor open for the life of the process, a file io knows
+  nothing of, read with plain `read` calls. getrandom's
+  `linux_disable_fallback` feature would make that an error instead;
+  skein does not set it.
 - **No clock:** rustls asks a time provider for the time it checks
   certificates against. Each connection's configuration carries one that
   answers the `env.wall` of the step that started its handshake, read
@@ -246,34 +255,44 @@ TLS is tested on its own (testing-strategy.md, 4.4), against rustls's own
 server, in memory: rustls's buffered connection over byte slices. Its
 certificates are fixtures (`tests/tls/fixtures`, made by `make.sh` with
 OpenSSL): a root, an intermediate, the server's certificate for
-`skein.test` and `127.0.0.1`, one of 40 KB for 1,500 names, and one that
-a root no one trusts signed, all valid from 2026 to 2036, checked at a
-wall time each test chooses.
+`skein.test` and `127.0.0.1`, one of 40 KB for 1,500 names, one that a
+root no one trusts signed, one signed by itself, one of a CA, and one
+for client authentication only, all valid from 2026 to 2036, checked at
+a wall time each test chooses.
 
 - **Step tests** (`crates/skein-tls/src/tests/`): the limits and what they
   price, the configuration's refusals, names, the faults, the bytes held
   for rustls; and the machine fed by hand: its first flight, records no
   server writes (not TLS, past TLS's lengths, an alert, a message longer
-  than the records held), the stream ending and failing before and
-  during the handshake, closes, and each bug of the side above's.
+  than the records held, a retry whose cookie no flight holds), the
+  stream ending and failing before and during the handshake, closes, and
+  the bugs it asserts: limits it cannot honour, a second handshake, the
+  stream before it, a second demand, a read or room past the limits, a
+  `Send` without room, a `Finish` with room or a read outstanding, a
+  close after close, and an answer no demand asked for.
 - **Machine worlds** (`tests/tls`, `skein-tls-world`): one client from a
   seed between the server's ciphertext, cut at random, room granted late,
   ended or failed, and a user that reads with demands of every shape,
-  slowly, writes within the room granted, finishes, and closes in every
-  state. They check both streams' contracts as they go, and each run
-  against its scenario: the plaintext each side received, the server's
-  ending (`close_notify`, a truncation, a corrupted record, nothing), a
-  key update, certificates refused at the wall time handed in, a chain
-  longer than the records held, `close_notify` sent on a finish or a
-  close, the server reading every record the client sends, and, left
-  alone, the end the server makes reached and the request all sent, so
-  that a client that waits for ever fails. Focused tests aim at one
-  outcome each: every version, a retry, ALPN, an alert, every split of
-  the ciphertext a byte at a time, a slow reader that fills the stream
-  below, closes in every state, a read that crosses the end held until
-  withdrawn, a corrupted record read after `close_notify` went, and a
-  renegotiation request, sealed with the server's keys
-  taken out, refused alone or in front of the side above's data.
+  slowly, writes within the room granted, finishes, and closes as the
+  client waits for the handshake, room, bytes, the side above, or its
+  close after a failure. They check both streams' contracts as they go,
+  and each run against its scenario: the plaintext each side received,
+  the server's ending (`close_notify`, a truncation, a corrupted record,
+  nothing), the server's key update in TLS 1.3, certificates refused at
+  the wall time handed in, a chain longer than the records held,
+  `close_notify` sent on a finish or a close, the server reading every
+  record the client sends, and, left alone, the end the server makes
+  reached and the request all sent, so that a client that waits for ever
+  fails. Focused tests aim at one
+  outcome each: each version, a retry, ALPN, an alert, a certificate
+  refused for each reason, every split of the ciphertext a byte at a
+  time, a slow reader that fills the stream below, the same closes, a
+  read that crosses the end held until withdrawn, room held for a demand
+  withdrawn, a corrupted record read after `close_notify` went, the key
+  updates rustls starts at its keys' limit, and a renegotiation request,
+  sealed with the server's keys taken out, refused alone or in front of
+  the side above's data. Nothing reaches `Other`, rustls failing for a
+  reason of its own.
 - **Not replayed:** what rustls draws from the kernel changes a record's
   length, and with it where the pieces fall. The worlds assert only what
   does not depend on it.
@@ -300,10 +319,16 @@ wall time each test chooses.
   MB past the buffers) and 18 in TLS 1.3. That chain reaches 97% of the
   worst case. Dropped, the client frees what it held.
 - **The fuzzy suite** (`tests/tls/tests/fuzzy_world.rs`): 400 runs of
-  scenarios and neighbours drawn from each seed, every version, retries,
-  ALPN, the big chain, key updates, every ending and every refused
-  certificate, asserting that each outcome, each wait a close came in,
-  and each oddity of the neighbours fell.
+  scenarios and neighbours drawn from each seed: each version, retries,
+  ALPN, the big chain, the server's key updates, each ending and each
+  certificate refused. It asserts that what it draws fell: no failure,
+  the stream's own failure, a truncation, a record that fails to
+  decrypt, among them one read after `close_notify` went, a message
+  longer than the records held, each reason a certificate is refused,
+  each version, a protocol agreed, a retry, records read past a key
+  update, a close in each wait the worlds reach, and each oddity of the
+  neighbours. It draws no alert, no protocol error and no cookie too long
+  to echo: the focused tests reach those.
 
 ## 6. Decisions
 
