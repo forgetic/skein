@@ -1,0 +1,573 @@
+use skein_lib::{Duration, Token};
+use skein_llm::{Block, Delta, Error, Failure, Stop, client};
+use skein_llm_world::{TERMINAL, World, call, events, limits, response, text_response};
+
+#[test]
+fn wire_request_and_streamed_answer() {
+    for chunked in [false, true] {
+        let mut world = World::new(call(7), limits(), text_response(chunked), 2);
+        world.fragmentation(1, 3);
+        world.request(client::Request::Next);
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        let sent = String::from_utf8(world.sent.clone()).unwrap();
+        let (head, body) = sent.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("POST /backend-api/codex/responses HTTP/1.1\r\n"));
+        for header in [
+            "Host: chatgpt.com",
+            "Authorization: Bearer secret-test-token",
+            "chatgpt-account-id: account-test",
+            "originator: skein-world",
+        ] {
+            assert!(head.to_ascii_lowercase().contains(&header.to_ascii_lowercase()), "{head}");
+        }
+        assert!(head.to_ascii_lowercase().contains(&format!("content-length: {}", body.len())));
+        for property in [
+            "\"model\":\"fixture-model\"",
+            "\"stream\":true",
+            "\"store\":false",
+            "\"prompt_cache_key\":\"cache-world\"",
+            "reasoning.encrypted_content",
+            "Hello",
+        ] {
+            assert!(body.contains(property), "{body}");
+        }
+        assert!(world.seen.iter().any(|e| matches!(e, client::Event::Delta { owner, delta: Delta::Text { text, .. }} if *owner == Token::new(7) && text.as_ref() == b"Hello")));
+        let completion = world
+            .seen
+            .iter()
+            .find_map(|e| {
+                if let client::Event::Completed { owner, completion } = e {
+                    assert_eq!(*owner, Token::new(7));
+                    Some(completion)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert_eq!(completion.stop, Stop::EndTurn);
+        assert_eq!(completion.usage.input_tokens, 8);
+        assert_eq!(completion.usage.cache_read_tokens, 4);
+        assert!(
+            completion
+                .content
+                .iter()
+                .any(|b| matches!(b, Block::Text { text, replay: Some(_) } if text.as_ref() == b"Hello"))
+        );
+        assert_eq!(world.machine.waiting(), client::Waiting::Idle);
+    }
+}
+
+#[test]
+fn next_is_one_event_and_duplicate_demand_is_inert() {
+    let mut world = World::new(call(1), limits(), text_response(false), 1);
+    world.request(client::Request::Start);
+    for _ in 0..200 {
+        if !world.tick(false) {
+            break;
+        }
+        if world.machine.waiting() == client::Waiting::Next {
+            break;
+        }
+    }
+    assert!(world.seen.is_empty());
+    assert_eq!(world.machine.waiting(), client::Waiting::Next);
+    world.request(client::Request::Next);
+    world.request(client::Request::Next);
+    for _ in 0..1000 {
+        world.tick(false);
+        if world.machine.waiting() == client::Waiting::Next {
+            break;
+        }
+    }
+    assert_eq!(
+        world
+            .seen
+            .iter()
+            .filter(|e| matches!(
+                e,
+                client::Event::Delta { .. } | client::Event::Block { .. } | client::Event::Completed { .. }
+            ))
+            .count(),
+        1
+    );
+    for _ in 0..20 {
+        world.tick(false);
+    }
+    assert_eq!(world.seen.len(), 1);
+    world.run();
+    world.assert_once();
+}
+
+#[test]
+fn reasoning_and_parallel_tools_preserve_replay_and_order() {
+    let docs = [
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning"}}"#,
+        r#"{"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"Plan"}"#,
+        r#"{"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call"}}"#,
+        r#"{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"x\":1}"}"#,
+        r#"{"type":"response.output_item.added","output_index":2,"item":{"id":"fc_2","type":"function_call"}}"#,
+        r#"{"type":"response.output_item.done","output_index":2,"item":{"id":"fc_2","type":"function_call","call_id":"call_2","name":"b","arguments":"{}"}}"#,
+        r#"{"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"a","arguments":"{\"x\":1}"}}"#,
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","encrypted_content":"opaque-test","summary":[]}}"#,
+        TERMINAL,
+    ];
+    let mut world =
+        World::new(call(1), limits(), response(200, "Content-Type: text/event-stream\r\n", &events(&docs), true), 9);
+    world.request(client::Request::Start);
+    world.run();
+    world.assert_once();
+    assert!(world.seen.iter().any(
+        |e| matches!(e, client::Event::Delta { delta: Delta::Reasoning { text, .. }, .. } if text.as_ref() == b"Plan")
+    ));
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Delta { delta: Delta::ToolArguments { delta, .. }, .. } if delta.as_ref() == b"{\"x\":1}")));
+    let completion = world
+        .seen
+        .iter()
+        .find_map(|e| if let client::Event::Completed { completion, .. } = e { Some(completion) } else { None })
+        .unwrap();
+    assert_eq!(completion.stop, Stop::ToolUse);
+    assert!(matches!(&completion.content[0], Block::Reasoning { .. }));
+    assert!(
+        matches!(&completion.content[1], Block::ToolCall { id, arguments, replay: Some(_), .. } if id.as_ref() == b"call_1" && arguments.as_ref() == b"{\"x\":1}")
+    );
+    assert!(matches!(&completion.content[2], Block::ToolCall { id, .. } if id.as_ref() == b"call_2"));
+}
+
+#[test]
+fn provider_error_body_end_and_http_done_share_one_terminal() {
+    for (status, body, expected) in [
+        (401, r#"{"error":{"code":"invalid_api_key","message":"bad token"}}"#, Failure::Unauthorized),
+        (
+            429,
+            r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#,
+            Failure::RateLimited { retry_after: Duration::from_secs(13) },
+        ),
+        (503, r#"{"error":{"code":"server_error","message":"offline"}}"#, Failure::Overloaded),
+    ] {
+        let mut world = World::new(
+            call(1),
+            limits(),
+            response(status, "Content-Type: application/json\r\nRetry-After: 13\r\n", body.as_bytes(), false),
+            1,
+        );
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure, evidence: client::Evidence::Response, .. } if *failure == expected)), "{:?}", world.seen);
+        world.settle();
+        world.settle();
+        world.assert_once();
+    }
+}
+
+#[test]
+fn cancellation_waits_for_actual_settlement() {
+    for stage in 0..3 {
+        let mut world = World::new(call(19), limits(), text_response(false), 1);
+        if stage > 0 {
+            world.request(client::Request::Start);
+        }
+        if stage == 2 {
+            for _ in 0..1000 {
+                world.tick(false);
+                if world.machine.waiting() == client::Waiting::Next {
+                    break;
+                }
+            }
+        }
+        world.request(client::Request::Cancel);
+        world.request(client::Request::Cancel);
+        assert_eq!(world.terminals(), 0);
+        assert_eq!(world.machine.waiting(), client::Waiting::Closing);
+        world.settle();
+        world.settle();
+        world.request(client::Request::Close);
+        world.assert_once();
+        assert!(world.seen.iter().any(|e| matches!(e, client::Event::Cancelled { owner } if *owner == Token::new(19))));
+        assert_eq!(world.seen.iter().filter(|e| matches!(e, client::Event::Close)).count(), 1);
+        assert_eq!(world.seen.iter().filter(|e| matches!(e, client::Event::Closed)).count(), 1);
+    }
+}
+
+#[test]
+fn malformed_truncated_and_oversized_streams_fail_once() {
+    let mut small = limits();
+    small.sse.line = 32;
+    for (wire, bounds) in [
+        (response(200, "Content-Type: text/event-stream\r\n", b"data: not-json\n\n", false), limits()),
+        (
+            response(200, "Content-Type: text/event-stream\r\n", &events(&[skein_llm_world::TEXT_ADDED]), false),
+            limits(),
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 900\r\n\r\ndata: {".to_vec(),
+            limits(),
+        ),
+        (text_response(false), small),
+        (response(200, "Content-Type: application/json\r\n", b"{}", false), limits()),
+        (
+            response(200, "Content-Type: text/event-stream\r\nContent-Encoding: gzip\r\n", &events(&[TERMINAL]), false),
+            limits(),
+        ),
+    ] {
+        let mut world = World::new(call(1), bounds, wire, 2);
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { .. })), "{:?}", world.seen);
+        world.settle();
+        world.assert_once();
+    }
+}
+
+#[test]
+fn reuse_preserves_binding_and_rejects_other_authority() {
+    let mut wire = text_response(true);
+    wire.extend(text_response(false));
+    let mut world = World::new(call(1), limits(), wire, 8);
+    world.request(client::Request::Start);
+    world.run();
+    assert_eq!(world.machine.waiting(), client::Waiting::Idle);
+    let mut changed = call(2);
+    changed.endpoint.authority = b"another.example".to_vec().into();
+    let rejected = world.machine.next_call(client::Client::prepare(changed, &limits()).unwrap()).err().unwrap();
+    assert_eq!(rejected.owner(), Token::new(2));
+    assert!(world.machine.next_call(client::Client::prepare(call(3), &limits()).unwrap()).is_ok());
+    world.request(client::Request::Start);
+    world.run();
+    assert_eq!(world.terminals(), 2);
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Completed { owner, .. } if *owner == Token::new(3))));
+}
+
+#[test]
+fn hostile_request_is_refused_before_connection() {
+    for field in 0..4 {
+        let mut request = call(1);
+        match field {
+            0 => request.credential.access_token = b"bad\r\ninjected".to_vec().into(),
+            1 => request.credential.account_id = Box::new([]),
+            2 => request.endpoint.target = b"/bad target".to_vec().into(),
+            3 => request.endpoint.authority = b"bad/name".to_vec().into(),
+            _ => unreachable!(),
+        }
+        assert!(matches!(client::Client::prepare(request, &limits()), Err(Error::Invalid)));
+    }
+}
+
+#[test]
+fn terminal_only_unknown_events_refusal_and_token_limit() {
+    let empty_terminal = TERMINAL.to_owned();
+    let refusal_done = r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","content":[{"type":"refusal","refusal":"Cannot comply"}]}}"#.to_owned();
+    let incomplete = r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":0,"output_tokens":1}}}"#.to_owned();
+    for (documents, stop) in [
+        (vec![r#"{"type":"future.event","extra":[1,2]}"#.to_owned(), empty_terminal.clone()], Stop::EndTurn),
+        (vec![skein_llm_world::TEXT_ADDED.to_owned(), refusal_done, empty_terminal], Stop::Refusal),
+        (vec![incomplete], Stop::MaxTokens),
+    ] {
+        let refs: Vec<_> = documents.iter().map(String::as_str).collect();
+        let mut world = World::new(
+            call(1),
+            limits(),
+            response(200, "Content-Type: text/event-stream\r\n", &events(&refs), false),
+            4,
+        );
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        assert!(
+            world
+                .seen
+                .iter()
+                .any(|e| matches!(e, client::Event::Completed { completion, .. } if completion.stop == stop)),
+            "{:?}",
+            world.seen
+        );
+    }
+}
+
+#[test]
+fn error_within_sse_stream_is_terminal_and_uses_headers() {
+    let body = events(&[r#"{"type":"error","code":"usage_limit_reached","message":"account spent"}"#]);
+    let mut world = World::new(
+        call(1),
+        limits(),
+        response(200, "Content-Type: text/event-stream\r\nRetry-After: 17\r\n", &body, true),
+        10,
+    );
+    world.request(client::Request::Start);
+    world.run();
+    world.assert_once();
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Exhausted { retry_after }, .. } if *retry_after == Duration::from_secs(17))), "{:?}", world.seen);
+    world.settle();
+    world.assert_once();
+}
+
+#[test]
+fn lower_close_before_start_is_unsent_and_cancellation_during_read_settles() {
+    let mut world = World::new(call(1), limits(), Vec::new(), 1);
+    world.settle();
+    world.settle();
+    world.assert_once();
+    assert!(world.sent.is_empty());
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { evidence: client::Evidence::Unsent, .. })));
+    let mut world = World::new(call(2), limits(), text_response(true), 8);
+    world.request(client::Request::Start);
+    for _ in 0..1000 {
+        world.tick(false);
+        if world.machine.waiting() == client::Waiting::Next {
+            break;
+        }
+    }
+    world.request(client::Request::Next);
+    assert!(world.demand.is_some(), "reading SSE creates a lower demand");
+    world.request(client::Request::Cancel);
+    assert_eq!(world.terminals(), 0);
+    world.settle();
+    world.assert_once();
+}
+
+#[test]
+fn completed_messages_replay_reasoning_message_ids_and_tool_ids_on_next_turn() {
+    let docs = [
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning"}}"#,
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning","encrypted_content":"exact-opaque","summary":[]}}"#,
+        r#"{"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message"}}"#,
+        r#"{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","phase":"commentary","content":[{"type":"output_text","text":"Reading"}]}}"#,
+        r#"{"type":"response.output_item.added","output_index":2,"item":{"id":"fc_1","type":"function_call"}}"#,
+        r#"{"type":"response.output_item.done","output_index":2,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"a\"}"}}"#,
+        TERMINAL,
+    ];
+    let mut world =
+        World::new(call(1), limits(), response(200, "Content-Type: text/event-stream\r\n", &events(&docs), false), 18);
+    world.request(client::Request::Start);
+    world.run();
+    let completed = world
+        .seen
+        .iter()
+        .find_map(|e| if let client::Event::Completed { completion, .. } = e { Some(completion) } else { None })
+        .unwrap();
+    let mut followup = call(2);
+    followup.prompt.messages = vec![
+        skein_llm::Message { role: skein_llm::Role::Assistant, content: completed.content.clone() },
+        skein_llm::Message {
+            role: skein_llm::Role::User,
+            content: Box::new([Block::ToolResult {
+                id: b"call_1".to_vec().into(),
+                text: b"file contents".to_vec().into(),
+                is_error: false,
+            }]),
+        },
+    ]
+    .into();
+    let mut next = World::new(followup, limits(), text_response(false), 4);
+    next.request(client::Request::Start);
+    next.run();
+    next.assert_once();
+    let wire = String::from_utf8(next.sent).unwrap();
+    for value in [
+        "\"encrypted_content\":\"exact-opaque\"",
+        "\"id\":\"msg_1\"",
+        "\"phase\":\"commentary\"",
+        "\"id\":\"fc_1\"",
+        "\"call_id\":\"call_1\"",
+        "\"type\":\"function_call_output\"",
+    ] {
+        assert!(wire.contains(value), "{wire}");
+    }
+}
+
+#[test]
+fn independent_caps_bound_requests_errors_deltas_and_tool_arguments() {
+    let mut tiny_request = limits();
+    tiny_request.dialect.request_bytes = 32;
+    assert!(matches!(client::Client::prepare(call(1), &tiny_request), Err(Error::Limit)));
+    let mut token_cap = limits();
+    token_cap.dialect.tokens = 2;
+    let mut world = World::new(call(1), token_cap, text_response(false), 3);
+    world.request(client::Request::Start);
+    world.run();
+    world.assert_once();
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Limit, .. })));
+    let mut short_errors = limits();
+    short_errors.error_bytes = 16;
+    let mut world = World::new(
+        call(1),
+        short_errors,
+        response(429, "Content-Type: application/json\r\nRetry-After: 4\r\n", &[b'x'; 512], false),
+        1,
+    );
+    world.request(client::Request::Start);
+    world.run();
+    world.assert_once();
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::RateLimited { retry_after }, .. } if *retry_after == Duration::from_secs(4))));
+    world.settle();
+    world.assert_once();
+
+    let mut bounded = limits();
+    bounded.dialect.input_bytes = 2;
+    let tool_documents = [
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call"}}"#,
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":"{\"x\":1}"}}"#,
+        TERMINAL,
+    ];
+    let mut world = World::new(
+        call(1),
+        bounded,
+        response(200, "Content-Type: text/event-stream\r\n", &events(&tool_documents), true),
+        8,
+    );
+    world.request(client::Request::Start);
+    world.run();
+    world.assert_once();
+    assert!(
+        world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Limit, .. })),
+        "{:?}",
+        world.seen
+    );
+
+    let mut bounded = limits();
+    bounded.dialect.answer_bytes = 1;
+    // Admission checks the prompt against the same answer cap, so use an
+    // empty prompt while the incoming text delta exceeds it.
+    let mut request = call(1);
+    request.prompt.messages = Box::new([]);
+    request.prompt.instructions = Box::new([]);
+    let mut world = World::new(request, bounded, text_response(false), 2);
+    world.request(client::Request::Start);
+    world.run();
+    world.assert_once();
+    assert!(
+        world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Limit, .. })),
+        "{:?}",
+        world.seen
+    );
+}
+
+#[test]
+fn exact_request_head_cap_is_checked_before_transport_binding() {
+    let mut world = World::new(call(1), limits(), text_response(false), 2);
+    world.request(client::Request::Start);
+    world.run();
+    let head_end = world.sent.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    let mut exact = limits();
+    exact.http.request = u32::try_from(head_end).unwrap();
+    assert!(client::Client::prepare(call(1), &exact).is_ok());
+    exact.http.request -= 1;
+    assert!(matches!(client::Client::prepare(call(1), &exact), Err(Error::Limit)));
+}
+
+#[test]
+fn early_final_response_stops_the_unfinished_upload() {
+    let mut input = call(1);
+    input.prompt.instructions = vec![b'a'; 4096].into();
+    let mut world = World::new(input, limits(), text_response(false), 3);
+    world.fragmentation(256, 200);
+    world.allow_early_response();
+    world.request(client::Request::Start);
+    world.run();
+    world.assert_once();
+    assert!(world.sent.len() < 4096, "provider answered before the long request was sent");
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Completed { .. })), "{:?}", world.seen);
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Close)));
+    assert!(!world.seen.iter().any(|e| matches!(e, client::Event::Reusable)));
+    world.settle();
+    world.assert_once();
+}
+
+#[test]
+fn transport_failures_are_unsolicited_and_keep_the_terminal_unique() {
+    let mut world = World::new(call(1), limits(), text_response(false), 5);
+    world.request(client::Request::Start);
+    for _ in 0..1000 {
+        world.tick(false);
+        if world.machine.waiting() == client::Waiting::Next {
+            break;
+        }
+    }
+    assert_eq!(world.terminals(), 0);
+    world.transport_failed();
+    world.assert_once();
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Unavailable, .. })));
+    world.settle();
+    world.assert_once();
+}
+
+#[test]
+fn lower_failure_with_a_buffered_provider_terminal_closes_without_another_next() {
+    let documents = [
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"rs_0","type":"reasoning"}}"#,
+        r#"{"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message"}}"#,
+        r#"{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"partial"}]}}"#,
+        r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        r#"{"type":"trailing.unread.event"}"#,
+    ];
+    let mut world = World::new(
+        call(1),
+        limits(),
+        response(200, "Content-Type: text/event-stream\r\n", &events(&documents), false),
+        9,
+    );
+    world.request(client::Request::Start);
+    world.request(client::Request::Next);
+    for _ in 0..1000 {
+        world.tick(false);
+        if world.machine.waiting() == client::Waiting::Next {
+            break;
+        }
+    }
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Block { .. })));
+    assert_eq!(world.terminals(), 0, "the final completion is buffered behind the demanded block");
+    world.transport_failed();
+    assert!(
+        world.seen.iter().any(|e| matches!(e, client::Event::Close)),
+        "a dead stream closes without another data demand: {:?}",
+        world.seen
+    );
+    assert!(
+        world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Unavailable, .. })),
+        "transport failure is terminal without another Next"
+    );
+    world.settle();
+    world.assert_once();
+}
+
+#[test]
+fn lower_eof_with_a_buffered_provider_terminal_closes_without_another_next() {
+    let documents = [
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"rs_0","type":"reasoning"}}"#,
+        r#"{"type":"response.output_item.added","output_index":1,"item":{"id":"msg_1","type":"message"}}"#,
+        r#"{"type":"response.output_item.done","output_index":1,"item":{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"partial"}]}}"#,
+        r#"{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":1}}}"#,
+        r#"{"type":"trailing.unread.event"}"#,
+    ];
+    let mut world = World::new(
+        call(1),
+        limits(),
+        response(200, "Content-Type: text/event-stream\r\n", &events(&documents), false),
+        9,
+    );
+    world.request(client::Request::Start);
+    world.request(client::Request::Next);
+    for _ in 0..1000 {
+        world.tick(false);
+        if world.machine.waiting() == client::Waiting::Next {
+            break;
+        }
+    }
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Block { .. })));
+    assert_eq!(world.terminals(), 0, "the final completion is buffered behind the demanded block");
+    world.eof();
+    assert!(
+        world.seen.iter().any(|e| matches!(e, client::Event::Close)),
+        "a truncated stream closes without another data demand: {:?}",
+        world.seen
+    );
+    assert!(
+        world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Protocol, .. })),
+        "truncation is terminal without another Next"
+    );
+    world.settle();
+    world.assert_once();
+}

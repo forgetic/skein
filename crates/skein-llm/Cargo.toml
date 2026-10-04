@@ -1,0 +1,15 @@
+[package]
+name = "skein-llm"
+description = "Bounded provider-neutral LLM calls over HTTP and server-sent events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-http.workspace = true
+skein-json.workspace = true
+
+[lints]
+workspace = true

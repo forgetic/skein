@@ -237,6 +237,7 @@ role              depends on
 lib               nothing                          skein's `skein-lib`
 io                lib
 protocol machine  lib                              one per format; TLS also on rustls
+protocol composition lib, protocol machines        a reusable static stack, such as skein-llm
 domain            lib, and its child domains (4.5)
 protocol layer    lib, io, its machines, domain    sees both vocabularies
 service           lib, io, protocol layer, domain  its `iterate`
@@ -284,6 +285,10 @@ against fakes, or its `iterate` on the simulator.
     and, within its step, routes each event from a machine to the one
     above it and each request the other way, the way a parent routes
     between child domains (4.5). No pipeline type, no trait, no `dyn`.
+    A reusable composition crate may own this routing and depend on the
+    machines it composes (`skein-llm` composes HTTP, SSE and provider JSON).
+    It knows neither io nor a service's domain; the individual machines
+    retain their lib-only dependencies.
   - Each machine pulls from the one below only when it has room to push
     up.
   - **Machines keep no timers.** Each says what it is waiting for, and the

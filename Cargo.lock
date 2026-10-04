@@ -292,6 +292,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-llm"
+version = "0.0.0"
+dependencies = [
+ "skein-http",
+ "skein-json",
+ "skein-lib",
+]
+
+[[package]]
+name = "skein-llm-world"
+version = "0.0.0"
+dependencies = [
+ "skein-heap",
+ "skein-http",
+ "skein-lib",
+ "skein-llm",
+]
+
+[[package]]
 name = "skein-protocol-world"
 version = "0.0.0"
 dependencies = [

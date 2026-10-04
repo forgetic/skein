@@ -22,6 +22,7 @@ members = [
     "tests/io",
     "tests/json",
     "tests/lib",
+    "tests/llm",
     "tests/protocol",
     "tests/ring",
     "tests/sim",
@@ -40,6 +41,7 @@ skein-lib = { path = "crates/skein-lib" }
 skein-io = { path = "crates/skein-io" }
 skein-http = { path = "crates/skein-http" }
 skein-json = { path = "crates/skein-json" }
+skein-llm = { path = "crates/skein-llm" }
 skein-tls = { path = "crates/skein-tls" }
 skein-shell = { path = "crates/skein-shell" }
 skein-sim = { path = "crates/skein-sim" }

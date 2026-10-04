@@ -34,6 +34,7 @@ starts from.
 | HTTP | `skein-http` | HTTP/1.1 client and server, server-sent events | [http.md](docs/design/http.md) |
 | JSON | `skein-json` | a bounded tokenizer, a sized writer | [json.md](docs/design/json.md) |
 | TLS | `skein-tls` | the TLS client, a stream over rustls's unbuffered connection, with ring | [tls.md](docs/design/tls.md) |
+| LLM | `skein-llm` | provider-neutral calls, streaming deltas and completions; ChatGPT/Codex subscription access | [llm.md](docs/design/llm.md) |
 
 ```
 crate          depends on
@@ -42,6 +43,7 @@ skein-io       lib
 skein-http     lib
 skein-json     lib
 skein-tls      lib, rustls (and ring beneath it)
+skein-llm      lib, http, json
 skein-shell    lib, io, io-uring, libc
 skein-sim      lib, io
 ```
@@ -76,9 +78,12 @@ among them for its cryptography, the TLS client's.
 
 ## Not in skein
 
-- **Domains, and protocols only one application speaks:** an LLM
-  provider's API, a forge's API, temper's protocol between worker and
+- **Domains, and protocols only one application speaks:** a forge's API,
+  temper's protocol between worker and
   engine. They are built on skein's machines.
+- LLM calls shared by services are in `skein-llm`; a service still owns its
+  tool schemas and execution, OAuth renewal, connection/TLS ownership and
+  retry policy.
 - **A service's wiring:** its `iterate`, the sum of its worst cases, its
   `main`.
 - **What a simulated program does.** The simulator plays the kernel; the

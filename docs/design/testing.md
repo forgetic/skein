@@ -27,7 +27,7 @@ tested in its own tier is in that part's document.
 |---|---|---|
 | step tests | lib's containers and value types; each crate's step functions | lib.md, 10 |
 | machine worlds | HTTP, server-sent events, JSON, each side alone; the TLS client, against rustls's server in memory | http.md, 6; json.md, 6; tls.md, 5 |
-| protocol worlds | an LLM client's HTTP, server-sent events and JSON against a server's | http.md, 6 |
+| protocol worlds | an LLM client's HTTP, server-sent events and JSON against a server's; skein-llm's subscription client against independent wire scenarios | http.md, 6; llm.md, Verification |
 | io worlds | io over the simulator, with a scripted owner | io.md, 8 |
 | simulated worlds | the examples' `iterate`, each a process of the simulator | section 3 |
 | real loop | the examples under the shell, on the real kernel | section 3 |
@@ -156,6 +156,7 @@ tests/json/transcripts          its transcripts, each with what it must decode t
 tests/http                      the HTTP client's and server's and the event stream reader's and writer's machine worlds, a reference reader of each, the client and the reader stacked with JSON, and their worst cases against the counting allocator, skein-http-world
 tests/http/transcripts          its transcripts, responses and, in requests/, requests, each with what it must decode to
 tests/protocol                  the protocol worlds: an LLM client's stack against a server's, joined by bytes cut at random, skein-protocol-world
+tests/llm                       skein-llm's subscription protocol worlds, fragmentation and fault sweeps, and bounds against the counting allocator, skein-llm-world
 tests/tls                       the TLS client's machine worlds against a rustls server in memory, the HTTP client stacked on it, and its worst case against the counting allocator, skein-tls-world
 tests/tls/fixtures              its certificates and key, and the script that makes them
 tests/**/tests/*.rs             a crate's focused tests

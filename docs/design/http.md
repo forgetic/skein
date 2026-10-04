@@ -49,7 +49,7 @@ socket up:
 ```
 domain
   ▲  typed calls
-the service's decoder
+skein-llm's provider decoder (or the service's own decoder)
   ▲  tokens
 json                  a tokenizer for each event's data, through sse::Data
   ▲  events
