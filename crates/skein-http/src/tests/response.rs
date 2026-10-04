@@ -154,6 +154,14 @@ fn the_head_limit_counts_every_byte_of_every_head_and_a_head_at_it_is_read() {
 }
 
 #[test]
+fn an_interim_head_that_ends_at_the_limit_leaves_none_for_the_final_one() {
+    let interim = b"HTTP/1.1 100 Continue\r\n\r\n";
+    let response = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    let limits = Limits { head: u32::try_from(interim.len()).unwrap(), ..LIMITS };
+    assert_eq!(failure_with(response, limits), Error::HeadTooLong);
+}
+
+#[test]
 fn a_head_that_never_ends_fails_at_the_limit_or_is_cut_by_the_end_of_the_stream() {
     let mut endless = Vec::from(&b"HTTP/1.1 200 OK\r\n"[..]);
     for _ in 0..40_u32 {

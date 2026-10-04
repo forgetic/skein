@@ -36,7 +36,8 @@ pub(super) enum Pumped {
 /// end, if nothing below can meet it; drops what a discard leaves.
 pub(super) fn pump(download: &mut Download, intake: &mut Intake, above: &mut Queue<Event>) -> Pumped {
     match download.face {
-        Face::Idle => Pumped::Open,
+        // Until the side above discards the rest, or closes the client.
+        Face::Idle | Face::Withdrawn => Pumped::Open,
         Face::Demand(read) => {
             if let Some(bytes) = intake.meet(read) {
                 above.push(Event::Body(Up::Bytes(bytes)));
@@ -78,7 +79,7 @@ fn is_over(rest: Rest) -> bool {
 /// that the intake does not meet, or to discard.
 pub(super) fn read(download: &Download, intake: &Intake, limits: &Limits) -> Option<Read> {
     match download.face {
-        Face::Idle => return None,
+        Face::Idle | Face::Withdrawn => return None,
         Face::Demand(_) | Face::Discarding => {}
     }
     match download.rest {
@@ -108,7 +109,9 @@ fn piece(face: Face, intake: &Intake, limits: &Limits, left: u64) -> Read {
             // fill, and the intake finds a delimiter split across the two.
             if index(wanted) >= until.as_bytes().len() { Read::Scan { until, max: wanted } } else { Read::Fill(wanted) }
         }
-        Face::Demand(Read::Nothing) | Face::Idle => unreachable!("a withdrawn demand leaves the body idle"),
+        Face::Demand(Read::Nothing) | Face::Idle | Face::Withdrawn => {
+            unreachable!("the body is read for a demand outstanding, or to discard")
+        }
     }
 }
 
@@ -171,10 +174,11 @@ fn took(face: &mut Face, intake: &mut Intake, bytes: Box<[u8]>, left: u64, above
             above.push(Event::Body(Up::Bytes(bytes)));
             *face = Face::Idle;
         }
-        // Held for the demand, or for the next if the side above withdrew
-        // the one they were read for.
-        Face::Demand(_) | Face::Idle => intake.append(&bytes).expect("a read within the intake's room"),
-        Face::Discarding => drop(bytes),
+        Face::Demand(_) => intake.append(&bytes).expect("a read within the intake's room"),
+        // Read for a demand withdrawn, or to discard: the side above reads
+        // no more.
+        Face::Withdrawn | Face::Discarding => drop(bytes),
+        Face::Idle => unreachable!("the body is read for a demand outstanding, or to discard"),
     }
     left
 }

@@ -29,8 +29,9 @@
 //! - **The response body is a stream** (`Body`), read: the client is its
 //!   side below, and keeps its contract (lib.md, 7). `End` is the body's
 //!   end, and `Done` follows it at once.
-//! - **`Discard`** gives up the rest of the body: the client reads and
-//!   drops it, so that the connection can be used again, then says `Done`.
+//! - **`Discard`** gives up the rest of the body, a demand outstanding or
+//!   withdrawn among it: the client reads and drops it, so that the
+//!   connection can be used again, then says `Done`.
 //! - **`Close` ends the client in any state:** it withdraws what it
 //!   demanded below, ends the exchange in progress without a word, and
 //!   answers `Closed`, its one terminal event. It does not close the
@@ -156,7 +157,9 @@ pub enum Request {
     /// above closes the client instead.
     Upload(Down),
     /// The response body's stream, read, once `Response` came: a demand of
-    /// at most [`Limits::read`] and no room, or its withdrawal.
+    /// at most [`Limits::read`] and no room, or its withdrawal, after which
+    /// the side above reads no more (lib.md, 7): it discards the rest, or
+    /// closes the client.
     Body(Down),
     /// The side above reads no more of the response body: the client reads
     /// the rest and drops it, then says `Done`. A demand outstanding is
@@ -540,6 +543,9 @@ enum Face {
     Idle,
     /// A demand outstanding, which the intake does not meet yet.
     Demand(Read),
+    /// The side above withdrew its demand: it reads no more (lib.md, 7),
+    /// and discards the rest or closes the client next.
+    Withdrawn,
     /// The side above gave up the rest: read and dropped.
     Discarding,
 }
@@ -714,9 +720,13 @@ fn head_complete(
     let status = reading.status.expect("a head is complete only after its status line");
     match status.code {
         101 => fail(exchange, Error::Upgrade, intake, above, below),
-        // The next head is read within what is left of the budget.
+        // The next head is read within what is left of the budget, if
+        // anything is.
         100..=199 => {
             let budget = reading.budget;
+            if budget == 0 {
+                return fail(exchange, Error::HeadTooLong, intake, above, below);
+            }
             exchange.response = Receiving::Head(Reading::new(budget, limits));
             settle(exchange, intake, limits, above, below)
         }
@@ -836,9 +846,10 @@ fn body_demanded(
             assert!(wanted <= limits.read, "no demand past Limits::read");
             Face::Demand(read)
         }
-        // A withdrawal: what was read for it stays held.
-        Face::Demand(_) if read == Read::Nothing => Face::Idle,
+        // A withdrawal: what is read for it from now on is dropped.
+        Face::Demand(_) if read == Read::Nothing => Face::Withdrawn,
         Face::Demand(_) => unreachable!("one demand at a time, stated after the last was answered"),
+        Face::Withdrawn => unreachable!("a body demand after its withdrawal: the side above reads no more"),
         Face::Discarding => unreachable!("a body demand after Discard"),
     };
     settle(exchange, intake, limits, above, below)
@@ -857,7 +868,7 @@ fn discard(
         Receiving::Head(_) => unreachable!("a Discard before the response"),
     };
     match download.face {
-        Face::Idle | Face::Demand(_) => {}
+        Face::Idle | Face::Demand(_) | Face::Withdrawn => {}
         Face::Discarding => unreachable!("a second Discard"),
     }
     download.face = Face::Discarding;
@@ -1007,7 +1018,8 @@ fn fail(
         Receiving::Body(Download { face: Face::Idle | Face::Demand(_), .. }) => {
             above.push(Event::Body(Up::Failed(fault)));
         }
-        Receiving::Body(Download { face: Face::Discarding, .. }) | Receiving::Head(_) => {}
+        // A stream the side above reads no more is told nothing.
+        Receiving::Body(Download { face: Face::Withdrawn | Face::Discarding, .. }) | Receiving::Head(_) => {}
     }
     above.push(Event::Failed(error));
     body::drain(intake);

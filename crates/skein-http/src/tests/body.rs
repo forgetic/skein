@@ -113,17 +113,79 @@ fn the_reads_below_take_the_shape_of_the_demand_above_bounded_by_the_framing() {
     assert_eq!(events, [Event::Body(Up::Bytes(super::boxed(b"abc\n")))], "met whole: up as it came");
     assert!(requests.is_empty(), "nothing read ahead");
     assert_eq!(machine.client.waiting(), Waiting::Above);
+    let (_, requests) = machine.down(Request::Body(Down::Demand { read: LINE, room: 0 }));
+    assert_eq!(requests, [Down::Demand { read: Read::Scan { until: Delimiter::LF, max: 6 }, room: 0 }]);
+    let (events, requests) = machine.bytes(b"defghi");
+    assert_eq!(events, [Event::Body(Up::End), Event::Done(Reuse::Keep)], "no LF, short of the scan's maximum");
+    assert!(requests.is_empty(), "nothing past the body");
+}
+
+#[test]
+fn a_fill_past_what_is_left_of_the_body_is_answered_by_its_end() {
+    let mut machine = Machine::new(LIMITS);
+    machine.called(get());
+    machine.bytes(b"HTTP/1.1 200 OK\r\n");
+    machine.bytes(b"Content-Length: 6\r\n");
+    machine.bytes(b"\r\n");
     let (_, requests) = machine.down(Request::Body(Down::Demand { read: Read::Fill(16), room: 0 }));
     assert_eq!(requests, [Down::Demand { read: Read::Fill(6), room: 0 }], "no fill past the body");
-    let (events, requests) = machine.down(Request::Body(Down::Demand { read: Read::Nothing, room: 0 }));
-    assert!(events.is_empty() && requests.is_empty(), "a withdrawal: the read below goes on");
     let (events, requests) = machine.bytes(b"defghi");
-    assert!(events.is_empty() && requests.is_empty(), "held for the next demand");
-    let (events, _) = machine.down(Request::Body(Down::Demand { read: Read::Fill(6), room: 0 }));
-    assert_eq!(events, [Event::Body(Up::Bytes(super::boxed(b"defghi")))]);
-    let (events, _) = machine.down(Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
-    assert_eq!(events, [Event::Body(Up::End), Event::Done(Reuse::Keep)]);
+    assert_eq!(events, [Event::Body(Up::End), Event::Done(Reuse::Keep)], "a read larger than what is left (lib.md, 7)");
+    assert!(requests.is_empty());
     assert_eq!(machine.client.waiting(), Waiting::Call);
+}
+
+#[test]
+fn a_fill_across_two_deliveries_is_met_from_the_intake() {
+    let mut machine = Machine::new(LIMITS);
+    machine.called(get());
+    machine.bytes(b"HTTP/1.1 200 OK\r\n");
+    machine.bytes(b"Transfer-Encoding: chunked\r\n");
+    machine.bytes(b"\r\n");
+    machine.down(Request::Body(Down::Demand { read: Read::Fill(6), room: 0 }));
+    let (_, requests) = machine.bytes(b"3\r\n");
+    assert_eq!(requests, [Down::Demand { read: Read::Fill(3), room: 0 }], "within the chunk");
+    let (events, _) = machine.bytes(b"def");
+    assert!(events.is_empty(), "held: three bytes cannot meet a fill of six");
+    machine.bytes(b"\r\n");
+    let (_, requests) = machine.bytes(b"3\r\n");
+    assert_eq!(requests, [Down::Demand { read: Read::Fill(3), room: 0 }], "what the fill still needs");
+    let (events, requests) = machine.bytes(b"ghi");
+    assert_eq!(events, [Event::Body(Up::Bytes(super::boxed(b"defghi")))]);
+    assert!(requests.is_empty());
+}
+
+#[test]
+fn a_withdrawn_demand_is_never_answered_and_what_is_read_for_it_is_dropped() {
+    let mut machine = Machine::new(LIMITS);
+    machine.called(get());
+    machine.bytes(b"HTTP/1.1 200 OK\r\n");
+    machine.bytes(b"Content-Length: 6\r\n");
+    machine.bytes(b"\r\n");
+    let (_, requests) = machine.down(Request::Body(Down::Demand { read: Read::Fill(4), room: 0 }));
+    assert_eq!(requests, [Down::Demand { read: Read::Fill(4), room: 0 }]);
+    let (events, requests) = machine.down(Request::Body(Down::Demand { read: Read::Nothing, room: 0 }));
+    assert!(events.is_empty() && requests.is_empty(), "the read below goes on: it is not withdrawn but by a close");
+    let (events, requests) = machine.bytes(b"abcd");
+    assert!(events.is_empty() && requests.is_empty(), "dropped, and nothing more read until the rest is discarded");
+    assert_eq!(machine.client.waiting(), Waiting::Above);
+    let (events, requests) = machine.down(Request::Discard);
+    assert!(events.is_empty());
+    assert_eq!(requests, [Down::Demand { read: Read::Fill(2), room: 0 }]);
+    let (events, _) = machine.bytes(b"ef");
+    assert_eq!(events, [Event::Done(Reuse::Keep)]);
+}
+
+#[test]
+#[should_panic(expected = "a body demand after its withdrawal")]
+fn no_body_demand_after_a_withdrawal() {
+    let mut machine = Machine::new(LIMITS);
+    machine.called(get());
+    machine.bytes(b"HTTP/1.1 200 OK\r\n");
+    machine.bytes(b"\r\n");
+    machine.down(Request::Body(Down::Demand { read: Read::Fill(4), room: 0 }));
+    machine.down(Request::Body(Down::Demand { read: Read::Nothing, room: 0 }));
+    machine.down(Request::Body(Down::Demand { read: Read::Fill(4), room: 0 }));
 }
 
 #[test]
