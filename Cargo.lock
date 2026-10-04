@@ -61,6 +61,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-echo-client"
+version = "0.0.0"
+dependencies = [
+ "skein-io",
+ "skein-lib",
+]
+
+[[package]]
 name = "skein-echo-domain"
 version = "0.0.0"
 dependencies = [

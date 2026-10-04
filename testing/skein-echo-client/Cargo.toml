@@ -1,0 +1,18 @@
+[package]
+name = "skein-echo-client"
+description = "The fake echo client: a step machine over io that sends lines, checks their answers, and keeps what it saw for a referee"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-io.workspace = true
+
+# A fake that runs as a step machine is held to the subset, not to test
+# code's liberties (testing-strategy.md, 4): the step crates' lints, and the
+# step crates' clippy.toml at the root, which it has none of its own to
+# override.
+[lints]
+workspace = true

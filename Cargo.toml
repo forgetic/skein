@@ -9,6 +9,7 @@ members = [
     "examples/echo/service",
     "examples/echo/shell",
     "testing/skein-conformance",
+    "testing/skein-echo-client",
     "testing/skein-heap",
     "tests/conformance/ring",
     "tests/conformance/sim",
@@ -37,6 +38,7 @@ skein-heap = { path = "testing/skein-heap" }
 skein-echo-domain = { path = "examples/echo/domain" }
 skein-echo-protocol = { path = "examples/echo/protocol" }
 skein-echo-service = { path = "examples/echo/service" }
+skein-echo-client = { path = "testing/skein-echo-client" }
 
 # The only dependencies from outside the workspace, with rustls later
 # (programming-model.md, 2.1): the shell's, for the ring adapter.
