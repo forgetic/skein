@@ -838,6 +838,7 @@ fn file_error(kind: &Op, errno: i32) -> Error {
         Op::List { .. } => match errno {
             libc::ENOENT => Some(Error::NotFound),
             libc::ENOTDIR => Some(Error::NotADirectory),
+            libc::ENAMETOOLONG => Some(Error::NameTooLong),
             _ => None,
         },
         Op::Socket { .. }
@@ -915,8 +916,9 @@ const D_NAME: usize = 19;
 /// and the directory's position set back to just past the last entry taken,
 /// so that the next `List` starts there. A filesystem that does not say an
 /// entry's kind is asked with `fstatat`. Fails with the error number of a
-/// call, when no entry was taken.
-fn list(fd: i32, entries: &mut [Entry], names: &mut [u8], listing: &mut [u8]) -> Result<u32, i32> {
+/// call, or `ENAMETOOLONG` for a next name longer than all of `names`, when
+/// no entry was taken.
+pub(crate) fn list(fd: i32, entries: &mut [Entry], names: &mut [u8], listing: &mut [u8]) -> Result<u32, i32> {
     let mut count = 0_usize;
     let mut used = 0_usize;
     // Where the next List starts: past the last entry taken.
@@ -945,8 +947,14 @@ fn list(fd: i32, entries: &mut [Entry], names: &mut [u8], listing: &mut [u8]) ->
             }
             let end = used.checked_add(name.len()).expect("a name's end fits a usize");
             let (Some(entry), Some(room)) = (entries.get_mut(count), names.get_mut(used..end)) else {
-                let _back: i64 = seek(fd, resume, libc::SEEK_SET)?;
-                return Ok(u32::try_from(count).expect("no more entries than a valid List's count"));
+                return match (count, seek(fd, resume, libc::SEEK_SET)) {
+                    (0, Err(errno)) => Err(errno),
+                    // A name longer than all of names: nothing can be taken.
+                    (0, Ok(_)) => Err(libc::ENAMETOOLONG),
+                    // Those taken are handed back, whether or not the
+                    // position could be set back: they were read.
+                    (_, Ok(_) | Err(_)) => Ok(u32::try_from(count).expect("no more entries than a valid List's count")),
+                };
             };
             room.copy_from_slice(name);
             let kind = match kind_of_entry(d_type) {
@@ -1163,7 +1171,7 @@ pub fn open_root(path: &Path) -> Result<Fd, i32> {
 
 /// Releases a descriptor the adapter made but cannot hand up. The descriptor
 /// is released whatever `close` answers, so there is nothing to do with it.
-fn close(fd: i32) {
+pub(crate) fn close(fd: i32) {
     // SAFETY: `fd` is a descriptor the kernel just made for this adapter,
     // which nothing else has seen.
     let _closed: i32 = unsafe { libc::close(fd) };

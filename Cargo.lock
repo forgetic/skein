@@ -325,6 +325,7 @@ dependencies = [
  "libc",
  "skein-io",
  "skein-lib",
+ "skein-scratch",
 ]
 
 [[package]]

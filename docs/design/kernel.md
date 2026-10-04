@@ -225,6 +225,11 @@ documentation, with each operation's errors; the decisions behind it:
   synchronous: `getdents64` is not a ring operation. A `names` of at
   least 255 bytes always takes the next entry, so a `List` stops short but
   never makes no progress while entries are left; `Count(0)` is the end.
+  A filesystem whose names may be longer than 255 bytes (one storing them
+  in another encoding) fails a `List` with `NameTooLong` when its next
+  name fits in none of `names`, rather than answer the end; entries a
+  `List` took are handed back even if the directory's position could not
+  be set back after them.
 - **Files complete promptly and are never cancelled.** No file operation
   waits on a peer, so io waits for each, as it does a `Socket` or a
   `Close`, and a `Cancel` of one is a broken invariant. What lies beneath

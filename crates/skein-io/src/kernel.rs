@@ -138,7 +138,10 @@
 //!   kind and a name of its own in `names` ([`Entry`]); `Count(0)` at the
 //!   end. It stops short when the next name does not fit what is left of
 //!   `names`, or when the backend chooses, but never before one entry while
-//!   any is left: `names` holds at least the longest name. Entries come in
+//!   any is left: `names` holds at least the longest name. A filesystem
+//!   whose names may be longer (one that stores them in another encoding)
+//!   fails a `List` with `NameTooLong` when the next name does not fit in
+//!   all of `names`, and the next `List` meets it again. Entries come in
 //!   no particular order, and one made or removed while a directory is
 //!   listed may or may not be seen.
 //! - **A file removed while open** stays readable and writable through its
@@ -167,7 +170,7 @@
 //! | `Rename` | `NotFound`, `NotADirectory`, `IsADirectory`, `NotEmpty`, `Permission`, `NoSpace`, `ReadOnly`, `TooManyLinks`, `NameTooLong` |
 //! | `Remove` | `NotFound`, `NotADirectory`, `IsADirectory`, `NotEmpty`, `Permission`, `ReadOnly`, `NameTooLong` |
 //! | `MakeDirectory` | `NotFound`, `Exists`, `NotADirectory`, `Permission`, `NoSpace`, `ReadOnly`, `TooManyLinks`, `NameTooLong` |
-//! | `List` | `NotFound`, `NotADirectory` |
+//! | `List` | `NotFound`, `NotADirectory`, `NameTooLong` |
 //! | `Cancel` | only `TooLate`, `InvalidArgument` or `Other` |
 //!
 //! Broken invariants, which io never commits and backends may assume never
@@ -611,7 +614,8 @@ pub enum Error {
     TooManyLinks,
     /// `Open`, `Rename`, `Remove`, `MakeDirectory`: a name longer than
     /// [`LONGEST_NAME`] bytes, or a path of 4096 bytes or more
-    /// (`ENAMETOOLONG`).
+    /// (`ENAMETOOLONG`). `List`: the next name does not fit in all of its
+    /// `names`, as a name longer than the longest may on some filesystems.
     NameTooLong,
     /// `Open`: the path leads out of its root, by `..` above it, an absolute
     /// path, or a symbolic link out of it (`EXDEV`, as `RESOLVE_BENEATH`
@@ -911,15 +915,13 @@ fn fails_on_files(op: Files, error: Error) -> bool {
     match error {
         Error::NoBufferSpace | Error::InvalidArgument | Error::Other(_) => true,
         Error::TooManyOpenFiles | Error::Escape => op == Files::Open,
-        Error::NotFound | Error::NotADirectory => {
+        Error::NotFound | Error::NotADirectory | Error::NameTooLong => {
             among(op, &[Files::Open, Files::Rename, Files::Remove, Files::MakeDirectory, Files::List])
         }
         Error::Exists => among(op, &[Files::Open, Files::MakeDirectory]),
         Error::IsADirectory => among(op, &[Files::Open, Files::Read, Files::Rename, Files::Remove]),
         Error::NotEmpty => among(op, &[Files::Rename, Files::Remove]),
-        Error::Permission | Error::NameTooLong => {
-            among(op, &[Files::Open, Files::Rename, Files::Remove, Files::MakeDirectory])
-        }
+        Error::Permission => among(op, &[Files::Open, Files::Rename, Files::Remove, Files::MakeDirectory]),
         Error::NoSpace => among(op, &[Files::Open, Files::Write, Files::Sync, Files::Rename, Files::MakeDirectory]),
         Error::ReadOnly => among(op, &[Files::Open, Files::Write, Files::Rename, Files::Remove, Files::MakeDirectory]),
         Error::TooManyLinks => among(op, &[Files::Open, Files::Rename, Files::MakeDirectory]),

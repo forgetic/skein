@@ -291,7 +291,7 @@ fn named(op: &Op) -> &'static [Error] {
             Error::TooManyLinks,
             Error::NameTooLong,
         ],
-        Op::List { .. } => &[Error::NotFound, Error::NotADirectory],
+        Op::List { .. } => &[Error::NotFound, Error::NotADirectory, Error::NameTooLong],
         Op::Socket { .. }
         | Op::Bind { .. }
         | Op::Listen { .. }

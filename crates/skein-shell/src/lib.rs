@@ -18,6 +18,8 @@
 mod clock;
 mod ring;
 mod seed;
+#[cfg(test)]
+mod tests;
 
 pub use clock::{Clock, Now};
 pub use ring::{Config, Kernel, OpenError, Wait, open_root};

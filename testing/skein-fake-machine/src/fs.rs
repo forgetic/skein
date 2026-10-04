@@ -435,6 +435,9 @@ impl Machine {
             if after.as_ref().is_some_and(|after| name <= after) {
                 continue;
             }
+            if listed.is_empty() && name.len() > left {
+                return Err(Refusal::NameTooLong);
+            }
             if listed.len() >= most || name.len() > left {
                 break;
             }
