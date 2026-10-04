@@ -2,12 +2,15 @@
 //! expectation holds whole, and chaotic, where streams may break. The sweeps
 //! over hundreds of seeds are in `fuzzy_scenarios.rs`.
 
-use skein_io_world::census::{Answer, Target, cancels};
+use skein_io::kernel::Error;
+use skein_io_world::census::{Answer, Target, batched, cancels, discards, failures};
 use skein_io_world::scenarios::{
-    abort, accept, backlog, backpressure, close_deadline, closes, connects, exchange, refusal_mid_upload,
+    abort, accept, backlog, backpressure, batch, burst, close_deadline, closes, connects, descriptors, discard,
+    exchange, refusal_mid_upload,
 };
 use skein_io_world::world::World;
 use skein_sim::Config;
+use skein_sim::Summary;
 
 const CALM: [u64; 4] = [1, 2, 3, 4];
 const CHAOS: [u64; 3] = [5, 6, 7];
@@ -44,6 +47,44 @@ fn connects_waiting_on_a_full_backlog_are_cancelled_by_their_abort() {
         assert!(answered.contains(&(Target::Connect, Answer::Stopped)), "seed {seed}: a waiting connect stopped");
     }
     chaos(backlog);
+}
+
+#[test]
+fn a_socket_and_an_accept_out_of_descriptors_are_refused_and_starved() {
+    for seed in CALM {
+        let outcome = descriptors(seed, Config::calm()).run();
+        let failed = failures(&outcome.trace, Error::TooManyOpenFiles);
+        assert!(failed.iter().any(|kind| matches!(kind, Summary::Socket { .. })), "seed {seed}: a socket found none");
+        assert!(failed.iter().any(|kind| matches!(kind, Summary::Accept { .. })), "seed {seed}: an accept found none");
+    }
+    chaos(descriptors);
+}
+
+#[test]
+fn the_accept_batch_holds_a_second_listener_back_an_iteration() {
+    for seed in CALM {
+        let outcome = batch(seed, Config::calm()).run();
+        assert!(batched(&outcome.trace, &outcome.marks), "seed {seed}: a listener's first accept waited");
+    }
+    chaos(batch);
+}
+
+#[test]
+fn a_socket_accepted_with_no_slot_left_is_discarded() {
+    for seed in CALM {
+        let outcome = discard(seed, Config::calm()).run();
+        assert!(discards(&outcome.trace) > 0, "seed {seed}: a socket accepted was discarded");
+    }
+    chaos(discard);
+}
+
+#[test]
+fn a_burst_of_connects_fills_the_refusals_and_io_takes_no_more_until_told() {
+    for seed in CALM {
+        let outcome = burst(seed, Config::calm()).run();
+        assert!(outcome.held_back[1] > 0, "seed {seed}: io took no more requests for a while");
+    }
+    chaos(burst);
 }
 
 #[test]

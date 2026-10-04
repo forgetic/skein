@@ -214,6 +214,124 @@ pub fn backlog(seed: u64, config: Config) -> World {
     world
 }
 
+/// Descriptors run out, two a process: the third connect's socket finds
+/// none, which io tells as `Busy`; and the listener, holding its own and one
+/// accepted, finds none for its next accept, so it starves until one comes
+/// back or its retry deadline passes, while the second client waits in the
+/// kernel's backlog.
+#[must_use]
+pub fn descriptors(seed: u64, config: Config) -> World {
+    let config = Config { max_fds: 2, ..config };
+    let mut rng = Rng::new(seed ^ 0xfd);
+    let messages = [framed(&short(&mut rng, 100)), framed(&short(&mut rng, 100))];
+    let mut expect = Vec::new();
+    for (name, bytes) in ["d-0", "d-1"].into_iter().zip(&messages) {
+        expect.push(closed(1, name, END, &config));
+        expect.push(if calm(&config) {
+            Expect::Receives { at: 1, conn: name, bytes: bytes.clone(), by: END }
+        } else {
+            Expect::Prefix { at: 1, conn: name, bytes: bytes.clone(), by: END }
+        });
+    }
+    expect.push(closed(1, "d-2", END, &config));
+    if calm(&config) {
+        expect.push(Expect::Fails { at: 1, conn: "d-2", errors: &[Error::Busy], by: END });
+    }
+    let mut world = World::new(seed, config, Referee::new(seed, expect));
+    let answers = vec![Some(echo("e-0", 16, Reads::Mixed(16))), Some(echo("e-1", 16, Reads::Mixed(16)))];
+    world.spawn(limits(3), Owner::new(seed, vec![serve("server", answers)], Vec::new()));
+    let mut dials = Vec::new();
+    for (name, bytes) in ["d-0", "d-1"].into_iter().zip(messages) {
+        dials.push(dial("server", Time::ZERO, expecting(plan(name, bytes.clone(), 16, Reads::Mixed(16)), &bytes)));
+    }
+    dials.push(dial("server", Time::ZERO, plan("d-2", Box::from(&b"hi"[..]), 4, Reads::Fill(1))));
+    world.spawn(limits(3), Owner::new(seed + 1, Vec::new(), dials));
+    world
+}
+
+/// Two listeners under a batch of one accept an iteration: their listens
+/// complete together, and the second's first accept waits an iteration
+/// (io.md, 3.2).
+#[must_use]
+pub fn batch(seed: u64, config: Config) -> World {
+    let mut rng = Rng::new(seed ^ 0xba7c);
+    let messages = [framed(&short(&mut rng, 100)), framed(&short(&mut rng, 100))];
+    let mut expect = Vec::new();
+    for (name, bytes) in ["b-0", "b-1"].into_iter().zip(&messages) {
+        expect.push(closed(1, name, END, &config));
+        expect.push(if calm(&config) {
+            Expect::Receives { at: 1, conn: name, bytes: bytes.clone(), by: END }
+        } else {
+            Expect::Prefix { at: 1, conn: name, bytes: bytes.clone(), by: END }
+        });
+    }
+    let mut world = World::new(seed, config, Referee::new(seed, expect));
+    let serves = vec![
+        serve("one", vec![Some(echo("one-0", 16, Reads::Mixed(16)))]),
+        serve("two", vec![Some(echo("two-0", 16, Reads::Mixed(16)))]),
+    ];
+    world.spawn(Limits { accepts: 1, ..limits(4) }, Owner::new(seed, serves, Vec::new()));
+    let mut dials = Vec::new();
+    for ((name, to), bytes) in [("b-0", "one"), ("b-1", "two")].into_iter().zip(messages) {
+        dials.push(dial(to, Time::ZERO, expecting(plan(name, bytes.clone(), 16, Reads::Mixed(16)), &bytes)));
+    }
+    world.spawn(limits(2), Owner::new(seed + 1, Vec::new(), dials));
+    world
+}
+
+/// A server under a slab of two that dials itself: its accept is armed while
+/// a slot is free, its own connect takes that slot, and the socket the accept
+/// brings finds none. io discards it, unannounced, and the dialer hears the
+/// end of a stream no one answered.
+#[must_use]
+pub fn discard(seed: u64, config: Config) -> World {
+    let mut expect = vec![closed(0, "dialer", END, &config)];
+    if calm(&config) {
+        expect.push(Expect::Ends { at: 0, conn: "dialer", by: END });
+    }
+    let mut world = World::new(seed, config, Referee::new(seed, expect));
+    let serve = Serve { name: "server", addr: local(0), answers: Vec::new(), close: ServeClose::At(ms(50)) };
+    let dialer = expecting(plan("dialer", Box::new([]), 4, Reads::Fill(1)), b"");
+    world.spawn(limits(2), Owner::new(seed, vec![serve], vec![dial("server", Time::ZERO, dialer)]));
+    world
+}
+
+/// A burst of connects past the socket slab and the refusals io holds, in
+/// one tick: two made, two refused, and io takes no more requests until the
+/// next up pass tells those refusals (`Io::takes`); then the last two are
+/// refused too.
+#[must_use]
+pub fn burst(seed: u64, config: Config) -> World {
+    let names = ["x-0", "x-1", "x-2", "x-3", "x-4", "x-5"];
+    let mut rng = Rng::new(seed ^ 0xb0857);
+    let messages = [framed(&short(&mut rng, 100)), framed(&short(&mut rng, 100))];
+    let mut expect = Vec::new();
+    for name in names {
+        expect.push(closed(1, name, END, &config));
+    }
+    if calm(&config) {
+        for (name, bytes) in names.into_iter().zip(&messages) {
+            expect.push(Expect::Receives { at: 1, conn: name, bytes: bytes.clone(), by: END });
+        }
+        for name in &names[2..] {
+            expect.push(Expect::Fails { at: 1, conn: name, errors: &[Error::Busy], by: END });
+        }
+    }
+    let mut world = World::new(seed, config, Referee::new(seed, expect));
+    let answers = vec![Some(echo("y-0", 16, Reads::Mixed(16))), Some(echo("y-1", 16, Reads::Mixed(16)))];
+    world.spawn(limits(3), Owner::new(seed, vec![serve("server", answers)], Vec::new()));
+    let mut dials = Vec::new();
+    for (n, name) in names.into_iter().enumerate() {
+        let plan = match messages.get(n) {
+            Some(bytes) => expecting(plan(name, bytes.clone(), 16, Reads::Mixed(16)), bytes),
+            None => plan(name, Box::from(&b"hi"[..]), 4, Reads::Fill(1)),
+        };
+        dials.push(dial("server", Time::ZERO, plan));
+    }
+    world.spawn(limits(2), Owner::new(seed + 1, Vec::new(), dials));
+    world
+}
+
 /// Two clients exchange random bytes with an echo server, both ways, every
 /// read a fill, a scan for `\n` or `\r\n`, or a single byte, every send cut
 /// to a chunk drawn from the seed.
@@ -392,10 +510,14 @@ pub fn closes(seed: u64, config: Config) -> World {
 pub type Scenario = fn(u64, Config) -> World;
 
 /// Every scenario, by name, for the sweeps.
-pub const SCENARIOS: [(&str, Scenario); 9] = [
+pub const SCENARIOS: [(&str, Scenario); 13] = [
     ("accept", accept),
     ("connects", connects),
     ("backlog", backlog),
+    ("descriptors", descriptors),
+    ("batch", batch),
+    ("discard", discard),
+    ("burst", burst),
     ("exchange", exchange),
     ("backpressure", backpressure),
     ("refusal_mid_upload", refusal_mid_upload),

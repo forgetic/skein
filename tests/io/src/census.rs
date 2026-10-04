@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use skein_io::kernel::{Done, Error};
+use skein_io::kernel::{Done, Error, Fd};
 use skein_lib::Token;
 use skein_sim::{Entry, Event, Fault, Pid, Summary};
 
@@ -67,4 +67,69 @@ pub fn faults(trace: &[Entry]) -> BTreeSet<Fault> {
         }
     }
     seen
+}
+
+/// The operations whose completion failed with `error`, by their kind as the
+/// trace names them: an accept or a socket out of descriptors, say.
+#[must_use]
+pub fn failures(trace: &[Entry], error: Error) -> Vec<Summary> {
+    let mut seen = Vec::new();
+    for entry in trace {
+        if let Event::Complete { kind, result: Err(failed), .. } = entry.event
+            && failed == error
+        {
+            seen.push(kind);
+        }
+    }
+    seen
+}
+
+/// How many accepted sockets io discarded: closed by the process that
+/// accepted them, with nothing ever received on them.
+#[must_use]
+pub fn discards(trace: &[Entry]) -> u32 {
+    let mut accepted: BTreeSet<(Pid, Fd)> = BTreeSet::new();
+    let mut discarded = 0;
+    for entry in trace {
+        match entry.event {
+            Event::Complete { kind: Summary::Accept { .. }, result: Ok(Done::Accepted { fd, .. }), .. } => {
+                accepted.insert((entry.pid, fd));
+            }
+            Event::Submit { kind: Summary::Recv { fd, .. }, .. } => {
+                accepted.remove(&(entry.pid, fd));
+            }
+            Event::Submit { kind: Summary::Close { fd }, .. } => {
+                if accepted.remove(&(entry.pid, fd)) {
+                    discarded += 1;
+                }
+            }
+            Event::Submit { .. } | Event::Complete { .. } | Event::Fault(_) => {}
+        }
+    }
+    discarded
+}
+
+/// Whether a listener's first accept waited an iteration for the accept
+/// batch: armed in a later iteration than its listen completed in. `marks`
+/// are where each iteration began in the trace.
+#[must_use]
+pub fn batched(trace: &[Entry], marks: &[usize]) -> bool {
+    let iteration = |at: usize| marks.partition_point(|mark| *mark <= at);
+    let mut listened: BTreeMap<(Pid, Fd), usize> = BTreeMap::new();
+    for (at, entry) in trace.iter().enumerate() {
+        match entry.event {
+            Event::Complete { kind: Summary::Listen { fd, .. }, result: Ok(_), .. } => {
+                listened.insert((entry.pid, fd), iteration(at));
+            }
+            Event::Submit { kind: Summary::Accept { fd }, .. } => {
+                if let Some(when) = listened.remove(&(entry.pid, fd))
+                    && iteration(at) > when
+                {
+                    return true;
+                }
+            }
+            Event::Submit { .. } | Event::Complete { .. } | Event::Fault(_) => {}
+        }
+    }
+    false
 }

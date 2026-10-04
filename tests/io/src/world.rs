@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 use std::fmt::Write;
 
-use skein_io::kernel::{Complete, Submit};
+use skein_io::kernel::{Complete, Op, Submit};
 use skein_io::{Event, Io, Limits, MAX_OUT_DOWN, MAX_OUT_FIRE, MAX_OUT_RESUME, MAX_OUT_UP, MaxOut, Request};
 use skein_lib::{Env, Queue, Time, Wall};
 use skein_sim::{Config, Entry, Pid, Sim};
@@ -43,6 +43,9 @@ pub struct Proc {
     requests: VecDeque<Request>,
     /// What io told, in order, for replay.
     pub log: Vec<String>,
+    /// Iterations whose down stage stopped with requests waiting, as io
+    /// could hold no more refusals (`Io::takes`).
+    pub held_back: u32,
 }
 
 impl Proc {
@@ -58,6 +61,7 @@ impl Proc {
             events: Queue::with_capacity(ROOM),
             requests: VecDeque::new(),
             log: Vec::new(),
+            held_back: 0,
         };
         proc.owner.start(&mut proc.requests);
         proc
@@ -104,6 +108,18 @@ impl Proc {
             skein_io::down(&mut self.io, &self.env, request, &mut self.subs);
             self.within(mark, MAX_OUT_DOWN, "down");
         }
+        if !self.io.takes() && !self.requests.is_empty() {
+            self.held_back += 1;
+        }
+        // The accept batch (io.md, 3.2): no more accepts armed in an
+        // iteration than it allows, over every listener.
+        let mut accepts = 0;
+        for submit in &self.subs {
+            if let Op::Accept { .. } = submit.kind {
+                accepts += 1;
+            }
+        }
+        assert!(accepts <= self.env.limits.accepts, "{accepts} accepts armed in one iteration, past the batch");
         self.io.reclaim();
     }
 
@@ -148,6 +164,11 @@ pub struct Outcome {
     pub trace: Vec<Entry>,
     pub logs: Vec<Vec<String>>,
     pub iterations: u32,
+    /// Where each iteration began in the trace, to tell which iteration an
+    /// entry belongs to.
+    pub marks: Vec<usize>,
+    /// Each process's iterations held back for want of room for a refusal.
+    pub held_back: Vec<u32>,
 }
 
 impl World {
@@ -168,9 +189,11 @@ impl World {
     #[must_use]
     pub fn run(mut self) -> Outcome {
         let mut iterations = 0;
+        let mut marks = Vec::new();
         loop {
             iterations += 1;
             assert!(iterations < STEPS, "the world settles\n{}", self.trace());
+            marks.push(self.sim.trace().len());
             let now = self.sim.now();
             let wall = self.sim.wall();
             for (at, (proc, pid)) in self.procs.iter_mut().zip(&self.pids).enumerate() {
@@ -205,8 +228,10 @@ impl World {
         }
         Outcome {
             trace: self.sim.trace().to_vec(),
+            held_back: self.procs.iter().map(|proc| proc.held_back).collect(),
             logs: self.procs.into_iter().map(|proc| proc.log).collect(),
             iterations,
+            marks,
         }
     }
 
