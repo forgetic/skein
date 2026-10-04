@@ -13,7 +13,7 @@ use core::net::{Ipv4Addr, SocketAddr};
 use skein_io::kernel::{Addr, Complete, Done, Error, Fd, Op, Submit};
 use skein_lib::{Duration, Time, Wall};
 
-use crate::{Client, Limits, Plan, Then, iterate, worst_case};
+use crate::{Client, HalfClose, Limits, Plan, Then, iterate, worst_case};
 
 const LIMITS: Limits = Limits {
     io: skein_io::Limits {
@@ -44,6 +44,7 @@ const PLAN: Plan = Plan {
     read_from: Some(Time::ZERO),
     send_limit: u64::MAX,
     then: Then::Finish,
+    half_close: None,
     abort_at: None,
     retries: 0,
     backoff: Duration::from_millis(5),
@@ -302,6 +303,38 @@ fn an_abort_at_its_time_stops_whatever_it_does() {
     let seen = rig.client.seen(0);
     assert_eq!(seen.done, Some(abort), "and no retry");
     assert!(rig.client.is_empty());
+}
+
+#[test]
+fn a_half_close_sends_its_whole_lines_and_a_piece_then_finishes_and_reads_on() {
+    let half_close = Some(HalfClose { after: 2, tail: 3 });
+    let mut rig = Rig::new(Plan { lines: 4, ahead: 4, half_close, then: Then::Linger, ..PLAN });
+    rig.at(PLAN.at);
+    assert!(rig.shut, "finished once it handed its whole lines and the piece");
+    let mut ends = 0_u32;
+    for byte in &rig.sent {
+        if *byte == b'\n' {
+            ends = ends.checked_add(1).expect("few");
+        }
+    }
+    assert_eq!(ends, 2, "two whole lines, and a piece with no end of line");
+    assert_ne!(rig.sent.last(), Some(&b'\n'), "the piece comes last");
+    rig.echo();
+    rig.echo();
+    let seen = rig.client.seen(0);
+    assert!(seen.complete && seen.answered == 2, "answered once its whole lines are");
+    assert_eq!(rig.sent.len(), 3, "the piece is left, unanswered");
+    rig.deliver(b"");
+    assert_eq!(rig.closed, 1, "closed once the server ended");
+}
+
+#[test]
+fn no_line_begins_with_b_so_none_reads_as_busy() {
+    for seed in 0..200_u64 {
+        let mut rig = Rig::new(Plan { seed, lines: 1, shortest: 5, longest: 5, ..PLAN });
+        rig.at(PLAN.at);
+        assert_ne!(rig.sent.first(), Some(&b'b'), "seed {seed}: a line's first byte");
+    }
 }
 
 #[test]

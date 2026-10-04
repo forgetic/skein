@@ -75,12 +75,25 @@ pub struct Plan {
     pub send_limit: u64,
     /// What it does once every line is answered.
     pub then: Then,
+    /// A half-close before every line is sent: after so many whole lines,
+    /// and a piece of the next, with no end of line.
+    pub half_close: Option<HalfClose>,
     /// When it aborts, whatever it is doing, and makes no more attempts.
     pub abort_at: Option<Time>,
     /// The attempts it makes after the first, while one ends unanswered.
     pub retries: u32,
     /// How long it waits before each retry.
     pub backoff: Duration,
+}
+
+/// A half-close before the plan's last line: it hands io `after` lines
+/// whole, then `tail` bytes of the next with no end of line, then finishes,
+/// and reads on. The echo answers the whole lines, then ends its stream,
+/// the piece dropped, and the plan is answered once the whole lines are.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct HalfClose {
+    pub after: u32,
+    pub tail: u32,
 }
 
 /// What a connection does once every line is answered.
@@ -173,8 +186,8 @@ enum Server {
 }
 
 /// The most requests to io one event or timer of the client's emits: a
-/// piece sent and the next demand; a finish and a read.
-pub const MAX_OUT: u32 = 2;
+/// piece sent, the half-close it completes, and the next demand.
+pub const MAX_OUT: u32 = 3;
 
 /// Timers per connection.
 const TIMERS: u32 = 3;
@@ -221,6 +234,11 @@ impl Client {
             );
             if let Some(long) = plan.long {
                 assert!(long < plan.lines, "the line past the limit is among the plan's");
+            }
+            if let Some(half) = plan.half_close {
+                assert!(half.after < plan.lines || half.tail == 0, "the piece of a line is of one of the plan's");
+                assert!(half.after <= plan.lines && plan.long.is_none(), "a half-close among the plan's lines");
+                assert!(half.tail < limits.line, "a piece of a line, under the server's limit");
             }
             assert!(
                 plan.read_from.is_some() || plan.abort_at.is_some() || plan.lines == 0,

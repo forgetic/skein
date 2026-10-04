@@ -11,7 +11,7 @@ use skein_io::{Event as Told, Request as Io};
 use skein_lib::stream::{Delimiter, Down, Read, Up};
 use skein_lib::{Queue, Rng, Time, Token, Writer};
 
-use crate::{Limits, Plan, Seen, Then};
+use crate::{HalfClose, Limits, Plan, Seen, Then};
 
 /// The echo's refusals (examples.md, 3.1), as the client knows them: its own
 /// copy, as a fake shares no type with what it stands in for.
@@ -81,12 +81,25 @@ struct Sender {
     rng: Rng,
     /// Lines begun.
     begun: u32,
-    /// Bytes left of the line begun, its end of line included.
+    /// Bytes left of the line begun, its end of line included, or of the
+    /// piece of a line it sends before it half-closes.
     left: u32,
+    /// Its next byte is the first of a line.
+    fresh: bool,
+    /// The piece of a line it sends before it half-closes.
+    tail: Tail,
     /// Lines handed whole.
     sent: u32,
     /// Bytes handed io.
     handed: u64,
+}
+
+/// Where the piece of a line a plan half-closes after is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Tail {
+    Unsent,
+    Sending,
+    Sent,
 }
 
 /// What the server said instead of an answer.
@@ -226,14 +239,22 @@ fn connected(state: State, plan: &Plan, seen: &mut Seen, now: Time, limits: &Lim
             seen.handed = 0;
             let mut open = Open {
                 socket,
-                sender: Sender { rng: Rng::new(plan.seed), begun: 0, left: 0, sent: 0, handed: 0 },
+                sender: Sender {
+                    rng: Rng::new(plan.seed),
+                    begun: 0,
+                    left: 0,
+                    fresh: false,
+                    tail: Tail::Unsent,
+                    sent: 0,
+                    handed: 0,
+                },
                 checker: Rng::new(plan.seed),
                 demand: None,
                 finished: false,
                 refusal: Refusal::None,
             };
             // A plan of no lines is answered as soon as it connects.
-            if plan.lines == 0 {
+            if answered(plan) == 0 {
                 seen.complete = true;
                 if let Some(state) = then(&mut open, plan, down) {
                     return state;
@@ -361,6 +382,10 @@ fn follow(open: &mut Open, plan: &Plan, seen: &Seen, now: Time, limits: &Limits,
     if open.demand.is_some() {
         return;
     }
+    if !open.finished && half_closes(&open.sender, plan.half_close) {
+        down.push(Io::Stream { stream: open.socket, down: Down::Finish });
+        open.finished = true;
+    }
     let reads = match plan.read_from {
         Some(from) => now >= from,
         None => false,
@@ -387,11 +412,21 @@ fn piece(open: &mut Open, plan: &Plan, seen: &Seen, limits: &Limits) -> u32 {
             None => false,
         };
         let unanswered = sender.begun.checked_sub(seen.answered).expect("no more answered than begun");
-        if sender.begun >= plan.lines || past_long || unanswered >= plan.ahead {
+        let whole = answered(plan);
+        let tail = match plan.half_close {
+            Some(HalfClose { tail, .. }) => tail,
+            None => 0,
+        };
+        if sender.begun < whole && !past_long && unanswered < plan.ahead {
+            sender.left = length(plan, sender.begun, &mut sender.rng, limits);
+            sender.begun = sender.begun.checked_add(1).expect("no more lines than the plan's u32");
+        } else if sender.begun >= whole && sender.tail == Tail::Unsent && tail > 0 {
+            sender.left = tail;
+            sender.tail = Tail::Sending;
+        } else {
             return 0;
         }
-        sender.left = length(plan, sender.begun, &mut sender.rng, limits);
-        sender.begun = sender.begun.checked_add(1).expect("no more lines than the plan's u32");
+        sender.fresh = true;
     }
     let limit = plan.send_limit.checked_sub(sender.handed).expect("checked above");
     let limit = u32::try_from(limit).unwrap_or(u32::MAX);
@@ -405,10 +440,20 @@ fn send(open: &mut Open, room: u32, seen: &mut Seen, down: &mut Queue<Io>) {
     assert!(room > 0 && room <= sender.left, "room is demanded for a piece of the line begun");
     let mut writer = Writer::new(usize::try_from(room).expect("a u32 fits a usize"));
     for _ in 0..room {
-        let byte = if sender.left == 1 { b'\n' } else { byte(&mut sender.rng) };
+        let tailing = sender.tail == Tail::Sending;
+        let byte = if sender.left == 1 && !tailing {
+            b'\n'
+        } else if sender.fresh {
+            first_byte(&mut sender.rng)
+        } else {
+            byte(&mut sender.rng)
+        };
+        sender.fresh = false;
         writer.put(&[byte]).expect("the writer is sized for the piece");
         sender.left = sender.left.checked_sub(1).expect("within the line");
-        if sender.left == 0 {
+        if sender.left == 0 && tailing {
+            sender.tail = Tail::Sent;
+        } else if sender.left == 0 {
             sender.sent = sender.sent.checked_add(1).expect("no more lines than the plan's u32");
         }
     }
@@ -421,7 +466,9 @@ fn send(open: &mut Open, room: u32, seen: &mut Seen, down: &mut Queue<Io>) {
 /// seed; or a refusal, where one may come. The echo's contract
 /// (examples.md, 3.1): each answer is the oldest line unanswered, byte for
 /// byte; `busy` comes only first; `too long` only to the line past the
-/// limit; nothing comes after either but the end. A breach fails the world.
+/// limit; nothing comes after either but the end; a piece of a line, with no
+/// end of line, is never answered. A breach fails the world. No line begins
+/// with `b` (`first_byte`), so `busy` is never an answer misread.
 fn check(open: &mut Open, plan: &Plan, seen: &mut Seen, answer: &[u8], now: Time, limits: &Limits) {
     assert!(open.refusal == Refusal::None, "the echo says nothing after a refusal but the end");
     let index = seen.answered;
@@ -445,13 +492,14 @@ fn check(open: &mut Open, plan: &Plan, seen: &mut Seen, answer: &[u8], now: Time
         unreachable!("io delivers no empty answer to a scan");
     };
     assert!(u32::try_from(answer.len()) == Ok(len), "the answer is the line it answers: its length");
-    for got in text {
-        assert!(*got == byte(&mut open.checker), "the answer is the line it answers, byte for byte");
+    for (at, got) in text.iter().enumerate() {
+        let line = if at == 0 { first_byte(&mut open.checker) } else { byte(&mut open.checker) };
+        assert!(*got == line, "the answer is the line it answers, byte for byte");
     }
     assert!(*last == b'\n', "the answer ends its line");
     seen.answered = seen.answered.checked_add(1).expect("no more answers than lines");
     seen.progress = Some(now);
-    if seen.answered == plan.lines {
+    if seen.answered == answered(plan) {
         seen.complete = true;
     }
 }
@@ -464,6 +512,37 @@ fn length(plan: &Plan, index: u32, rng: &mut Rng, limits: &Limits) -> u32 {
     }
     let drawn = rng.between(u64::from(plan.shortest), u64::from(plan.longest));
     u32::try_from(drawn).expect("between two u32s")
+}
+
+/// The lines a plan expects answered: those it sends whole.
+fn answered(plan: &Plan) -> u32 {
+    match plan.half_close {
+        Some(HalfClose { after, .. }) => after,
+        None => plan.lines,
+    }
+}
+
+/// Whether the plan half-closes now: every line it sends whole sent, and
+/// the piece of the next.
+fn half_closes(sender: &Sender, half_close: Option<HalfClose>) -> bool {
+    match half_close {
+        Some(HalfClose { after, tail }) => {
+            sender.begun >= after && sender.left == 0 && (tail == 0 || sender.tail == Tail::Sent)
+        }
+        None => false,
+    }
+}
+
+/// The first byte of a line: anything but its end, or `b`, so that no line
+/// reads as the refusal `busy`, which answers first.
+fn first_byte(rng: &mut Rng) -> u8 {
+    let mut drawn = u8::try_from(rng.below(254)).expect("below 254");
+    for skipped in [b'\n', b'b'] {
+        if drawn >= skipped {
+            drawn = drawn.checked_add(1).expect("at most 255");
+        }
+    }
+    drawn
 }
 
 /// A byte of a line: anything but its end.

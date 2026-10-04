@@ -121,6 +121,7 @@ pub const fn plan(at: Time, seed: u64) -> Plan {
         read_from: Some(Time::ZERO),
         send_limit: u64::MAX,
         then: Then::Finish,
+        half_close: None,
         abort_at: None,
         retries: 0,
         backoff: Duration::from_millis(10),
