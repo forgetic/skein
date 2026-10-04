@@ -61,6 +61,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-echo-domain"
+version = "0.0.0"
+dependencies = [
+ "skein-lib",
+]
+
+[[package]]
 name = "skein-heap"
 version = "0.0.0"
 

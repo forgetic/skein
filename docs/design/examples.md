@@ -1,0 +1,272 @@
+# The examples
+
+Provisional, 2026-10-04. The design of skein's example services
+(testing.md, 3): what each one is, the steps README.md asks for before
+code (the wire protocol, the limits, the entities, the state machines),
+its fakes, the harness its worlds run on, and how it is tested. The
+examples exist to be tested and to be copied: a service starts from
+them. The echo server is built; the HTTP server and its client come with
+`skein-http`.
+
+## 1. In one page
+
+- **Laid out as a service is** (README.md, "Building a service on
+  skein"): a domain, a protocol layer, a service with its `iterate` and
+  the sum of its worst cases, and a shell with its `main`, each a crate.
+  The step crates are in the model's subset, under the workspace's lints.
+- **Their fakes are step machines** (testing-strategy.md, 4), so that the
+  simulator and the real loop host them as they host the service.
+- **One harness hosts them all:** `skein-world`, the loop of a simulated
+  world over the simulator, with its trace, its memory check and its
+  referee; and the same loop over the shell's kernels, on the real clock.
+- **Tested in simulated worlds and on the real loop,** under tiny limits
+  and every fault the simulator injects.
+
+## 2. Layout
+
+```
+examples/echo/domain        skein-echo-domain     sessions, and the answer to each line
+examples/echo/protocol      skein-echo-protocol   the listener and the connections: lines to calls and back
+examples/echo/service       skein-echo-service    iterate, the limits, the sum of the worst cases
+examples/echo/shell         skein-echo-shell      main: configuration, startup, the loop; the binary skein-echo
+testing/skein-echo-client   skein-echo-client     the fake echo client, a step machine
+testing/skein-world         skein-world           the world harness: simulated worlds and the real loop
+tests/echo                  skein-echo-world      the echo's simulated worlds, and its real loop
+```
+
+The crate graph is README.md's: the domain depends on lib; the protocol
+layer on lib, io and the domain; the service on all three; the shell on
+the service and `skein-shell`. The fake client shares no type with the
+echo (testing-strategy.md, 4): it depends on lib and io only.
+
+## 3. The echo, before code
+
+### 3.1 The wire protocol
+
+A foreign-style line protocol, so scanned framing (programming-model.md,
+8):
+
+- **A request is a line:** any bytes but `\n`, then `\n`, at most
+  `Limits::line` bytes with it.
+- **The answer to a line is the same line,** its `\n` included. One
+  request is in flight per connection: the server asks for room for the
+  next answer before it reads the next line.
+- **Refusals are small and fixed.** `busy\n`, as the first and only
+  answer, when the domain has no session for the peer; then the server
+  closes. `too long\n`, when a line passes `line` bytes without its `\n`;
+  then the server closes, and io's graceful close discards the rest.
+- **Idle:** a connection that sends no line for `idle` while the server
+  waits for one, or reads nothing for as long while the server waits for
+  room for its answer, is closed, gracefully and without a word. Each
+  deadline is spread by up to `spread`, drawn from the seed, so that
+  connections opened together do not all expire in one iteration.
+- **End:** a peer that half-closes has every complete line answered, then
+  the server closes gracefully. A last piece of a line, with no `\n`, is
+  dropped.
+- **Past the protocol's slab** of connections, an accepted socket is
+  rejected: io closes it without a word.
+
+### 3.2 Limits and the worst case
+
+| Layer | Limit | What |
+|---|---|---|
+| domain | `sessions` | sessions at once: an `Open` past it is answered `Busy` |
+| protocol | `conns` | connections at once: an accepted socket past it is rejected |
+| protocol | `line` | the longest line, `\n` included, and the room each answer asks for: at least the longest refusal |
+| protocol | `idle`, `spread` | the idle deadline, and how far it is spread |
+| io | io.md, 2 | `intake` and `output` at least `line`: the protocol's largest read and room |
+| service | `queue` | each queue between the stages, at least the largest `MAX_OUT` |
+
+```
+worst case = io::worst_case(io)
+           + domain:   the slab of sessions
+           + protocol: the slab of connections, its deadlines and ready list,
+                       conns × line (one line in flight per connection:
+                       the bytes read, the domain's text, or the answer
+                       before io takes it), and one line more (a step's
+                       copy while it decodes or encodes)
+           + service:  its queues' containers
+```
+
+Startup refuses a worst case past the configured memory, and io limits
+that cannot meet the protocol's largest demand (io.md, 2): `line` past
+`intake` or `output`.
+
+### 3.3 Entities
+
+| Layer | Entity | Made by | Owned by | Named by | Ends |
+|---|---|---|---|---|---|
+| protocol | the listener | startup | the protocol layer | a fixed owner token below; io's listener token | io's `Closed` |
+| protocol | a connection | an accepted socket it binds | the protocol layer, which owns io's socket | `Id<Conn>`: io's owner token, and the `ReplyTo` of its calls | io's `Closed`, with no call out and its session told gone |
+| domain | a session | an `Open` admitted | the domain | `Id<Session>`, as a token the connection holds | `Gone` |
+
+The domain's vocabulary (programming-model.md, 4.4): calls up, `Open {
+reply_to }` and `Line { session, reply_to, text }`, answered by `Reply {
+to, reply }` with `Admitted { session }`, `Busy` or `Echo(text)`; and
+events up, `Gone { session }` and `Shutdown`, the latter answered by the
+request `Stop`: admit no one more. The text of a line is its bytes without
+the `\n`: framing stays in the protocol layer, which copies the text out
+when it decodes and writes the answer at its length when it encodes.
+
+`Shutdown` stands in for io's `Shutdown` event, which is not built: the
+service's `shutdown` asks the protocol layer to tell it, from its ready
+list. The domain decides what it means: it admits no one more, and asks
+for the listener to stop. The connections it has run to their end.
+
+### 3.4 State machines
+
+**The connection.**
+
+| State | Holds | Demand | Deadline |
+|---|---|---|---|
+| Greeting | io's socket | room for an answer | idle |
+| Admitting | socket; whether the peer ended | | |
+| Reading | socket, session | a scan to `\n`, at most `line` | idle |
+| Answering | socket, session; whether the peer ended | | |
+| Draining | socket, session | room for an answer | idle |
+| Closing | whether io told `Closed`; whether a call is out; the session to tell `Gone` | | |
+| Closed | | | |
+
+The demand and the deadline are one function of the state, applied after
+every transition: entering Greeting, Reading or Draining states its demand
+and arms the idle deadline afresh, so that each line read and each room
+granted is progress (programming-model.md, 7).
+
+| State | Event | Next, and what it does |
+|---|---|---|
+| Greeting | `Room` | Admitting: `Open` |
+| Admitting | `Admitted` | Reading; or, if the peer ended, Closing: `Close`, `Gone` owed |
+| Admitting | `Busy` | Closing: `busy\n`, `Close` |
+| Reading | `Bytes`, a line | Answering: `Line` |
+| Reading | `Bytes`, no `\n` | Closing: `too long\n`, `Close`, `Gone` |
+| Answering | `Echo` | Draining: the answer sent; or, if the peer ended, Closing: the answer, `Close`, `Gone` owed |
+| Draining | `Room` | Reading |
+| Admitting, Answering | `End` | the same, the end noted |
+| Greeting, Reading, Draining | `End` | Closing: `Close`, `Gone` if admitted |
+| Greeting, Reading, Draining | the idle deadline | Closing: `Close`, `Gone` if admitted |
+| any open state | `Failed` | Closing: `Close`, `Gone` once no call is out |
+| Closing | the reply to its call | `Admitted`: its session owed `Gone`; `Busy`, `Echo`: dropped |
+| Closing | `Bytes`, `Room`, `End`, `Failed` | ignored: told before io took the close |
+| Closing | `Closed` | retired once no call is out and nothing is owed |
+| Closing | resumed | `Gone` told |
+| any but Closing | `Closed` | impossible: io tells it only after the close |
+| any without the demand | `Bytes`, `Room` | impossible: io answers only a demand |
+| any without a call out | a reply | impossible: one reply per call |
+| any without the deadline | the idle deadline | impossible: cancelled on leaving |
+
+A `Gone` owed by a down-pass cell (a reply that finds the connection
+closing) is up from the down pass (programming-model.md, 2): the
+connection goes on the protocol's ready list, and `resume` tells it.
+`Gone` comes only once no call is out, so the domain never answers for a
+session it has retired. A connection retires once io told `Closed`, no
+call is out, and its session was told gone: the bindings above and below
+have both ended (programming-model.md, 5.2).
+
+**The listener.**
+
+| State | Event | Next, and what it does |
+|---|---|---|
+| Unopened | resumed | Opening: `Listen` |
+| Opening | `Listening` | Listening, its address kept; or, if stopped, Closing: `Close` |
+| Opening | `Failed` | Failed: io closes it |
+| Opening | `Stop` | Opening, stopped |
+| Listening | `Accepted` | a connection: `Bind`, Greeting; or, the slab full, `Reject` |
+| Listening | `Failed` (its accept stopped) | Closing: `Close` |
+| Listening | `Stop` | Closing: `Close` |
+| Closing | `Accepted` | `Reject`: announced before io took the close |
+| Failed, Closing | `Closed` | Closed |
+| Unopened | `Stop` | Closed |
+| Failed, Closing, Closed | `Stop` | ignored |
+
+**The session** is active from `Open` admitted to `Gone`, and counts the
+lines it answered. **The domain** admits until `Shutdown`, then answers
+every `Open` with `Busy` and asks once for `Stop`.
+
+## 4. The echo's main
+
+`main` reads its configuration from its arguments (the address to listen
+on, and the memory it may take), runs startup (shell.md, 6): the worst
+case against the memory, io's caps against the protocol's largest demand,
+then the seed and the kernel; and then the loop of programming-model.md,
+section 2, over the shell's `Kernel` and `Clock`. Signals to the service
+are not built, so it runs until it is killed, and says so; it stops by
+itself only when its listener fails, as when the address is in use.
+
+## 5. The fake echo client
+
+`skein-echo-client` is a step machine (testing-strategy.md, 4): io and
+one layer above it, which plays the line protocol over io's stream
+vocabulary, with an `iterate` of its own and its own limits and worst
+case. It shares no type with the echo. Each connection follows a plan:
+
+- when it connects, how many lines it sends and their lengths, drawn
+  from its seed, one of them past the server's limit if the plan says;
+  how many it sends ahead of their answers, in pieces of what size;
+  from when it reads, and after how many bytes it stops sending;
+- what it does after its last answer: half-close and wait for the
+  server's end, close, abort, or linger until the server closes; or an
+  abort at a given time, whatever it is doing;
+- how often it tries again, after a refusal or a broken stream, and how
+  long it waits first.
+
+It holds no copy of what it sent: a line's bytes are drawn from the
+seed, and drawn again, from the same seed, to check its answer. It checks
+its peer as it goes, failing the world on the first breach: each answer
+is the oldest line unanswered, byte for byte; `busy\n` comes only first;
+`too long\n` only to the line past the limit; nothing comes after either
+but the end. What it saw (answers, refusals, the server's end, failures,
+the bytes it handed io, when it closed) is kept for the referee.
+
+## 6. The world harness
+
+`skein-world` (testing-strategy.md, 7) is skein's: its examples are the
+second user of a world. It is ordinary Rust, generic over a scenario's
+processes, each a host of an `iterate` (a service, or a fake client):
+
+- **One loop** drives every process over the simulator: each reaps,
+  iterates and submits, in turn, and the referee observes each.
+- **Time** moves only when the world is idle, to the earlier of what the
+  simulator has due and the processes' and the referee's earliest
+  deadline (simulator.md, 3).
+- **Trace and replay:** a run returns the simulator's trace, which the
+  same seed replays.
+- **Memory** (simulator.md, 5): under the counting allocator, the heap
+  that grew within the processes' own calls, at the peak of each
+  iteration, against the sum of their worst cases. What grew within the
+  simulator's calls and the harness's is left out, by metering around the
+  processes' calls rather than theirs.
+- **Settled:** once the referee passed and nothing is busy, every process
+  holds nothing, the simulator has nothing in flight, and every
+  descriptor is closed.
+- **The referee** holds a scenario's expectations, each with a deadline:
+  safety on every observation, liveness as the deadline; it may also
+  inject what belongs to no fake, such as a shutdown.
+- **The real loop** runs the same processes and referee, each process on
+  a ring of its own (as a process would be), in one thread on loopback,
+  with deadlines on the real clock.
+
+## 7. Testing
+
+- **Step tests** in each example crate: every cell of the connection and
+  the listener, the domain's admission and refusal, `iterate` with its
+  `MAX_OUT` reserved at each stage, the worst case and the startup
+  checks; and the fake client's own cells.
+- **Simulated worlds** (`tests/echo`): the echo and fake clients as
+  processes of the simulator, under tiny limits, calm and chaotic: many
+  clients; a line too long; a busy refusal at the entrance, and a
+  rejection; an idle timeout; a client that stops reading, stopped at the
+  server by backpressure; closes and resets in every state; and a
+  shutdown. Focused seeds in the default suite; sweeps in the fuzzy one,
+  asserting that every fault fell. Every binary checks memory at every
+  iteration.
+- **The real loop** (`tests/echo/tests/real.rs`): the echo and its fake
+  clients in one loop over the shell's rings, on loopback, quick, failing
+  clearly where `io_uring` is unusable.
+
+## 8. Not built yet
+
+- **The HTTP server and its client,** with `skein-http`.
+- **Signals to the service** (io.md, 7): `Shutdown` comes from the
+  service's `shutdown`, and `main` runs until it is killed.
+- **Domain worlds** for the echo's domain: it is one slab and a counter,
+  and its step tests cover it.
