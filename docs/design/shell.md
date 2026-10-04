@@ -171,9 +171,13 @@ and changes no code above io:
 
 ## 11. Not built yet
 
-- **Startup** (section 6): the worst-case check, blocking the termination
-  signals, roots, names, and TLS's configuration. Only the ring's probe
-  is built.
+- **Startup** (section 6): blocking the termination signals, roots, names,
+  and TLS's configuration. The ring's probe is built, and the echo's
+  `main` runs the rest of startup as a service's would (examples.md, 4):
+  its limits checked, each machine's largest demand within io's caps, and
+  the sum of the worst cases within the memory configured, before the
+  seed and the kernel. Startup is each service's `main`, with the kit, so
+  the kit holds no startup function of its own.
 - **The operations for files and processes,** and the synchronous ones
   (spawning, signalling, making a pipe, listing a directory), when io
   pulls them. Sockets are built.

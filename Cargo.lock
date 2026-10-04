@@ -107,6 +107,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-echo-world"
+version = "0.0.0"
+dependencies = [
+ "skein-echo-client",
+ "skein-echo-domain",
+ "skein-echo-protocol",
+ "skein-echo-service",
+ "skein-heap",
+ "skein-io",
+ "skein-lib",
+ "skein-shell",
+ "skein-sim",
+ "skein-world",
+]
+
+[[package]]
 name = "skein-heap"
 version = "0.0.0"
 

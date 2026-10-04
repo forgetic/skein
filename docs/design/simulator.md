@@ -125,9 +125,12 @@ heap grew by within them is the simulator's.
   services a spawn starts, when io pulls them. Sockets are built.
 - **A state digest** in the trace, beside the records (lib.md, 11).
 
-The check of memory at every iteration is not the simulator's but the
-world harness's (section 5), and not built yet: no harness leaves the
-simulator's heap out. The counting allocator it measures with is built, in
-`testing/skein-heap` (testing.md, 6); the check comes with the first
-simulated world that hosts a service, a service's own world or skein's
-examples (testing.md, 8).
+Hosting services is built for sockets: `skein-world` (testing.md, 5)
+hosts each process's `iterate` over the simulator, moving time to the
+earlier of `next_due` and the processes' earliest deadline only when no
+process has work and none has deferred work (section 3), and the echo's
+worlds run on it (examples.md, 6). So is the check of memory at every
+iteration, which is the harness's, not the simulator's (section 5): it
+meters around the processes' own calls, building each and each
+`iterate`, with the counting allocator's span, so that what grew within
+the simulator's calls and the harness's own is left out.

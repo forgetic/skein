@@ -14,6 +14,7 @@ members = [
     "testing/skein-world",
     "tests/conformance/ring",
     "tests/conformance/sim",
+    "tests/echo",
     "tests/heap",
     "tests/io",
     "tests/json",

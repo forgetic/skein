@@ -15,8 +15,10 @@ Everyone who builds skein, or builds on it, reads the foundation first:
   still open about both.
 
 `docs/design/` holds the design of each of skein's parts, one document per
-part, each the brief for the agent that builds it, and
-[`testing.md`](docs/design/testing.md): how skein itself is tested.
+part, each the brief for the agent that builds it;
+[`testing.md`](docs/design/testing.md): how skein itself is tested; and
+[`examples.md`](docs/design/examples.md): the example services a service
+starts from.
 
 ## What skein holds
 
@@ -28,6 +30,7 @@ part, each the brief for the agent that builds it, and
 | the shell kit | `skein-shell` | the io_uring backend, the clock, the seed, startup | [shell.md](docs/design/shell.md) |
 | the simulator | `skein-sim` | the simulated kernel and its faults; beside it, the conformance suite (`skein-conformance`) | [simulator.md](docs/design/simulator.md) |
 | the counting allocator | `skein-heap` | for tests: the heap counted, and each step checked against its worst case | [testing.md](docs/design/testing.md) |
+| the world harness | `skein-world` | for tests: each process's `iterate` in one loop, over the simulator or the ring, with a referee | [examples.md](docs/design/examples.md) |
 | HTTP | `skein-http` | HTTP/1.1 client and server, server-sent events | [http.md](docs/design/http.md) |
 | JSON | `skein-json` | a bounded tokenizer, a sized writer | [json.md](docs/design/json.md) |
 | TLS | `skein-tls` | a TLS stream over rustls | [tls.md](docs/design/tls.md) |
@@ -90,6 +93,7 @@ skein-sim      lib, io
 | `main`: configuration, startup, the loop | the service | `shell`, on `skein-shell` |
 | the simulator | skein | `skein-sim` |
 | the counting allocator, for memory tests | skein | `skein-heap` |
+| the world harness: the loop, the referee, the heap at every iteration | skein | `skein-world` |
 | the worlds, the fakes, the fake machine | the service | its tests |
 | the lints and `clippy.toml` | copied from skein | the workspace |
 
@@ -99,7 +103,7 @@ domain     skein-lib                                  and its child domains
 protocol   skein-lib, skein-io, the skein machines it stacks, domain
 service    skein-lib, skein-io, protocol, domain
 shell      service, skein-shell
-tests      service, skein-sim, skein-heap
+tests      service, skein-sim, skein-heap, skein-world
 ```
 
 Before code:
@@ -120,3 +124,7 @@ Then, in order:
 
 What the service finds missing in skein along the way is added to skein,
 with the service as its first user and first test.
+
+skein's own examples are built this way, and a service starts from them:
+the echo in `examples/echo`, with its steps before code, its fake client
+and its worlds in [examples.md](docs/design/examples.md).
