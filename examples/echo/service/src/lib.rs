@@ -32,8 +32,13 @@ extern crate alloc;
 #[cfg(test)]
 mod tests;
 
-use skein_echo_domain::{self as domain, Domain};
-use skein_echo_protocol::{self as protocol, Protocol};
+use domain::Domain;
+use protocol::Protocol;
+// The layers' crates, so that the shell and the worlds above the service
+// name their limits through it, and depend on the service alone (README.md's
+// crate graph).
+pub use skein_echo_domain as domain;
+pub use skein_echo_protocol as protocol;
 use skein_io::kernel::{Addr, Complete, Submit};
 use skein_io::{self as io, Io};
 use skein_lib::{Env, Queue, Time, Wall};

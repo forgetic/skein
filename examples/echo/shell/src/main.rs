@@ -95,14 +95,14 @@ const fn limits() -> Limits {
             close_timeout: Duration::from_secs(5),
             retry: Duration::from_millis(50),
         },
-        protocol: skein_echo_protocol::Limits {
+        protocol: service::protocol::Limits {
             conns: 1024,
             line: 4096,
             idle: Duration::from_secs(60),
             spread: Duration::from_secs(6),
             retry: Duration::from_millis(100),
         },
-        domain: skein_echo_domain::Limits { sessions: 1000 },
+        domain: service::domain::Limits { sessions: 1000 },
         queue: 256,
     }
 }

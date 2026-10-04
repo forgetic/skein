@@ -14,8 +14,6 @@ path = "src/main.rs"
 skein-lib.workspace = true
 skein-io.workspace = true
 skein-shell.workspace = true
-skein-echo-domain.workspace = true
-skein-echo-protocol.workspace = true
 skein-echo-service.workspace = true
 
 # Ordinary Rust (programming-model.md, 10.2), as skein-shell is, with the

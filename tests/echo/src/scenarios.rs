@@ -13,9 +13,8 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use skein_echo_client::{self as client, Plan, Then};
-use skein_echo_domain as domain;
-use skein_echo_protocol as protocol;
 use skein_echo_service as service;
+use skein_echo_service::{domain, protocol};
 use skein_io::kernel::Addr;
 use skein_lib::{Duration, Rng, Time};
 use skein_sim::{Config, Faults};

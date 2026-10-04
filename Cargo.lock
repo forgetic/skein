@@ -98,8 +98,6 @@ dependencies = [
 name = "skein-echo-shell"
 version = "0.0.0"
 dependencies = [
- "skein-echo-domain",
- "skein-echo-protocol",
  "skein-echo-service",
  "skein-io",
  "skein-lib",
@@ -111,8 +109,6 @@ name = "skein-echo-world"
 version = "0.0.0"
 dependencies = [
  "skein-echo-client",
- "skein-echo-domain",
- "skein-echo-protocol",
  "skein-echo-service",
  "skein-heap",
  "skein-io",

@@ -9,8 +9,7 @@
 use alloc::vec::Vec;
 use core::net::{Ipv4Addr, SocketAddr};
 
-use skein_echo_domain as domain;
-use skein_echo_protocol as protocol;
+use crate::{domain, protocol};
 use skein_io::kernel::{Addr, Complete, Done, Error, Fd, Op, Submit};
 use skein_lib::{Duration, Time, Wall};
 
