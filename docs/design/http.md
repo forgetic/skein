@@ -548,7 +548,8 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
   answering a busy status.
 - **A call is an exchange,** and exactly one terminal event ends it:
   `Done`, once the response is all queued below and the request body was
-  read to its end, discarded or given up; or `Failed`. After `Ended`, a
+  read to its end, discarded, withdrawn from once all read below, or
+  given up; or `Failed`. After `Ended`, a
   `Failed` or `Done(Close)` the server waits for its close; a `Next` then
   is the side above's bug, asserted, as is a request of any kind with no
   call in progress.
@@ -632,8 +633,10 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
   and holds its carry-over in an intake of `Limits::read`. A request is
   framed by length or by chunks, never to the end of the stream: one with
   neither has no body. The first demand of an empty body gets `End`; the
-  exchange is done only once the side above read its `End`, or discarded
-  it.
+  exchange is done only once the side above read its `End`, discarded
+  it, or withdrew its demand once the body was all read below, the
+  withdrawal crossing the last bytes: a side above that responds without
+  reading the body discards it, or `Done` never comes.
 - **`Discard`** reads the rest and drops it, on a connection that may be
   used again, so that the next request can be read; on one that may not,
   it reads no more: the body is given up, and a read outstanding for it
