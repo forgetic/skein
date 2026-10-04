@@ -149,8 +149,8 @@ fn trim_end(value: &[u8]) -> &[u8] {
 /// does not know, an obsolete fold, whitespace before a colon, both
 /// framing headers, a coding not undone, two lengths, a chunk size past a
 /// `u64`, no `Host`, a field past the head, too many fields, a request line
-/// past the head, a body past the limit, a trailer section that never
-/// ends, or HTTP/2's preface.
+/// past the head, a body past the limit, a length with a sign, a trailer
+/// section that never ends, or HTTP/2's preface.
 #[must_use]
 pub fn corrupt(rng: &mut Rng, client: &[u8]) -> Vec<u8> {
     let mut out = client.to_vec();
@@ -158,7 +158,7 @@ pub fn corrupt(rng: &mut Rng, client: &[u8]) -> Vec<u8> {
     let insert = |out: &mut Vec<u8>, bytes: &[u8]| {
         out.splice(after_line..after_line, bytes.iter().copied());
     };
-    match rng.below(15) {
+    match rng.below(16) {
         0 => {
             if let Some(at) = find(&out, b" HTTP/1.") {
                 out[at + 6] = b'2';
@@ -218,6 +218,11 @@ pub fn corrupt(rng: &mut Rng, client: &[u8]) -> Vec<u8> {
         }
         12 => insert(&mut out, b"Content-Length: 99999999999\r\n"),
         13 => {
+            // A length with a sign, which a lenient reader takes as a length.
+            let digits = format!("Content-Length: +{}\r\n", rng.below(10));
+            insert(&mut out, digits.as_bytes());
+        }
+        14 => {
             // A chunked body's last chunk, then trailer fields past the head.
             let mut trailers = Vec::new();
             for _ in 0..200 {

@@ -1,0 +1,4 @@
+# Hostile: a length with a sign, which 1*DIGIT has no room for (RFC 9110,
+# 8.6) and a lenient reader takes as 4. Drafted by the reference reader,
+# then checked by hand.
+rejected framing
