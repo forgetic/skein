@@ -5,6 +5,7 @@ resolver = "3"
 members = [
     "crates/*",
     "examples/echo/domain",
+    "examples/echo/protocol",
     "testing/skein-conformance",
     "testing/skein-heap",
     "tests/conformance/ring",
@@ -32,6 +33,7 @@ skein-sim = { path = "crates/skein-sim" }
 skein-conformance = { path = "testing/skein-conformance" }
 skein-heap = { path = "testing/skein-heap" }
 skein-echo-domain = { path = "examples/echo/domain" }
+skein-echo-protocol = { path = "examples/echo/protocol" }
 
 # The only dependencies from outside the workspace, with rustls later
 # (programming-model.md, 2.1): the shell's, for the ring adapter.
