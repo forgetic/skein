@@ -966,13 +966,20 @@ fn opened(fd: i32) -> Result<Done, Error> {
     }
 }
 
-/// Clears `O_NONBLOCK` from the file open on `fd`.
-fn blocking(fd: i32) -> Result<(), Error> {
+/// The status flags of what is open on `fd` (`F_GETFL`), or the error
+/// number.
+pub(crate) fn status_flags(fd: i32) -> Result<i32, i32> {
     // SAFETY: integers only.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(Error::Other(last_errno()));
-    }
+    if flags < 0 { Err(last_errno()) } else { Ok(flags) }
+}
+
+/// Clears `O_NONBLOCK` from the file open on `fd`.
+fn blocking(fd: i32) -> Result<(), Error> {
+    let flags = match status_flags(fd) {
+        Ok(flags) => flags,
+        Err(errno) => return Err(Error::Other(errno)),
+    };
     // SAFETY: integers only.
     let set = unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
     if set < 0 { Err(Error::Other(last_errno())) } else { Ok(()) }

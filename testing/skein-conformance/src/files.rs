@@ -59,8 +59,8 @@ pub struct FileLifecycle {
     /// A `Sync` of the file, and of a directory.
     pub synced: [Result<Done, Error>; 2],
     pub stat_written: Result<Stat, Error>,
-    /// The owner's bits of a file made with `0o640`, which no usual umask
-    /// takes, and the bits of a file laid `0o604`.
+    /// The owner's bits of a file made with `0o400`, which no usual umask
+    /// takes and the default's are not, and the bits of a file laid `0o604`.
     pub modes: [Result<u32, Error>; 2],
     pub read_back: Result<Vec<u8>, Error>,
     pub reads: Shortness,
@@ -130,9 +130,10 @@ pub fn file_lifecycle<B: Backend>(backend: &mut B) -> FileLifecycle {
     }
 }
 
-/// The owner's bits of a file created with `0o640`.
+/// The owner's bits of a file created with `0o400`, which `Create` still
+/// opens to write: a new file's mode does not stop its own open.
 fn created_mode<B: Backend>(run: &mut Run<'_, B>, process: B::Process, root: Fd) -> Result<u32, Error> {
-    let file = run.open(process, root, b"made", OpenHow::Create { mode: Some(0o640) })?;
+    let file = run.open(process, root, b"made", OpenHow::Create { mode: Some(0o400) })?;
     let stat = run.stat(process, file);
     run.close(process, file);
     stat.map(|stat| stat.mode & 0o700)
@@ -179,7 +180,7 @@ impl Check for FileLifecycle {
         let length = Ok((Kind::File, 10));
         let written = self.stat_written.map(|stat| (stat.kind, stat.size));
         assert_eq!(written, length, "the contract: Stat answers a file's kind and length");
-        let modes = [Ok(0o600), Ok(0o604)];
+        let modes = [Ok(0o400), Ok(0o604)];
         assert_eq!(self.modes, modes, "the contract: Create makes the mode asked for, and Stat answers it");
         let expected = file(b"abXYef\0\0\0Z");
         assert_eq!(self.read_back, expected, "the contract: Write at an offset, zeros in a gap past the end");

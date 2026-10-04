@@ -220,7 +220,9 @@ fn a_seed_replays_a_world_of_files() {
 /// back.
 #[test]
 fn a_hung_operation_on_files_waits_until_a_cancel_stops_it() {
-    let (mut world, pid, root) = rooted();
+    let mut world = World::new(1, Config { max_fds: 4, ..Config::calm() });
+    let pid = world.spawn();
+    let root = world.root(pid, &tree());
     let read = world.open(pid, root, b"a.txt", OpenHow::Read).unwrap();
     let write = world.open(pid, root, b"new", OpenHow::Create { mode: None }).unwrap();
     world.sim.set_faults(Faults { hung: 1000, ..Faults::NONE });
@@ -239,9 +241,11 @@ fn a_hung_operation_on_files_waits_until_a_cancel_stops_it() {
         let results: Vec<_> = got.into_iter().map(|complete| (complete.op, complete.result)).collect();
         assert_eq!(results, [(target, Err(Error::Cancelled)), (cancel, Ok(Done::Nothing))]);
     }
-    assert_eq!(world.sim.open_fds(pid), 3, "the hung Open made no descriptor and holds no place");
+    assert_eq!(world.sim.open_fds(pid), 3, "the hung Open made no descriptor");
     world.sim.set_faults(Faults::NONE);
-    close_all(&mut world, pid, &[read, write, root]);
+    let last = world.open(pid, root, b"d", OpenHow::Directory);
+    let last = last.expect("the fourth place, which the hung Open gave back");
+    close_all(&mut world, pid, &[read, write, last, root]);
 }
 
 /// A `Close` of a file and a `Cancel` of it in one batch: the `Close` is
