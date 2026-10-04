@@ -9,6 +9,7 @@ mod data;
 mod exchange;
 mod request;
 mod response;
+mod server;
 mod sse;
 
 use alloc::boxed::Box;
