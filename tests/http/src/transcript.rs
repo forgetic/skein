@@ -26,7 +26,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
-use skein_http::client::{Error, Framing, Limits, Method, Reuse, Version};
+use skein_http::Header;
+use skein_http::client::{Body, Call, Error, Framing, Limits, Method, Reuse, Version};
 use skein_http::sse;
 
 use crate::reference::{self, Ending, Events, Head, Outcome};
@@ -49,6 +50,21 @@ pub struct Transcript {
     pub method: Method,
     /// What it must decode to: `None` while it has no expectation yet.
     pub expected: Option<Decoded>,
+}
+
+impl Transcript {
+    /// The call its response answers: its method, for `/`, with nothing
+    /// but the `Host` every request carries.
+    #[must_use]
+    pub fn call(&self) -> Call {
+        Call {
+            method: self.method,
+            target: b"/".to_vec().into(),
+            headers: Box::new([Header { name: b"Host".to_vec().into(), value: b"example.com".to_vec().into() }]),
+            body: Body::None,
+            close: false,
+        }
+    }
 }
 
 /// What a response decodes to.

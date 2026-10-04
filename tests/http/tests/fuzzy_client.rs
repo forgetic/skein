@@ -183,14 +183,7 @@ fn transcripts_cut_mutated_and_failed_read_as_the_reference_reads_them() {
         if rng.chance(500) {
             server = generate::mutate(&mut rng, &server);
         }
-        let call = skein_http::client::Call {
-            method: transcript.method,
-            target: b"/".to_vec().into(),
-            headers: Box::new([]),
-            body: skein_http::client::Body::None,
-            close: false,
-        };
-        let exchanges = [Exchange { call, upload: Vec::new() }];
+        let exchanges = [Exchange { call: transcript.call(), upload: Vec::new() }];
         let settings = Settings::chaotic(&mut rng, transcript.limits, server.len());
         let run = client_world::check(&exchanges, &server, &settings, seed);
         tally.record(&run, &settings);

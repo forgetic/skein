@@ -132,10 +132,13 @@ pub struct Header { name: Box<[u8]>, value: Box<[u8]> }   // names compared with
   (`Target`), a field name that is not a token (`Name`), a value with a
   control character other than a tab, CR, LF and NUL among them
   (`Value`), a field the client writes itself, `Content-Length`,
-  `Transfer-Encoding` or `Connection` (`Reserved`), and the length
-  (`TooLong`). No header can be injected through a call.
+  `Transfer-Encoding` or `Connection` (`Reserved`), each field in turn,
+  its name before its value; then no `Host`, or more than one (`Host`,
+  RFC 9112, 3.2); and the length (`TooLong`). No header can be injected
+  through a call.
 - **The methods** are those an API's client sends: GET, HEAD, POST, PUT,
-  PATCH, DELETE and OPTIONS. `Host` is a field the caller gives.
+  PATCH, DELETE and OPTIONS. `Host` is a field the caller gives, exactly
+  once, anywhere among its fields.
 - **The request body is a stream** (`Upload`), written, by length: the
   side above demands room only, of at most `Limits::send`, sends within
   the room granted, and finishes once the call's length is sent. Each

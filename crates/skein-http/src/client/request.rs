@@ -66,9 +66,9 @@ pub struct Call {
     /// The request target, in origin form: `/v1/messages?beta=true`.
     /// Visible ASCII, at least one byte.
     pub target: Box<[u8]>,
-    /// The fields the request carries, `Host` among them, written in this
-    /// order. Not those the client writes itself: `Content-Length`,
-    /// `Transfer-Encoding` and `Connection`.
+    /// The fields the request carries, written in this order: one `Host`
+    /// among them (RFC 9112, 3.2), and none the client writes itself,
+    /// `Content-Length`, `Transfer-Encoding` and `Connection`.
     pub headers: Box<[Header]>,
     pub body: Body,
     /// Whether the connection ends with this exchange: the client says
@@ -90,6 +90,9 @@ pub enum Refusal {
     /// A field the client writes itself: `Content-Length`,
     /// `Transfer-Encoding` or `Connection`.
     Reserved,
+    /// No `Host` field, or more than one: an HTTP/1.1 request carries
+    /// exactly one (RFC 9112, 3.2), and a server refuses it otherwise.
+    Host,
     /// The head is longer than [`Limits::request`].
     TooLong,
 }
@@ -101,7 +104,7 @@ const CRLF: &[u8] = b"\r\n";
 
 /// The head `call` is written as, in a box of exactly its length, or why
 /// it is refused. The checks run in a fixed order: the target, then each
-/// field, its name before its value, then the length.
+/// field, its name before its value, then the one `Host`, then the length.
 pub(super) fn write(call: &Call, limits: &Limits) -> Result<Box<[u8]>, Refusal> {
     check(call)?;
     let length = framing(call);
@@ -162,6 +165,7 @@ fn check(call: &Call) -> Result<(), Refusal> {
             return Err(Refusal::Target);
         }
     }
+    let mut hosts: u32 = 0;
     for header in &call.headers {
         if header.name.is_empty() {
             return Err(Refusal::Name);
@@ -179,6 +183,12 @@ fn check(call: &Call) -> Result<(), Refusal> {
         if header.is(b"content-length") || header.is(b"transfer-encoding") || header.is(b"connection") {
             return Err(Refusal::Reserved);
         }
+        if header.is(b"host") {
+            hosts = hosts.saturating_add(1);
+        }
+    }
+    if hosts != 1 {
+        return Err(Refusal::Host);
     }
     Ok(())
 }

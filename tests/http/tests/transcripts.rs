@@ -5,7 +5,6 @@
 
 use std::fmt::Write as _;
 
-use skein_http::client::{Body, Call};
 use skein_http_world::client_world::{self, Exchange, Reads, Settings};
 use skein_http_world::reference::{Ending, Outcome};
 use skein_http_world::sse_world;
@@ -32,14 +31,7 @@ fn agree(left: &Decoded, right: &Decoded) -> bool {
 }
 
 fn exchange(transcript: &Transcript) -> [Exchange; 1] {
-    let call = Call {
-        method: transcript.method,
-        target: b"/".to_vec().into(),
-        headers: Box::new([]),
-        body: Body::None,
-        close: false,
-    };
-    [Exchange { call, upload: Vec::new() }]
+    [Exchange { call: transcript.call(), upload: Vec::new() }]
 }
 
 #[test]

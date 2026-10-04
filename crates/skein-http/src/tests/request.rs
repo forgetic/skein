@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use skein_lib::stream::{Delimiter, Down, Fault, Read, Up};
 
 use super::{LIMITS, Machine, boxed, call, get, header};
+use crate::Header;
 use crate::client::{Body, Call, Error, Event, Limits, Method, Refusal, Request, Waiting};
 
 /// The head a call is written as, sent once room is granted.
@@ -126,6 +127,17 @@ fn each_thing_a_call_gets_wrong_is_refused_in_order() {
         Refusal::Target,
         "the target first"
     );
+
+    // Exactly one Host (RFC 9112, 3.2), after every field, before the length.
+    let hosts = |headers: &[Header]| Call { headers: headers.into(), ..get() };
+    let host = header(b"Host", b"example.com");
+    assert_eq!(refused(hosts(&[]), LIMITS), Refusal::Host);
+    assert_eq!(refused(hosts(&[header(b"Accept", b"*/*")]), LIMITS), Refusal::Host);
+    assert_eq!(refused(hosts(&[host.clone(), header(b"hOsT", b"other.example")]), LIMITS), Refusal::Host);
+    assert_eq!(refused(hosts(&[header(b"X", b"\n")]), LIMITS), Refusal::Value, "each field before the Host");
+    assert_eq!(refused(Call { target: boxed(&[b'a'; 300]), ..hosts(&[]) }, LIMITS), Refusal::Host, "before the length");
+    let head = written(hosts(&[header(b"Accept", b"*/*"), header(b"host", b"example.com")]));
+    assert_eq!(&*head, b"GET / HTTP/1.1\r\nAccept: */*\r\nhost: example.com\r\n\r\n", "one Host, anywhere, any case");
 }
 
 #[test]
