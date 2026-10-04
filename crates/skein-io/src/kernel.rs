@@ -100,7 +100,10 @@
 //!   with `Escape`; a symbolic link that stays beneath it is followed. A
 //!   loop of links, or more than 40 in one resolution, fails with
 //!   `TooManyLinks`. A name longer than 255 bytes, or a path of 4096 or
-//!   more, fails with `NameTooLong`; an empty path with `NotFound`.
+//!   more, fails with `NameTooLong`; an empty path with `NotFound`. A `..`
+//!   that races a rename or a mount anywhere on the system, which
+//!   `RESOLVE_BENEATH` answers with `EAGAIN`, has the backend submit the
+//!   `Open` again, up to 16 times: still racing, it fails with `Other(11)`.
 //! - **`Rename`, `Remove` and `MakeDirectory` act on one entry of an open
 //!   directory,** named by an [`is_name`]: no `/`, not `.` or `..`. Only
 //!   `openat2` resolves a path beneath a root, so whatever lies further down

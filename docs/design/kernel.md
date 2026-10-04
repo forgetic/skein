@@ -191,6 +191,16 @@ documentation, with each operation's errors; the decisions behind it:
   refuse those too and keep nothing more in. Magic links (`/proc/*/fd/*`)
   are refused by name, with `RESOLVE_NO_MAGICLINKS`, as the man page
   asks: `RESOLVE_BENEATH` refuses them today, but may not always.
+- **A `..` that races is tried again.** `RESOLVE_BENEATH` cannot tell a
+  `..` from an escape when a rename or a mount anywhere on the system
+  moves under it, and answers `EAGAIN` for the caller to retry. The
+  backend does, not io: the ring pushes the same `Open` again from its
+  slot, up to 16 times, and only one still racing goes up, as
+  `Other(11)`. io_uring's worker meets the race only once a quick attempt
+  inline has too, so it is rare, about one `Open` in a thousand under a
+  storm of renames; the ring's own tests provoke it with renames in its
+  workers beside creates through `..`. The simulator has no race, and
+  never answers it.
 - **Every other operation on a name acts on one entry of an open
   directory.** `renameat`, `unlinkat`, `mkdirat` and `statx` take no
   `RESOLVE_*` flags, and a path with a `/` in it could leave the root

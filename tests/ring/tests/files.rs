@@ -191,3 +191,78 @@ fn a_rename_across_filesystems_is_other_not_an_escape() {
     world.close(to);
     world.settle();
 }
+
+/// `RESOLVE_BENEATH` answers `EAGAIN` when a `..` races a rename or a mount
+/// anywhere on the system. Renames run in the ring's own workers, beside
+/// `Open`s through `..`, from this one thread, until one `Open` has raced:
+/// the adapter submitted it again (kernel.md, 6.1), and none failed for it.
+/// About one in a thousand races; the test gives up after sixty times that.
+#[test]
+fn an_open_through_dot_dot_racing_renames_is_submitted_again() {
+    const OPENS: u32 = 60_000;
+    const RENAMERS: usize = 40;
+    const OPENERS: usize = 8;
+    let scratch = Scratch::new("ring");
+    fs::create_dir(scratch.path().join("sub")).unwrap();
+    fs::write(scratch.path().join("x"), b"x").unwrap();
+    for n in 0..RENAMERS {
+        fs::write(scratch.path().join(format!("a{n}")), b"").unwrap();
+    }
+    let mut world = World::new(64);
+    let dir = root(scratch.path());
+    let rename = |n: usize, flipped: bool| {
+        let (from, to) = if flipped { ("b", "a") } else { ("a", "b") };
+        let (from, to) = (format!("{from}{n}"), format!("{to}{n}"));
+        Op::Rename { from_dir: dir, from: from.into_bytes().into(), to_dir: dir, to: to.into_bytes().into() }
+    };
+    // A create is not tried inline, but in the ring's workers, beside the
+    // renames: a read is, and io_uring itself retries one that raced there.
+    let mut made = 0_u32;
+    let mut open = || {
+        made += 1;
+        Op::Open { root: dir, path: format!("sub/../c{made}").into_bytes().into(), how: OpenHow::Create }
+    };
+    let mut renaming = std::collections::BTreeMap::new();
+    let mut flipped = [false; RENAMERS];
+    for n in 0..RENAMERS {
+        renaming.insert(world.start(rename(n, false)), n);
+    }
+    let mut opening = BTreeSet::new();
+    for _ in 0..OPENERS {
+        opening.insert(world.start(open()));
+    }
+    let mut closing = BTreeSet::new();
+    let (mut opened, mut refused) = (0_u32, Vec::new());
+    let deadline = world.later(skein_lib::Duration::from_secs(30));
+    while !renaming.is_empty() || !opening.is_empty() || !closing.is_empty() {
+        let racing = opened < OPENS && world.kernel.resubmitted() == 0 && refused.is_empty();
+        world.turn(deadline);
+        for (token, complete) in std::mem::take(&mut world.arrived) {
+            if let Some(n) = renaming.remove(&token) {
+                assert_eq!(complete.result, Ok(Done::Nothing), "a rename of a file of its own");
+                flipped[n] = !flipped[n];
+                if racing {
+                    renaming.insert(world.start(rename(n, flipped[n])), n);
+                }
+            } else if opening.remove(&token) {
+                opened += 1;
+                match complete.result {
+                    Ok(Done::Fd(fd)) => {
+                        closing.insert(world.start(Op::Close { fd }));
+                    }
+                    other => refused.push(other),
+                }
+                if racing {
+                    opening.insert(world.start(open()));
+                }
+            } else {
+                assert!(closing.remove(&token), "a completion of the test's");
+                assert_eq!(complete.result, Ok(Done::Nothing));
+            }
+        }
+    }
+    assert!(refused.is_empty(), "an Open raced to EAGAIN is submitted again: {refused:?}");
+    assert!(world.kernel.resubmitted() > 0, "no Open raced a rename in {opened}");
+    world.close(dir);
+    world.settle();
+}

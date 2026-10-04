@@ -54,7 +54,10 @@
 //!
 //! The completion queue holds as many entries as the table has slots, and
 //! every slot has at most one entry in the kernel (single-shot operations
-//! only, each cancel in a slot of its own), so it cannot overflow.
+//! only, each cancel in a slot of its own), so it cannot overflow. An
+//! `Open` that a `..` race failed with `EAGAIN` is pushed again from its
+//! slot, under the same `user_data`, once its first entry has completed:
+//! still one entry a slot.
 
 #![expect(
     unsafe_code,
@@ -171,6 +174,15 @@ struct Table {
     /// What `getdents64` writes, for a `List`: the call is synchronous, so
     /// one buffer serves every one.
     listing: Box<[u8]>,
+    /// How many times an `Open` was submitted again after `EAGAIN`.
+    resubmitted: u64,
+}
+
+/// What a reaped entry comes to: a completion to hand up, or an `Open` to
+/// submit again, its slot kept.
+enum Reaped {
+    Complete(Complete),
+    Again(u32),
 }
 
 struct Slot {
@@ -200,6 +212,8 @@ struct Flight {
     /// What a `Stat` reads back, which the kernel writes; in a cell, as the
     /// address is.
     statx: UnsafeCell<libc::statx>,
+    /// How many times an `Open` was submitted again after `EAGAIN`.
+    again: u32,
     /// The result, for an operation the adapter completed itself.
     ready: Option<Result<Done, Error>>,
 }
@@ -236,6 +250,10 @@ const OPERATIONS: [(u8, &str); 18] = [
 ];
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+/// How many times an `Open` is submitted again after `EAGAIN` before its
+/// `Other(EAGAIN)` goes up.
+const AGAIN: u32 = 16;
 
 /// The bytes of `getdents64`'s buffer: many entries a call, and room for
 /// the largest one.
@@ -332,13 +350,46 @@ impl Kernel {
             let result = flight.ready.expect("a ready slot holds its result");
             out.push(Complete { op: flight.op, kind: flight.kind, result });
         }
+        let mut again = Vec::new();
         let mut completions = self.ring.completion();
         while out.room() > 0 {
             let Some(entry) = completions.next() else {
                 break;
             };
-            out.push(self.table.complete(entry.user_data(), entry.result()));
+            match self.table.complete(entry.user_data(), entry.result()) {
+                Reaped::Complete(complete) => out.push(complete),
+                Reaped::Again(index) => again.push(index),
+            }
         }
+        drop(completions);
+        for index in again {
+            self.resubmit(index);
+        }
+    }
+
+    /// How many times an `Open` was submitted again after `EAGAIN`, its `..`
+    /// having raced a rename or a mount: for tests, which provoke it.
+    #[must_use]
+    pub const fn resubmitted(&self) -> u64 {
+        self.table.resubmitted
+    }
+
+    /// Pushes an `Open` that failed with `EAGAIN` again, in its slot under the
+    /// same `user_data`; the next enter submits it.
+    fn resubmit(&mut self, index: u32) {
+        let slot = self.table.slots.get(slot_index(index)).expect("an index in flight names a slot");
+        let flight = slot.flight.as_ref().expect("an operation submitted again is in its slot");
+        let Op::Open { root, .. } = flight.kind else {
+            unreachable!("only an Open is submitted again");
+        };
+        let entry = open_entry(root, &flight.path, &flight.open_how).user_data(user_data(index, slot.generation));
+        // SAFETY: as at the first push (`start`): the path and the
+        // `open_how` the entry points at are this slot's, which stays in
+        // place, untouched by Rust code, until the new completion is reaped;
+        // the kernel had done with them, having posted the first.
+        let pushed = unsafe { self.ring.submission().push(&entry) };
+        pushed.expect("the submission queue has an entry for every slot");
+        self.table.resubmitted = self.table.resubmitted.saturating_add(1);
     }
 
     fn start(&mut self, record: Submit) {
@@ -453,6 +504,7 @@ impl Table {
             tokens: BTreeMap::new(),
             cancelled: BTreeSet::new(),
             listing: vec![0; LISTING].into_boxed_slice(),
+            resubmitted: 0,
         }
     }
 
@@ -472,16 +524,24 @@ impl Table {
 
     /// The completion of the ring entry named `user_data`, its result `res`
     /// decoded.
-    fn complete(&mut self, user_data: u64, res: i32) -> Complete {
+    fn complete(&mut self, user_data: u64, res: i32) -> Reaped {
         let (index, generation) = split(user_data);
-        let slot = self.slots.get(slot_index(index)).expect("a completion names a slot");
-        assert!(
-            slot.generation == generation && slot.flight.is_some(),
-            "every completion names an operation in flight, once"
-        );
+        let slot = self.slots.get_mut(slot_index(index)).expect("a completion names a slot");
+        assert!(slot.generation == generation, "every completion names an operation in flight, once");
+        let flight = slot.flight.as_mut().expect("every completion names an operation in flight, once");
+        // RESOLVE_BENEATH answers EAGAIN when a `..` raced a rename or a
+        // mount anywhere on the system: the same Open is likely to pass.
+        if let Op::Open { .. } = flight.kind
+            && res == -libc::EAGAIN
+            && flight.again < AGAIN
+            && !self.cancelled.contains(&flight.op)
+        {
+            flight.again = flight.again.saturating_add(1);
+            return Reaped::Again(index);
+        }
         let (mut flight, cancelled) = self.retire(index);
         let result = decode(&mut flight, res, cancelled);
-        Complete { op: flight.op, kind: flight.kind, result }
+        Reaped::Complete(Complete { op: flight.op, kind: flight.kind, result })
     }
 }
 
@@ -496,6 +556,7 @@ impl Flight {
             to: Box::default(),
             open_how: UnsafeCell::new(types::OpenHow::new()),
             statx: UnsafeCell::new(zeroed_statx()),
+            again: 0,
             ready: None,
         }
     }
@@ -559,7 +620,7 @@ fn prepare(
         Op::Open { root, path: asked, how } => {
             *path = c_path(asked);
             *open_how.get_mut() = open(*how);
-            opcode::OpenAt2::new(types::Fd(root.raw()), path.as_ptr().cast(), open_how.get().cast_const()).build()
+            open_entry(*root, path, open_how)
         }
         Op::Read { fd, buf, at } => {
             let len = u32::try_from(buf.len()).expect("a valid Read buffer's length is a count");
@@ -853,6 +914,11 @@ fn file_error(kind: &Op, errno: i32) -> Error {
         | Op::Cancel { .. } => unreachable!("only an operation on files' errors are mapped here"),
     };
     named.unwrap_or(Error::Other(errno))
+}
+
+/// An `Open`'s entry, of the path and the `open_how` its slot holds.
+fn open_entry(root: Fd, path: &[u8], open_how: &UnsafeCell<types::OpenHow>) -> squeue::Entry {
+    opcode::OpenAt2::new(types::Fd(root.raw()), path.as_ptr().cast(), open_how.get().cast_const()).build()
 }
 
 /// `bytes` and a NUL after them: the string the kernel reads for a path or
