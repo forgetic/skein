@@ -301,6 +301,9 @@ pub struct Fell {
     /// It withdrew a demand that asked room too, after the end crossed its
     /// read.
     pub withdrew_room_after_end: bool,
+    /// The server updated its keys, and the client read records sealed
+    /// with the new ones.
+    pub updated_keys: bool,
 }
 
 struct World<'a> {
@@ -325,6 +328,9 @@ struct Side {
     server: Server,
     responded: bool,
     ended: bool,
+    /// How much of the response went before the server's key update, if it
+    /// sent one.
+    updated_at: Option<usize>,
 }
 
 /// The ciphertext stream.
@@ -403,7 +409,12 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Run {
         client: Client::new(&config, name, &limits),
         events: Queue::with_capacity(8),
         requests: Queue::with_capacity(8),
-        server: Side { server: Server::new(scenario.server.config()), responded: false, ended: false },
+        server: Side {
+            server: Server::new(scenario.server.config()),
+            responded: false,
+            ended: false,
+            updated_at: None,
+        },
         below: Below {
             wire: VecDeque::new(),
             eof: false,
@@ -448,6 +459,7 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Run {
             // What failed before the close, not what fails after it.
             let below_failed = world.below.failed;
             world.late();
+            world.fell.updated_keys = world.server.updated_at.is_some_and(|at| world.above.received.len() > at);
             let above = world.above;
             return Run {
                 agreed: above.agreed,
@@ -660,6 +672,7 @@ impl World<'_> {
             let tls13 = self.above.agreed.as_ref().is_some_and(|agreed| agreed.version == Version::Tls13);
             if scenario.key_update && tls13 {
                 side.server.key_update();
+                side.updated_at = Some(half);
             }
             side.server.write(&scenario.response[half..]);
             let mut records = side.server.transmit();

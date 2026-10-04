@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use skein_lib::Rng;
-use skein_tls::client::Error;
+use skein_tls::client::{Error, Version};
 use skein_tls_world::pki::{self, Chain, Versions};
 use skein_tls_world::world::{self, Ending, Run, Scenario, Settings};
 
@@ -60,7 +60,7 @@ impl Seen {
         *self.0.entry(what).or_default() += 1;
     }
 
-    fn record(&mut self, run: &Run) {
+    fn record(&mut self, scenario: &Scenario, run: &Run) {
         match run.failed {
             Some(Error::Stream(_)) => self.note("failed Stream".into()),
             Some(Error::Certificate(certificate)) => self.note(format!("refused {certificate:?}")),
@@ -75,6 +75,14 @@ impl Seen {
             if agreed.alpn.is_some() {
                 self.note("agreed a protocol".into());
             }
+            // The server offers no group the client sent a share for.
+            if scenario.server.retry && agreed.version == Version::Tls13 {
+                self.note("agreed after a retry".into());
+            }
+        }
+        // rustls had sent close_notify when it read the corrupted record.
+        if run.notified && run.failed == Some(Error::Decrypt) {
+            self.note("a corrupted record read after close_notify went".into());
         }
         self.note(format!("closed while waiting for {:?}", run.closed_while));
         let fell = run.fell;
@@ -88,6 +96,7 @@ impl Seen {
             (fell.early_response, "a response before the request was sent"),
             (fell.withdrew_after_end, "the read that crossed the end withdrawn"),
             (fell.withdrew_room_after_end, "a demand of room withdrawn after the end"),
+            (fell.updated_keys, "records read past the server's key update"),
         ] {
             if flag {
                 self.note(what.into());
@@ -114,13 +123,14 @@ fn exchanges_swept() {
         let limits = world::limits(&mut rng);
         let settings = Settings::chaotic(&mut rng, limits);
         let run = world::check(&scenario, &settings, seed);
-        seen.record(&run);
+        seen.record(&scenario, &run);
     }
     seen.assert_fell(&[
         "no failure",
         "failed Stream",
         "failed Truncated",
         "failed Decrypt",
+        "failed TooLong",
         "refused Expired",
         "refused NotYetValid",
         "refused Name",
@@ -130,6 +140,7 @@ fn exchanges_swept() {
         "agreed Tls12",
         "agreed Tls13",
         "agreed a protocol",
+        "agreed after a retry",
         "closed while waiting for Handshaking",
         "closed while waiting for Room",
         "closed while waiting for Bytes",
@@ -145,5 +156,7 @@ fn exchanges_swept() {
         "the read that crossed the end withdrawn",
         "a demand of room withdrawn after the end",
         "close_notify read by the server",
+        "a corrupted record read after close_notify went",
+        "records read past the server's key update",
     ]);
 }
