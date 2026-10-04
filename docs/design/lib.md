@@ -96,7 +96,7 @@ entries.
 (programming-model.md, 4.3):
 
 ```rust
-pub enum Read { Nothing, Fill(u32), Scan { until: Delimiter, max: u32 } }
+pub enum Read { Nothing, Fill(u32), Scan { until: Delimiter, max: u32 }, Line { max: u32 } }
 
 pub enum Down {                         // to the side below
     Demand { read: Read, room: u32 },   // what this state needs, and the output room it wants
@@ -145,6 +145,13 @@ machine's:
   the maximum.** What that means is the side above's: a framing error for
   a line or a head, one piece of a longer text for a string scanned to its
   quote (json.md, 3.2).
+- **A line scan (`Line`) ends at the first line end, a CR or an LF,
+  whichever comes first,** for text whose lines end with LF, CRLF or CR
+  alone, as an event stream's do (http.md, 4.1): a CRLF is two ends, the
+  CR ending one delivery and the LF the next, and the side above pairs
+  them. Otherwise it is a scan: within its maximum, or exactly the
+  maximum. A `Delimiter` stays one exact sequence of bytes; "either of
+  two bytes" is a read of its own.
 
 **`Intake`** is the carry-over of a stream: the bytes the side below has
 received and the side above has not yet demanded, up to a cap fixed when
@@ -152,15 +159,16 @@ it is made. It is allocated once, at the cap, and never grows.
 
 - It appends what arrives while it has room, and reports the room left,
   so receiving stops at the cap.
-- It meets a fill or a scan as soon as it can, each delivery a box of
-  exactly the demanded length. A scan that reaches its maximum with no
-  delimiter delivers exactly the maximum: the side above sees a scan that
-  does not end with the delimiter, and decides what it means.
+- It meets a fill, a scan or a line scan as soon as it can, each delivery
+  a box of exactly the demanded length. A scan that reaches its maximum
+  with no delimiter delivers exactly the maximum: the side above sees a
+  scan that does not end with the delimiter, and decides what it means.
 - A fill larger than the cap, or a scan whose maximum is shorter than the
-  delimiter or longer than the cap, could never be met: the caller's bug,
-  asserted.
+  delimiter (one byte, for a line scan) or longer than the cap, could
+  never be met: the caller's bug, asserted.
 - A scan remembers how far it has searched, so a scan for the same
-  delimiter does not search the same bytes again.
+  delimiter, or a line scan after a line scan, does not search the same
+  bytes again.
 - It says whether what it holds ends partway through a delimiter
   (`ends_partway`): a side below that fills its own intake from another
   stream, as the HTTP client does a body's, then reads a byte at a time,

@@ -116,6 +116,29 @@ fn an_intake_knows_when_it_ends_partway_through_a_delimiter() {
 }
 
 #[test]
+fn a_line_scan_ends_at_the_first_cr_or_lf() {
+    let line = |max| Read::Line { max };
+    let mut intake = Intake::with_capacity(16);
+    assert_eq!(intake.append(b"ab\r\ncd\ref"), Ok(()));
+    assert_eq!(intake.meet(line(16)), Some(boxed(b"ab\r")), "a CR ends it");
+    assert_eq!(intake.meet(line(16)), Some(boxed(b"\n")), "the LF of the CRLF, alone");
+    assert_eq!(intake.meet(line(2)), Some(boxed(b"cd")), "its maximum, with no end within it");
+    assert_eq!(intake.meet(line(16)), Some(boxed(b"\r")));
+    assert_eq!(intake.meet(line(16)), None, "no end yet, and short of the maximum");
+    assert_eq!(intake.append(b"g\n"), Ok(()));
+    assert_eq!(intake.meet(line(16)), Some(boxed(b"efg\n")), "searched on from where it stopped");
+    assert_eq!(intake.append(b"\n"), Ok(()));
+    assert_eq!(intake.meet(line(1)), Some(boxed(b"\n")), "an end at a maximum of one");
+}
+
+#[test]
+#[should_panic(expected = "a scan holds its delimiter")]
+fn a_line_scan_of_nothing_is_the_caller_s_bug() {
+    let mut intake = Intake::with_capacity(4);
+    drop(intake.meet(Read::Line { max: 0 }));
+}
+
+#[test]
 fn a_delimiter_ending_at_max_is_found() {
     let mut intake = Intake::with_capacity(8);
     assert_eq!(intake.append(b"abc\r\nde"), Ok(()));
@@ -231,6 +254,16 @@ fn reference(stream: &[u8], read: Read) -> Option<usize> {
             }
             (stream.len() >= max).then_some(max)
         }
+        Read::Line { max } => {
+            let max = usize::try_from(max).unwrap();
+            let window = &stream[..stream.len().min(max)];
+            for (at, &byte) in window.iter().enumerate() {
+                if byte == b'\r' || byte == b'\n' {
+                    return Some(at.checked_add(1).unwrap());
+                }
+            }
+            (stream.len() >= max).then_some(max)
+        }
     }
 }
 
@@ -335,9 +368,10 @@ fn random_splits_demands_and_caps_meet_what_the_reference_meets() {
         }
         let mut demands = Vec::new();
         for _ in 0..rng.between(1, 40) {
-            let read = match rng.below(5) {
+            let read = match rng.below(6) {
                 0 => Read::Nothing,
                 1 => Read::Fill(u32::try_from(rng.below(u64::from(capacity) + 1)).unwrap()),
+                2 => Read::Line { max: u32::try_from(rng.between(1, u64::from(capacity))).unwrap() },
                 _ => {
                     let until = delimiters[usize::try_from(rng.below(4)).unwrap()];
                     let shortest = u64::try_from(until.as_bytes().len()).unwrap();

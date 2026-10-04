@@ -47,6 +47,24 @@ pub fn find_from(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     TwoWay::of(needle).find(haystack, needle, from)
 }
 
+/// Where the first line end in `bytes` is, a CR or an LF, whichever comes
+/// first, or `None`: what a line scan stops at (`stream::Read::Line`).
+#[must_use]
+pub fn line_end(bytes: &[u8]) -> Option<usize> {
+    for (at, byte) in bytes.iter().enumerate() {
+        if is_line_end(*byte) {
+            return Some(at);
+        }
+    }
+    None
+}
+
+/// Whether `byte` ends a line: a CR or an LF.
+#[must_use]
+pub const fn is_line_end(byte: u8) -> bool {
+    byte == b'\r' || byte == b'\n'
+}
+
 /// How many times `needle` occurs in `haystack` without overlapping, counting
 /// from the start, as a run of [`find_from`]s past each match would, and
 /// stopping at `cap`: "none, one, or more" is `count(haystack, needle, 2)`.

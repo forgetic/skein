@@ -33,8 +33,26 @@ pub struct Intake {
 /// No occurrence of `until` begins in the first `clear` bytes buffered.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct Searched {
-    until: Delimiter,
+    until: Until,
     clear: u32,
+}
+
+/// What a scan ends at.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Until {
+    /// A delimiter's bytes, in order.
+    Delimiter(Delimiter),
+    /// A line's end: a CR or an LF, whichever comes first.
+    LineEnd,
+}
+
+impl Until {
+    fn len(self) -> usize {
+        match self {
+            Until::Delimiter(delimiter) => delimiter.as_bytes().len(),
+            Until::LineEnd => 1,
+        }
+    }
 }
 
 impl Intake {
@@ -43,7 +61,7 @@ impl Intake {
         Intake {
             bytes: VecDeque::with_capacity(index(capacity)),
             capacity,
-            searched: Searched { until: Delimiter::LF, clear: 0 },
+            searched: Searched { until: Until::LineEnd, clear: 0 },
         }
     }
 
@@ -96,27 +114,28 @@ impl Intake {
     /// - `Scan { until, max }`: the bytes up to and including the first
     ///   `until`, if it ends within the first `max`; otherwise, once `max`
     ///   are buffered, exactly `max` bytes, which do not end with `until`;
+    /// - `Line { max }`: the same, to the first CR or LF;
     /// - `Nothing`: nothing.
     ///
     /// A demand the cap can never meet, a fill or a scan past the capacity,
     /// is the caller's bug, as is a scan too short to hold its delimiter.
     pub fn meet(&mut self, read: Read) -> Option<Box<[u8]>> {
-        match read {
-            Read::Nothing => None,
+        let (until, max) = match read {
+            Read::Nothing => return None,
             Read::Fill(n) => {
                 assert!(n <= self.capacity, "a fill past the intake's cap would never be met");
                 if self.len() < n {
                     return None;
                 }
-                Some(self.take(n))
+                return Some(self.take(n));
             }
-            Read::Scan { until, max } => {
-                assert!(max <= self.capacity, "a scan past the intake's cap would never be met");
-                assert!(index(max) >= until.as_bytes().len(), "a scan holds its delimiter");
-                let n = self.scan(until, max)?;
-                Some(self.take(n))
-            }
-        }
+            Read::Scan { until, max } => (Until::Delimiter(until), max),
+            Read::Line { max } => (Until::LineEnd, max),
+        };
+        assert!(max <= self.capacity, "a scan past the intake's cap would never be met");
+        assert!(index(max) >= until.len(), "a scan holds its delimiter");
+        let n = self.scan(until, max)?;
+        Some(self.take(n))
     }
 
     /// Whether what is buffered ends partway through `until`: with its first
@@ -140,20 +159,27 @@ impl Intake {
 
     /// How many bytes a scan for `until` within `max` delivers, if it can be
     /// met yet.
-    fn scan(&mut self, until: Delimiter, max: u32) -> Option<u32> {
-        let needle = until.as_bytes();
+    fn scan(&mut self, until: Until, max: u32) -> Option<u32> {
+        let len = until.len();
         if self.searched.until != until {
             self.searched = Searched { until, clear: 0 };
         }
         let end = self.len().min(max);
         // The last position at which a delimiter can begin and end by `end`.
-        let last = index(end).checked_sub(needle.len())?;
+        let last = index(end).checked_sub(len)?;
         let first = index(self.searched.clear);
         // Bounded by `max`: each position is searched once per delimiter, as
         // `clear` moves past it.
         for at in first..=last {
-            if self.occurs_at(needle, at) {
-                return Some(count(at.checked_add(needle.len()).expect("within the buffer")));
+            let found = match until {
+                Until::Delimiter(delimiter) => self.occurs_at(delimiter.as_bytes(), at),
+                Until::LineEnd => match self.bytes.get(at) {
+                    Some(b'\r' | b'\n') => true,
+                    Some(_) | None => false,
+                },
+            };
+            if found {
+                return Some(count(at.checked_add(len).expect("within the buffer")));
             }
         }
         self.searched.clear = count(last.checked_add(1).expect("within the buffer")).max(self.searched.clear);

@@ -591,10 +591,11 @@ fn draw(rng: &mut Rng, reads: Reads, left: usize) -> Read {
         }
         Reads::Mixed(max) | Reads::From(_, max) => {
             let max = cap(max);
-            match rng.below(4) {
+            match rng.below(5) {
                 0 => Read::Fill(upto(rng, max)),
                 1 => Read::Scan { until: Delimiter::LF, max: upto(rng, max) },
                 2 if max >= 2 => Read::Scan { until: Delimiter::CRLF, max: upto(rng, max).max(2) },
+                3 => Read::Line { max: upto(rng, max) },
                 _ => Read::Fill(1),
             }
         }

@@ -444,6 +444,10 @@ fn meets(read: Read, bytes: &[u8]) -> bool {
             let window = &bytes[..max.min(bytes.len())];
             bytes.len() >= max || window.windows(until.as_bytes().len()).any(|found| found == until.as_bytes())
         }
+        Read::Line { max } => {
+            let max = usize::try_from(max).expect("fits a usize");
+            bytes.len() >= max || bytes[..max.min(bytes.len())].iter().any(|&byte| byte == b'\r' || byte == b'\n')
+        }
     }
 }
 
@@ -819,10 +823,11 @@ impl World<'_> {
             Reads::Bytes => Read::Fill(1),
             Reads::Any => {
                 let n = draw(&mut self.rng, 1, most);
-                match self.rng.below(4) {
+                match self.rng.below(5) {
                     0 => Read::Fill(n),
                     1 => Read::Scan { until: Delimiter::LF, max: n },
                     2 if n >= 2 => Read::Scan { until: Delimiter::CRLF, max: n },
+                    3 => Read::Line { max: n },
                     _ => Read::Scan { until: Delimiter::new(b"\"").expect("one byte"), max: n },
                 }
             }
@@ -1001,7 +1006,7 @@ impl World<'_> {
                 let wanted = match read {
                     Read::Nothing => 0,
                     Read::Fill(n) => n,
-                    Read::Scan { max, .. } => max,
+                    Read::Scan { max, .. } | Read::Line { max } => max,
                 };
                 assert!(wanted <= client::largest_read(&self.settings.limits), "no read past the largest declared");
                 assert!(wanted <= below.intake.capacity(), "no read past the cap below");
@@ -1062,5 +1067,9 @@ fn delivers(read: Read, bytes: &[u8]) -> bool {
                 None => bytes.len() == usize::try_from(max).expect("fits a usize"),
             }
         }
+        Read::Line { max } => match bytes.iter().position(|&byte| byte == b'\r' || byte == b'\n') {
+            Some(at) => at + 1 == bytes.len(),
+            None => bytes.len() == usize::try_from(max).expect("fits a usize"),
+        },
     }
 }

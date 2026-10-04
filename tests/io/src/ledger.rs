@@ -225,5 +225,12 @@ fn met(read: Read, bytes: &[u8]) -> bool {
                 None => bytes.len() == max,
             }
         }
+        Read::Line { max } => {
+            let max = max as usize;
+            match bytes.iter().position(|&byte| byte == b'\r' || byte == b'\n') {
+                Some(at) => at + 1 == bytes.len() && bytes.len() <= max,
+                None => bytes.len() == max,
+            }
+        }
     }
 }

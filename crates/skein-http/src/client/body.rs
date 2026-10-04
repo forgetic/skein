@@ -116,6 +116,11 @@ fn piece(face: Face, intake: &Intake, limits: &Limits, left: u64) -> Read {
             // fill, which cannot hold one.
             if index(wanted) >= until.as_bytes().len() { Read::Scan { until, max: wanted } } else { Read::Fill(wanted) }
         }
+        // A line end is one byte: what is held has none, or the intake would
+        // have met the scan, so the rest of the scan is a scan again.
+        Face::Demand(Read::Line { max }) => {
+            Read::Line { max: at_most(max.checked_sub(held).expect("a scan the intake has not met"), left) }
+        }
         Face::Demand(Read::Nothing) | Face::Idle | Face::Withdrawn => {
             unreachable!("the body is read for a demand outstanding, or to discard")
         }
@@ -198,6 +203,10 @@ fn answers(read: Read, bytes: &[u8]) -> bool {
         Read::Fill(n) => index(n) == bytes.len(),
         Read::Scan { until, max } => match bytes::find(bytes, until.as_bytes()) {
             Some(at) => at.saturating_add(until.as_bytes().len()) == bytes.len(),
+            None => bytes.len() == index(max),
+        },
+        Read::Line { max } => match bytes::line_end(bytes) {
+            Some(at) => at.saturating_add(1) == bytes.len(),
             None => bytes.len() == index(max),
         },
     }

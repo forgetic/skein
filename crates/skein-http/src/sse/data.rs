@@ -53,6 +53,15 @@ impl Data {
                     None => None,
                 }
             }
+            Read::Line { max } => {
+                let max = index(max);
+                let window = rest.get(..max.min(rest.len())).expect("within the rest");
+                match bytes::line_end(window) {
+                    Some(at) => Some(at.saturating_add(1)),
+                    None if rest.len() >= max => Some(max),
+                    None => None,
+                }
+            }
         };
         let Some(n) = met else {
             self.ended = true;

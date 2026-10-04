@@ -491,6 +491,7 @@ impl Below<'_> {
             }
             Read::Fill(n) => panic!("the reader scans, it does not fill: {n}"),
             Read::Scan { until, max } => (until, max),
+            Read::Line { max } => panic!("the reader scans to LF or to CR: {max}"),
         };
         assert!(!closing, "a close demands nothing");
         assert!(self.demand.is_none(), "one demand at a time: {read:?} over {:?}", self.demand);

@@ -874,7 +874,7 @@ fn body_demanded(
         Face::Idle => {
             let wanted = match read {
                 Read::Fill(n) => n,
-                Read::Scan { max, .. } => max,
+                Read::Scan { max, .. } | Read::Line { max } => max,
                 Read::Nothing => unreachable!("a withdrawal is matched above"),
             };
             assert!(wanted <= limits.read, "no demand past Limits::read");

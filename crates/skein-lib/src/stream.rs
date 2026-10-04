@@ -25,6 +25,14 @@ pub enum Read {
     /// delimiter's length and at most the cap of the side below; breaking
     /// either is the caller's bug, asserted below.
     Scan { until: Delimiter, max: u32 },
+    /// A scan to the end of a line, wherever text ends its lines with LF,
+    /// CRLF or CR alone: the bytes up to and including the first CR or LF,
+    /// whichever comes first, if it is within the first `max` bytes;
+    /// otherwise exactly `max` bytes, without one. A CRLF is two ends here,
+    /// the CR ending one delivery and the LF the next, and the side above
+    /// pairs them. `max` is at least one and at most the cap of the side
+    /// below; breaking either is the caller's bug, asserted below.
+    Line { max: u32 },
 }
 
 /// To the side below.
