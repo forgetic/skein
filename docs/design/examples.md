@@ -256,6 +256,9 @@ processes, each a host of an `iterate` (a service, or a fake client):
   counting allocator's span measures a call's growth signed, where its
   meter, which checks a step from a base it never falls below, cannot. A
   process's worst case counts the box the harness keeps its state in.
+  Once settled, dropping the run's outcome drops each process under a
+  span: it must free exactly what was metered as its own, which finds a
+  leak, and heap made or freed outside its calls.
 - **Contracts:** each process keeps its own as it goes, as its loop is
   its own: the echo's and the fake client's `iterate` assert each call
   within its `MAX_OUT`, the protocol layer one reply per call, the fake

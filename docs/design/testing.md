@@ -119,6 +119,7 @@ tests/echo                      the echo's simulated worlds and its real loop, s
 tests/io                        io worlds: io over the simulator, a scripted owner, a referee, skein-io-world
 tests/lib                       lib's comparisons with naive functions, run long, and its worst cases against the counting allocator, skein-lib-tests
 tests/sim                       the simulator's own tests, skein-sim-tests
+tests/world                     the world harness's own tests, over scripted processes of raw records, skein-world-tests
 tests/ring                      the ring adapter's own tests, skein-ring-tests
 tests/conformance/sim           the suite against the simulator, skein-conformance-sim
 tests/conformance/ring          the suite against the ring, skein-conformance-ring
@@ -269,8 +270,11 @@ meter, as an io world's simulator would allocate on the same thread. The
 echo's simulated worlds check memory at every iteration: each process's
 heap, what grew within its own calls, measured with the allocator's span,
 at its peak within each call, against its own worst case (simulator.md,
-5). The echo peaks at about two thirds of its worst case, the fake
-clients at about three quarters of theirs.
+5); and once settled, each process, dropped, must free exactly what was
+metered as its own, which finds a leak, and heap made or freed outside
+its calls. The scenarios leave slack: the echo peaks about a third below
+its worst case, the fake clients a quarter below theirs, and a part that
+held more than it should within that slack would pass the check unseen.
 
 ## 8. Not built yet
 

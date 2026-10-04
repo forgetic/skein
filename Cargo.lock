@@ -222,3 +222,14 @@ dependencies = [
  "skein-shell",
  "skein-sim",
 ]
+
+[[package]]
+name = "skein-world-tests"
+version = "0.0.0"
+dependencies = [
+ "skein-heap",
+ "skein-io",
+ "skein-lib",
+ "skein-sim",
+ "skein-world",
+]

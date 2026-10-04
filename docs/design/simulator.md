@@ -93,19 +93,20 @@ small buffers so that sends are cut and stall.
   closed.
 
 Memory is not the simulator's to check, though a simulated world checks it
-at every iteration (testing-strategy.md, 6). The world's harness, whose
-loop calls each service's `iterate` and which knows their worst cases,
-checks with the counting allocator, `skein-heap` (testing.md, 5), each
-hosted service's heap against its own worst case (programming-model.md,
-6.3). The services and the simulator share one thread, so the allocator
-sees one heap; the harness tells each service's part apart by metering
-around that service's own calls, building it and each `iterate`: what the
-heap grew by within them is the service's. A service's submit and reap
-run simulator code, but outside those calls, and nothing one service
-allocates is freed by another or by the simulator, which hands every
-buffer back and never drops, copies or replaces one (kernel.md). So the
-simulator's own heap (its trace, the bytes in its network) and the
-harness's are left out.
+at every iteration (testing-strategy.md, 6), with the counting allocator,
+`skein-heap` (testing.md, 5). The harness checks each hosted process's
+heap against its own worst case (programming-model.md, 6.3). One thread,
+one heap: a process's part is what grew within the calls that run its
+code (making it, and each `iterate`), metered with a span, at its peak
+within each call. The simulator's submit and reap, the referee and the
+harness run between those calls, so the simulator's trace and network and
+the harness's heap are left out. This holds while nothing a process owns
+is allocated or freed outside its calls: the backend hands every buffer
+back and never drops, copies or replaces one (kernel.md); the queues it
+fills and drains are the process's own, bounded and made with it; and the
+referee changes a process only through flags that allocate nothing. Once
+settled, the harness checks it: each process, dropped, frees exactly what
+was metered as its own, which also finds a leak.
 
 ## 6. Testing
 
@@ -136,4 +137,7 @@ worlds run on it (examples.md, 6). So is the check of memory at every
 iteration, which is the harness's, not the simulator's (section 5): it
 meters around the processes' own calls, building each and each
 `iterate`, with the counting allocator's span, so that what grew within
-the simulator's calls and the harness's own is left out.
+the simulator's calls and the harness's own is left out, and checks once
+settled that each process, dropped, frees what was metered as its own.
+The harness's own tests (`tests/world`) show it holds time while deferred
+work waits, and catches a process past its worst case and one that leaks.

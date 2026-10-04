@@ -117,9 +117,10 @@ fn the_same_seed_replays_to_the_same_trace() {
 #[test]
 fn memory_is_checked_at_every_iteration_against_the_worst_cases() {
     let outcome = clients(1, Config::calm()).run();
-    let heap = outcome.heap.expect("checked");
+    let heap = outcome.heap.as_ref().expect("checked");
     assert_eq!(heap.len(), 4, "the echo and three clients, each checked against its own");
-    for (at, (most, bound)) in heap.into_iter().enumerate() {
-        assert!(most > 0 && most <= bound, "process {at} held {most} bytes at most, within {bound}");
+    for (at, (most, bound)) in heap.iter().enumerate() {
+        assert!(*most > 0 && most <= bound, "process {at} held {most} bytes at most, within {bound}");
     }
+    // Dropping the outcome checks that each process frees what it held.
 }

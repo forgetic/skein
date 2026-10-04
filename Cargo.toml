@@ -21,6 +21,7 @@ members = [
     "tests/lib",
     "tests/ring",
     "tests/sim",
+    "tests/world",
 ]
 
 [workspace.package]

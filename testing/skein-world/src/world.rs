@@ -6,7 +6,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Write};
+use std::thread;
 
+use skein_heap::Span;
 use skein_lib::Time;
 use skein_sim::{Config, Entry, Pid, Sim};
 
@@ -38,7 +40,12 @@ impl<P, R> Debug for World<P, R> {
     }
 }
 
-/// What a run left, for a test to compare or look at.
+/// What a run left, for a test to look at by reference.
+///
+/// When memory was checked, dropping it is the last check of the run: each
+/// process, dropped in turn, must free exactly what was metered as its own,
+/// or something it allocated was never accounted, or never freed. A test
+/// that panicked skips it.
 #[derive(Debug)]
 pub struct Outcome<P> {
     pub seed: u64,
@@ -53,6 +60,32 @@ pub struct Outcome<P> {
     /// The most heap each process held at once, and its worst case, by
     /// index, when memory was checked.
     pub heap: Option<Vec<(u64, u64)>>,
+    /// What each process held of its own once settled, by index, when memory
+    /// was checked: what dropping it must free.
+    pub held: Option<Vec<i64>>,
+}
+
+impl<P> Drop for Outcome<P> {
+    fn drop(&mut self) {
+        let Some(held) = self.held.take() else {
+            return;
+        };
+        if thread::panicking() {
+            return;
+        }
+        for (at, (proc, held)) in self.procs.drain(..).zip(held).enumerate() {
+            let span = Span::start();
+            drop(proc);
+            let freed = span.end().net.checked_neg().expect("a heap within an i64");
+            if freed != held {
+                crate::fail(&format!(
+                    "seed {}: process {at}, dropped once settled, freed {freed} bytes, not the {held} it held of \
+                     its own: a leak, or heap made or freed outside its calls",
+                    self.seed
+                ));
+            }
+        }
+    }
 }
 
 impl<P: Host, R: Referee<P>> World<P, R> {
@@ -134,6 +167,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             trace: self.sim.trace().to_vec(),
             end: self.sim.now(),
             heap: self.heap.as_ref().map(Heap::report),
+            held: self.heap.as_ref().map(Heap::held),
             procs: self.procs,
             iterations,
         }

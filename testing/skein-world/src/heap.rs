@@ -1,17 +1,18 @@
-//! Memory at every iteration (simulator.md, 5; testing-strategy.md, 6): the
-//! heap each hosted process holds, against its own worst case.
+//! Memory at every iteration (simulator.md, 5; testing-strategy.md, 6).
 //!
-//! The processes, the simulator and the harness share one thread, so the
-//! counting allocator sees one heap. Each process's part is told apart by
-//! metering around its own calls (building it, and each `iterate`) with a
-//! [`Span`]: what the heap grew by within them is that process's. Nothing
-//! one process allocates is freed by another, or by the simulator, which
-//! hands every buffer back and never drops, copies or replaces one
-//! (`skein_io::kernel`); so everything else (the simulator's trace and
-//! network, the referee's notes, the harness's own) is left out, and each
-//! process is checked against its own worst case. The check is of the most
-//! a process held at once within each call: what it held before the call,
-//! and the call's peak growth.
+//! The harness checks each hosted process's heap against its own worst
+//! case. One thread, one heap: a process's part is what grew within the
+//! calls that run its code (making it, and each `iterate`), metered with a
+//! [`Span`], at its peak within each call. The simulator's submit and reap,
+//! the referee and the harness run between those calls, so the simulator's
+//! trace and network and the harness's heap are left out. This holds while
+//! nothing a process owns is allocated or freed outside its calls: the
+//! backend hands every buffer back and never drops, copies or replaces one
+//! (`skein_io::kernel`); the queues it fills and drains are the process's
+//! own, bounded and made with it; and the referee changes a process only
+//! through flags that allocate nothing. Once settled, the harness checks it:
+//! each process, dropped, frees exactly what was metered as its own
+//! ([`Outcome`](crate::Outcome)), which also finds a leak.
 
 use alloc::format;
 use alloc::vec::Vec;
@@ -95,6 +96,15 @@ impl Heap {
         }
         held.most = held.most.max(most);
         held.now = held.now.checked_add(grown.net).expect("a heap within an i64");
+    }
+
+    /// What each process holds of its own now, by index.
+    pub(crate) fn held(&self) -> Vec<i64> {
+        let mut held = Vec::with_capacity(self.procs.len());
+        for proc in &self.procs {
+            held.push(proc.now);
+        }
+        held
     }
 
     /// The most each process held at once, and its worst case, by index.
