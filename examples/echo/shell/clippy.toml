@@ -1,0 +1,23 @@
+# What the echo's main may not use. It is ordinary Rust, with the rules of
+# programming-model.md, 2.1, as skein-shell is: `unsafe` nowhere (the ring
+# adapter is skein-shell's), and no std handle types that close on drop.
+
+doc-valid-idents = ["io_uring", ".."]
+
+disallowed-types = [
+    { path = "std::os::fd::OwnedFd", reason = "a descriptor is closed by a Close record, not on drop" },
+    { path = "std::fs::File", reason = "a descriptor is closed by a Close record, not on drop" },
+    { path = "std::net::TcpStream", reason = "a descriptor is closed by a Close record, not on drop" },
+    { path = "std::net::TcpListener", reason = "a descriptor is closed by a Close record, not on drop" },
+    { path = "std::net::UdpSocket", reason = "a descriptor is closed by a Close record, not on drop" },
+    { path = "std::process::Child", reason = "std::process is not used (io.md, 6)" },
+    { path = "std::process::Command", reason = "std::process is not used (io.md, 6)" },
+    { path = "std::time::Instant", reason = "skein_shell::Clock, a skein_lib::Time" },
+    { path = "std::time::SystemTime", reason = "skein_shell::Clock, a skein_lib::Wall" },
+    { path = "std::collections::HashMap", reason = "iteration order depends on a random seed: BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order depends on a random seed: BTreeSet" },
+]
+
+disallowed-methods = [
+    { path = "std::thread::spawn", reason = "one loop per process, and the ring is set up for a single issuer" },
+]

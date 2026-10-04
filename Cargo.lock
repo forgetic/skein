@@ -61,6 +61,64 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-echo-client"
+version = "0.0.0"
+dependencies = [
+ "skein-io",
+ "skein-lib",
+]
+
+[[package]]
+name = "skein-echo-domain"
+version = "0.0.0"
+dependencies = [
+ "skein-lib",
+]
+
+[[package]]
+name = "skein-echo-protocol"
+version = "0.0.0"
+dependencies = [
+ "skein-echo-domain",
+ "skein-io",
+ "skein-lib",
+]
+
+[[package]]
+name = "skein-echo-service"
+version = "0.0.0"
+dependencies = [
+ "skein-echo-domain",
+ "skein-echo-protocol",
+ "skein-io",
+ "skein-lib",
+]
+
+[[package]]
+name = "skein-echo-shell"
+version = "0.0.0"
+dependencies = [
+ "skein-echo-service",
+ "skein-io",
+ "skein-lib",
+ "skein-shell",
+]
+
+[[package]]
+name = "skein-echo-world"
+version = "0.0.0"
+dependencies = [
+ "skein-echo-client",
+ "skein-echo-service",
+ "skein-heap",
+ "skein-io",
+ "skein-lib",
+ "skein-shell",
+ "skein-sim",
+ "skein-world",
+]
+
+[[package]]
 name = "skein-heap"
 version = "0.0.0"
 
@@ -152,4 +210,26 @@ dependencies = [
  "skein-io",
  "skein-lib",
  "skein-sim",
+]
+
+[[package]]
+name = "skein-world"
+version = "0.0.0"
+dependencies = [
+ "skein-heap",
+ "skein-io",
+ "skein-lib",
+ "skein-shell",
+ "skein-sim",
+]
+
+[[package]]
+name = "skein-world-tests"
+version = "0.0.0"
+dependencies = [
+ "skein-heap",
+ "skein-io",
+ "skein-lib",
+ "skein-sim",
+ "skein-world",
 ]

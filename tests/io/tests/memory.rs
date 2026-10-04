@@ -247,13 +247,17 @@ fn fill_and_drain(limits: Limits) -> (u64, u64) {
     for _ in 0..fills {
         driver.complete_all(is_recv, succeed);
     }
-    // Each output full: a send in flight, and its queue of sends. The bytes
-    // are made by the test, the owner, and io's once sent.
+    // Each output full: a send in flight, and its queue of sends, within the
+    // room asked for them all at once (lib.md, 7). The bytes are made by the
+    // test, the owner, and io's once sent.
     let boxes = limits.sends + 1;
     let each = usize::try_from(limits.output / boxes).expect("a few bytes");
     let sockets = driver.sockets.len();
     for n in 0..sockets {
         let socket = driver.sockets[n];
+        let room = boxes * u32::try_from(each).expect("a few bytes");
+        driver.down(Request::Stream { stream: socket, down: Down::Demand { read: Read::Nothing, room } });
+        driver.next();
         for _ in 0..boxes {
             let bytes = vec![1_u8; each].into_boxed_slice();
             driver.down(Request::Stream { stream: socket, down: Down::Send(bytes) });

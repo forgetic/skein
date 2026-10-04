@@ -93,16 +93,20 @@ small buffers so that sends are cut and stall.
   closed.
 
 Memory is not the simulator's to check, though a simulated world checks it
-at every iteration (testing-strategy.md, 6). The world's harness, whose
-loop calls each service's `iterate` and which knows their worst cases,
-checks with the counting allocator, `skein-heap` (testing.md, 5), the live
-heap against the sum of the hosted services' worst cases
-(programming-model.md, 6.3). It checks the total, not each service: the
-services and the simulator share one thread, and a service's submit and
-reap run simulator code, so the allocator cannot tell their heaps apart
-(testing.md, 9). The simulator's own heap (its trace, the bytes in its
-network) is left out by metering around the simulator's calls: what the
-heap grew by within them is the simulator's.
+at every iteration (testing-strategy.md, 6), with the counting allocator,
+`skein-heap` (testing.md, 5). The harness checks each hosted process's
+heap against its own worst case (programming-model.md, 6.3). One thread,
+one heap: a process's part is what grew within the calls that run its
+code (making it, and each `iterate`), metered with a span, at its peak
+within each call. The simulator's submit and reap, the referee and the
+harness run between those calls, so the simulator's trace and network and
+the harness's heap are left out. This holds while nothing a process owns
+is allocated or freed outside its calls: the backend hands every buffer
+back and never drops, copies or replaces one (kernel.md); the queues it
+fills and drains are the process's own, bounded and made with it; and the
+referee changes a process only through flags that allocate nothing. Once
+settled, the harness checks it: each process, dropped, frees exactly what
+was metered as its own, which also finds a leak.
 
 ## 6. Testing
 
@@ -125,9 +129,15 @@ heap grew by within them is the simulator's.
   services a spawn starts, when io pulls them. Sockets are built.
 - **A state digest** in the trace, beside the records (lib.md, 11).
 
-The check of memory at every iteration is not the simulator's but the
-world harness's (section 5), and not built yet: no harness leaves the
-simulator's heap out. The counting allocator it measures with is built, in
-`testing/skein-heap` (testing.md, 6); the check comes with the first
-simulated world that hosts a service, a service's own world or skein's
-examples (testing.md, 8).
+Hosting services is built for sockets: `skein-world` (testing.md, 5)
+hosts each process's `iterate` over the simulator, moving time to the
+earlier of `next_due` and the processes' earliest deadline only when no
+process has work and none has deferred work (section 3), and the echo's
+worlds run on it (examples.md, 6). So is the check of memory at every
+iteration, which is the harness's, not the simulator's (section 5): it
+meters around the processes' own calls, building each and each
+`iterate`, with the counting allocator's span, so that what grew within
+the simulator's calls and the harness's own is left out, and checks once
+settled that each process, dropped, frees what was metered as its own.
+The harness's own tests (`tests/world`) show it holds time while deferred
+work waits, and catches a process past its worst case and one that leaks.

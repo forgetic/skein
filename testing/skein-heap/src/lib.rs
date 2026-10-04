@@ -27,6 +27,14 @@
 //! only grows). A block freed after the step was handed out by each of those
 //! moments that its number is no later than.
 //!
+//! # Around a call
+//!
+//! A simulated world checks the heap its processes hold at every iteration
+//! (simulator.md, 5), counting what grew within their own calls and leaving
+//! out the simulator's. A process frees what it allocated in earlier calls,
+//! so the heap may fall below where a call began: a [`Span`] measures the
+//! growth around one call, signed, at its peak and in all.
+//!
 //! # The `unsafe`
 //!
 //! A global allocator is an `unsafe impl`: beside the ring adapter, the one
@@ -378,5 +386,40 @@ impl Meter {
 impl Default for Meter {
     fn default() -> Meter {
         Meter::new()
+    }
+}
+
+/// The heap's growth around one call, which may free what it did not
+/// allocate: unlike a [`Meter`]'s, its counts are signed and have no base,
+/// and nothing is handed out. Not inside a meter's step, as both read the
+/// thread's peak.
+#[derive(Debug)]
+pub struct Span {
+    start: i64,
+}
+
+/// What a [`Span`] measured, in bytes: the most the heap grew by at once,
+/// and what it grew by in all, negative when the call freed more than it
+/// allocated.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Grown {
+    pub peak: i64,
+    pub net: i64,
+}
+
+impl Span {
+    /// Measures from now.
+    #[must_use]
+    pub fn start() -> Span {
+        assert!(PHASE.get() != Phase::Stepping, "a span is measured outside a meter's step");
+        let live = LIVE.get();
+        PEAK.set(live);
+        Span { start: live }
+    }
+
+    /// What the heap grew by since the start: at its peak, and now.
+    #[must_use]
+    pub fn end(self) -> Grown {
+        Grown { peak: PEAK.get().wrapping_sub(self.start), net: LIVE.get().wrapping_sub(self.start) }
     }
 }

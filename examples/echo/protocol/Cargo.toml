@@ -1,0 +1,15 @@
+[package]
+name = "skein-echo-protocol"
+description = "The echo example's protocol layer: its listener and connections, lines read into calls and answers written back"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-io.workspace = true
+skein-echo-domain.workspace = true
+
+[lints]
+workspace = true

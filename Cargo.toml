@@ -4,16 +4,24 @@
 resolver = "3"
 members = [
     "crates/*",
+    "examples/echo/domain",
+    "examples/echo/protocol",
+    "examples/echo/service",
+    "examples/echo/shell",
     "testing/skein-conformance",
+    "testing/skein-echo-client",
     "testing/skein-heap",
+    "testing/skein-world",
     "tests/conformance/ring",
     "tests/conformance/sim",
+    "tests/echo",
     "tests/heap",
     "tests/io",
     "tests/json",
     "tests/lib",
     "tests/ring",
     "tests/sim",
+    "tests/world",
 ]
 
 [workspace.package]
@@ -30,6 +38,11 @@ skein-shell = { path = "crates/skein-shell" }
 skein-sim = { path = "crates/skein-sim" }
 skein-conformance = { path = "testing/skein-conformance" }
 skein-heap = { path = "testing/skein-heap" }
+skein-echo-domain = { path = "examples/echo/domain" }
+skein-echo-protocol = { path = "examples/echo/protocol" }
+skein-echo-service = { path = "examples/echo/service" }
+skein-echo-client = { path = "testing/skein-echo-client" }
+skein-world = { path = "testing/skein-world" }
 
 # The only dependencies from outside the workspace, with rustls later
 # (programming-model.md, 2.1): the shell's, for the ring adapter.

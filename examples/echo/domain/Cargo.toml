@@ -1,0 +1,13 @@
+[package]
+name = "skein-echo-domain"
+description = "The echo example's domain: sessions admitted at the entrance, and the answer to each line"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+
+[lints]
+workspace = true

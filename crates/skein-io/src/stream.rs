@@ -59,6 +59,9 @@ pub(crate) struct Open {
     /// What arrived and was not yet demanded.
     intake: Intake,
     demand: Demand,
+    /// The room the owner holds: what the last `Room` granted, less what it
+    /// sent since. Each `Send` fits within it (lib.md, 7).
+    granted: u32,
     reader: Reader,
     writer: Writer,
     output: Output,
@@ -821,6 +824,7 @@ fn open(
         fd,
         intake,
         demand: Demand { read: Read::Nothing, room: 0 },
+        granted: 0,
         reader: Reader::Receiving(recv),
         writer: Writer::Idle,
         output: Output { queue: Queue::with_capacity(env.limits.sends), bytes: 0 },
@@ -852,6 +856,7 @@ fn deliver(
     } else if open.demand.room > 0 && open.writer.takes_sends() && open.output.fits(open.demand.room, env.limits.output)
     {
         up.push(Event::Stream { owner, up: Up::Room });
+        open.granted = open.demand.room;
         open.demand = Demand { read: Read::Nothing, room: 0 };
     }
     // With a read outstanding, the end comes once it can never be met; with
@@ -923,6 +928,8 @@ fn queue(
         return;
     }
     let len = u32::try_from(bytes.len()).expect("a Send within the room granted, under a u32 cap");
+    // Room granted is spent by what is sent within it (lib.md, 7).
+    open.granted = open.granted.checked_sub(len).expect("a Send within the room granted: no more than the last Room");
     let queued = open.output.bytes.checked_add(len).expect("a Send within the room granted, under a u32 cap");
     assert!(queued <= env.limits.output, "a Send within the room granted: no more than the output cap");
     open.writer = match mem::replace(&mut open.writer, Writer::Idle) {
@@ -1108,7 +1115,7 @@ fn broken_landed(broken: Broken, happened: Happened) -> Broken {
 /// `Close` of an open stream: flush and half-close, discarding the input,
 /// under the close deadline; or released at once if nothing is left to do.
 fn close_open(open: Open, id: Id<Entity>, env: &Env<Limits>, tables: &mut Tables, subs: &mut Queue<Submit>) -> Stream {
-    let Open { owner, fd, intake: _, demand: _, reader, writer, output } = open;
+    let Open { owner, fd, intake: _, demand: _, granted: _, reader, writer, output } = open;
     // Discarding starts now, so a peer blocked on its upload drains, then
     // reads what is flushed to it.
     let drain = match reader {
