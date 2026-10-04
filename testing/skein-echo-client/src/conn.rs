@@ -221,6 +221,7 @@ fn connected(state: State, plan: &Plan, seen: &mut Seen, now: Time, limits: &Lim
         State::Dialing { socket } => {
             seen.connected = Some(now);
             seen.progress = Some(now);
+            seen.ended = None;
             seen.answered = 0;
             seen.handed = 0;
             let mut open = Open {

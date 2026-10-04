@@ -95,14 +95,17 @@ small buffers so that sends are cut and stall.
 Memory is not the simulator's to check, though a simulated world checks it
 at every iteration (testing-strategy.md, 6). The world's harness, whose
 loop calls each service's `iterate` and which knows their worst cases,
-checks with the counting allocator, `skein-heap` (testing.md, 5), the live
-heap against the sum of the hosted services' worst cases
-(programming-model.md, 6.3). It checks the total, not each service: the
-services and the simulator share one thread, and a service's submit and
-reap run simulator code, so the allocator cannot tell their heaps apart
-(testing.md, 9). The simulator's own heap (its trace, the bytes in its
-network) is left out by metering around the simulator's calls: what the
-heap grew by within them is the simulator's.
+checks with the counting allocator, `skein-heap` (testing.md, 5), each
+hosted service's heap against its own worst case (programming-model.md,
+6.3). The services and the simulator share one thread, so the allocator
+sees one heap; the harness tells each service's part apart by metering
+around that service's own calls, building it and each `iterate`: what the
+heap grew by within them is the service's. A service's submit and reap
+run simulator code, but outside those calls, and nothing one service
+allocates is freed by another or by the simulator, which hands every
+buffer back and never drops, copies or replaces one (kernel.md). So the
+simulator's own heap (its trace, the bytes in its network) and the
+harness's are left out.
 
 ## 6. Testing
 

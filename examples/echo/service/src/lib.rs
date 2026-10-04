@@ -18,7 +18,10 @@
 //!
 //! Each stage drains its layer's ready list, then takes its input, then
 //! fires its deadlines once every input is taken, so that progress that
-//! came wins over a deadline that passed while the loop waited. Before each
+//! came wins over a deadline that passed while the loop waited. The price:
+//! under a load that leaves input over in every iteration, deadlines wait
+//! for it to ease, as one that cut in could close a connection whose
+//! progress sits untaken in the queue. Before each
 //! call it reserves the call's `MAX_OUT` in its output queues, and after it
 //! asserts that the call emitted no more: the loop is the service's own, so
 //! it checks the room it reserves. What does not fit waits for the next
@@ -34,9 +37,10 @@ mod tests;
 
 use domain::Domain;
 use protocol::Protocol;
-// The layers' crates, so that the shell and the worlds above the service
-// name their limits through it, and depend on the service alone (README.md's
-// crate graph).
+// The domain's and the protocol layer's crates, so that the shell and the
+// worlds above the service name their limits through it: neither depends on
+// them, as neither does in the role graph (programming-model.md, 4; README.md),
+// though both name io's and lib's, which every role may.
 pub use skein_echo_domain as domain;
 pub use skein_echo_protocol as protocol;
 use skein_io::kernel::{Addr, Complete, Submit};

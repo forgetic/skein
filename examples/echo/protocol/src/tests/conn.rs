@@ -255,6 +255,20 @@ fn each_line_read_and_each_room_granted_arms_the_idle_deadline_afresh() {
 }
 
 #[test]
+fn a_peer_that_never_reads_its_answer_is_closed_while_draining() {
+    let mut rig = Rig::new();
+    rig.listen();
+    let conn = rig.reading(1, session(1));
+    rig.line(conn, session(1), b"unread\n");
+    let _sent = rig.down(reply(conn, Reply::Echo(Box::from(&b"unread"[..]))));
+    let deadline = Time::ZERO.saturating_add(LIMITS.idle);
+    rig.at(deadline);
+    let out = rig.fire();
+    assert_eq!(out.io, [close(1)], "no room for the next answer within the deadline: closed");
+    assert_eq!(out.calls, [Call::Gone { session: session(1) }]);
+}
+
+#[test]
 fn the_idle_deadline_is_spread_within_its_limit() {
     let spread = Duration::from_millis(100);
     let mut rig = Rig::with(Limits { spread, ..LIMITS });

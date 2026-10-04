@@ -95,9 +95,9 @@ requests, against its worst case (programming-model.md, 6.3). Every world
 that checks memory uses it, whatever its tier (testing-strategy.md, 6), in
 a test binary of its own that declares it. It measures; it runs no world.
 In a simulated world, the check at every iteration is the world harness's:
-the live heap against the sum of the worst cases of the services it hosts
-(simulator.md, 5), measured with the allocator's span, the heap's growth
-around one call, signed.
+each hosted service's heap, grown within its own calls, against its own
+worst case (simulator.md, 5), measured with the allocator's span, the
+heap's growth around one call, signed.
 
 **The world harness** is `skein-world`, in `testing/` (examples.md, 6):
 one loop over the processes' `iterate`, generic over a scenario's
@@ -266,10 +266,11 @@ own tests. Each of lib's containers is checked against its worst case
 writer's, a call of an entry point at a time (json.md, 6), and io (io.md,
 8): driven by hand to its limits and back, every call a step of the
 meter, as an io world's simulator would allocate on the same thread. The
-echo's simulated worlds check memory at every iteration: the heap that
-grew within the processes' own calls, measured with the allocator's span,
-at its peak within each call, against the sum of their worst cases
-(simulator.md, 5).
+echo's simulated worlds check memory at every iteration: each process's
+heap, what grew within its own calls, measured with the allocator's span,
+at its peak within each call, against its own worst case (simulator.md,
+5). The echo peaks at about two thirds of its worst case, the fake
+clients at about three quarters of theirs.
 
 ## 8. Not built yet
 
@@ -292,7 +293,10 @@ By tier, in the order temper pulls the parts (README.md):
 
 By check: state digests for replay, transition coverage, fuzzing.
 Transition coverage of io's handlers needs `cargo llvm-cov`, which is not
-installed.
+installed. In the echo's worlds, a ledger of the stream contract between
+the echo and its io, as io's worlds keep one: io itself asserts only that
+a send fits its output cap, not that it fits room granted, so the echo's
+asking room before each answer is held by its step tests alone.
 
 ## 9. Open questions
 
@@ -300,12 +304,11 @@ installed.
   ordinary Rust, as small as the echo needs. How much of temper's own
   harness (its schedule, its ledger of requests) joins it is settled when
   temper moves its worlds onto it.
-- **Attributing heap to each service in a shared thread.** The services
-  of a simulated world and the simulator run on one thread, and a
-  service's submit and reap run simulator code, so the counting allocator
-  sees one heap: a world checks the total against the sum of the services'
-  worst cases (simulator.md, 5). Checking each service against its own
-  would take attributing every allocation to the code that made it, and
-  every hand-off between them.
+- **Heap handed between services in one thread.** A world checks each
+  service against its own worst case by metering around its own calls
+  (simulator.md, 5), which holds while nothing one service allocates is
+  freed by another: true over the kernel boundary, whose backend hands
+  every buffer back. A world that joins two services' layers in-process,
+  passing a box from one to the other, would need the hand-off counted.
 - The real loop in CI and sanitizers on the ring adapter are the shell's
   (shell.md, 10).

@@ -80,11 +80,14 @@ fn configure(mut args: impl Iterator<Item = String>) -> Result<Configuration, St
 /// The limits of every layer: a thousand connections of lines up to 4 KiB,
 /// with fewer sessions than connections and fewer connections than
 /// sockets, so that each layer refuses at its own entrance first
-/// (programming-model.md, 7).
+/// (programming-model.md, 7). io accepts only while a socket slot is free,
+/// so past the listener and the protocol layer's connections it keeps an
+/// accept batch of slots more: the sockets the protocol layer rejects, each
+/// holding its slot while io closes it.
 const fn limits() -> Limits {
     Limits {
         io: skein_io::Limits {
-            sockets: 1025,
+            sockets: 1024 + 1 + 64,
             refusals: 1,
             intake: 4096,
             receive: 4096,

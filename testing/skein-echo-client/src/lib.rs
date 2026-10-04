@@ -64,7 +64,12 @@ pub struct Plan {
     pub ahead: u32,
     /// The most bytes in one send, at least 1 and at most io's output cap.
     pub piece: u32,
-    /// When it starts reading answers; `None`, never.
+    /// When it starts reading answers; `None`, never. A demand is never
+    /// replaced (lib.md, 7): one for room alone, still outstanding when the
+    /// time comes, reads only once its room is granted. And a connection
+    /// that never reads never hears the server's end, which waits behind the
+    /// answers it left unread (io.md, 3.3): with lines to send, it needs an
+    /// abort of its own.
     pub read_from: Option<Time>,
     /// The bytes after which it sends nothing more, in each attempt.
     pub send_limit: u64,
@@ -115,7 +120,7 @@ pub struct Seen {
     pub broken: u32,
     /// The server told the line past its limit `too long`.
     pub too_long: bool,
-    /// When the server last ended its stream.
+    /// When the server ended the last attempt's stream.
     pub ended: Option<Time>,
     /// An attempt had every line answered, or its line past the limit
     /// refused.
@@ -217,6 +222,10 @@ impl Client {
             if let Some(long) = plan.long {
                 assert!(long < plan.lines, "the line past the limit is among the plan's");
             }
+            assert!(
+                plan.read_from.is_some() || plan.abort_at.is_some() || plan.lines == 0,
+                "a plan that sends lines and never reads their answers ends by an abort of its own"
+            );
             conns.push(Conn::new(*plan)).expect("a slot for each plan");
         }
         let timers = count.checked_mul(TIMERS).expect("fewer than 2^30 plans");

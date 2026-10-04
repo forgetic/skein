@@ -10,8 +10,9 @@
 //!   and what the referee injects that belongs to no process;
 //! - [`World`]: the loop over the simulator, which moves time only when the
 //!   world is idle (simulator.md, 3), returns the run's trace for replay,
-//!   checks the heap at every iteration under the counting allocator
-//!   (simulator.md, 5), and once settled checks that every process holds
+//!   checks each process's heap at every iteration against its own worst
+//!   case, under the counting allocator (simulator.md, 5), and once
+//!   settled checks that every process holds
 //!   nothing and the simulator nothing in flight;
 //! - [`real`]: the same processes and referee in one loop over the real
 //!   ring, a ring each, on the real clock (testing-strategy.md, 2.8).

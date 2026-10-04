@@ -178,7 +178,8 @@ gone: the bindings above and below have both ended (programming-model.md,
 | Listening | `Failed` (its accept stopped) | Closing: `Close` |
 | Listening | `Stop` | Closing: `Close` |
 | Closing | `Accepted` | `Reject`: announced before io took the close |
-| Failed | `Closed` | `Busy`, and not stopped: Backoff, its deadline `retry` on; otherwise Closed, the failure kept |
+| Closing | `Failed` | its failure kept: told before io took the close |
+| Failed | `Closed` | `Busy`, and not stopped: Backoff, its deadline `retry` on; `Busy` and stopped: Closed; otherwise Closed, the failure kept |
 | Backoff | its deadline | Opening: `Listen` |
 | Closing | `Closed` | Closed |
 | Unopened, Backoff | `Stop` | Closed |
@@ -189,7 +190,8 @@ io's `Busy` says that nothing was made and the request may be made again
 later (io.md, 2): a listen refused for want of descriptors or buffers is a
 shortage, not a failure, so the listener listens again after `retry`.
 Any other failure stops it for good, and the service with it: `main` then
-says why and exits.
+says why and exits. A failure is kept whether a stop came meanwhile or
+not; a shortage never counts as one.
 
 **The session** is active from `Open` admitted to `Gone`, and counts the
 lines it answered. **The domain** admits until `Shutdown`, then answers
@@ -243,15 +245,17 @@ processes, each a host of an `iterate` (a service, or a fake client):
   deadline (simulator.md, 3).
 - **Trace and replay:** a run returns the simulator's trace, which the
   same seed replays.
-- **Memory** (simulator.md, 5): under the counting allocator, the heap
-  that grew within the processes' own calls (building each, and each
-  `iterate`), at its peak within each call, against the sum of their
-  worst cases. What grew within the simulator's calls and the harness's is
-  left out, by metering around the processes' calls rather than theirs.
-  A process frees in one call what it allocated in another, so the heap
-  falls below where a call began: the counting allocator's span measures
-  a call's growth signed, where its meter, which checks a step from a base
-  it never falls below, cannot.
+- **Memory** (simulator.md, 5): under the counting allocator, each
+  process's heap, what grew within its own calls (building it, and each
+  `iterate`), at its peak within each call, against its own worst case.
+  What grew within the simulator's calls and the harness's is left out,
+  by metering around the processes' calls rather than theirs; and as
+  nothing one process allocates is freed by another or by the simulator,
+  each process's growth is its own. A process frees in one call what it
+  allocated in another, so the heap falls below where a call began: the
+  counting allocator's span measures a call's growth signed, where its
+  meter, which checks a step from a base it never falls below, cannot. A
+  process's worst case counts the box the harness keeps its state in.
 - **Contracts:** each process keeps its own as it goes, as its loop is
   its own: the echo's and the fake client's `iterate` assert each call
   within its `MAX_OUT`, the protocol layer one reply per call, the fake

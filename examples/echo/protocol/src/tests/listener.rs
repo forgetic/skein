@@ -70,6 +70,20 @@ fn a_stop_while_the_listener_waits_to_listen_again_closes_it() {
     rig.down(Domain::Stop).nothing();
     assert_eq!(rig.proto.next_deadline(), None, "stopped while it waited");
     assert!(rig.proto.is_empty());
+    assert_eq!(rig.proto.failure(), None, "a shortage is not a failure");
+}
+
+#[test]
+fn a_listen_that_fails_for_good_keeps_its_failure_though_a_stop_came() {
+    let mut rig = Rig::new();
+    let out = rig.resume();
+    let [Io::Listen { owner, .. }] = out.io.as_slice() else { panic!("listens: {out:?}") };
+    let owner = *owner;
+    rig.up(Told::Failed { owner, error: Error::Other }).nothing();
+    rig.down(Domain::Stop).nothing();
+    rig.up(Told::Closed { owner }).nothing();
+    assert_eq!(rig.proto.failure(), Some(Error::Other), "kept, as a closing listener's is");
+    assert!(rig.proto.is_empty());
 }
 
 #[test]

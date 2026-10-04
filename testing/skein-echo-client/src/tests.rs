@@ -261,6 +261,7 @@ fn busy_is_retried_after_the_backoff() {
     rig.sent.clear();
     rig.at(PLAN.at.saturating_add(PLAN.backoff));
     assert_eq!(rig.connects, 2, "tried again, after its backoff");
+    assert_eq!(rig.client.seen(0).ended, None, "the new attempt has not been ended");
     for _ in 0..3_u32 {
         rig.echo();
     }
@@ -301,6 +302,12 @@ fn an_abort_at_its_time_stops_whatever_it_does() {
     let seen = rig.client.seen(0);
     assert_eq!(seen.done, Some(abort), "and no retry");
     assert!(rig.client.is_empty());
+}
+
+#[test]
+#[should_panic(expected = "ends by an abort of its own")]
+fn a_plan_that_never_reads_and_never_aborts_is_refused() {
+    let _rig = Rig::new(Plan { read_from: None, ..PLAN });
 }
 
 #[test]

@@ -58,7 +58,7 @@ enum State {
 }
 
 /// Closing: io asked to close the socket, gracefully.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 struct Closing {
     /// io told `Closed`.
     closed: bool,

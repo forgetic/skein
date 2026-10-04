@@ -427,8 +427,11 @@ fn listener_closed(proto: &mut Protocol, env: &Env<Limits>) {
         Listener::Failed { error: Error::Busy, stop: false } => {
             Listener::Backoff { at: env.now.saturating_add(env.limits.retry) }
         }
-        Listener::Failed { stop: true, .. } => Listener::Closed { error: None },
-        Listener::Failed { error, stop: false } => Listener::Closed { error: Some(error) },
+        // A shortage is not a failure, stopped or not; any other failure is
+        // kept, whether a stop came meanwhile or not, as a closing
+        // listener's is.
+        Listener::Failed { error: Error::Busy, stop: true } => Listener::Closed { error: None },
+        Listener::Failed { error, .. } => Listener::Closed { error: Some(error) },
         Listener::Closing { error } => Listener::Closed { error },
         Listener::Unopened
         | Listener::Opening { .. }

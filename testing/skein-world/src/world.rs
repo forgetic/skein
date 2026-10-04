@@ -50,9 +50,9 @@ pub struct Outcome<P> {
     pub iterations: u32,
     /// When the world settled.
     pub end: Time,
-    /// The most heap the processes held at once, and the sum of their worst
-    /// cases, when memory was checked.
-    pub heap: Option<(u64, u64)>,
+    /// The most heap each process held at once, and its worst case, by
+    /// index, when memory was checked.
+    pub heap: Option<Vec<(u64, u64)>>,
 }
 
 impl<P: Host, R: Referee<P>> World<P, R> {
@@ -133,7 +133,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             seed: self.seed,
             trace: self.sim.trace().to_vec(),
             end: self.sim.now(),
-            heap: self.heap.as_ref().map(|heap| (heap.most(), heap.bound())),
+            heap: self.heap.as_ref().map(Heap::report),
             procs: self.procs,
             iterations,
         }
@@ -145,7 +145,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
         let proc = self.procs.get_mut(at).expect("a process at each index");
         self.sim.reap(pid, proc.completions());
         match &mut self.heap {
-            Some(heap) => heap.around(|| proc.iterate(now, wall)),
+            Some(heap) => heap.around(at, || proc.iterate(now, wall)),
             None => proc.iterate(now, wall),
         }
         self.sim.submit(pid, proc.submissions());
