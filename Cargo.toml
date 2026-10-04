@@ -36,6 +36,7 @@ skein-lib = { path = "crates/skein-lib" }
 skein-io = { path = "crates/skein-io" }
 skein-http = { path = "crates/skein-http" }
 skein-json = { path = "crates/skein-json" }
+skein-tls = { path = "crates/skein-tls" }
 skein-shell = { path = "crates/skein-shell" }
 skein-sim = { path = "crates/skein-sim" }
 skein-conformance = { path = "testing/skein-conformance" }
@@ -46,10 +47,14 @@ skein-echo-service = { path = "examples/echo/service" }
 skein-echo-client = { path = "testing/skein-echo-client" }
 skein-world = { path = "testing/skein-world" }
 
-# The only dependencies from outside the workspace, with rustls later
-# (programming-model.md, 2.1): the shell's, for the ring adapter.
+# The only dependencies from outside the workspace (programming-model.md,
+# 2.1): the shell's, for the ring adapter; and rustls, the TLS machine's, the
+# one exception of programming-model.md, section 3 (tls.md, 4). rustls is
+# pinned and built without std, with ring for its cryptography (0.17.14,
+# pinned by Cargo.lock): no default features, which would bring aws-lc-rs.
 io-uring = "0.7.15"
 libc = "0.2.186"
+rustls = { version = "=0.23.41", default-features = false, features = ["ring", "tls12"] }
 
 # Panics are fail-stop and overflow traps, in every profile. (The test harness
 # needs unwinding, so cargo ignores `panic` for test targets.)
