@@ -12,7 +12,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 
-use skein_echo_client::{self as client, Plan, Then};
+use skein_echo_client::{self as client, HalfClose, Plan, Then};
 use skein_echo_service as service;
 use skein_echo_service::{domain, protocol};
 use skein_io::kernel::Addr;
@@ -306,9 +306,82 @@ pub fn backpressure(seed: u64, config: Config) -> EchoWorld {
     ];
     if calm(&config) {
         expect.push(Expect::Served { at: 1, conn: 1, by: ms(1_500) });
+        // Once the echo idles the stopped client out, its close discards
+        // what the client sends, which then hands io the rest of its lines.
+        let close = server(SPREAD).io.close_timeout;
+        let by = ms(1).saturating_add(IDLE).saturating_add(SPREAD).saturating_add(close).saturating_add(MARGIN);
+        expect.push(Expect::Handed { at: 1, conn: 0, bytes: 40 * u64::from(LINE), by });
     }
     let mut world = world(seed, config, expect, Shutdown::WhenDone);
     spawn(&mut world, &[full, late]);
+    world
+}
+
+/// A margin past a deadline, for what follows it in the same instant of a
+/// calm world, in a few iterations.
+const MARGIN: Duration = Duration::from_millis(500);
+
+/// A half-close with lines unanswered: one connection sends three lines
+/// ahead of their answers and half-closes, so that the echo hears the end
+/// while it answers the last; another sends three and a piece of a fourth,
+/// with no end of line, then half-closes. The echo answers every whole line,
+/// then ends each stream, the piece dropped.
+#[must_use]
+pub fn half_close(seed: u64, config: Config) -> EchoWorld {
+    let mut rng = Rng::new(seed ^ 0x4a1f);
+    let whole = Plan {
+        lines: 3,
+        ahead: 3,
+        half_close: Some(HalfClose { after: 3, tail: 0 }),
+        then: Then::Linger,
+        ..plan(ms(1), rng.next_u64())
+    };
+    let piece = Plan {
+        lines: 4,
+        ahead: 4,
+        half_close: Some(HalfClose { after: 3, tail: 5 }),
+        then: Then::Linger,
+        ..plan(ms(1), rng.next_u64())
+    };
+    let mut expect = vec![Expect::Finished { at: 1, conn: 0, by: END }, Expect::Finished { at: 1, conn: 1, by: END }];
+    if calm(&config) {
+        for conn in 0..2 {
+            expect.push(Expect::Ends { at: 1, conn, by: ms(1).saturating_add(MARGIN) });
+        }
+    }
+    let mut world = world(seed, config, expect, Shutdown::WhenDone);
+    spawn(&mut world, &[whole, piece]);
+    world
+}
+
+/// The echo at its worst case (testing-strategy.md, 8): with sessions for
+/// all three of its connections, three clients that send forty lines ahead
+/// of their answers and never read fill every connection's intake, receive
+/// and output at once, and a fourth is rejected, until the clients give up.
+/// What the echo held at its peak is measured against its worst case by the
+/// focused test, to show how near the bound comes.
+#[must_use]
+pub fn worst(seed: u64, config: Config) -> EchoWorld {
+    let config = Config { buffer: BUFFER, ..config };
+    let mut rng = Rng::new(seed ^ 0x3057);
+    let mut limits = server(SPREAD);
+    limits.domain.sessions = 3;
+    let referee = EchoReferee::new(seed, Vec::new(), Shutdown::WhenDone);
+    let mut world = World::new(seed, config, referee, Memory::Checked);
+    world.spawn(|| Proc::echo(limits, listen(), seed));
+    let mut plans = Vec::new();
+    for _ in 0..4 {
+        plans.push(Plan {
+            lines: 40,
+            shortest: LINE,
+            ahead: 40,
+            read_from: None,
+            then: Then::Linger,
+            abort_at: Some(ms(1_000)),
+            ..plan(ms(1), rng.next_u64())
+        });
+    }
+    spawn(&mut world, &plans);
     world
 }
 
@@ -388,7 +461,7 @@ pub fn shutdown(seed: u64, config: Config) -> EchoWorld {
 }
 
 /// Every scenario, by name, for the sweeps.
-pub const SCENARIOS: [(&str, Scenario); 7] = [
+pub const SCENARIOS: [(&str, Scenario); 9] = [
     ("clients", clients),
     ("too_long", too_long),
     ("busy", busy),
@@ -396,4 +469,6 @@ pub const SCENARIOS: [(&str, Scenario); 7] = [
     ("backpressure", backpressure),
     ("closes", closes),
     ("shutdown", shutdown),
+    ("half_close", half_close),
+    ("worst", worst),
 ];

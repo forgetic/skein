@@ -35,9 +35,15 @@ tests/echo                  skein-echo-world      the echo's simulated worlds, a
 ```
 
 The crate graph is README.md's: the domain depends on lib; the protocol
-layer on lib, io and the domain; the service on all three; the shell on
-the service and `skein-shell`. The fake client shares no type with the
-echo (testing-strategy.md, 4): it depends on lib and io only.
+layer on lib, io and the domain; the service on all three, and re-exports
+the domain's and the protocol layer's crates; the shell on lib, io, the
+service and `skein-shell`; the worlds on lib, io, the service, the fake
+client and skein's testing crates. Every crate may name lib, and every
+one but the domain's may name io, as the role graph has it
+(programming-model.md, 4): the shell names io's limits and records, and
+reaches the domain and the protocol layer only through the service. The
+fake client shares no type with the echo (testing-strategy.md, 4): it
+depends on lib and io only.
 
 ## 3. The echo, before code
 
@@ -285,7 +291,12 @@ processes, each a host of an `iterate` (a service, or a fake client):
   inject what belongs to no fake. The echo's tells the fake clients the
   echo's address once it listens, as a directory would, and shuts the
   echo down once the clients are done, or at a given time, so that the
-  world settles.
+  world settles. Both reach into the service where the referee should
+  only watch from outside (testing-strategy.md, 7), and stand in for what
+  is not built: its reading of `svc.listening()` for the fact `main`
+  prints, "listening at", which the service will emit as a fact; and its
+  call of `svc.shutdown()` for the termination signal, which will come as
+  io's `Shutdown` event (io.md, 7). Each moves out once those are built.
 - **The real loop** runs the same processes and referee, each process on
   a ring of its own (as a process would be: its tokens are its own), in
   one thread on loopback, with deadlines on the real clock. One thread
@@ -302,18 +313,26 @@ processes, each a host of an `iterate` (a service, or a fake client):
   processes of the simulator, under tiny limits, calm and chaotic: many
   clients; a line too long; a busy refusal at the entrance, and a
   rejection; an idle timeout; a client that stops reading, stopped at the
-  server by backpressure; closes and resets in every state; and a
-  shutdown. Calm, each scenario holds whole; under faults, a stream may
-  break, so each expects only that every connection finishes, while the
-  fake clients still check every answer they get, and the idle deadline's
-  "not before" is calm's alone: a server whose side of a stream broke
-  ends it at once, which the client cannot tell from an early idle. Each
-  admission point's scenario checks what the clients saw for evidence
-  that it was reached; the protocol layer's rejection shows as the end
-  without a word, or as a reset when the client's first line was already
-  there unread. Focused seeds in the default suite; sweeps in the fuzzy
+  server by backpressure and then idled out, its close discarding the
+  rest; closes and resets in every state; a shutdown; a half-close with
+  lines unanswered, every whole line answered before the end and a
+  trailing piece of a line dropped (section 3.1's end, tested); and the
+  echo driven to its worst case. Calm, each scenario holds whole; under
+  faults, a stream may break, so each expects only that every connection
+  finishes, while the fake clients still check every answer they get, and
+  the idle deadline's "not before" is calm's alone: a server whose side of
+  a stream broke ends it at once, which the client cannot tell from an
+  early idle. So that the faulted sweep still shows the echo at work,
+  every outcome a client can see must appear over it: served, busy,
+  rejected, broken, too long, idled out. Each admission point's scenario
+  checks what the clients saw for evidence that it was reached; the
+  protocol layer's rejection shows as the end without a word, or as a
+  reset when the client's first line was already there unread. A rare
+  cell, a stream failing while its line is out with the domain, is pinned
+  by its seed. Focused seeds in the default suite; sweeps in the fuzzy
   one, asserting that every fault fell. Every binary checks memory at
-  every iteration.
+  every iteration, and that each process frees what it held once
+  settled; io holds the echo to the room it was granted in every world.
 - **The real loop** (`tests/echo/tests/real.rs`): the echo and its fake
   clients in one loop over the shell's rings, on loopback, quick, failing
   clearly where `io_uring` is unusable.

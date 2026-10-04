@@ -5,7 +5,9 @@
 //! world checks memory at every iteration, under the counting allocator.
 //! The sweeps over many seeds are in `fuzzy_scenarios.rs`.
 
-use skein_echo_world::scenarios::{EchoWorld, backpressure, busy, clients, closes, idle, shutdown, too_long};
+use skein_echo_world::scenarios::{
+    EchoWorld, backpressure, busy, clients, closes, half_close, idle, shutdown, too_long, worst,
+};
 use skein_heap::Counting;
 use skein_sim::Config;
 use skein_world::Outcome;
@@ -97,6 +99,15 @@ fn a_shutdown_stops_the_listener_and_lets_its_connections_run_on() {
     chaos(shutdown);
 }
 
+/// A pinned seed: under chaos, a stream of the echo's fails while its line
+/// is out with the domain (Answering, then `Failed`), which the domain then
+/// answers into a connection closing. Rare, about one seed in four hundred
+/// of `clients`, so kept here; found by marking the cell and sweeping.
+#[test]
+fn a_stream_that_fails_while_its_line_is_answered_settles() {
+    let _outcome = clients(387, Config::chaos()).run();
+}
+
 #[test]
 fn the_same_seed_replays_to_the_same_trace() {
     for seed in [11_u64, 12] {
@@ -123,4 +134,24 @@ fn memory_is_checked_at_every_iteration_against_the_worst_cases() {
         assert!(*most > 0 && most <= bound, "process {at} held {most} bytes at most, within {bound}");
     }
     // Dropping the outcome checks that each process frees what it held.
+}
+
+#[test]
+fn a_half_close_with_lines_unanswered_has_every_whole_line_answered_then_the_end() {
+    calm(half_close);
+    chaos(half_close);
+}
+
+/// Every connection's intake, receive and output full at once, the echo
+/// holds about three fifths of its worst case. The rest is the bookkeeping
+/// of io's and the protocol layer's B-tree tables (deadlines, ready lists),
+/// whose worst cases count a full table's nodes while a few timers are
+/// armed. A floor of half catches a world that stops reaching the limits.
+#[test]
+fn the_echo_driven_to_its_limits_comes_near_its_worst_case() {
+    for outcome in calm(worst) {
+        let (most, bound) = outcome.heap.as_ref().expect("checked")[0];
+        assert!(most * 2 >= bound, "seed {}: the echo held {most} bytes at its limits, of {bound}", outcome.seed);
+    }
+    chaos(worst);
 }

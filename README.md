@@ -102,9 +102,14 @@ crate      depends on
 domain     skein-lib                                  and its child domains
 protocol   skein-lib, skein-io, the skein machines it stacks, domain
 service    skein-lib, skein-io, protocol, domain
-shell      service, skein-shell
-tests      service, skein-sim, skein-heap, skein-world
+shell      skein-lib, skein-io, service, skein-shell
+tests      skein-lib, skein-io, service, skein-sim, skein-heap, skein-world
 ```
+
+Every crate may name `skein-lib`, and every one but the domain's
+`skein-io`, as the role graph has it (programming-model.md, 4). The shell
+and the tests reach the domain and the protocol layer only through the
+service, which re-exports what they name of them, their limits.
 
 Before code:
 

@@ -237,17 +237,23 @@ The echo's worlds (examples.md, 7) run the echo and its fake clients as
 processes of the simulator, each through its own `iterate`, over the
 world harness, with a referee holding each scenario's expectations on
 what the clients saw. Under tiny limits (two sessions, three connections,
-five sockets, lines of sixteen bytes), seven scenarios: many clients
+five sockets, lines of sixteen bytes), nine scenarios: many clients
 refused at both entrances and retried until served; a line too long; a
 peer told busy at the domain's entrance and one rejected at the protocol
 layer's; idle connections closed at their deadline and not before; a
 client that stops reading, held by backpressure to what the buffers
-between them hold; closes, aborts and resets in every state, with a
-shutdown among them; and a shutdown while connections live. The focused
-suite runs each over 3 calm seeds and 3 of chaos, and the fuzzy suite
-over 300 of each, asserting that every fault of the simulator fell. The
+between them hold, then idled out; closes, aborts and resets in every
+state, with a shutdown among them; a shutdown while connections live; a
+half-close with lines unanswered, every whole line answered before the
+end; and the echo at its worst case. The focused suite runs each over 3
+calm seeds and 3 of chaos, with a chaos seed pinned for a rare cell (a
+stream failing while its line is out with the domain); the fuzzy suite
+over 300 of each, asserting that every fault of the simulator fell and
+that every outcome a client can see came of some connection. io holds
+the echo, as every owner, to the room it was granted (io.md, 3.3). The
 real loop runs the echo and two fake clients on loopback, a ring each, in
-half a second.
+half a second. The world harness has tests of its own (`tests/world`),
+over scripted processes of raw records.
 
 The two suites of testing-strategy.md, section 8, are
 `.config/nextest.toml`'s profiles, each with its budget as a global
@@ -275,6 +281,12 @@ metered as its own, which finds a leak, and heap made or freed outside
 its calls. The scenarios leave slack: the echo peaks about a third below
 its worst case, the fake clients a quarter below theirs, and a part that
 held more than it should within that slack would pass the check unseen.
+Driven to its limits (every connection's intake, receive and output full
+at once), the echo still holds only about three fifths of its worst case:
+the rest is the bookkeeping of io's and the protocol layer's B-tree
+tables (deadlines, ready lists), whose worst cases count a full table's
+nodes while a world arms a few timers. A focused test holds that world
+to at least half its worst case, so that it keeps reaching the limits.
 
 ## 8. Not built yet
 
@@ -297,10 +309,13 @@ By tier, in the order temper pulls the parts (README.md):
 
 By check: state digests for replay, transition coverage, fuzzing.
 Transition coverage of io's handlers needs `cargo llvm-cov`, which is not
-installed. In the echo's worlds, a ledger of the stream contract between
-the echo and its io, as io's worlds keep one: io itself asserts only that
-a send fits its output cap, not that it fits room granted, so the echo's
-asking room before each answer is held by its step tests alone.
+installed.
+
+In the echo's worlds, the referee's purity: it reads the echo's address
+from `svc.listening()`, standing in for the fact `main` prints, which the
+service will emit; and it calls `svc.shutdown()`, standing in for the
+termination signal, which will come as io's `Shutdown` event (io.md, 7).
+Both move out of the referee once those are built (examples.md, 6).
 
 ## 9. Open questions
 

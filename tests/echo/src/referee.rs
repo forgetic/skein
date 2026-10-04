@@ -36,6 +36,11 @@ pub enum Expect {
     /// Safety: until `until`, it handed io no more than `most` bytes:
     /// backpressure stopped it.
     Holds { at: usize, conn: u32, most: u64, until: Time },
+    /// Liveness: it handed io at least `bytes`, by `by`.
+    Handed { at: usize, conn: u32, bytes: u64, by: Time },
+    /// Safety: it never broke. Liveness: every line it sent whole was
+    /// answered, then the server ended its stream, by `by`.
+    Ends { at: usize, conn: u32, by: Time },
     /// Liveness: a connect was refused, as with nothing listening, by `by`.
     Refused { at: usize, conn: u32, by: Time },
     /// Liveness: done for good, by `by`.
@@ -51,6 +56,8 @@ impl Expect {
             | Expect::TooLong { at, conn, .. }
             | Expect::Idled { at, conn, .. }
             | Expect::Holds { at, conn, .. }
+            | Expect::Handed { at, conn, .. }
+            | Expect::Ends { at, conn, .. }
             | Expect::Refused { at, conn, .. }
             | Expect::Finished { at, conn, .. } => (at, conn),
         }
@@ -85,6 +92,13 @@ impl Expectation<Proc> for Expect {
                 }
                 now >= until
             }
+            Expect::Handed { bytes, .. } => seen.handed >= bytes,
+            Expect::Ends { .. } => {
+                if seen.broken > 0 {
+                    return Err("its stream broke".to_owned());
+                }
+                seen.complete && seen.ended.is_some()
+            }
             Expect::Refused { .. } => seen.failed > 0,
             Expect::Finished { .. } => seen.done.is_some(),
         };
@@ -98,6 +112,8 @@ impl Expectation<Proc> for Expect {
             | Expect::TurnedAway { by, .. }
             | Expect::TooLong { by, .. }
             | Expect::Idled { by, .. }
+            | Expect::Handed { by, .. }
+            | Expect::Ends { by, .. }
             | Expect::Refused { by, .. }
             | Expect::Finished { by, .. } => by,
             Expect::Holds { until, .. } => until,
@@ -117,6 +133,8 @@ impl fmt::Debug for Expect {
             Expect::TooLong { .. } => "told too long",
             Expect::Idled { .. } => "idled out, not early",
             Expect::Holds { .. } => "held back",
+            Expect::Handed { .. } => "handed its bytes",
+            Expect::Ends { .. } => "answered, then ended by the server",
             Expect::Refused { .. } => "refused a connect",
             Expect::Finished { .. } => "finished",
         };
