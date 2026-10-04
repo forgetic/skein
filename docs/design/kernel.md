@@ -189,8 +189,8 @@ documentation, with each operation's errors; the decisions behind it:
   stay beneath the root are followed, since a workspace holds them (a
   repository's `CLAUDE.md -> AGENTS.md`); `RESOLVE_NO_SYMLINKS` would
   refuse those too and keep nothing more in. Magic links (`/proc/*/fd/*`)
-  are refused outright, though `RESOLVE_BENEATH` refuses them today, as
-  the man page asks.
+  are refused by name, with `RESOLVE_NO_MAGICLINKS`, as the man page
+  asks: `RESOLVE_BENEATH` refuses them today, but may not always.
 - **Every other operation on a name acts on one entry of an open
   directory.** `renameat`, `unlinkat`, `mkdirat` and `statx` take no
   `RESOLVE_*` flags, and a path with a `/` in it could leave the root
