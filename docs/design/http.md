@@ -207,7 +207,10 @@ client.
 - **A withdrawal** of a body demand means the side above reads no more
   (lib.md, 7), as when a machine stacked on the body closes: what was
   read for it is dropped, a demand after it is asserted, and the side
-  above discards the rest or closes the client.
+  above discards the rest or closes the client. A withdrawal may cross
+  its demand's answer: one that comes after the answer withdraws all the
+  same, and one that comes after the body's end and `Done` is dropped, as
+  is a `Discard` that crosses them.
 - **`Discard`** gives up the rest of the body, a demand outstanding or
   withdrawn among it: the client reads and drops it, by fills of at most
   `Limits::read` within the framing, so that the connection can be used

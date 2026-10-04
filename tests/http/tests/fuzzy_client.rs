@@ -56,6 +56,8 @@ impl Seen {
             (fell.room_first, "room granted while a response waited"),
             (fell.early_response, "a response line read mid-upload"),
             (fell.withdrew, "a body demand withdrawn"),
+            (fell.crossed_withdrawal, "a withdrawal crossed its answer"),
+            (fell.crossed_end_of_body, "a withdrawal or a discard crossed the end of the body"),
             (fell.late_answer, "an answer after the withdrawal"),
             (fell.failed_after_end, "a failure after the end"),
             (fell.reused, "a connection reused"),
@@ -101,7 +103,7 @@ const EVERY_OUTCOME: [&str; 16] = [
     "closed before the outcome",
 ];
 
-const EVERY_NEIGHBOUR: [&str; 24] = [
+const EVERY_NEIGHBOUR: [&str; 26] = [
     "a body discarded",
     "the upload failed with Some(Other)",
     "the upload failed with Some(Invalid)",
@@ -117,6 +119,8 @@ const EVERY_NEIGHBOUR: [&str; 24] = [
     "room granted while a response waited",
     "a response line read mid-upload",
     "a body demand withdrawn",
+    "a withdrawal crossed its answer",
+    "a withdrawal or a discard crossed the end of the body",
     "an answer after the withdrawal",
     "a failure after the end",
     "a connection reused",

@@ -88,6 +88,8 @@ fn a_response_that_comes_mid_upload_stops_it_and_the_exchange_ends_with_it() {
             reads: Reads::Bytes,
             discard: 0,
             withdraw: 0,
+            cross: 0,
+            patient: false,
             ..Settings::calm(&mut rng, LIMITS)
         };
         let run = client_world::check(&exchanges, &server, &settings, seed);

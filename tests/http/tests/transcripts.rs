@@ -73,6 +73,7 @@ fn every_transcript_decodes_to_its_expectation_whatever_the_cuts() {
                 reads: Reads::Bytes,
                 discard: 0,
                 withdraw: 0,
+                cross: 0,
                 idle_end: 0,
                 ..Settings::calm(&mut rng, transcript.limits)
             };

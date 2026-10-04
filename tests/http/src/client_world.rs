@@ -61,6 +61,10 @@ pub struct Settings {
     /// Per mille, per exchange: how likely the side above discards the
     /// rest of a body, once it has read some.
     pub discard: u32,
+    /// Per mille, per answer on the body: how likely the side above had
+    /// withdrawn its demand, or discarded the rest, before the answer
+    /// reached it, so that the two cross (lib.md, 7).
+    pub cross: u32,
     /// Where the server's bytes stop, if before their end.
     pub cut: Option<usize>,
     /// When the stream fails, if it does: once, at the first iteration from
@@ -103,6 +107,7 @@ impl Settings {
             reads: if rng.chance(300) { Reads::Bytes } else { Reads::Any },
             withdraw: if rng.chance(300) { draw(rng, 0, 200) } else { 0 },
             discard: if rng.chance(200) { draw(rng, 0, 1000) } else { 0 },
+            cross: if rng.chance(200) { draw(rng, 0, 300) } else { 0 },
             cut: None,
             failure: None,
             close: None,
@@ -232,6 +237,10 @@ pub struct Fell {
     pub early_response: bool,
     /// The side above withdrew a body demand.
     pub withdrew: bool,
+    /// A withdrawal crossed its demand's answer, during the body.
+    pub crossed_withdrawal: bool,
+    /// A withdrawal or a discard crossed the body's end, and was dropped.
+    pub crossed_end_of_body: bool,
     /// An answer came after the demand was withdrawn below.
     pub late_answer: bool,
     /// The stream failed after its end.
@@ -281,6 +290,7 @@ pub fn run(exchanges: &[Exchange], server: &[u8], settings: &Settings, seed: u64
             closing: None,
             closed: false,
             spent: false,
+            crossing: None,
         },
         fell: Fell::default(),
         iteration: 0,
@@ -513,6 +523,9 @@ struct Above<'a> {
     closed: bool,
     /// The connection is not to be used again.
     spent: bool,
+    /// A request the side above sent before an answer reached it, sent
+    /// once the call that answered is routed.
+    crossing: Option<Request>,
 }
 
 impl World<'_> {
@@ -836,6 +849,47 @@ impl World<'_> {
             self.send(request, closing || ending);
         }
         self.check_waiting();
+        if let Some(crossing) = self.above.crossing.take()
+            && self.above.closing.is_none()
+        {
+            self.cross(crossing);
+        }
+    }
+
+    /// A withdrawal or a discard the side above sent before the answer it
+    /// crosses reached it: during the body, it takes effect; after the
+    /// body's end, the client drops it.
+    fn cross(&mut self, crossing: Request) {
+        if self.above.terminal.is_some() {
+            self.fell.crossed_end_of_body = true;
+        } else {
+            match crossing {
+                Request::Discard => {
+                    self.above.body = Face::Over;
+                    self.current().expect("the exchange in progress").discarded = true;
+                }
+                Request::Body(_) => {
+                    self.fell.crossed_withdrawal = true;
+                    self.above.body = Face::Withdrawn;
+                }
+                Request::Call(_) | Request::Upload(_) | Request::Close => {
+                    unreachable!("only a withdrawal or a discard")
+                }
+            }
+        }
+        self.down(crossing);
+    }
+
+    /// Whether the side above had sent a withdrawal or a discard before
+    /// the answer now reaching it.
+    fn maybe_cross(&mut self) {
+        if self.rng.chance(self.settings.cross) {
+            self.above.crossing = Some(if self.rng.chance(500) {
+                Request::Discard
+            } else {
+                Request::Body(Down::Demand { read: Read::Nothing, room: 0 })
+            });
+        }
     }
 
     /// An event for the side above, checked against its contract.
@@ -868,11 +922,13 @@ impl World<'_> {
                     *after = after.saturating_sub(1);
                 }
                 self.current().expect("the exchange in progress").body.extend_from_slice(&bytes);
+                self.maybe_cross();
             }
             Event::Body(Up::End) => {
                 let Face::Demanded(read, 0) = self.above.body else { panic!("the end answers a body demand") };
                 self.above.body = Face::Over;
                 self.current().expect("the exchange in progress").ended = Some(read);
+                self.maybe_cross();
             }
             Event::Body(Up::Failed(fault)) => {
                 assert!(

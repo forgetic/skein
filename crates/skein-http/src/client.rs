@@ -162,11 +162,12 @@ pub enum Request {
     /// The response body's stream, read, once `Response` came: a demand of
     /// at most [`Limits::read`] and no room, or its withdrawal, after which
     /// the side above reads no more (lib.md, 7): it discards the rest, or
-    /// closes the client.
+    /// closes the client. A withdrawal may cross its demand's answer, even
+    /// the body's end and `Done`.
     Body(Down),
     /// The side above reads no more of the response body: the client reads
     /// the rest and drops it, then says `Done`. A demand outstanding is
-    /// dropped unanswered.
+    /// dropped unanswered. One that crosses the body's end is dropped.
     Discard,
     /// Closes the client, in any state. `Closed` answers it.
     Close,
@@ -391,13 +392,20 @@ pub fn down(client: &mut Client, env: &Env<Limits>, rq: Request, above: &mut Que
         Request::Body(down) => match state {
             State::Exchange(exchange) => body_demanded(exchange, down, intake, limits, above, below),
             State::Spent => State::Spent,
-            State::Idle(_) => unreachable!("a body demand with no exchange in progress"),
+            // A withdrawal on its way when the body's end went up with `Done`
+            // (lib.md, 7): dropped.
+            State::Idle(line) => match down {
+                Down::Demand { read: Read::Nothing, room: 0 } => State::Idle(line),
+                Down::Demand { .. } | Down::Send(_) | Down::Finish => {
+                    unreachable!("a body demand with no exchange in progress")
+                }
+            },
             State::Closed => unreachable!("a body demand after Closed"),
         },
         Request::Discard => match state {
             State::Exchange(exchange) => discard(exchange, intake, limits, above, below),
-            State::Spent => State::Spent,
-            State::Idle(_) => unreachable!("a Discard with no exchange in progress"),
+            // On its way when the body's end went up, or the exchange failed.
+            State::Idle(_) | State::Spent => state,
             State::Closed => unreachable!("a Discard after Closed"),
         },
     };
@@ -846,17 +854,19 @@ fn body_demanded(
         Receiving::Head(_) => unreachable!("a body demand before the response"),
     };
     download.face = match download.face {
+        // A withdrawal: what is read for it from now on is dropped. One with
+        // nothing outstanding was on its way when its demand's answer went
+        // up (lib.md, 7): the side above reads no more all the same.
+        Face::Idle | Face::Demand(_) if read == Read::Nothing => Face::Withdrawn,
         Face::Idle => {
             let wanted = match read {
                 Read::Fill(n) => n,
                 Read::Scan { max, .. } => max,
-                Read::Nothing => unreachable!("a withdrawal with no demand outstanding"),
+                Read::Nothing => unreachable!("a withdrawal is matched above"),
             };
             assert!(wanted <= limits.read, "no demand past Limits::read");
             Face::Demand(read)
         }
-        // A withdrawal: what is read for it from now on is dropped.
-        Face::Demand(_) if read == Read::Nothing => Face::Withdrawn,
         Face::Demand(_) => unreachable!("one demand at a time, stated after the last was answered"),
         Face::Withdrawn => unreachable!("a body demand after its withdrawal: the side above reads no more"),
         Face::Discarding => unreachable!("a body demand after Discard"),

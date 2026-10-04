@@ -177,6 +177,54 @@ fn a_withdrawn_demand_is_never_answered_and_what_is_read_for_it_is_dropped() {
 }
 
 #[test]
+fn a_withdrawal_that_crosses_its_answer_withdraws_all_the_same() {
+    let mut machine = Machine::new(LIMITS);
+    machine.called(get());
+    machine.bytes(b"HTTP/1.1 200 OK\r\n");
+    machine.bytes(b"Content-Length: 6\r\n");
+    machine.bytes(b"\r\n");
+    machine.down(Request::Body(Down::Demand { read: Read::Fill(2), room: 0 }));
+    let (events, _) = machine.bytes(b"ab");
+    assert_eq!(events, [Event::Body(Up::Bytes(super::boxed(b"ab")))]);
+    // The side above withdrew before it saw the answer (lib.md, 7).
+    let (events, requests) = machine.down(Request::Body(Down::Demand { read: Read::Nothing, room: 0 }));
+    assert!(events.is_empty() && requests.is_empty());
+    let (_, requests) = machine.down(Request::Discard);
+    assert_eq!(requests, [Down::Demand { read: Read::Fill(4), room: 0 }], "the rest, discarded");
+    let (events, _) = machine.bytes(b"cdef");
+    assert_eq!(events, [Event::Done(Reuse::Keep)]);
+}
+
+#[test]
+fn a_withdrawal_or_a_discard_that_crosses_the_body_s_end_is_dropped() {
+    let mut machine = Machine::new(LIMITS);
+    machine.called(get());
+    machine.bytes(b"HTTP/1.1 200 OK\r\n");
+    machine.bytes(b"Content-Length: 0\r\n");
+    machine.bytes(b"\r\n");
+    let (events, _) = machine.down(Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
+    assert_eq!(events, [Event::Body(Up::End), Event::Done(Reuse::Keep)]);
+    let nothing = (Vec::new(), Vec::new());
+    assert_eq!(machine.down(Request::Body(Down::Demand { read: Read::Nothing, room: 0 })), nothing);
+    assert_eq!(machine.down(Request::Discard), nothing);
+    assert_eq!(machine.client.waiting(), Waiting::Call, "the connection is kept");
+    let (head, _) = machine.called(get());
+    assert!(head.starts_with(b"GET / HTTP/1.1\r\n"), "the next call goes out");
+}
+
+#[test]
+#[should_panic(expected = "a body demand with no exchange in progress")]
+fn no_body_demand_once_the_exchange_is_done() {
+    let mut machine = Machine::new(LIMITS);
+    machine.called(get());
+    machine.bytes(b"HTTP/1.1 200 OK\r\n");
+    machine.bytes(b"Content-Length: 0\r\n");
+    machine.bytes(b"\r\n");
+    machine.down(Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
+    machine.down(Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
+}
+
+#[test]
 #[should_panic(expected = "a body demand after its withdrawal")]
 fn no_body_demand_after_a_withdrawal() {
     let mut machine = Machine::new(LIMITS);
