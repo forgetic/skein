@@ -103,6 +103,33 @@ fn a_response_that_comes_mid_upload_stops_it_and_the_exchange_ends_with_it() {
 }
 
 #[test]
+fn a_server_that_answers_only_once_it_has_the_whole_request_is_answered() {
+    for seed in 0..20 {
+        let mut rng = Rng::new(seed);
+        let mut exchanges = Vec::new();
+        let mut server = Vec::new();
+        for index in 0..3 {
+            let body = generate::body(&mut rng);
+            let call = Call {
+                method: Method::Post,
+                target: b"/v1/messages".to_vec().into(),
+                headers: vec![skein_http::Header { name: b"Host".to_vec().into(), value: b"h".to_vec().into() }].into(),
+                body: Body::Length(200),
+                close: false,
+            };
+            server.extend(generate::response(&mut rng, Method::Post, &body, index == 2));
+            exchanges.push(Exchange { call, upload: vec![b'u'; 200] });
+        }
+        let settings = Settings { patient: true, ..Settings::calm(&mut rng, LIMITS) };
+        let run = client_world::check(&exchanges, &server, &settings, seed);
+        for seen in &run.exchanges {
+            assert!(seen.upload_failed.is_none(), "seed {seed}: no response came before the request was whole");
+            assert!(matches!(seen.outcome, Some(Outcome::Done(_))), "seed {seed}: {:?}", seen.outcome);
+        }
+    }
+}
+
+#[test]
 fn the_stream_ending_after_any_byte_fails_or_ends_the_exchange_as_the_reference_reads_it() {
     let (exchanges, server) = scenario(77, 2);
     for cut in 0..=server.len() {

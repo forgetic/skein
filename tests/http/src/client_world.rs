@@ -70,6 +70,10 @@ pub struct Settings {
     pub close: Option<u64>,
     /// When the side above stops acting, and for how many iterations.
     pub stall: Option<(u64, u64)>,
+    /// Whether the server answers only once it has the whole request of
+    /// the exchange in progress: a client that waited for the response
+    /// before it took the body would wait for ever.
+    pub patient: bool,
 }
 
 /// How the side above reads a body.
@@ -103,6 +107,7 @@ impl Settings {
             failure: None,
             close: None,
             stall: None,
+            patient: rng.chance(200),
         }
     }
 
@@ -254,6 +259,8 @@ pub fn run(exchanges: &[Exchange], server: &[u8], settings: &Settings, seed: u64
         requests: Queue::with_capacity(8),
         below: Below {
             unsent: settings.sent(server),
+            arrived: 0,
+            ends: response_ends(exchanges, settings.sent(server), &limits),
             intake: Intake::with_capacity(settings.cap),
             demand: None,
             granted: None,
@@ -375,8 +382,11 @@ pub fn check(exchanges: &[Exchange], server: &[u8], settings: &Settings, seed: u
                 let Outcome::Done(expected_reuse) = expected.outcome else {
                     panic!("the reference's outcome {:?}; {}", expected.outcome, what())
                 };
+                // A connection whose upload stopped, or whose stream ended or
+                // failed during the exchange, is not used again.
                 let lost = seen.upload_failed.is_some() || seen.below_over;
-                assert!(reuse == expected_reuse || (lost && reuse == Reuse::Close), "{reuse:?}; {}", what());
+                let expected_reuse = if lost { Reuse::Close } else { expected_reuse };
+                assert_eq!(reuse, expected_reuse, "the reuse; {}", what());
                 if !seen.discarded && seen.ended.is_some() {
                     assert!(seen.body_failed.is_none(), "{}", what());
                 }
@@ -390,6 +400,23 @@ pub fn check(exchanges: &[Exchange], server: &[u8], settings: &Settings, seed: u
         }
     }
     run
+}
+
+/// Where each exchange's response ends in `server`, as the reference reads
+/// them one after another; past a response that fails, the rest.
+fn response_ends(exchanges: &[Exchange], server: &[u8], limits: &Limits) -> Vec<usize> {
+    let mut ends = Vec::new();
+    let mut offset = 0;
+    for exchange in exchanges {
+        let rest = &server[offset.min(server.len())..];
+        let read = reference::response(rest, exchange.call.method, exchange.call.close, limits);
+        offset = match read.outcome {
+            Outcome::Done(Reuse::Keep) => offset + read.used,
+            Outcome::Done(Reuse::Close) | Outcome::Failed(_) => server.len(),
+        };
+        ends.push(offset);
+    }
+    ends
 }
 
 /// Whether `bytes` hold what `read` asks for, from their start.
@@ -421,6 +448,11 @@ struct World<'a> {
 /// The server's stream.
 struct Below<'a> {
     unsent: &'a [u8],
+    /// How many of the server's bytes arrived so far.
+    arrived: usize,
+    /// Where each exchange's response ends in the server's bytes, as the
+    /// reference reads them: what a patient server holds back.
+    ends: Vec<usize>,
     intake: Intake,
     /// The client's demand outstanding: its read, and its room.
     demand: Option<(Read, u32)>,
@@ -539,14 +571,40 @@ impl World<'_> {
         self.up(Up::Failed(fault));
     }
 
+    /// Whether the server holds its answer: it is patient, and the request
+    /// of the exchange in progress is not all sent yet.
+    /// How many of the server's bytes may have arrived by now: all of them,
+    /// unless the server is patient, which answers each exchange once its
+    /// request is whole.
+    fn may_arrive(&self) -> usize {
+        if !self.settings.patient {
+            return usize::MAX;
+        }
+        let Some(current) = self.above.next.checked_sub(1) else { return 0 };
+        let before = match current.checked_sub(1) {
+            Some(previous) => self.below.ends[previous],
+            None => 0,
+        };
+        let seen = self.above.seen.last().expect("a call made");
+        let exchange = &self.above.exchanges[current];
+        let whole = generate::request(&exchange.call).len() + exchange.upload.len();
+        if seen.sent.len() < whole && self.above.terminal.is_none() { before } else { self.below.ends[current] }
+    }
+
     fn below_acts(&mut self) {
+        let may_arrive = self.may_arrive().saturating_sub(self.below.arrived);
         let below = &mut self.below;
-        if !below.unsent.is_empty() && below.intake.room() > 0 && self.rng.chance(self.settings.arrival) {
+        if may_arrive > 0
+            && !below.unsent.is_empty()
+            && below.intake.room() > 0
+            && self.rng.chance(self.settings.arrival)
+        {
             let piece = usize::try_from(self.rng.between(1, u64::from(self.settings.piece))).expect("fits a usize");
             let room = usize::try_from(below.intake.room()).expect("fits a usize");
-            let (arrived, rest) = below.unsent.split_at(piece.min(room).min(below.unsent.len()));
+            let (arrived, rest) = below.unsent.split_at(piece.min(room).min(below.unsent.len()).min(may_arrive));
             below.intake.append(arrived).expect("within the room");
             below.unsent = rest;
+            below.arrived += arrived.len();
         }
         if let Some((at, fault)) = self.settings.failure
             && self.iteration >= at

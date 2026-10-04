@@ -416,10 +416,13 @@ Not built yet (section 9). As planned:
   - **The client's** runs one connection for one exchange after another.
     Below, the server's stream: its bytes arrive in pieces cut at random,
     late, into an intake under its cap, and meet each read exactly; room
-    is granted late, one `Send` a grant, while a response may wait; the
-    stream ends when the bytes run out, early at a cut, idle or with a
-    read on its way, and fails, before its end or after it; after a
-    close it may still answer what was on its way. Above, a user makes
+    is granted late, one `Send` a grant, while a response may wait; now
+    and then the server is patient, and answers each exchange only once
+    it has the whole request, so that a client that waited for the
+    response before it took the body would wait for ever; the stream ends
+    when the bytes run out, early at a cut, idle or with a read on its
+    way, and fails, before its end or after it; after a close it may
+    still answer what was on its way. Above, a user makes
     the calls, uploads each body in pieces within the room granted, reads
     with fills and scans to LF, CRLF and a quote of every size, slowly,
     withdraws a demand and discards, discards the rest now and then,
@@ -434,8 +437,9 @@ Not built yet (section 9). As planned:
     reader: the request written, against a writer of the test's own; the
     head; the body, a prefix of the reference's, and when `End` came,
     nothing left that meets the demand it answered; and the outcome,
-    unless the stream failed, the side above closed first, or the
-    connection was lost after the body.
+    unless the stream failed or the side above closed first, with a
+    connection whose upload stopped, or whose stream ended or failed
+    during the exchange, not used again.
   - **The reader's** does the same for an event stream, against a
     reference that follows the standard's parser a byte at a time and
     mirrors only what the reader promises: which bytes its scans see, and
