@@ -29,6 +29,9 @@ pub enum Expect {
     Fails { at: usize, conn: &'static str, errors: &'static [Error], by: Time },
     /// Safety: until `until`, it has handed io no more than `most` bytes.
     Holds { at: usize, conn: &'static str, most: u64, until: Time },
+    /// Safety: it is never told `Failed`. Liveness: it hears `End` by `by`:
+    /// its peer ended the stream, not a reset.
+    Ends { at: usize, conn: &'static str, by: Time },
 }
 
 /// A scenario's expectations, each either pending or met.
@@ -106,6 +109,11 @@ impl Referee {
                 }
                 false
             }
+            Expect::Ends { conn: name, .. } => {
+                let Some(conn) = conn(name) else { return false };
+                assert!(conn.failed.is_none(), "seed {seed}: {name} was told Failed({:?}), not the end", conn.failed);
+                conn.ended
+            }
         }
     }
 
@@ -119,7 +127,8 @@ impl Referee {
                 Expect::Closed { optional: false, .. }
                 | Expect::Receives { .. }
                 | Expect::Fails { .. }
-                | Expect::Holds { .. } => false,
+                | Expect::Holds { .. }
+                | Expect::Ends { .. } => false,
             };
             let reached = due.is_none_or(|now| expect.deadline() <= now);
             if optional && reached && owners[expect.at()].conn(expect.conn()).is_none() {
@@ -168,7 +177,8 @@ impl Expect {
             | Expect::Prefix { at, .. }
             | Expect::Closed { at, .. }
             | Expect::Fails { at, .. }
-            | Expect::Holds { at, .. } => *at,
+            | Expect::Holds { at, .. }
+            | Expect::Ends { at, .. } => *at,
         }
     }
 
@@ -178,7 +188,8 @@ impl Expect {
             | Expect::Prefix { conn, .. }
             | Expect::Closed { conn, .. }
             | Expect::Fails { conn, .. }
-            | Expect::Holds { conn, .. } => conn,
+            | Expect::Holds { conn, .. }
+            | Expect::Ends { conn, .. } => conn,
         }
     }
 
@@ -187,7 +198,8 @@ impl Expect {
             Expect::Receives { by, .. }
             | Expect::Prefix { by, .. }
             | Expect::Closed { by, .. }
-            | Expect::Fails { by, .. } => *by,
+            | Expect::Fails { by, .. }
+            | Expect::Ends { by, .. } => *by,
             Expect::Holds { until, .. } => *until,
         }
     }
@@ -205,6 +217,7 @@ impl fmt::Debug for Expect {
             Expect::Closed { optional, .. } => write!(f, "{conn}@{at} closed by {when} ns (optional: {optional})"),
             Expect::Fails { errors, .. } => write!(f, "{conn}@{at} fails with one of {errors:?} by {when} ns"),
             Expect::Holds { most, .. } => write!(f, "{conn}@{at} hands io no more than {most} bytes until {when} ns"),
+            Expect::Ends { .. } => write!(f, "{conn}@{at} hears End, never Failed, by {when} ns"),
         }
     }
 }

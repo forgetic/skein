@@ -292,7 +292,13 @@ pub fn refusal_mid_upload(seed: u64, config: Config) -> World {
             Expect::Prefix { at, conn: "uploader", bytes: Box::from(&b"no\n"[..]), by: END }
         }
     };
-    let expect = vec![answer(1), closed(0, "refuser", END, &config), closed(1, "uploader", END, &config)];
+    let mut expect = vec![answer(1), closed(0, "refuser", END, &config), closed(1, "uploader", END, &config)];
+    // Calm, the close is graceful all the way: the refuser half-closes and
+    // drains, so the uploader hears the end, not a reset that would lose the
+    // answer.
+    if calm(&config) {
+        expect.push(Expect::Ends { at: 1, conn: "uploader", by: END });
+    }
     let mut world = World::new(seed, config, Referee::new(seed, expect));
     let refuser = Plan {
         wait: 4,
