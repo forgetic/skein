@@ -56,15 +56,16 @@ use alloc::boxed::Box;
 use skein_lib::stream::{Delimiter, Down, Fault, Read, Up};
 use skein_lib::{Env, Intake, List, Queue};
 
+use crate::body::{self, Face, Incoming, Pumped, Rest};
 use crate::{Header, MaxOut};
 
-mod body;
 mod head;
 mod request;
 
-use body::Pumped;
 use head::Parsed;
-pub use request::{Body, Call, Method, Refusal};
+pub use request::{Body, Call, Refusal};
+
+pub use crate::{Method, Version};
 
 /// The client's limits (programming-model.md, 7): the same for every step
 /// and for [`Client::new`], which allocates by them.
@@ -231,14 +232,6 @@ impl Response {
         }
         None
     }
-}
-
-/// The version a response gave.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Version {
-    Http10,
-    /// HTTP/1.1, or a later 1.x, read as 1.1 (RFC 9112, 2.3).
-    Http11,
 }
 
 /// How a response body is framed (RFC 9112, 6.3).
@@ -531,47 +524,11 @@ struct Status {
 /// A response body being read.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct Download {
-    /// What is left of it below.
-    rest: Rest,
-    /// The side above's side of its stream.
-    face: Face,
+    /// What is left of it below, and the side above's side of its stream.
+    body: Incoming,
     /// Whether the response lets the connection carry another exchange,
     /// once this one is done.
     persist: bool,
-}
-
-/// What is left of a body below, by its framing.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Rest {
-    /// By length: this many bytes, at least one.
-    Length(u64),
-    /// Chunked: this many bytes of a chunk's data, at least one.
-    Chunk(u64),
-    /// Chunked: the line ending after a chunk's data.
-    ChunkEnd,
-    /// Chunked: the next chunk's size line.
-    ChunkSize,
-    /// Chunked: the trailer section after the last chunk, this many bytes
-    /// of it at most, its blank line included.
-    Trailer(u32),
-    /// To the end of the stream.
-    UntilEnd,
-    /// Nothing: the body is all read below.
-    Over,
-}
-
-/// The side above's side of the body's stream.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Face {
-    /// No demand outstanding.
-    Idle,
-    /// A demand outstanding, which the intake does not meet yet.
-    Demand(Read),
-    /// The side above withdrew its demand: it reads no more (lib.md, 7),
-    /// and discards the rest or closes the client next.
-    Withdrawn,
-    /// The side above gave up the rest: read and dropped.
-    Discarding,
 }
 
 /// An event below while idle: only the stream's end or failure, as nothing
@@ -648,9 +605,14 @@ fn exchange_up(
             let parsed = match &mut exchange.response {
                 Receiving::Head(reading) => head::line(reading, &bytes),
                 Receiving::Body(download) => {
-                    return match body::delivered(download, intake, limits, bytes, above) {
-                        Ok(()) => settle(exchange, intake, limits, above, below),
-                        Err(error) => fail(exchange, error, intake, above, below),
+                    return match body::delivered(&mut download.body, intake, limits.head, bytes) {
+                        Ok(up) => {
+                            if let Some(bytes) = up {
+                                above.push(Event::Body(Up::Bytes(bytes)));
+                            }
+                            settle(exchange, intake, limits, above, below)
+                        }
+                        Err(bad) => fail(exchange, framing_error(bad), intake, above, below),
                     };
                 }
             };
@@ -689,7 +651,7 @@ fn exchange_up(
                 return fail(exchange, Error::Closed(Some(fault)), intake, above, below);
             }
             match &mut exchange.response {
-                Receiving::Body(download) if download.rest == Rest::Over => {
+                Receiving::Body(download) if download.body.rest == Rest::Over => {
                     download.persist = false;
                     settle(exchange, intake, limits, above, below)
                 }
@@ -724,9 +686,9 @@ fn ended(
             let answered = reading.budget < limits.head;
             fail(exchange, Error::Truncated { answered }, intake, above, below)
         }
-        Receiving::Body(download) => match download.rest {
+        Receiving::Body(download) => match download.body.rest {
             Rest::UntilEnd | Rest::Over => {
-                download.rest = Rest::Over;
+                download.body.rest = Rest::Over;
                 download.persist = false;
                 settle(exchange, intake, limits, above, below)
             }
@@ -801,7 +763,7 @@ fn final_head(
         }
         Upload::None | Upload::Finished | Upload::Stopped => {}
     }
-    exchange.response = Receiving::Body(Download { rest, face: Face::Idle, persist });
+    exchange.response = Receiving::Body(Download { body: Incoming { rest, face: Face::Idle }, persist });
     settle(exchange, intake, limits, above, below)
 }
 
@@ -869,7 +831,7 @@ fn body_demanded(
         Receiving::Body(download) => download,
         Receiving::Head(_) => unreachable!("a body demand before the response"),
     };
-    download.face = match download.face {
+    download.body.face = match download.body.face {
         // A withdrawal: what is read for it from now on is dropped. One with
         // nothing outstanding was on its way when its demand's answer went
         // up (lib.md, 7): the side above reads no more all the same.
@@ -902,15 +864,15 @@ fn discard(
         Receiving::Body(download) => download,
         Receiving::Head(_) => unreachable!("a Discard before the response"),
     };
-    match download.face {
+    match download.body.face {
         Face::Idle | Face::Demand(_) | Face::Withdrawn => {}
         Face::Discarding => unreachable!("a second Discard"),
     }
-    download.face = Face::Discarding;
+    download.body.face = Face::Discarding;
     // A body that runs to the end of the stream has no end to discard to:
     // the exchange is done, and the connection with it.
-    if download.rest == Rest::UntilEnd {
-        download.rest = Rest::Over;
+    if download.body.rest == Rest::UntilEnd {
+        download.body.rest = Rest::Over;
         download.persist = false;
     }
     settle(exchange, intake, limits, above, below)
@@ -944,7 +906,13 @@ fn settle(
     below: &mut Queue<Down>,
 ) -> State {
     let pumped = match &mut exchange.response {
-        Receiving::Body(download) => body::pump(download, intake, above),
+        Receiving::Body(download) => {
+            let (up, pumped) = body::pump(&mut download.body, intake);
+            if let Some(up) = up {
+                above.push(Event::Body(up));
+            }
+            pumped
+        }
         Receiving::Head(_) => Pumped::Open,
     };
     match pumped {
@@ -982,7 +950,7 @@ fn wanted(exchange: &Exchange, intake: &Intake, limits: &Limits) -> Option<Deman
             assert!(reading.budget > 0, "a head with nothing left of its budget has failed");
             Read::Scan { until: Delimiter::LF, max: reading.budget }
         }
-        Receiving::Body(download) => match body::read(download, intake, limits) {
+        Receiving::Body(download) => match body::read(&download.body, intake, limits.head, limits.read) {
             Some(read) => read,
             None => Read::Nothing,
         },
@@ -1052,11 +1020,12 @@ fn fail(
         Upload::None | Upload::Finished | Upload::Stopped => {}
     }
     match exchange.response {
-        Receiving::Body(Download { face: Face::Idle | Face::Demand(_), .. }) => {
+        Receiving::Body(Download { body: Incoming { face: Face::Idle | Face::Demand(_), .. }, .. }) => {
             above.push(Event::Body(Up::Failed(fault)));
         }
         // A stream the side above reads no more is told nothing.
-        Receiving::Body(Download { face: Face::Withdrawn | Face::Discarding, .. }) | Receiving::Head(_) => {}
+        Receiving::Body(Download { body: Incoming { face: Face::Withdrawn | Face::Discarding, .. }, .. })
+        | Receiving::Head(_) => {}
     }
     above.push(Event::Failed(error));
     body::drain(intake);
@@ -1065,4 +1034,13 @@ fn fail(
         below.push(Down::Demand { read: Read::Nothing, room: 0 });
     }
     State::Spent
+}
+
+/// The error a chunked body's bad framing fails the exchange with.
+fn framing_error(bad: body::Bad) -> Error {
+    match bad {
+        body::Bad::ChunkSize => Error::ChunkSize,
+        body::Bad::Chunk => Error::Chunk,
+        body::Bad::Trailer => Error::Trailer,
+    }
 }

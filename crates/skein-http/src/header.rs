@@ -1,5 +1,6 @@
 //! Header fields (RFC 9110, 5): a name and a value, both bytes, the names
-//! compared without regard to case; and the lists some values are.
+//! compared without regard to case; the lists some values are; and the
+//! lines a head comes in.
 
 use alloc::boxed::Box;
 
@@ -95,4 +96,15 @@ pub(crate) fn lists(headers: &[Header], name: &[u8], token: &[u8]) -> bool {
         }
     }
     false
+}
+
+/// A line's content: the bytes before its LF, and before a CR that
+/// precedes it (RFC 9112, 2.2). `None` for bytes that do not end with LF:
+/// a scan that reached its maximum first.
+pub(crate) fn content(bytes: &[u8]) -> Option<&[u8]> {
+    let line = bytes.strip_suffix(b"\n")?;
+    match line.strip_suffix(b"\r") {
+        Some(line) => Some(line),
+        None => Some(line),
+    }
 }

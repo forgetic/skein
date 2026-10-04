@@ -19,13 +19,16 @@
 
 extern crate alloc;
 
+mod body;
 pub mod client;
 mod header;
+mod message;
 pub mod sse;
 #[cfg(test)]
 mod tests;
 
 pub use header::Header;
+pub use message::{Method, Version};
 
 /// The most an entry point emits in one call, into each of its two queues.
 /// Whoever calls it reserves this much room in each first
