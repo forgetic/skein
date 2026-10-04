@@ -255,8 +255,8 @@ stream writer runs in one too, and what it writes reads back, by the
 reference reader and by the reader's own world, as it was written.
 Thirty-two request transcripts, curl's, two LLM SDKs' JSON POSTs, and
 hostile ones, come to their expectations in the focused suite. The fuzzy
-suite runs 20,000 connections of generated, mutated and corrupted
-requests, the request transcripts cut and mutated, and 10,000 runs of the
+suite runs 10,000 connections of generated, mutated and corrupted
+requests, the request transcripts cut and mutated, and 5,000 runs of the
 writer, asserting that every outcome, rejection, refusal and fault fell.
 
 The protocol worlds (http.md, 6) build both ends of an LLM streaming
@@ -267,7 +267,7 @@ the other received, token for token, and the bytes the writer runs ahead
 of the reader to the caps between them. Five scenarios run in the focused
 suite: an answer streamed whole, a slow reader that stops the writer, a
 response that comes mid-upload, an end closing while the other sends,
-and the wire resetting at any moment; 400 runs of them under caps drawn
+and the wire resetting at any moment; 300 runs of them under caps drawn
 down to the least the stacks allow run in the fuzzy suite. They keep a
 small harness of their own, as `skein-world` drives processes over the
 simulator's kernel records, which a world joined by bytes has none of.

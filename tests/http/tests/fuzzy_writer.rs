@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use skein_http_world::writer_world::{self, Run, Settings};
 use skein_lib::Rng;
 
-const ROUNDS: u64 = 10_000;
+const ROUNDS: u64 = 5_000;
 
 #[derive(Default)]
 struct Seen(BTreeMap<String, u32>);

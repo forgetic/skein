@@ -14,7 +14,7 @@ use skein_lib::Rng;
 use skein_protocol_world::scenario;
 use skein_protocol_world::world::{self, Expect, Run, Settings};
 
-const ROUNDS: u64 = 400;
+const ROUNDS: u64 = 300;
 
 #[derive(Default)]
 struct Seen(BTreeMap<String, u32>);

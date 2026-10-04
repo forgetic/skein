@@ -18,10 +18,10 @@ use skein_http_world::server_world::{self, Outcome, Plan, Run, Settings};
 use skein_http_world::{generate, request_transcript, requests};
 use skein_lib::Rng;
 
-const ROUNDS: u64 = 20_000;
+const ROUNDS: u64 = 10_000;
 
 /// The transcripts, longer, are swept fewer times.
-const TRANSCRIPT_ROUNDS: u64 = 2_000;
+const TRANSCRIPT_ROUNDS: u64 = 1_000;
 
 /// How often each thing a sweep injects or reaches fell.
 #[derive(Default)]

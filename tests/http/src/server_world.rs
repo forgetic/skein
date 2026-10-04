@@ -68,6 +68,10 @@ pub struct Settings {
     /// Per mille, per demand: how likely the side above withdraws a body
     /// demand rather than wait for it, and discards the rest.
     pub withdraw: u32,
+    /// Per mille, per demand: how likely the side above withdraws a reply's
+    /// demand, as a machine stacked on the reply does when it closes, and
+    /// closes the server a while later.
+    pub withdraw_reply: u32,
     /// Whether the client sends each request only once the last exchange is
     /// over, rather than pipelining them.
     pub patient: bool,
@@ -111,6 +115,7 @@ impl Settings {
             idle_end: draw(rng, 0, 1000),
             reads: if rng.chance(300) { Reads::Bytes } else { Reads::Any },
             withdraw: if rng.chance(300) { draw(rng, 0, 200) } else { 0 },
+            withdraw_reply: 0,
             patient: rng.chance(500),
             patience: rng.between(8, 400),
             cut: None,
@@ -127,6 +132,9 @@ impl Settings {
     pub fn chaotic(rng: &mut Rng, limits: Limits, len: usize) -> Settings {
         let mut settings = Settings::calm(rng, limits);
         let span = 6 * len as u64 + 64;
+        if rng.chance(150) {
+            settings.withdraw_reply = draw(rng, 0, 100);
+        }
         if rng.chance(150) {
             settings.cut = Some(usize::try_from(rng.below(len as u64 + 1)).expect("fits a usize"));
         }
@@ -204,6 +212,8 @@ pub enum When {
     AfterBody,
     /// Once it discarded the body.
     Discarding,
+    /// While a demand of its on the body is outstanding.
+    Midway,
 }
 
 /// A plan drawn at random: a response of [`requests::response`], given at
@@ -212,7 +222,8 @@ pub enum When {
 pub fn plan(rng: &mut Rng) -> Plan {
     let (response, reply) = requests::response(rng);
     let when = match rng.below(10) {
-        0 | 1 => When::First,
+        0 => When::First,
+        1 => When::Midway,
         2 => When::Partway(draw(rng, 0, 4)),
         3 => When::Discarding,
         _ => When::AfterBody,
@@ -363,6 +374,7 @@ pub fn run(client: &[u8], plans: &[Plan], settings: &Settings, seed: u64) -> Run
             closing: None,
             closed: false,
             spent: false,
+            must_close: false,
         },
         fell: Fell::default(),
         iteration: 0,
@@ -630,6 +642,7 @@ enum Life {
 }
 
 /// The side above.
+#[expect(clippy::struct_excessive_bools, reason = "what the side above knows of the connection, a flag each")]
 struct Above<'a> {
     plans: &'a [Plan],
     seen: Vec<Seen>,
@@ -642,6 +655,9 @@ struct Above<'a> {
     closed: bool,
     /// The connection is not to be used again.
     spent: bool,
+    /// The side above withdrew the reply's demand, as a machine stacked on
+    /// it does when it closes: it closes the server next.
+    must_close: bool,
 }
 
 /// The side above's side of an exchange.
@@ -822,6 +838,25 @@ impl World<'_> {
             }
             Life::Open | Life::Ended => {}
         }
+        // An answer on its way for a demand the server withdrew, before the
+        // close: the server drops it.
+        if let Some((read, room)) = self.below.withdrawn
+            && self.rng.chance(300)
+        {
+            self.below.withdrawn = None;
+            if let Some(bytes) = self.below.intake.meet(read) {
+                self.fell.late_answer = true;
+                self.up(Up::Bytes(bytes));
+                return;
+            }
+            if room > 0 {
+                self.fell.late_answer = true;
+                self.below.granted = room;
+                self.below.sends = 0;
+                self.up(Up::Room);
+                return;
+            }
+        }
         let ended = self.below.life == Life::Ended;
         let nothing_left = self.below.arrived == self.below.client.len() && self.below.intake.is_empty();
         let below = &mut self.below;
@@ -874,7 +909,7 @@ impl World<'_> {
         let closes_now = match self.settings.close {
             Some(at) => self.iteration >= at,
             None => false,
-        };
+        } || self.above.must_close;
         let over = self.above.exchange.as_ref().is_none_or(|exchange| exchange.terminal);
         let last = over && !self.above.asked && (self.above.spent || self.above.seen.len() >= self.above.plans.len());
         if closes_now || (last && self.rng.chance(self.settings.eagerness)) {
@@ -941,6 +976,7 @@ impl World<'_> {
             let ready = match plan_when {
                 When::First => true,
                 When::Partway(after) => exchange.pieces >= after || exchange.body == Face::Over,
+                When::Midway => matches!(exchange.body, Face::Demanded(_) | Face::Over),
                 When::AfterBody | When::Discarding => exchange.body == Face::Over,
             };
             if ready {
@@ -1058,6 +1094,14 @@ impl World<'_> {
                 }
                 self.down(Request::Reply(Down::Send(piece.into())));
             }
+            // Now and then, as a machine stacked on the reply withdraws its
+            // demand when it closes, a while before the server's close.
+            Reply::Demanded(_) if self.rng.chance(self.settings.withdraw_reply) => {
+                exchange.reply = Reply::Over;
+                self.fell.reply_withdrawn = true;
+                self.above.must_close = true;
+                self.down(Request::Reply(Down::Demand { read: Read::Nothing, room: 0 }));
+            }
             Reply::None | Reply::Demanded(_) | Reply::Over => {}
         }
     }
@@ -1086,9 +1130,10 @@ impl World<'_> {
 
     fn down(&mut self, rq: Request) {
         let stopping = match rq {
-            Request::Close => Stopping::Closing,
+            // A withdrawal of the reply's demand stops the server as a close
+            // does: it writes no more.
+            Request::Close | Request::Reply(Down::Demand { read: Read::Nothing, room: 0 }) => Stopping::Closing,
             Request::Respond(_) | Request::Discard => Stopping::Maybe,
-            Request::Reply(Down::Demand { read: Read::Nothing, room: 0 }) => Stopping::Closing,
             Request::Next | Request::Body(_) | Request::Reply(_) => Stopping::No,
         };
         server::down(&mut self.server, &self.env, rq, &mut self.events, &mut self.requests);

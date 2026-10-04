@@ -990,22 +990,22 @@ pub struct Limits {
   waited for each thing, room granted while a response
   waited, a response read mid-upload, a withdrawal and an answer after
   it, a discard, a connection reused, a CR's LF delivered alone, and a
-  line longer than a chunk read in pieces. The server's: 20,000
+  line longer than a chunk read in pieces. The server's: 10,000
   connections of one to four generated requests, valid, mutated, and
   corrupted where a random edit seldom lands (another major version, a
   method not implemented, a fold, whitespace before a colon, both framing
   headers, a coding not undone, two lengths, a chunk size past a `u64`,
   no `Host`, a field and a request line past the head, too many fields, a
   body past the limit, a trailer section without end, HTTP/2's preface),
-  and 2,000 request transcripts cut and mutated; it asserts that every
+  and 1,000 request transcripts cut and mutated; it asserts that every
   outcome, every rejection and refusal, each way a stream ends or fails
   and what the server waited for then, a close while it waited for each
   thing, a 100 (Continue), a client tired of waiting for one, a body
   given up, a head that waited for a discard, room after the end, a
-  reply withdrawn, pipelining and reuse fell. The writer's: 10,000 runs,
+  reply withdrawn, pipelining and reuse fell. The writer's: 5,000 runs,
   every answer and refusal, an event in pieces, the end and room after
   it, a failure idle and while writing, and a close in each state. The
-  protocol worlds' (`tests/protocol/tests/fuzzy_worlds.rs`): 400 runs of
+  protocol worlds' (`tests/protocol/tests/fuzzy_worlds.rs`): 300 runs of
   the scenarios under caps drawn down to the least the stacks allow,
   asserting that a writer was held back, an upload stopped, a writer
   heard its stream fail, a stream reset, and each outcome at each end
