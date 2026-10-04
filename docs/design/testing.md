@@ -221,9 +221,10 @@ random, grants room late, ends early and fails, and a user that uploads
 within the room granted, reads with demands of every shape, withdraws,
 discards, stops, and closes in every state, checking both of the
 client's streams as it goes; the event stream reader runs in one of its
-own (http.md, 6). Each run is held to a reference reader. Forty-five
+own (http.md, 6). Each run is held to a reference reader. Forty-seven
 transcripts, in the shape of two LLM providers' streams, a forge's
-answers and responses curl accepts, and hostile ones, decode to their
+answers (one captured from a real forge) and responses curl accepts,
+and hostile ones, decode to their
 expectations in the focused suite, and the LLM ones go up the client,
 the reader and a JSON tokenizer per event, stacked. The fuzzy suite runs
 20,000 connections of generated, mutated and corrupted exchanges, 12,000

@@ -1,6 +1,8 @@
-# Written by hand after the published format of Anthropic's Messages API
-# (streaming, server-sent events): no real response can be captured offline.
-# Drafted by the reference readers, then checked by hand.
+# A synthetic variation, written by hand after the published format of
+# Anthropic's Messages API (streaming, server-sent events): Anthropic sends its
+# streams chunked, and this one is framed by Content-Length instead, so that an
+# event stream is also read by length. No real response can be captured
+# offline. Drafted by the reference readers, then checked by hand.
 status HTTP/1.1 200
 header Date "Sat, 03 Oct 2026 10:12:44 GMT"
 header Content-Type "text/event-stream; charset=utf-8"

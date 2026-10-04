@@ -476,16 +476,18 @@ Not built yet (section 9). As planned:
   - A seed replays to the same run.
 - **Transcripts** in `tests/http/transcripts/`, each `<name>.http` beside
   `<name>.expect`, what it must decode to: the head, the body or the
-  events its body holds, and the outcome. No real response can be
-  captured offline, so each is written by hand after the public format
-  of its peer, and says so; its expectation was drafted by the reference
-  readers and checked by hand. Forty-five:
+  events its body holds, and the outcome. Each is written by hand after
+  the public format of its peer, and says so, but one captured from the
+  user's own forge with curl, unauthenticated; its expectation was
+  drafted by the reference readers and checked by hand. Forty-seven:
   - an LLM provider's streams: Anthropic's Messages, a text answer
-    chunked and a tool call by length, and an overloaded error; OpenAI's
-    Chat Completions, a text answer chunked and tool calls by length,
-    each ending with `[DONE]`;
+    chunked, a tool call by length (a synthetic variation: Anthropic
+    sends its streams chunked), an overloaded error as a 529, and one as
+    an `error` event mid-stream; OpenAI's Chat Completions, a text answer
+    chunked and tool calls by length, each ending with `[DONE]`;
   - a forge's API: a Forgejo pull request by length, a page of issues
-    chunked with its `Link` and `X-Total-Count`, and a 404;
+    chunked with its `Link` and `X-Total-Count`, a 404, and a repository
+    as a real Forgejo behind nginx sent it, chunked;
   - responses curl accepts: a head of LF alone, a folded field, HTTP/1.0
     kept alive and to the end of the stream, a 100 and a 103 before the
     response, a 204, a 304, chunk extensions and trailers, a length
