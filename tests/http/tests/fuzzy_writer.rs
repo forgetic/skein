@@ -1,5 +1,5 @@
 //! The event stream writer's machine world, swept (testing-strategy.md, 8;
-//! http.md, 8): many runs of generated events and comments, now and then
+//! http.md, 6): many runs of generated events and comments, now and then
 //! flawed, under limits and neighbours drawn from each seed, what was
 //! written read back by the reference reader and the reader's own world.
 //! This stands in for the fuzz target, which waits for a nightly

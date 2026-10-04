@@ -27,7 +27,7 @@ tested in its own tier is in that part's document.
 |---|---|---|
 | step tests | lib's containers and value types; each crate's step functions | lib.md, 10 |
 | machine worlds | HTTP, server-sent events, JSON, each side alone | http.md, 6; json.md, 6 |
-| protocol worlds | an LLM client's HTTP, server-sent events and JSON against a server's | http.md, 9 |
+| protocol worlds | an LLM client's HTTP, server-sent events and JSON against a server's | http.md, 6 |
 | io worlds | io over the simulator, with a scripted owner | io.md, 8 |
 | simulated worlds | the examples' `iterate`, each a process of the simulator | section 3 |
 | real loop | the examples under the shell, on the real kernel | section 3 |
@@ -137,8 +137,9 @@ tests/conformance/sim           the suite against the simulator, skein-conforman
 tests/conformance/ring          the suite against the ring, skein-conformance-ring
 tests/json                      the JSON tokenizer's machine worlds, the writer against it, and their worst cases against the counting allocator, skein-json-world
 tests/json/transcripts          its transcripts, each with what it must decode to
-tests/http                      the HTTP client's and the event stream reader's machine worlds, a reference reader of each, the two stacked with JSON, and their worst cases against the counting allocator, skein-http-world
-tests/http/transcripts          its transcripts, each with what it must decode to
+tests/http                      the HTTP client's and server's and the event stream reader's and writer's machine worlds, a reference reader of each, the client and the reader stacked with JSON, and their worst cases against the counting allocator, skein-http-world
+tests/http/transcripts          its transcripts, responses and, in requests/, requests, each with what it must decode to
+tests/protocol                  the protocol worlds: an LLM client's stack against a server's, joined by bytes cut at random, skein-protocol-world
 tests/**/tests/*.rs             a crate's focused tests
 tests/**/tests/fuzzy_*.rs       its fuzzy tests: sweeps over many seeds
 tests/clippy.toml               what the crates under tests/ may not use
@@ -180,8 +181,8 @@ is held to the subset instead (testing-strategy.md, 4): it has no
 
 A machine's worlds are a crate of their own, `tests/<machine>`, with its
 transcripts in `transcripts/` beside its tests. The minimal machine joins
-the io worlds with files and processes; the protocol worlds find their
-home under `tests/` when the first is built. `scripts/check.sh` runs what CI runs:
+the io worlds with files and processes; the protocol worlds are a crate
+of their own, `tests/protocol`. `scripts/check.sh` runs what CI runs:
 formatting, the lints as errors, then the focused suite and the fuzzy
 suite, with nextest (section 7).
 
@@ -191,9 +192,9 @@ As of 2026-10-04.
 
 | Tier | Built |
 |---|---|
-| step tests | lib: every container and value type; io: the kernel records' rules, and every cell of its listener and stream; JSON: the tokenizer and the writer; HTTP: the client and the event stream reader; the echo: its domain, every cell of its connection and listener, its `iterate`, its startup checks, and its fake client |
-| machine worlds | JSON: the tokenizer, with its transcripts, and the writer against it; HTTP: the client and the event stream reader, with their transcripts |
-| protocol worlds | none; the HTTP client, the event stream reader and JSON stacked over transcripts, a step towards them |
+| step tests | lib: every container and value type; io: the kernel records' rules, and every cell of its listener and stream; JSON: the tokenizer and the writer; HTTP: the client and the server, the event stream reader and the writer; the echo: its domain, every cell of its connection and listener, its `iterate`, its startup checks, and its fake client |
+| machine worlds | JSON: the tokenizer, with its transcripts, and the writer against it; HTTP: the client and the server, with their transcripts of responses and of requests, and the event stream reader and the writer, the writer read back by the reader |
+| protocol worlds | an LLM client's stack (the HTTP client, the event stream reader, JSON) against a server's (the HTTP server, the event stream writer, JSON), five scenarios |
 | io worlds | sockets, over the simulator; one exchange over the ring |
 | simulated worlds | the echo and its fake clients, seven scenarios |
 | real loop | the echo and its fake clients, on loopback |
@@ -242,6 +243,34 @@ the reader and a JSON tokenizer per event, stacked. The fuzzy suite runs
 20,000 connections of generated, mutated and corrupted exchanges, 12,000
 event streams, and the transcripts cut and mutated, asserting that every
 fault fell.
+
+The HTTP server runs in a machine world of its own, for one request
+after another, between a client's stream that cuts its bytes at random,
+pipelines or waits, holds a body back for a 100 (Continue), grants room
+late, ends and fails, and a service that reads, discards, withdraws, and
+responds at every moment, now and then with a response the server must
+refuse; each call is held to a reference reader of requests, and what
+the server wrote, byte for byte, to a writer of the test's own. The event
+stream writer runs in one too, and what it writes reads back, by the
+reference reader and by the reader's own world, as it was written.
+Thirty-two request transcripts, curl's, two LLM SDKs' JSON POSTs, and
+hostile ones, come to their expectations in the focused suite. The fuzzy
+suite runs 20,000 connections of generated, mutated and corrupted
+requests, the request transcripts cut and mutated, and 10,000 runs of the
+writer, asserting that every outcome, rejection, refusal and fault fell.
+
+The protocol worlds (http.md, 6) build both ends of an LLM streaming
+exchange as two services would, the client's stack and the server's, a
+scripted user at each top, joined by a stream each way cut and joined at
+random, in one loop with a referee that holds what each top sent to what
+the other received, token for token, and the bytes the writer runs ahead
+of the reader to the caps between them. Five scenarios run in the focused
+suite: an answer streamed whole, a slow reader that stops the writer, a
+response that comes mid-upload, an end closing while the other sends,
+and the wire resetting at any moment; 400 runs of them under caps drawn
+down to the least the stacks allow run in the fuzzy suite. They keep a
+small harness of their own, as `skein-world` drives processes over the
+simulator's kernel records, which a world joined by bytes has none of.
 
 io's worlds run io over the simulator with a scripted owner above it and
 a referee beside it, every process in one loop (io.md, 8). Their harness
@@ -300,8 +329,9 @@ same run. No state digest yet.
 Memory: the counting allocator is temper's heap meter, ported with its
 own tests. Each of lib's containers is checked against its worst case
 (lib.md, 10), in the focused suite, and so are the JSON tokenizer's and
-writer's and the HTTP client's and event stream reader's, a call of an
-entry point at a time (json.md, 6; http.md, 6), and io (io.md,
+writer's, the HTTP client's and server's, and the event stream reader's
+and writer's, a call of an entry point at a time (json.md, 6; http.md,
+6), and io (io.md,
 8): driven by hand to its limits and back, every call a step of the
 meter, as an io world's simulator would allocate on the same thread. The
 echo's simulated worlds check memory at every iteration: each process's
@@ -329,11 +359,10 @@ By tier, in the order temper pulls the parts (README.md):
 - **Conformance** for files and processes, with a scratch directory as
   the root, when io pulls them; against the readiness backend when it
   exists.
-- **Machine worlds** for the HTTP server and the event writer, with
-  their transcripts, when the fake LLM provider pulls them (http.md, 9);
-  **fuzz targets** for every machine, JSON's and HTTP's included, when a
-  nightly toolchain is installed; and **protocol worlds**, an LLM
-  client's stack against a server's, once the server is built.
+- **Fuzz targets** for every machine, JSON's and HTTP's included, when a
+  nightly toolchain is installed; and the heap metered in the protocol
+  worlds, which meets the open question of heap handed between stacks
+  in one thread (section 9).
 - **TLS's own tests,** when the TLS client is built.
 - **The HTTP examples' simulated worlds and real loop,** with skein-http.
   The echo's are built; the real loop's signals, child processes, scratch

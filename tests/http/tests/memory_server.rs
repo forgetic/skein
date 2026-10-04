@@ -1,5 +1,5 @@
 //! The server's and the event writer's worst cases against the counting
-//! allocator (http.md, 5.6 and 6.2; programming-model.md, 6.3): every call
+//! allocator (http.md, 5.6 and 4.4; programming-model.md, 6.3): every call
 //! of an entry point a step of the meter, and what the machine held of its
 //! own never more than its `worst_case`.
 //!

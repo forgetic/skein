@@ -1,4 +1,4 @@
-//! The server-sent events writer (http.md, 6): a step machine that frames
+//! The server-sent events writer (http.md, 4.3): a step machine that frames
 //! each event the side above gives it as the standard's lines (WHATWG
 //! HTML, 9.2.6), sized, and writes it into the body stream below, one at a
 //! time, within the room it is granted.

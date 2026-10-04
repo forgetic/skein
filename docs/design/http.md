@@ -5,8 +5,7 @@ machines for HTTP/1.1, client and server, and for server-sent events,
 reader and writer. They are step machines of a connection's stack
 (programming-model.md, 4): each depends on lib only, and meets the
 stream below it and the user above it through entry points of the
-model's shape. The client and the reader are built; the server and the
-writer are not (section 9).
+model's shape. All four are built (section 9).
 
 ## 1. In one page
 
@@ -15,19 +14,28 @@ writer are not (section 9).
   stream; the body goes up as a stream that the side above demands.
 - **One exchange at a time.** A client connection carries one exchange
   at a time and is used again when both sides allow it; a server
-  connection will parse the next request only once the response is
-  queued and there is room for the one after it.
+  connection parses the next request only once the response is queued
+  and there is room for the one after it: it sets that room aside before
+  it reads anything of a request, so whatever the request comes to, its
+  answer goes down at once.
 - **Two streams per exchange.** The side above writes the request body
   as a stream and reads the response body as one, each a `lib::stream`
-  face (lib.md, 7) of which the client is the side below. A machine
-  stacked on the response body (server-sent events, JSON) cannot tell it
-  from a socket.
-- **Server-sent events** are a machine over a body stream: lines, fields,
-  and an event at each blank line, each under a maximum. An event's data
-  goes up whole, and `sse::Data` reads it to a JSON tokenizer.
+  face (lib.md, 7) of which the client is the side below; the server's
+  side above reads the request body and writes the response body the
+  same way. A machine stacked on a body (server-sent events, JSON)
+  cannot tell it from a socket.
+- **Refuse at the entrance.** What is wrong with a request's head the
+  server answers itself, small and fixed: 400, 413, 414, 431, 501 or 505,
+  and the connection ends. Bad framing in a body closes, unanswered.
+- **Server-sent events** are a machine over a body stream each way. The
+  reader reads lines, fields, and an event at each blank line, each
+  under a maximum; an event's data goes up whole, and `sse::Data` reads
+  it to a JSON tokenizer. The writer frames each event sized and sends
+  it within the room it is granted.
 - **Both sides of each machine** are skein's (client and server, reader
   and writer), and each is tested against transcripts of real peers'
-  formats, generated messages, and, once both are built, the other side.
+  formats, generated messages, and the other side: a protocol world
+  stacks both ends of an LLM's stream (section 6).
 
 ## 2. In skein
 
@@ -52,6 +60,20 @@ tls
 io socket
 ```
 
+A fake LLM provider's, the other end:
+
+```
+domain
+  ▲  typed calls              ▼  what it answers
+the service's protocol layer
+  ▲  tokens                   ▼  events, their data written by the JSON writer
+json (the request body)      sse writer     skein_http::sse::writer
+  ▲  request body             ▼  response body
+http server                                 skein_http::server
+  ▲  stream: plaintext        ▼
+tls, or an io socket
+```
+
 Each machine has its own `Limits` and `worst_case`, each entry point
 declares its `MAX_OUT`, and each says what it waits for:
 
@@ -67,12 +89,23 @@ pub fn up(reader: &mut Reader, env: &Env<Limits>, ev: stream::Up,
           above: &mut Queue<Event>, below: &mut Queue<stream::Down>)
 pub fn down(reader: &mut Reader, env: &Env<Limits>, rq: Request,
             above: &mut Queue<Event>, below: &mut Queue<stream::Down>)
+
+// skein_http::server and skein_http::sse::writer: the same shape
+pub fn up(server: &mut Server, env: &Env<Limits>, ev: stream::Up,
+          above: &mut Queue<Event>, below: &mut Queue<stream::Down>)
+pub fn down(server: &mut Server, env: &Env<Limits>, rq: Request,
+            above: &mut Queue<Event>, below: &mut Queue<stream::Down>)
 ```
 
 Whoever stacks a machine checks at startup that its largest demand fits
-the side below: `client::largest_read` and `client::largest_room`
-against the stream's intake and output caps, `sse::largest_demand` and
-the JSON tokenizer's against the client's `Limits::read`.
+the side below: `client::largest_read` and `client::largest_room`, or
+`server::largest_read` and `server::largest_room`, against the stream's
+intake and output caps; `sse::largest_demand` and the JSON tokenizer's
+against the client's `Limits::read`; the tokenizer's against the
+server's `Limits::read`, and `writer::largest_room` against its
+`Limits::send`. The method and the version a start line names
+(`Method`, `Version`) and a field (`Header`) are the crate's, both sides
+the same.
 
 ## 3. The HTTP/1.1 client
 
@@ -301,10 +334,12 @@ pub struct Limits {
   **`DOWN_MAX_OUT`** is two events and one request: a body's end and
   `Done`, or `Closed`; below, a demand, a send or a withdrawal.
 
-## 4. The server-sent events reader
+## 4. Server-sent events
 
-A machine over a body stream (WHATWG HTML, 9.2), with the same shape on
-both sides as the client's.
+Two machines over a body stream (WHATWG HTML, 9.2), each with the same
+shape on both sides as the client's: the reader, which a client stacks
+on a response body, and the writer (4.3), which a server stacks on its
+reply. The reader:
 
 ```rust
 pub enum Request { Next, Close }           // from the side above
@@ -401,18 +436,321 @@ pub struct Limits {
   only a `Close` while reading emits both, `Closed` and the demand
   withdrawn.
 
-## 5. The server and the event writer
+### 4.3 The writer
 
-Not built yet (section 9). As planned:
+```rust
+pub enum Request {                         // from the side above
+    Event(Outgoing),                       // write an event: Sent, Refused or Failed answers it
+    Comment(Box<[u8]>),                    // write a comment, to keep the stream alive: the same
+    Finish,                                // end the body, once nothing is being written
+    Close,                                 // Closed answers it
+}
 
-- **A server connection** takes one request at a time. It parses the
-  next request only once the response is queued and there is room for
-  the response after it (programming-model.md, section 7). Its request
-  head is read as the client reads a response head (3.2), its body
-  framed by length or chunks.
-- **The event writer** frames events for a server, sized.
-- **Not planned:** HTTP/2 and upgrades. Revisit them when a peer
-  requires them.
+pub enum Event { Sent, Refused(Refusal), Failed(Fault), Closed }
+
+pub struct Outgoing { name: Box<[u8]>, data: Box<[u8]>, id: Option<Box<[u8]>>, retry: Option<u64> }
+pub enum Refusal { Name, Id, Comment, TooLong }
+```
+
+- **One at a time.** Exactly one event answers each event or comment:
+  `Sent`, once all of it went down; `Refused`, for what the side above
+  got wrong, writing nothing and leaving the writer as it was; or
+  `Failed`, the stream's failure, now or before, after which nothing
+  follows but `Closed`. Another while one is written, or one after
+  `Finish`, is the side above's bug, asserted.
+- **Framed sized, a block each:** `event: ` and the type, if it has one;
+  `id: ` and the id, if it has one, an empty one resetting a reader's
+  last event ID; `retry: ` and its digits; a `data: ` line for each line
+  of the data, split at each LF, CRLF or CR, so one line more than its
+  endings; and a blank line. One space follows each colon, which a reader
+  drops, so a value's own leading space survives. A comment is `: ` and
+  its text, or the colon alone, then a blank line, so that a reader's
+  count for an event starts over after it (4.2).
+- **Refused in a fixed order:** a type with a CR or an LF (`Name`), an id
+  with a CR, an LF or a NUL, which a reader ignores (`Id`), a comment
+  with a CR or an LF (`Comment`), then a frame past `Limits::event`
+  (`TooLong`).
+- **Every event written is one a reader dispatches,** and reads back as
+  it was written: a type of none as `message`, the data's line endings
+  as LFs, the last event ID as each `id` left it.
+- **Sent in pieces** of at most `Limits::chunk`, each within the room
+  granted for it, one `Send` a grant; the frame itself goes, uncopied,
+  when it fits one. The server's chunked reply makes each a chunk.
+- **`Finish`** ends the body below, once nothing is being written; after
+  the stream failed there is nothing to end. The stream's `End` changes
+  nothing for a writer, which reads nothing: room may still come after
+  it.
+- **`Close` ends the writer in any state:** it withdraws what it
+  demanded below, drops an event not yet sent, and answers `Closed`.
+- **What it waits for**, `waiting()`: `Above`, `Room` (the reader is not
+  reading), `Close`, `Nothing`.
+
+### 4.4 The writer's limits and worst case
+
+```rust
+pub struct Limits {
+    pub event: u32,   // the longest event or comment framed, its blank line included: past it, TooLong
+    pub chunk: u32,   // the most room demanded at once; at least one
+}
+```
+
+- **`worst_case(&limits)`** is the event being written, framed, at most
+  `event`, held until all of it went down. What the side above gives it
+  is the side above's to count, and a piece copied out is handed out as
+  it is sent. `None` for a chunk of zero.
+- **`largest_room`** is `chunk`, which whoever stacks the writer checks
+  against the server's `Limits::send`. A reader whose `Limits::event` is
+  at least the writer's reads every event it writes.
+- **`UP_MAX_OUT`** is one event and two requests: room granted sends a
+  piece and asks room for the next, or sends the last and says `Sent`.
+  **`DOWN_MAX_OUT`** is one and one.
+
+## 5. The HTTP/1.1 server
+
+The server's vocabulary is its own, as the client's is: the service's
+protocol layer translates between it and the domain's.
+
+```rust
+pub enum Request {                         // from the side above
+    Next,                                  // the next request: Call, Ended or Failed answers it
+    Respond(Response),                     // the call's response head, once; Refused answers one refused
+    Body(stream::Down),                    // the request body's stream, read
+    Discard,                               // the rest of the request body is read and dropped, or given up
+    Reply(stream::Down),                   // the response body's stream, written
+    Close,                                 // Closed answers it
+}
+
+pub enum Event {                           // to the side above
+    Call(Call),                            // for a Next: a request's head, whole and sound
+    Ended,                                 // for a Next: the client ended the connection between requests
+    Body(stream::Up),                      // Bytes, End, or Failed
+    Reply(stream::Up),                     // Room, or Failed once the reply can go no further
+    Refused(Refusal),                      // for a Respond: refused, writing nothing
+    Done(Reuse),                           // for a Call: over, and whether the connection is kept
+    Failed(Error),                         // for a Call, or for a Next no call answered
+    Closed,                                // for a Close: terminal
+}
+
+pub struct Call { method: Method, target: Box<[u8]>, version: Version, headers: Box<[Header]>, body: Body }
+pub struct Response { status: u16, headers: Box<[Header]>, body: Body, close: bool }
+pub enum Body { None, Length(u64), Chunked }
+pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk, Trailer }
+```
+
+- **`Next` asks for the next request,** while no exchange is in
+  progress, and exactly one event answers it: `Call`; `Ended`, the
+  client's end with no line of a request; or `Failed`, a request
+  rejected with the server's own answer (`Rejected`), one cut short
+  (`Truncated`), or the stream's failure. The side above asks only when
+  it can take a request: at its entrance it refuses by not asking, or by
+  answering a busy status.
+- **A call is an exchange,** and exactly one terminal event ends it:
+  `Done`, once the response is all queued below and the request body was
+  read to its end, discarded or given up; or `Failed`. After `Ended`, a
+  `Failed` or `Done(Close)` the server waits for its close; a `Next` then
+  is the side above's bug, asserted, as is a request of any kind with no
+  call in progress.
+- **`Close` ends the server in any state.** It withdraws what it
+  demanded below, ends the exchange in progress without a word, and
+  answers `Closed`, its one terminal event. It does not close the stream
+  below, which its owner closes.
+
+### 5.1 One request at a time
+
+- **Room first.** On `Next`, before it reads anything of a request, the
+  server asks below for room for the longest response head it writes,
+  `Limits::response`, and holds it once granted, as io holds a grant
+  across demands that ask for none (io.md, 3.3). Only then does it read.
+  Whatever the request comes to, a response head or a rejection's
+  answer, goes down at once within that room, so the server never parses
+  a request it could not answer (programming-model.md, 7).
+- **The next request is read** only once the side above asks for it,
+  which it does after `Done(Keep)`, once the response is queued.
+  Pipelined requests wait below meanwhile, in the stream's intake, under
+  its cap, and then in the client's socket.
+
+### 5.2 The request head
+
+- **Read a line at a time,** as the client reads a response head (3.2):
+  each line a scan to LF of at most what is left of `Limits::head`, its
+  CR dropped. Empty lines before the request line are skipped, within the
+  budget (RFC 9112, 2.2).
+- **The request line** is a method, a space, a target, a space and
+  `HTTP/x.y`, exactly so: one that is not is rejected rather than
+  repaired (RFC 9112, 3). The method is a token, and one of `Method`'s,
+  the methods an API's client sends; the target is visible ASCII, kept as
+  it came, in whatever form the client wrote it. A minor version past 1
+  is read as 1.1.
+- **A field** is read as the client reads one (3.2), but an obsolete
+  fold, or whitespace before the first field, is rejected (RFC 9112, 5.2
+  lets a server).
+- **At the blank line:** one `Host` in HTTP/1.1, at most one in HTTP/1.0
+  (RFC 9112, 3.2); then the framing (RFC 9112, 6.1 and 6.3):
+  `Transfer-Encoding` is read only in HTTP/1.1 and only alone, so in
+  HTTP/1.0 or beside a `Content-Length` it is faulty framing, as it is
+  how requests are smuggled; its codings end with `chunked`, given once,
+  and hold no other, which the server does not undo. `Content-Length` is
+  one length, however many times it is given. Neither: no body. Then a
+  length past `Limits::body`.
+- **Errors are decided in a fixed order:** at a line, its length, then its
+  bytes, then the room for one more field; at the request line, its
+  form, then its version, then its method; at the blank line, the
+  `Host`, the framing, then the length.
+- **Each rejection** has a small, fixed answer (programming-model.md, 8):
+  the status line, `Content-Length: 0` and `Connection: close`. It goes
+  down within the room set aside, `Failed(Rejected(_))` answers the
+  `Next`, and the connection ends.
+
+  | Rejection | What | Answer |
+  |---|---|---|
+  | `RequestLine` | a request line that is not one | 400 |
+  | `TargetTooLong` | a request line that does not fit in what is left of the head | 414 |
+  | `Version` | another major version than HTTP/1 | 505 |
+  | `Method` | a method the server does not know | 501 |
+  | `Header` | a field line that is not a field, or a fold | 400 |
+  | `HeadTooLong` | a head past `Limits::head` | 431 |
+  | `TooManyHeaders` | more than `Limits::headers` fields | 431 |
+  | `Host` | no `Host` in HTTP/1.1, or more than one | 400 |
+  | `Framing` | framing that cannot be read | 400 |
+  | `Coding` | a transfer coding other than `chunked` | 501 |
+  | `BodyTooLong` | a body by length past `Limits::body` | 413 |
+
+### 5.3 The request body
+
+- **Read as the client reads a response body** (3.3), by the same code:
+  the server is the side below of the body's stream, keeps its contract,
+  and holds its carry-over in an intake of `Limits::read`. A request is
+  framed by length or by chunks, never to the end of the stream: one with
+  neither has no body. The first demand of an empty body gets `End`; the
+  exchange is done only once the side above read its `End`, or discarded
+  it.
+- **`Discard`** reads the rest and drops it, on a connection that may be
+  used again, so that the next request can be read; on one that may not,
+  it reads no more: the body is given up, and a read outstanding for it
+  withdrawn.
+- **Bad framing** (`ChunkSize`, `Chunk`, `Trailer`) fails the exchange,
+  and the body's stream hears `Failed(Fault::Invalid)`: nothing is
+  answered, and the connection ends.
+- **A 100 (Continue)** (RFC 9110, 10.1.1): for an HTTP/1.1 request with a
+  body whose `Expect` lists `100-continue`, the server writes `HTTP/1.1
+  100 Continue` before the body's first read below, for a demand of the
+  side above's or a discard, within the room set aside; the head then
+  asks room of its own. A final response given first answers instead, and
+  no 100 goes. An HTTP/1.0 client's expectation, and any other, is
+  ignored.
+
+### 5.4 The response
+
+- **`Respond` gives the head,** once a call. What the side above gets
+  wrong is a refusal, checked in a fixed order, which writes nothing and
+  leaves the exchange as it was: a status outside 200 to 599 (`Status`:
+  the server writes no interim response but its own 100, and switches no
+  protocols); each field, a name that is not a token (`Name`), a value
+  with a control character but a tab (`Value`), a field the server
+  writes itself, `Content-Length`, `Transfer-Encoding` or `Connection`
+  (`Reserved`); a body for a 204 or a 304 (`Body`); then a head past
+  `Limits::response` (`TooLong`).
+- **Written sized:** `HTTP/1.1` whatever the request's version (RFC 9110,
+  2.5), the status and the standard's reason phrase for it, or none; the
+  side above's fields in order; the framing as the response says it,
+  even to `HEAD` (RFC 9110, 9.3.2), `Content-Length` for a length, `0`
+  for no body but in a 204 or a 304, `Transfer-Encoding: chunked` for
+  chunks; and `Connection: close` for a connection that does not persist,
+  `Connection: keep-alive` for an HTTP/1.0 one that does.
+- **The head goes down** once the request body is all read below, or
+  given up (5.5), within the room set aside, or room asked for it after a
+  100.
+- **The body is a stream** (`Reply`), written as the client's upload is
+  (3.1): the side above demands room of at most `Limits::send`, sends
+  within it, and finishes. By length, each `Send` goes down as it is, and
+  `Finish` once the length is sent. In chunks, each `Send` is one chunk,
+  framed into a box of its own, its size line, the bytes and a line
+  ending, below room asked for the chunk; an empty `Send` is no chunk;
+  `Finish` writes the last chunk, `0` and a blank line, with no trailer
+  section, within room asked for it. To an HTTP/1.0 client, which knows
+  no chunks, a chunked response goes to the end of the stream instead
+  (RFC 9112, 6.1), on a connection that ends with it. A response to
+  `HEAD`, a 204, a 304 or one without a body has no reply stream: a
+  request on one is the side above's bug, asserted.
+- **A withdrawal on the reply,** as a machine stacked on it sends when it
+  closes, means the side above writes no more: the response can never
+  end. The server withdraws what it demanded below, demands nothing more,
+  drops an answer on its way, and waits for its close.
+
+### 5.5 The exchange
+
+- **Reuse** (RFC 9112, 9.3): `Done(Keep)` when the request persists
+  (HTTP/1.1 without `Connection: close`; HTTP/1.0 with `Connection:
+  keep-alive` and not `close`), the response did not ask to close and is
+  not sent to the end of the stream, the request body was all read below
+  when the head was written, and the stream did not end. Otherwise
+  `Done(Close)`, and the head says so.
+- **A response given first,** before the request body is all read below,
+  gives up the rest of it: the body's stream, if the side above still
+  reads it, hears `Failed(Fault::Other)`, the fault the stream
+  vocabulary has for a side below that stops for a reason of its own; a
+  read outstanding for it is withdrawn; and the head says `Connection:
+  close`, as the client may stop its upload when a response comes first,
+  as skein's does (3.4), so the rest may never come. Unless the side
+  above discards the body on a connection that may be kept: the head then
+  waits for the body's end below, and keeps the connection.
+- **The stream ending or failing:**
+
+  | When | `End` | `Failed(fault)` |
+  |---|---|---|
+  | idle | the next `Next`: `Ended` | the next `Next`: `Failed(Stream(fault))` |
+  | setting room aside, or before a request line | `Ended` | `Failed(Stream(fault))` |
+  | in a head, after its request line | `Failed(Truncated)` | `Failed(Stream(fault))` |
+  | in a body by length or chunks | `Failed(Truncated)` | `Failed(Stream(fault))` |
+  | once the request is all read below | the response still goes, room may still come; `Done(Close)` | `Failed(Stream(fault))` |
+
+  A stream of the side above's that is still open hears its end first,
+  `Failed` with the stream's own fault, `Other` for an end that cut the
+  request short, and `Invalid` for bad framing.
+- **What it waits for**, `waiting()`, a function of its state, so the
+  connection can arm deadlines: `Next` (idle), `Room` (the client is not
+  reading: the room set aside, a head after a 100, the reply's room or
+  the last chunk's), `Request` (a request's head or its next line: an
+  idle keep-alive, or a head that comes slowly), `Body` (the request body
+  or its framing), `Above` (the side above must respond, demand, discard,
+  send or finish), `Close` and `Nothing`.
+
+### 5.6 Limits and the worst case
+
+```rust
+pub struct Limits {
+    pub head: u32,      // a request's head: past it 431, or 414 for a request line that does not fit;
+                        // also the longest chunk size line, and the longest trailer section
+    pub headers: u32,   // fields in a head: past it 431
+    pub body: u64,      // the longest body by length: past it 413; a chunked one is not bounded here
+    pub read: u32,      // the most the side above demands of the request body at once: the intake's cap
+    pub response: u32,  // the longest response head: past it Refused(TooLong); also the room set aside
+                        // before each request, at least the longest of the server's own answers
+    pub send: u32,      // the most room the side above demands at once for the reply; at least 1
+}
+```
+
+- **`worst_case(&limits)`** is the intake (`read`); the list of a
+  request's fields (`headers`); the head being read, its target's and
+  its fields' bytes and the line that holds the next (`2 × head`); the
+  response head, held until the body is all read below and room comes
+  for it (`response`); and, once the body is read, a delivery or the
+  carry-over an exchange leaves unread (`read`). A response and a piece of
+  the reply are counted by the side above, which made them, and the step
+  that takes one is checked against the worst case and that input
+  (testing.md, 5); what goes down (a head, a chunk, an answer of the
+  server's own) and what goes up is handed out when it is emitted. `None`
+  for a head shorter than a blank line, a read of nothing, room for
+  nothing of a reply, room set aside short of the server's own answers,
+  or a chunk's room past a `u32`.
+- **`largest_read`** is the larger of `head` and `read`, and at least 2;
+  **`largest_room`** the larger of `response` and the room of a chunk of
+  `send`: `send`, its size in hexadecimal, and four.
+- **`UP_MAX_OUT`** is three events and two requests: the stream's
+  failure told to both bodies' streams and the exchange; below, the head
+  and the reply's room, or a 100 and the read it goes before.
+  **`DOWN_MAX_OUT`** is two and two: the body given up and `Done`; below,
+  a read withdrawn and the head.
 
 ## 6. Testing
 
@@ -430,7 +768,22 @@ Not built yet (section 9). As planned:
   CRLF and mixed endings shorter than one scan and the deliveries they
   take, the end and a failure while idle and while reading, every limit
   at its edge, the byte order mark, every cut of a stream reading the
-  same, and a close in each state; and `sse::Data`.
+  same, and a close in each state; and `sse::Data`. The server: the room
+  set aside before anything is read; the request line, fields, and every
+  head limit at and past its edge; every rejection and its answer; the
+  framing each head decides; the body under demands of every shape, its
+  empty end, every framing error, a withdrawal and a discard on a
+  connection kept and on one not; a 100 (Continue), and where none goes;
+  the response head written, its reasons and framing, and every refusal
+  in order; each reply's framing, the room of a chunk, HTTP/1.0's
+  chunked reply to the end of the stream, and a reply withdrawn; reuse
+  by each rule, a response given before the body is read and one given
+  while it is discarded; the stream ending and failing in each state, a
+  close in each state, `waiting()`, and each bug of the side above's
+  asserted. The writer: each field and data split at every line ending,
+  comments, every refusal, an event in pieces within the room granted,
+  the end and a failure, a close in each state, and events read back by
+  the reader as they were written.
 - **Machine worlds** (testing-strategy.md, 2.4) in `tests/http`
   (`skein-http-world`), one machine from a seed in one loop with both its
   neighbours:
@@ -474,6 +827,43 @@ Not built yet (section 9). As planned:
     incomplete line a stream may end with (4.1), of which only whole
     chunks are read, so a failure the reference finds past them reads
     as the end.
+  - **The server's** runs one connection for one request after another.
+    Below, the client's stream: its bytes arrive in pieces cut at random,
+    late, and meet each read exactly; room is granted late and each
+    `Send` held to it as io holds it, one a grant; the client pipelines
+    its requests, or is patient and sends each once the last exchange is
+    over; one that asks for a 100 (Continue) holds its body back until
+    the 100 comes, sends none once a final response comes first, and now
+    and then tires of waiting; the stream ends when the bytes run out,
+    early at a cut, idle or with a read on its way, after a request or
+    mid-way, and fails, before its end or after it. Above, a service asks
+    for each request when it feels like it, reads the body with demands
+    of every shape, slowly, withdraws a demand and discards, responds at
+    the moment its plan draws (at once, partway through the body, once it
+    read it, or once it discarded it) with a response now and then one
+    the server must refuse, writes the reply in pieces within the room
+    granted, withdraws the reply's demand now and then as it closes,
+    stops for a while, and closes after the last request or at any
+    moment. The world checks both sides' contracts as the client's does,
+    a 100 before any read of a body its client holds back among them, and
+    `waiting()` against what the neighbours see. Each call is held to a
+    reference reader of requests, which shares nothing with the server:
+    the call, or the rejection; the body; and the outcome, the reuse as
+    the world reckons it from the request, the response and when the body
+    was read. What the server wrote is held, byte for byte, to a writer of
+    the test's own: the 100 if it went, the head, and the reply framed as
+    the side above sent it; and a rejection's answer.
+  - **The writer's** runs one writer for a stream of events and comments
+    of every shape, one in fifty flawed. Below, room is granted late, the
+    stream says it ended now and then, and fails; above, a user writes
+    one at a time when it feels like it, stops for a while, finishes, or
+    closes at any moment. The world checks `MAX_OUT`, room only, one
+    demand at a time, one `Send` a grant within it, one answer each, and
+    `waiting()`. Each item is refused exactly when a check of the test's
+    own refuses it; what was written is the frames of what was sent, byte
+    for byte against a writer of the test's own, and a prefix of the one
+    being written; and it reads back, by the reference reader and by the
+    reader's own world, as each event was written.
   - A seed replays to the same run.
 - **Transcripts** in `tests/http/transcripts/`, each `<name>.http` beside
   `<name>.expect`, what it must decode to: the head, the body or the
@@ -509,12 +899,64 @@ Not built yet (section 9). As planned:
   reference reads the prefix; each event stream reads to its events under
   scans of several sizes. A transcript without an expectation fails,
   printing the reference readers' reading as a draft to check.
+
+  Requests are kept the same way, in `tests/http/transcripts/requests/`,
+  each with what the server must make of it, served by a side above that
+  reads each body to its end and answers `200`: the call or the
+  rejection, the body, and the outcome. Each is written by hand after the
+  public format of its client, and says so. Thirty-two:
+  - curl's: a GET, a HEAD, a JSON POST, a large body that waits for a 100
+    (Continue), a chunked upload from standard input that waits for one
+    too, HTTP/1.0, two requests on one connection, and `Connection:
+    close` before a request never read;
+  - an LLM client's POST with a JSON body, as Anthropic's and OpenAI's
+    Python SDKs send them, their keys redacted;
+  - hostile ones: an oversized head and an oversized request line, a
+    chunk size past a `u64`, smuggling with both framing headers in
+    either order and with whitespace before a colon, a bad request line,
+    HTTP/2's preface, a method not implemented, no `Host` and two, a
+    fold, a NUL and a bare CR in a field, a coding not undone, a body
+    past the limit, a head and a body cut short, a chunk without its line
+    ending, a trailer section that never ends, two lengths, and too many
+    fields.
+
+  Each comes to its expectation through the server's world under several
+  seeds, read a byte at a time, and cut anywhere, as the reference reads
+  the prefix.
 - **The machines stacked** (`tests/http/tests/stack.rs`), a small step
   towards the protocol worlds: the reader and a tokenizer per event over
   the client, as a connection routes between them, the request body
   written by the JSON writer and uploaded, over the LLM transcripts cut
   at random; every event is the transcript's and every document the JSON
   reference parser's reading of its data.
+- **Protocol worlds** (testing-strategy.md, 2.5) in `tests/protocol`
+  (`skein-protocol-world`): both ends of an LLM streaming exchange, built
+  as two services would build them. The client's end stacks the client,
+  the reader on its body and a tokenizer for each event's data, its
+  request written by the JSON writer; the server's stacks the server, a
+  tokenizer on the request body and the writer on the reply, each event's
+  data written by the JSON writer; each routes as a connection routes,
+  every call held to its `MAX_OUT`, and a scripted user sits at each top.
+  The two bottoms are joined by a stream each way, carried in pieces cut
+  at random and joined in the receiving intake, each end's side below
+  keeping the stream's contract as io keeps it; a closed end drains what
+  comes for its linger, and what comes after resets the other's stream,
+  as on a socket. A referee watches what the users saw: what the top of
+  one end sent is what the top of the other received, the request and
+  every event, token for token; and what the writer sent and the reader's
+  user has not read is never more than the caps between them. The
+  scenarios: an answer streamed whole; a slow reader at the client's top,
+  far more events than the caps hold, which must stop the writer at the
+  server's; a response that comes mid-upload, an error before the body
+  is read, which stops the client's upload and is read; one end closing
+  while the other sends; and the wire resetting at any moment. Once both
+  ends are closed, every machine is, and each stack withdrew what it
+  demanded below before its owner closed the stream. A seed replays to
+  the same run. The worlds run in plaintext. `skein-world` drives
+  processes' `iterate` over the simulator, through the kernel's records,
+  which a world joined by bytes has none of, so these keep a small
+  harness of their own of the same shape: one loop, the contracts as it
+  goes, a referee for the scenario's expectations.
 - **Memory** (`tests/http/tests/memory.rs`, with the counting allocator,
   testing.md, 5): every call of an entry point a step of the meter. The
   client at its limits: a head at the head limit with folds among its
@@ -525,7 +967,15 @@ Not built yet (section 9). As planned:
   carry-over held with a delivery. The reader at its limits: an event at
   every limit with lines ended every way, a line, an event and a type
   past theirs, each closed after every step; its peak is its worst case
-  exactly.
+  exactly. The server and the writer, in a binary of their own
+  (`tests/http/tests/memory_server.rs`): the server at its limits, a head
+  at the head limit with its fields at theirs, bodies by length and
+  chunked with a trailer section at its limit, a 100 (Continue),
+  responses at the response limit by length, chunked and without a
+  body, a rejection and a body cut short, each read with three demands,
+  responded to before and after its body, and closed, failed and
+  discarded after every step; and the carry-over held with a delivery.
+  The writer's peak at its limits is its worst case exactly.
 - **The fuzzy suite** (`tests/http/tests/fuzzy_*.rs`): 20,000 connections
   of one to four generated exchanges, valid, mutated, and corrupted where
   a random edit seldom lands (another major version, a code past 599, an
@@ -540,8 +990,27 @@ Not built yet (section 9). As planned:
   waited for each thing, room granted while a response
   waited, a response read mid-upload, a withdrawal and an answer after
   it, a discard, a connection reused, a CR's LF delivered alone, and a
-  line longer than a chunk read in pieces. It stands in for the fuzz
-  targets, which wait for a nightly toolchain.
+  line longer than a chunk read in pieces. The server's: 20,000
+  connections of one to four generated requests, valid, mutated, and
+  corrupted where a random edit seldom lands (another major version, a
+  method not implemented, a fold, whitespace before a colon, both framing
+  headers, a coding not undone, two lengths, a chunk size past a `u64`,
+  no `Host`, a field and a request line past the head, too many fields, a
+  body past the limit, a trailer section without end, HTTP/2's preface),
+  and 2,000 request transcripts cut and mutated; it asserts that every
+  outcome, every rejection and refusal, each way a stream ends or fails
+  and what the server waited for then, a close while it waited for each
+  thing, a 100 (Continue), a client tired of waiting for one, a body
+  given up, a head that waited for a discard, room after the end, a
+  reply withdrawn, pipelining and reuse fell. The writer's: 10,000 runs,
+  every answer and refusal, an event in pieces, the end and room after
+  it, a failure idle and while writing, and a close in each state. The
+  protocol worlds' (`tests/protocol/tests/fuzzy_worlds.rs`): 400 runs of
+  the scenarios under caps drawn down to the least the stacks allow,
+  asserting that a writer was held back, an upload stopped, a writer
+  heard its stream fail, a stream reset, and each outcome at each end
+  fell. It stands in for the fuzz targets, which wait for a nightly
+  toolchain.
 
 ## 7. Decisions
 
@@ -598,6 +1067,60 @@ Not built yet (section 9). As planned:
   not UTF-8 with U+FFFD as a browser would: its data goes to a decoder
   that refuses it.
 - **A `retry` past a `u64` is ignored,** as a value of other bytes is.
+- **One body reader for both sides.** The client reads a response's body
+  and the server a request's by the same code (`body.rs`), which returns
+  what goes up for each machine to emit as its own event: the demands'
+  shapes and a delimiter split between chunks are subtle enough to have
+  once.
+- **The server sets room aside before it reads a request,** room for the
+  longest response head, held while it reads, as io keeps a grant across
+  demands for none. The answer to whatever the request comes to then
+  goes down at once: a rejection never waits on a client that does not
+  read, and the server never parses a request it could not answer
+  (programming-model.md, 7). It is the side above that asks for each
+  request (`Next`), so a service's entrance is where it chooses to ask.
+- **Rejections are the server's own,** small and fixed, and end the
+  connection; bad framing in a body closes unanswered, as
+  programming-model.md, 8 has bad lengths do. The request line that does not fit in
+  the head is a 414, as RFC 9112, 3 requires, rather than a 431, which
+  is for fields; a fold is rejected, not joined, as RFC 9112, 5.2 lets a
+  server; an unknown method is a 501 (RFC 9110, 9.1) and a coding not
+  undone too (RFC 9112, 6.1), while codings that do not end with
+  `chunked`, or give it twice, are faulty framing, a 400 (RFC 9112,
+  6.3).
+- **A body by length past `Limits::body` is refused at the entrance**
+  (413); a chunked body is not bounded by the server, which cannot know
+  its length there: the side above stops reading when it has had enough.
+- **A response given before the body is all read gives up the rest,** on
+  a connection not used again, rather than read the rest to keep it: a
+  client may stop its upload when a response comes first, as skein's
+  does, and the rest would never come. A side above that wants the
+  connection kept discards the body: the head then waits for the body's
+  end. This rules out answering while reading the same request's body (a
+  streaming echo), which nothing pulls.
+- **The server reads the body only before the head goes,** and writes the
+  reply only after it, so a demand below is a read or room, never both,
+  and the server never holds a read that a client which stopped its
+  upload would leave unanswered while the reply waits for room.
+- **A 100 (Continue) goes before the body's first read,** the moment the
+  server means to read it, which a discard counts as; a final response
+  given first answers instead. The client still does not wait for one
+  (section 8).
+- **A withdrawal on the reply is taken,** as the event writer stacked on
+  it sends one when it closes, unlike the client's upload, on which
+  nothing is stacked. It means the side above writes no more: the server
+  withdraws what it demanded below and waits for its close.
+- **A chunked response to HTTP/1.0 goes to the end of the stream,** as
+  RFC 9112, 6.1 forbids `Transfer-Encoding` to it, rather than being
+  refused: the side above writes the same reply to either.
+- **The server writes no `Date`.** RFC 9110, 6.6.1 asks one of a server
+  with a clock; the side above has `env.wall` and gives it as a field if
+  it wants one. Reason phrases are the standard's, or none.
+- **Each event or comment the writer writes is a block of its own,**
+  ended by a blank line, so a reader's count starts over at each, and
+  every event written is one a reader dispatches: a block that sets only
+  an id or a reconnection time is not written. Data is split at every
+  line ending, so a reader reads its CRs and CRLFs back as LFs.
 
 ## 8. Open questions
 
@@ -605,29 +1128,34 @@ Not built yet (section 9). As planned:
   is in. Still open: a pool of connections per peer, who sets its size,
   and how a pool learns that an idle connection ended (the client says
   so in `waiting()` only).
-- **`Expect: 100-continue`.** A caller may send the field, but the client
-  does not wait for the 100 before it takes the body. Waiting would need
-  an interim event plus a read while the upload is idle, which section
-  3.1 rules out. Whether the client should wait waits for a server that
-  needs it.
+- **`Expect: 100-continue` in the client.** A caller may send the field,
+  but the client does not wait for the 100 before it takes the body.
+  Waiting would need an interim event plus a read while the upload is
+  idle, which section 3.1 rules out. skein's server sends a 100 when it
+  reads, and a client that sends at once is read all the same; whether
+  the client should wait waits for a server that needs it.
+- **A server's deadlines.** `waiting()` says `Request` both for an idle
+  keep-alive and for a head that comes slowly; a connection that wants a
+  shorter deadline for the second cannot tell them apart. Whether the
+  server says so waits for the engine's webhooks.
 
 ## 9. Not built yet
 
-The client and the server-sent events reader are built, with their
-machine worlds and transcripts. temper pulls next:
-
-1. **the server and the event writer** (section 5), for the fake LLM
-   provider; with them, each machine tested against the other side, and
-   the **protocol worlds** of testing-strategy.md, 2.5: an LLM client's
-   stack against a server's, joined by bytes cut at random, where a slow
-   reader at the top of one end stops the writer at the top of the other;
-2. both, for the engine's forge client and its webhooks.
+The client, the server, and both sides of server-sent events are built,
+with their machine worlds and transcripts, and the protocol worlds of
+testing-strategy.md, 2.5, an LLM client's stack against a server's. temper
+pulls next: both, for the engine's forge client and its webhooks.
 
 Also not built: chunked uploads; content codings (`gzip`), which the
-client refuses; trailer fields, which are read and dropped; reconnecting
-an event stream, for which the reader keeps the reconnection time and
-the last event ID; and the **fuzz targets** (`fuzz/`, fed `Bytes` under
-every demand), which wait for a nightly toolchain, the fuzzy suite
-standing in for them. Transition coverage of the handlers
+client refuses and the server answers with a 501; trailer fields, which
+are read and dropped; reconnecting an event stream, for which the reader
+keeps the reconnection time and the last event ID; HTTP/2 and upgrades,
+until a peer requires them; a `Date` field of the server's own; reading a
+request's body while answering it; the heap metered in the protocol
+worlds, which join two stacks in one thread and so meet testing.md, 9's
+open question on heap handed between them, while each machine's worst
+case is checked in its memory tests; and the **fuzz targets** (`fuzz/`,
+fed `Bytes` under every demand), which wait for a nightly toolchain, the
+fuzzy suite standing in for them. Transition coverage of the handlers
 (testing-strategy.md, 6) waits for `cargo llvm-cov`, which is not
 installed.

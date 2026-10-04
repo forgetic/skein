@@ -1,4 +1,4 @@
-//! The request transcripts (testing-strategy.md, 4.1; http.md, 8): each
+//! The request transcripts (testing-strategy.md, 4.1; http.md, 6): each
 //! comes to its expectation through the server's machine world under
 //! several seeds, read a byte at a time so that every byte of each body is
 //! seen, and cut anywhere, as the reference reads the prefix. A transcript

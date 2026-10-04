@@ -166,7 +166,7 @@ pub fn items(rng: &mut Rng) -> Vec<Item> {
 }
 
 /// Why the writer must refuse `item` under `limits`, if it must: the first
-/// thing wrong, in the order of http.md, 6, read independently of the
+/// thing wrong, in the order of http.md, 4.3, read independently of the
 /// writer's checks.
 #[must_use]
 pub fn refusal(item: &Item, limits: &Limits) -> Option<Refusal> {

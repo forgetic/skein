@@ -1,4 +1,4 @@
-//! The server-sent events writer (http.md, 6): each field framed, data
+//! The server-sent events writer (http.md, 4.3): each field framed, data
 //! split at every line ending, comments, every refusal, an event sent in
 //! pieces within the room granted, the stream ending and failing, a close
 //! in each state, and every event read back by the reader as it was

@@ -1,4 +1,4 @@
-//! The server's end (testing-strategy.md, 2.5; http.md, 5 and 6): a fake
+//! The server's end (testing-strategy.md, 2.5; http.md, 4.3 and 5): a fake
 //! LLM provider's stack as a service builds it, the HTTP server over the
 //! stream, a JSON tokenizer on each request's body, and the event stream
 //! writer on its response body, each event's data a document the JSON

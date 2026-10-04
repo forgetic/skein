@@ -1,4 +1,4 @@
-//! The server's machine world, swept (testing-strategy.md, 8; http.md, 8):
+//! The server's machine world, swept (testing-strategy.md, 8; http.md, 6):
 //! many connections of generated requests, valid, mutated, and corrupted
 //! where a random edit seldom lands, and the request transcripts cut and
 //! mutated, under limits and neighbours drawn from each seed, each exchange checked against the reference reader and
