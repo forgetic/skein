@@ -597,9 +597,10 @@ Not built yet (section 9). As planned:
   and how a pool learns that an idle connection ended (the client says
   so in `waiting()` only).
 - **`Expect: 100-continue`.** A caller may send the field, but the client
-  does not wait for the 100 before it takes the body; the side above
-  could, by demanding room only once it has seen it. Whether the client
-  should wait waits for a server that needs it.
+  does not wait for the 100 before it takes the body. Waiting would need
+  an interim event plus a read while the upload is idle, which section
+  3.1 rules out. Whether the client should wait waits for a server that
+  needs it.
 
 ## 9. Not built yet
 
