@@ -1,6 +1,8 @@
-# Written by hand after what curl sends for a large body: it asks for a 100
-# (Continue) and waits before it sends the body. Drafted by the reference
-# reader, then checked by hand.
+# Written by hand after what curl sends when told to ask for a 100
+# (Continue) with -H 'Expect: 100-continue': curl 8.22 sends no Expect for
+# a body of 1199 bytes of its own accord, only for a far larger one. It
+# then waits for the 100 before it sends the body. Drafted by the
+# reference reader, then checked by hand.
 request POST /upload HTTP/1.1
 header Host "localhost:8080"
 header User-Agent "curl/8.5.0"
