@@ -332,8 +332,11 @@ pub enum Error { LineTooLong, EventTooLong, FieldTooLong, Stream(Fault) }
   ending of every line in practice and the pair of a CRLF; to CR after a
   line that ended with a CR alone. Each scan is of at most
   `Limits::chunk`. A stream of LF, of CRLF or of CR alone is so read as
-  it comes, a line in each scan once its convention is known; one whose
-  lines change convention is read correctly, a scan's worth later.
+  it comes, a line in each scan once its convention is known. One whose
+  lines change convention is read a scan's worth later after each
+  change; and at the end of the stream, what follows a change that the
+  last scan did not deliver is never seen (lib.md, 7), as a line cut by
+  the end would not be.
 - **A delivery may hold more than the event asked for:** lines ended by
   a CR alone within a scan to LF. The reader then holds the rest of the
   delivery, at most a scan, and reads it before it demands more. Before
