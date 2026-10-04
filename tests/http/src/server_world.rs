@@ -1002,6 +1002,7 @@ impl World<'_> {
             {
                 exchange.reply = Reply::Over;
                 self.fell.reply_withdrawn = true;
+                self.above.must_close = true;
                 self.down(Request::Reply(Down::Demand { read: Read::Nothing, room: 0 }));
             }
             self.above.closing = Some(waiting);
@@ -1487,6 +1488,9 @@ impl World<'_> {
             Waiting::Close
         } else if over && !self.above.asked {
             Waiting::Next
+        } else if self.above.must_close {
+            // It withdrew the reply: it writes no more, and closes next.
+            Waiting::Close
         } else {
             match self.below.demand.filter(|_| !self.below.crossed) {
                 Some((_, room)) if room > 0 => Waiting::Room,

@@ -314,7 +314,8 @@ pub struct Response {
     pub headers: Box<[Header]>,
     /// How its body is framed: written as said, even to `HEAD`, but sent
     /// only for a request that is not `HEAD`, and never for a 204 or a 304,
-    /// which take none.
+    /// which take none. A 304 may say the length a 200 would have had (RFC
+    /// 9110, 8.6), but not chunks.
     pub body: Body,
     /// Whether the connection ends with this exchange: the server says
     /// `Connection: close`, and does not use it again.
@@ -418,7 +419,7 @@ pub enum Waiting {
     /// discard it, or to demand room for its reply, send or finish it.
     Above,
     /// For the side above to close it: the connection is not to be used
-    /// again.
+    /// again, or the side above withdrew the reply, and writes no more.
     Close,
     /// For nothing: it is closed.
     Nothing,
@@ -457,11 +458,22 @@ impl Server {
                     Waiting::Room
                 }
             }
-            State::Exchange(exchange) => match exchange.below {
-                Some(Demand::Room(_)) => Waiting::Room,
-                Some(Demand::Read(_)) => Waiting::Body,
-                None => Waiting::Above,
-            },
+            State::Exchange(exchange) => {
+                // The side above withdrew the reply: it writes no more, and
+                // closes the server next.
+                let withdrawn = match &exchange.response {
+                    Responding::Head { reply, .. } | Responding::Sending { reply, .. } => *reply == Reply::Withdrawn,
+                    Responding::Awaited => false,
+                };
+                if withdrawn {
+                    return Waiting::Close;
+                }
+                match exchange.below {
+                    Some(Demand::Room(_)) => Waiting::Room,
+                    Some(Demand::Read(_)) => Waiting::Body,
+                    None => Waiting::Above,
+                }
+            }
             State::Spent => Waiting::Close,
             State::Closed => Waiting::Nothing,
         }

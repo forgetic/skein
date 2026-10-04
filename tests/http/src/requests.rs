@@ -294,7 +294,10 @@ pub fn response(rng: &mut Rng) -> (Response, Vec<u8>) {
         headers.push(header(name.as_bytes(), trim_end(&value).trim_ascii_start()));
     }
     let mut body = Vec::new();
-    let framing = if status == 204 || status == 304 || rng.chance(100) {
+    let framing = if status == 304 && rng.chance(300) {
+        // The length a 200 would have had (RFC 9110, 8.6), and no body.
+        Body::Length(rng.below(5000))
+    } else if status == 204 || status == 304 || rng.chance(100) {
         Body::None
     } else {
         body = crate::generate::body(rng);
@@ -327,8 +330,9 @@ fn flaw(rng: &mut Rng, response: &mut Response) {
             headers.push(header(name, b"5"));
         }
         4 => {
-            response.status = *pick(rng, &[204_u16, 304]);
-            response.body = *pick(rng, &[Body::Length(3), Body::Chunked]);
+            let (status, body) = *pick(rng, &[(204_u16, Body::Length(3)), (204, Body::Chunked), (304, Body::Chunked)]);
+            response.status = status;
+            response.body = body;
         }
         _ => headers.push(header(b"X-Huge", &vec![b'h'; 5000])),
     }
@@ -363,7 +367,10 @@ pub fn refusal(response: &Response, version: Version, persist: bool, limits: &Li
             return Some(Refusal::Reserved);
         }
     }
-    if (response.status == 204 || response.status == 304) && response.body != Body::None {
+    // A 304 may say the length a 200 would have had (RFC 9110, 8.6).
+    let bodiless = (response.status == 204 && response.body != Body::None)
+        || (response.status == 304 && response.body == Body::Chunked);
+    if bodiless {
         return Some(Refusal::Body);
     }
     if head(response, version, persist, wall).len() > usize::try_from(limits.response).expect("fits a usize") {

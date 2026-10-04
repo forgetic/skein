@@ -658,7 +658,11 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
   side above's or a discard, within the room set aside; the head then
   asks room of its own. A final response given first answers instead, and
   no 100 goes. An HTTP/1.0 client's expectation, and any other, is
-  ignored.
+  ignored. As the 100 goes only at the side above's first read, a side
+  above given such a call demands the body, discards it or responds
+  promptly (RFC 9110, 10.1.1): its client waits for the 100, or for a
+  while, before it sends the body, and the server sends nothing until the
+  side above moves.
 
 ### 5.4 The response
 
@@ -669,7 +673,9 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
   protocols); each field, a name that is not a token (`Name`), a value
   with a control character but a tab (`Value`), a field the server
   writes itself, `Content-Length`, `Transfer-Encoding`, `Connection` or
-  `Date` (`Reserved`); a body for a 204 or a 304 (`Body`); then a head
+  `Date` (`Reserved`); a body for a 204, or one in chunks for a 304,
+  which may say by its length the one a 200 would have had (RFC 9110,
+  8.6) but sends none (`Body`); then a head
   past `Limits::response` (`TooLong`).
 - **Written sized:** `HTTP/1.1` whatever the request's version (RFC 9110,
   2.5), the status and the standard's reason phrase for it, or none; the
@@ -741,7 +747,8 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
   the last chunk's), `Request` (a request's head or its next line: an
   idle keep-alive, or a head that comes slowly), `Body` (the request body
   or its framing), `Above` (the side above must respond, demand, discard,
-  send or finish), `Close` and `Nothing`.
+  send or finish), `Close` (the connection is not to be used again, or
+  the side above withdrew the reply and closes next) and `Nothing`.
 
 ### 5.6 Limits and the worst case
 
@@ -1222,7 +1229,10 @@ pulls next: both, for the engine's forge client and its webhooks.
 Also not built: chunked uploads; content codings (`gzip`), which the
 client refuses and the server answers with a 501; trailer fields, which
 are read and dropped; reconnecting an event stream, for which the reader
-keeps the reconnection time and the last event ID; HTTP/2 and upgrades,
+keeps the reconnection time and the last event ID; a block of its own for
+the reconnection time, `retry: N` alone ahead of the first event, which
+the writer cannot write, as every block it writes is an event or a
+comment and a reconnection time goes with an event; HTTP/2 and upgrades,
 until a peer requires them; reading a request's body while answering
 it; the heap metered in the protocol
 worlds, which join two stacks in one thread and so meet testing.md, 9's

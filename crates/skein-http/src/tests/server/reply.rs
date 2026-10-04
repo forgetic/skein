@@ -115,6 +115,19 @@ fn no_body_is_said_by_a_length_of_zero_but_in_a_204_or_a_304() {
 }
 
 #[test]
+fn a_304_may_say_the_length_a_200_would_have_had_and_sends_no_body() {
+    // RFC 9110, 8.6: a 304 to a conditional GET may carry the length.
+    let served = served(get(), Response { headers: Box::new([]), ..response(304, Body::Length(1234)) }, b"");
+    assert_eq!(
+        served.sent,
+        b"HTTP/1.1 304 Not Modified\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 1234\r\n\r\n",
+        "the length said, and no body sent"
+    );
+    assert_eq!(served.outcome, Some(Event::Done(Reuse::Keep)));
+    assert!(served.reply.is_empty(), "no reply stream");
+}
+
+#[test]
 fn a_response_to_head_says_its_framing_and_sends_no_body() {
     let head = b"HEAD / HTTP/1.1\r\nHost: h\r\n\r\n";
     let served_length = served(head, response(200, Body::Length(1234)), b"");
@@ -273,7 +286,7 @@ fn a_withdrawal_of_the_reply_s_demand_withdraws_the_room_below_and_waits_for_the
     let (events, requests) = machine.down(Request::Reply(Down::Demand { read: Read::Nothing, room: 0 }));
     assert!(events.is_empty());
     assert_eq!(requests, [Down::Demand { read: Read::Nothing, room: 0 }], "the room below withdrawn with it");
-    assert_eq!(machine.server.waiting(), Waiting::Above, "for the close");
+    assert_eq!(machine.server.waiting(), Waiting::Close, "for the close: the side above writes no more");
     let (events, requests) = machine.up(Up::Room);
     assert!(events.is_empty() && requests.is_empty(), "room on its way, dropped");
     let (events, requests) = machine.down(Request::Close);

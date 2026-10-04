@@ -27,8 +27,9 @@ pub enum Refusal {
     /// A field the server writes itself: `Content-Length`,
     /// `Transfer-Encoding`, `Connection` or `Date`.
     Reserved,
-    /// A body for a 204 or a 304, which have none (RFC 9110, 15.3.5 and
-    /// 15.4.5).
+    /// A body for a 204, which has none (RFC 9110, 15.3.5), or one in
+    /// chunks for a 304, which has none either (15.4.5) but may say the
+    /// length a 200 would have had (8.6).
     Body,
     /// The head is longer than [`Limits::response`].
     TooLong,
@@ -207,7 +208,8 @@ fn check(response: &Response) -> Result<(), Refusal> {
         }
     }
     match response.body {
-        Body::Length(_) | Body::Chunked if response.status == 204 || response.status == 304 => Err(Refusal::Body),
+        Body::Length(_) | Body::Chunked if response.status == 204 => Err(Refusal::Body),
+        Body::Chunked if response.status == 304 => Err(Refusal::Body),
         Body::None | Body::Length(_) | Body::Chunked => Ok(()),
     }
 }
