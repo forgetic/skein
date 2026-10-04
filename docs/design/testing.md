@@ -99,16 +99,17 @@ each hosted service's heap, grown within its own calls, against its own
 worst case (simulator.md, 5), measured with the allocator's span, the
 heap's growth around one call, signed.
 
-**Who counts a payload handed to a step.** An input moved into a step
-was counted by whoever made it; the step's bound covers what it keeps
-and what it allocates. Note that the protocol layer counts a call's
-target and fields in its own worst case: the client's limits do not
-bound them, and the step that takes a call or a piece of a request
-body is checked against its bound and that input's size. A delivery is
-made to the demand of the machine that reads it, within its largest
-demand, so that machine's bound covers the one it reads, for the step
-that reads it. What a step hands out in its requests is the next
-step's input, and the meter takes it off the step's own.
+**Who counts a payload handed to a step.** A step's bound covers what
+it keeps and what it allocates; what it hands out in its requests is the
+next step's input, and the meter takes it off the step's own. An input
+moved into a step is counted by whoever made it, with one exception: a
+delivery from the side below is made to the reading machine's own
+demand, within its largest demand, so the reader's bound covers the one
+it reads, for the step that reads it. A request whose size the receiving
+step's limits do not bound, such as an HTTP call's target and fields or
+a piece of a request body, is counted in the sender's worst case (the
+protocol layer's), and the memory test checks the step that takes it
+against its bound plus that input's size.
 
 **The world harness** is `skein-world`, in `testing/` (examples.md, 6):
 one loop over the processes' `iterate`, generic over a scenario's
