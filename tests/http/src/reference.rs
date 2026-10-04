@@ -132,7 +132,7 @@ impl<'a> Lines<'a> {
         let taken = n.min(rest.len());
         body.extend_from_slice(&rest[..taken]);
         self.at += taken;
-        if taken < n { Err(Error::Truncated) } else { Ok(()) }
+        if taken < n { Err(Error::Truncated { answered: true }) } else { Ok(()) }
     }
 }
 
@@ -144,7 +144,8 @@ fn head(reader: &mut Lines<'_>, budget: &mut u32, limits: &Limits) -> Result<Hea
         let (content, len) = match reader.line(*budget) {
             Line::Whole(content, len) => (content, len),
             Line::Long => return Err(Error::HeadTooLong),
-            Line::Short => return Err(Error::Truncated),
+            // Answered once any line of a head, interim or final, came.
+            Line::Short => return Err(Error::Truncated { answered: *budget < limits.head }),
         };
         *budget -= u32::try_from(len).expect("fits a u32");
         if first {
@@ -286,7 +287,7 @@ fn chunked(reader: &mut Lines<'_>, limits: &Limits, body: &mut Vec<u8>) -> Resul
         let size = match reader.line(limits.head) {
             Line::Whole(content, _) => chunk_size(content).ok_or(Error::ChunkSize)?,
             Line::Long => return Err(Error::ChunkSize),
-            Line::Short => return Err(Error::Truncated),
+            Line::Short => return Err(Error::Truncated { answered: true }),
         };
         if size == 0 {
             let mut budget = limits.head;
@@ -300,7 +301,7 @@ fn chunked(reader: &mut Lines<'_>, limits: &Limits, body: &mut Vec<u8>) -> Resul
                         }
                     }
                     Line::Long => return Err(Error::Trailer),
-                    Line::Short => return Err(Error::Truncated),
+                    Line::Short => return Err(Error::Truncated { answered: true }),
                 }
             }
         }
@@ -311,7 +312,7 @@ fn chunked(reader: &mut Lines<'_>, limits: &Limits, body: &mut Vec<u8>) -> Resul
             [b'\n', ..] => reader.at += 1,
             [b'\r', b'\n', ..] => reader.at += 2,
             [_, _, ..] => return Err(Error::Chunk),
-            [_] | [] => return Err(Error::Truncated),
+            [_] | [] => return Err(Error::Truncated { answered: true }),
         }
     }
 }

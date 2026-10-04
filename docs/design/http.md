@@ -236,17 +236,23 @@ client.
 
   | When | `End` | `Failed(fault)` |
   |---|---|---|
-  | idle | the next call fails at once, `Closed` | the next call fails, `Stream(fault)` |
-  | before the request head went down | `Closed`: nothing was sent | `Stream(fault)` |
-  | after it, before the response is whole | `Truncated` | `Stream(fault)` |
-  | in a body by length or chunks | `Truncated` | `Stream(fault)` |
+  | idle | the next call fails at once, `Closed(None)` | the next call fails at once, `Closed(Some(fault))` |
+  | before the request head went down | `Closed(None)` | `Closed(Some(fault))` |
+  | after it, before any line of a response | `Truncated { answered: false }` | `Stream(fault)` |
+  | in the response's heads | `Truncated { answered: true }` | `Stream(fault)` |
+  | in a body by length or chunks | `Truncated { answered: true }` | `Stream(fault)` |
   | in a body to the end of the stream | the body's end | `Stream(fault)` |
   | once the body is all read below | the body stands, not reused | the body stands, not reused |
 
-  `Closed` is the one a pool can retry on another connection whatever
-  the method: the server never saw the request. A stream of the side
-  above's that is still open is told first, `Failed` with the stream's
-  fault, or `Invalid` for an error of the peer's data; a demand that
+  `Closed` says the server never saw the request, so a pool can send it
+  on another connection whatever its method. `Truncated` with no line of
+  a response is the race of RFC 9112, 9.3.1, a connection kept idle that
+  the server closed as the request went out: an idempotent request may
+  be sent again. A stream of the side above's that is still open, and not
+  withdrawn or discarded, hears its end first, `Failed` with: the stream's
+  own fault, for a failure; `Other`, for an end that cut the exchange
+  short (`Closed(None)`, `Truncated`), which is no error of the peer's
+  data; and `Invalid`, for an error of the peer's data. A demand that
   still asks for room, which may come after the end, is withdrawn.
 - **What it waits for**, `waiting()`, a function of its state, so the
   connection can arm deadlines (programming-model.md, 4): `Call` (idle),
@@ -432,14 +438,17 @@ Not built yet (section 9). As planned:
     the calls, uploads each body in pieces within the room granted, reads
     with fills and scans to LF, CRLF and a quote of every size, slowly,
     withdraws a demand and discards, discards the rest now and then,
-    stops for a while, and closes after the last exchange or at any
-    moment. The world checks `MAX_OUT` on each call; below, one demand at
-    a time, none past the caps or once the stream ended or failed, a
-    withdrawal only as the client stops reading, each `Send` within the
-    room granted; above, each answer for a demand and exactly what it
-    reads, `End` and `Failed` once and nothing after, one response and
-    one terminal event per call, `Closed` once and last; and `waiting()`
-    against what the neighbours see. Each exchange is held to a reference
+    sends a withdrawal or a discard that crosses its answer, the body's
+    end among them, stops for a while, and closes after the last exchange
+    or at any moment. The world checks `MAX_OUT` on each call; below, one
+    demand at a time, none past the caps or once the stream ended or
+    failed, a withdrawal only as the client stops reading, each `Send`
+    within the room granted; above, each answer for a demand and exactly
+    what it reads, `End` and `Failed` once and nothing after, every stream
+    still open told it failed before the exchange's `Failed`, one response
+    and one terminal event per call, nothing sent for a call that failed
+    `Closed`, `Closed` once and last; and `waiting()` against what the
+    neighbours see. Each exchange is held to a reference
     reader: the request written, against a writer of the test's own; the
     head; the body, a prefix of the reference's, and when `End` came,
     nothing left that meets the demand it answered; and the outcome,

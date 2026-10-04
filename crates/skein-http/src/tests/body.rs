@@ -273,7 +273,11 @@ fn a_chunked_body_that_breaks_its_framing_fails() {
     assert_eq!(chunked(b"5 6\r\n"), Error::ChunkSize);
     assert_eq!(chunked(b"5;\x01\r\n"), Error::ChunkSize, "a control character in an extension");
     assert_eq!(chunked(b"10000000000000000\r\n"), Error::ChunkSize, "past a u64");
-    assert_eq!(chunked(b"FFFFFFFFFFFFFFFF\r\n"), Error::Truncated, "a u64, and the stream ends in it");
+    assert_eq!(
+        chunked(b"FFFFFFFFFFFFFFFF\r\n"),
+        Error::Truncated { answered: true },
+        "a u64, and the stream ends in it"
+    );
     let mut long = Vec::from(&b"1;"[..]);
     long.extend_from_slice(&[b'e'; 300]);
     long.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
@@ -286,10 +290,10 @@ fn a_chunked_body_that_breaks_its_framing_fails() {
     }
     trailers.extend_from_slice(b"\r\n");
     assert_eq!(chunked(&trailers), Error::Trailer);
-    assert_eq!(chunked(b"5\r\nhel"), Error::Truncated);
-    assert_eq!(chunked(b"5\r\nhello\r\n"), Error::Truncated, "no last chunk");
-    assert_eq!(chunked(b"5\r\nhello\r\n0\r\n"), Error::Truncated, "no end to the trailer section");
-    assert_eq!(failure(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort"), Error::Truncated);
+    assert_eq!(chunked(b"5\r\nhel"), Error::Truncated { answered: true });
+    assert_eq!(chunked(b"5\r\nhello\r\n"), Error::Truncated { answered: true }, "no last chunk");
+    assert_eq!(chunked(b"5\r\nhello\r\n0\r\n"), Error::Truncated { answered: true }, "no end to the trailer section");
+    assert_eq!(failure(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort"), Error::Truncated { answered: true });
 }
 
 #[test]

@@ -257,14 +257,18 @@ pub enum Framing {
 pub enum Error {
     /// The client refused the call, writing nothing.
     Refused(Refusal),
-    /// The stream had ended before the request was sent, so the server did
-    /// not see it: another connection may take it.
-    Closed,
+    /// The stream had ended (`None`), or failed with this fault, before the
+    /// request went down, so the server saw none of it: another connection
+    /// may take it, whatever its method.
+    Closed(Option<Fault>),
     /// The stream ended before the response did: before its head was whole,
     /// or before its body's framing said it was over. Whether the server
-    /// acted on the request is unknown.
-    Truncated,
-    /// The stream below failed.
+    /// acted on the request is unknown. With no line of a response at all
+    /// (`answered` false), it is the race of RFC 9112, 9.3.1: the server
+    /// closed a connection kept idle as the request went out, and an
+    /// idempotent request may be sent again.
+    Truncated { answered: bool },
+    /// The stream below failed once the request had begun to go down.
     Stream(Fault),
     /// The status line is not one: not `HTTP/x.y`, a code outside 100 to
     /// 599, or a control character in the reason.
@@ -596,11 +600,11 @@ fn call_made(
     match line {
         Line::Open => {}
         Line::Ended => {
-            above.push(Event::Failed(Error::Closed));
+            above.push(Event::Failed(Error::Closed(None)));
             return State::Spent;
         }
         Line::Failed(fault) => {
-            above.push(Event::Failed(Error::Stream(fault)));
+            above.push(Event::Failed(Error::Closed(Some(fault))));
             return State::Spent;
         }
     }
@@ -677,6 +681,10 @@ fn exchange_up(
             exchange.below = None;
             // A failure once the body is all read below leaves it whole: only
             // the connection is gone.
+            // Before the request went down, it was never sent.
+            if exchange.request.head.is_some() {
+                return fail(exchange, Error::Closed(Some(fault)), intake, above, below);
+            }
             match &mut exchange.response {
                 Receiving::Body(download) if download.rest == Rest::Over => {
                     download.persist = false;
@@ -704,10 +712,15 @@ fn ended(
         Some(_) | None => {}
     }
     if exchange.request.head.is_some() {
-        return fail(exchange, Error::Closed, intake, above, below);
+        return fail(exchange, Error::Closed(None), intake, above, below);
     }
     match &mut exchange.response {
-        Receiving::Head(_) => fail(exchange, Error::Truncated, intake, above, below),
+        // Whether any line of a response came: the budget of the heads is
+        // whole until one does.
+        Receiving::Head(reading) => {
+            let answered = reading.budget < limits.head;
+            fail(exchange, Error::Truncated { answered }, intake, above, below)
+        }
         Receiving::Body(download) => match download.rest {
             Rest::UntilEnd | Rest::Over => {
                 download.rest = Rest::Over;
@@ -715,7 +728,7 @@ fn ended(
                 settle(exchange, intake, limits, above, below)
             }
             Rest::Length(_) | Rest::Chunk(_) | Rest::ChunkEnd | Rest::ChunkSize | Rest::Trailer(_) => {
-                fail(exchange, Error::Truncated, intake, above, below)
+                fail(exchange, Error::Truncated { answered: true }, intake, above, below)
             }
         },
     }
@@ -1013,11 +1026,13 @@ fn fail(
     above: &mut Queue<Event>,
     below: &mut Queue<Down>,
 ) -> State {
+    // What the side above's streams are told: the stream's own fault; an
+    // end that cut the exchange short is no error of the peer's data, but
+    // one of the side below's own; anything else is.
     let fault = match error {
-        Error::Stream(fault) => fault,
+        Error::Stream(fault) | Error::Closed(Some(fault)) => fault,
+        Error::Closed(None) | Error::Truncated { .. } => Fault::Other,
         Error::Refused(_)
-        | Error::Closed
-        | Error::Truncated
         | Error::Status
         | Error::Version
         | Error::Header

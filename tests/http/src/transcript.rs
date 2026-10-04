@@ -319,9 +319,10 @@ pub fn render(transcript: &Transcript, decoded: &Decoded) -> String {
     out
 }
 
-const ERRORS: [(Error, &str); 12] = [
-    (Error::Closed, "closed"),
-    (Error::Truncated, "truncated"),
+const ERRORS: [(Error, &str); 13] = [
+    (Error::Closed(None), "closed"),
+    (Error::Truncated { answered: true }, "truncated"),
+    (Error::Truncated { answered: false }, "unanswered"),
     (Error::Status, "status"),
     (Error::Version, "version"),
     (Error::Header, "header"),

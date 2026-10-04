@@ -132,7 +132,7 @@ fn the_stream_ending_before_the_request_is_sent_is_closed_and_after_it_truncated
     let mut machine = Machine::new(LIMITS);
     machine.down(Request::Call(get()));
     let (events, requests) = machine.up(Up::End);
-    assert_eq!(events, [Event::Failed(Error::Closed)], "nothing was sent");
+    assert_eq!(events, [Event::Failed(Error::Closed(None))], "nothing was sent");
     assert_eq!(requests, [Down::Demand { read: Read::Nothing, room: 0 }], "the room no longer wanted");
     assert_eq!(machine.client.waiting(), Waiting::Close);
     let (events, requests) = machine.up(Up::Room);
@@ -141,7 +141,7 @@ fn the_stream_ending_before_the_request_is_sent_is_closed_and_after_it_truncated
     let mut machine = Machine::new(LIMITS);
     machine.called(get());
     let (events, requests) = machine.up(Up::End);
-    assert_eq!(events, [Event::Failed(Error::Truncated)]);
+    assert_eq!(events, [Event::Failed(Error::Truncated { answered: false })]);
     assert!(requests.is_empty(), "a read crosses the end: nothing to withdraw");
 }
 
@@ -152,19 +152,26 @@ fn the_stream_ending_mid_upload_fails_the_upload_and_the_exchange() {
     machine.up(Up::Room);
     machine.down(Request::Upload(Down::Demand { read: Read::Nothing, room: 8 }));
     let (events, requests) = machine.up(Up::End);
-    assert_eq!(events, [Event::Upload(Up::Failed(Fault::Invalid)), Event::Failed(Error::Truncated)]);
+    assert_eq!(events, [Event::Upload(Up::Failed(Fault::Other)), Event::Failed(Error::Truncated { answered: false })]);
     assert_eq!(requests, [Down::Demand { read: Read::Nothing, room: 0 }]);
 }
 
 #[test]
 fn the_stream_failing_in_each_state_fails_the_exchange_with_its_fault() {
     let fault = Fault::Reset;
-    // Writing the head.
+    // Writing the head: nothing went down, and a pool may retry it anywhere.
     let mut machine = Machine::new(LIMITS);
     machine.down(Request::Call(get()));
     let (events, requests) = machine.up(Up::Failed(fault));
-    assert_eq!(events, [Event::Failed(Error::Stream(fault))]);
+    assert_eq!(events, [Event::Failed(Error::Closed(Some(fault)))]);
     assert!(requests.is_empty(), "nothing follows a failure: nothing to withdraw");
+    // Writing the head, with room for the upload demanded already: its
+    // stream is told the stream's own fault.
+    let mut machine = Machine::new(LIMITS);
+    machine.down(Request::Call(post(8)));
+    machine.down(Request::Upload(Down::Demand { read: Read::Nothing, room: 8 }));
+    let (events, _) = machine.up(Up::Failed(fault));
+    assert_eq!(events, [Event::Upload(Up::Failed(fault)), Event::Failed(Error::Closed(Some(fault)))]);
     // Uploading.
     let mut machine = Machine::new(LIMITS);
     machine.down(Request::Call(post(8)));

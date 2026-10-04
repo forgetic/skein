@@ -35,6 +35,7 @@ impl Seen {
             match seen.outcome {
                 Some(Outcome::Failed(Error::Stream(_))) => self.note("failed Stream".into()),
                 Some(Outcome::Failed(Error::Refused(_))) => self.note("failed Refused".into()),
+                Some(Outcome::Failed(Error::Closed(Some(_)))) => self.note("failed Closed with a fault".into()),
                 Some(outcome) => self.note(format!("{outcome:?}")),
                 None => self.note("closed before the outcome".into()),
             }
@@ -84,11 +85,13 @@ impl Seen {
     }
 }
 
-const EVERY_OUTCOME: [&str; 16] = [
+const EVERY_OUTCOME: [&str; 19] = [
     "Done(Keep)",
     "Done(Close)",
-    "Failed(Closed)",
-    "Failed(Truncated)",
+    "Failed(Closed(None))",
+    "failed Closed with a fault",
+    "Failed(Truncated { answered: true })",
+    "Failed(Truncated { answered: false })",
     "Failed(Status)",
     "Failed(Version)",
     "Failed(Header)",
@@ -98,6 +101,7 @@ const EVERY_OUTCOME: [&str; 16] = [
     "Failed(ChunkSize)",
     "Failed(Chunk)",
     "Failed(Trailer)",
+    "Failed(Upgrade)",
     "failed Stream",
     "failed Refused",
     "closed before the outcome",
@@ -191,5 +195,10 @@ fn transcripts_cut_mutated_and_failed_read_as_the_reference_reads_them() {
         let run = client_world::check(&exchanges, &server, &settings, seed);
         tally.record(&run, &settings);
     }
-    tally.assert_fell(&["Done(Keep)", "Failed(Truncated)", "failed Stream", "closed before the outcome"]);
+    tally.assert_fell(&[
+        "Done(Keep)",
+        "Failed(Truncated { answered: true })",
+        "failed Stream",
+        "closed before the outcome",
+    ]);
 }

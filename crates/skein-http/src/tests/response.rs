@@ -168,9 +168,9 @@ fn a_head_that_never_ends_fails_at_the_limit_or_is_cut_by_the_end_of_the_stream(
         endless.extend_from_slice(b"X: y\r\n");
     }
     assert_eq!(failure_with(&endless, Limits { headers: 64, ..LIMITS }), Error::HeadTooLong);
-    assert_eq!(failure(b"HTTP/1.1 200 OK\r\nX: y\r\n"), Error::Truncated);
-    assert_eq!(failure(b"HTTP/1.1 200 O"), Error::Truncated, "a status line cut short");
-    assert_eq!(failure(b""), Error::Truncated, "no response at all");
+    assert_eq!(failure(b"HTTP/1.1 200 OK\r\nX: y\r\n"), Error::Truncated { answered: true });
+    assert_eq!(failure(b"HTTP/1.1 200 O"), Error::Truncated { answered: false }, "a status line cut short");
+    assert_eq!(failure(b""), Error::Truncated { answered: false }, "no response at all");
 }
 
 #[test]
@@ -284,5 +284,8 @@ fn the_response_goes_up_when_its_head_is_whole_and_not_before() {
     // An end with nothing demanded comes only once nothing is held below
     // (lib.md, 7): the body's two bytes never came.
     let (events, _) = machine.up(Up::End);
-    assert_eq!(events, [Event::Body(Up::Failed(skein_lib::stream::Fault::Invalid)), Event::Failed(Error::Truncated)]);
+    assert_eq!(
+        events,
+        [Event::Body(Up::Failed(skein_lib::stream::Fault::Other)), Event::Failed(Error::Truncated { answered: true })]
+    );
 }

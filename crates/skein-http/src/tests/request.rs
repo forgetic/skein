@@ -156,7 +156,7 @@ fn a_call_on_a_connection_that_ended_or_failed_while_idle_fails_at_once() {
     assert_eq!(machine.up(Up::End), nothing);
     assert_eq!(machine.client.waiting(), Waiting::Close);
     let (events, requests) = machine.down(Request::Call(get()));
-    assert_eq!(events, [Event::Failed(Error::Closed)]);
+    assert_eq!(events, [Event::Failed(Error::Closed(None))]);
     assert!(requests.is_empty());
     assert_eq!(machine.client.waiting(), Waiting::Close);
 
@@ -164,6 +164,6 @@ fn a_call_on_a_connection_that_ended_or_failed_while_idle_fails_at_once() {
     assert_eq!(machine.up(Up::Failed(Fault::Reset)), nothing);
     assert_eq!(machine.up(Up::End), nothing, "nothing follows a failure");
     let (events, requests) = machine.down(Request::Call(get()));
-    assert_eq!(events, [Event::Failed(Error::Stream(Fault::Reset))]);
+    assert_eq!(events, [Event::Failed(Error::Closed(Some(Fault::Reset)))], "nothing was sent: retried anywhere");
     assert!(requests.is_empty());
 }

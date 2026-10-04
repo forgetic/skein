@@ -376,8 +376,13 @@ pub fn check(exchanges: &[Exchange], server: &[u8], settings: &Settings, seed: u
         match seen.outcome {
             None => {}
             Some(Outcome::Failed(Error::Stream(fault))) => assert_eq!(run.failed, Some(fault), "{}", what()),
-            Some(Outcome::Failed(Error::Closed)) => {
-                assert!(rest.is_empty(), "closed only with nothing from the server; {}", what());
+            // Nothing of the request went down: a pool may send it anywhere.
+            Some(Outcome::Failed(Error::Closed(fault))) => {
+                assert!(seen.sent.is_empty(), "closed before anything was sent; {}", what());
+                match fault {
+                    Some(fault) => assert_eq!(run.failed, Some(fault), "{}", what()),
+                    None => assert!(rest.is_empty(), "closed only with nothing from the server; {}", what()),
+                }
             }
             // Generated calls are refused only for a head past the limit,
             // and nothing of them is written.
@@ -950,6 +955,21 @@ impl World<'_> {
     }
 
     fn terminal(&mut self, outcome: Outcome) {
+        // Each of the exchange's streams the side above still writes or reads
+        // heard its end first (http.md, 3.4): a failure tells a stream not
+        // withdrawn or discarded that it failed; `Done` follows the body's
+        // end or a discard, and an upload finished or stopped.
+        let refused = matches!(outcome, Outcome::Failed(Error::Refused(_)));
+        assert!(
+            refused || self.above.upload == Face::Over,
+            "the upload's stream is over before {outcome:?}: {:?}",
+            self.above.upload
+        );
+        assert!(
+            !self.above.body_open || matches!(self.above.body, Face::Over | Face::Withdrawn),
+            "the body's stream is over, or withdrawn, before {outcome:?}: {:?}",
+            self.above.body
+        );
         let seen = self.current().expect("one terminal event per call");
         seen.outcome = Some(outcome);
         self.above.terminal = Some(outcome);
