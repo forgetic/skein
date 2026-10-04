@@ -411,8 +411,8 @@ impl Sim {
                 if let Summary::Cancel { .. } = flight.kind {
                     self.fail(pid, &format!("a Cancel of {target:?}, which is a Cancel"));
                 }
-                if flight.kind.is_file() {
-                    self.fail(pid, &format!("a Cancel of {target:?}, {:?}: io never cancels a file's", flight.kind));
+                if !flight.kind.cancellable() {
+                    self.fail(pid, &format!("a Cancel of {target:?}, {:?}, which io never cancels", flight.kind));
                 }
             }
             return On::Nothing;
@@ -850,6 +850,15 @@ impl Sim {
 
     /// Stops a waiting operation from waiting.
     fn withdraw(&mut self, pid: Pid, token: Token, op: &Op) {
+        // A hung operation on files waits on nothing; an Open gives back
+        // the place it held.
+        if let Op::Open { .. } | Op::Read { .. } | Op::Write { .. } | Op::Sync { .. } = op {
+            if let Op::Open { .. } = op {
+                let process = self.process_mut(pid);
+                process.opening = process.opening.checked_sub(1).expect("an Open waiting holds a place");
+            }
+            return;
+        }
         let id = match op {
             Op::Accept { fd } | Op::Connect { fd, .. } | Op::Recv { fd, .. } | Op::Send { fd, .. } => {
                 *self.process(pid).fds.get(fd).expect("an operation in flight keeps its descriptor open")

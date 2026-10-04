@@ -307,7 +307,7 @@ fn named(op: &Op) -> &'static [Error] {
     }
 }
 
-const SOCKETS_ERRORS: [Error; 9] = [
+const SOCKETS_ERRORS: [Error; 8] = [
     Error::Refused,
     Error::Reset,
     Error::BrokenPipe,
@@ -316,8 +316,32 @@ const SOCKETS_ERRORS: [Error; 9] = [
     Error::AddressNotAvailable,
     Error::Unreachable,
     Error::TimedOut,
-    Error::Cancelled,
 ];
+
+/// Whether a `Cancel` may stop `op`, so that it may answer `Cancelled`.
+fn cancellable(op: &Op) -> bool {
+    match op {
+        Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. }
+        | Op::Cancel { .. } => false,
+        Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Socket { .. }
+        | Op::Bind { .. }
+        | Op::Listen { .. }
+        | Op::Accept { .. }
+        | Op::Connect { .. }
+        | Op::Recv { .. }
+        | Op::Send { .. }
+        | Op::Shutdown { .. }
+        | Op::Close { .. } => true,
+    }
+}
 
 const FILES_ERRORS: [Error; 12] = [
     Error::NotFound,
@@ -351,9 +375,12 @@ fn each_operation_on_files_answers_the_errors_its_table_names_and_no_other() {
             assert_eq!(answer.is_valid(), named(&answer.kind).contains(&error), "{answer:?}");
             kind = answer.kind;
         }
+        let answer = complete(kind, Err(Error::Cancelled));
+        assert_eq!(answer.is_valid(), cancellable(&answer.kind), "cancelled only if a Cancel may stop it: {answer:?}");
+        kind = answer.kind;
         for error in SOCKETS_ERRORS.into_iter().chain([Error::TooLate]) {
             let answer = complete(kind, Err(error));
-            assert!(!answer.is_valid(), "never cancelled, never a socket's error: {answer:?}");
+            assert!(!answer.is_valid(), "never a socket's error: {answer:?}");
             kind = answer.kind;
         }
     }

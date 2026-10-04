@@ -112,7 +112,9 @@ accept queues, descriptors, connect timeouts) and each fault's chance:
 - short reads and short writes of files;
 - a disk beyond a healthy one: no space, a filesystem gone read-only, an
   I/O error, and the kernel out of memory, each failing an operation on
-  files before the machine is asked.
+  files before the machine is asked; and a filesystem that hangs an
+  `Open`, `Read`, `Write` or `Sync` until a `Cancel` stops it, the
+  machine never asked.
 
 A calm configuration has no faults and roomy buffers; a chaotic one turns
 every fault on, often enough that a few hundred seeds meet each one, with

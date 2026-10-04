@@ -95,7 +95,11 @@
 //!   fewer bytes. `no_space`, `read_only` and `io_error` (`Other(5)`), and
 //!   `no_buffer`, model a disk beyond a healthy scratch directory, and fall
 //!   instead of the call, before the machine is asked: the operation did
-//!   nothing.
+//!   nothing. `hung` parks an `Open`, `Read`, `Write` or `Sync` with no
+//!   call at all, until a `Cancel` stops it.
+//! - **A cancel of an operation on files** stops one that hangs. One whose
+//!   call waits for the world, or is with the machine, is being done, as an
+//!   ring's worker would be doing it: the `Cancel` is too late.
 #![forbid(unsafe_code)]
 
 extern crate alloc;

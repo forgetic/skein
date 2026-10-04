@@ -39,8 +39,8 @@ use skein_lib::{Duration, Queue, Time};
 
 pub use files::{
     Entries, Escapes, FileLifecycle, Listing, MakeDirectories, Nested, OpenLimit, Permissions, Removes, Renames,
-    Shortness, escapes, file_lifecycle, list, make_directory, nested_roots, open_past_the_descriptor_limit,
-    permissions, remove, rename,
+    Shortness, cancel_read, escapes, file_lifecycle, list, make_directory, nested_roots,
+    open_past_the_descriptor_limit, permissions, remove, rename,
 };
 
 pub use scenarios::{

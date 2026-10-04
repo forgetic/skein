@@ -240,9 +240,18 @@ documentation, with each operation's errors; the decisions behind it:
   name fits in none of `names`, rather than answer the end; entries a
   `List` took are handed back even if the directory's position could not
   be set back after them.
-- **Files complete promptly and are never cancelled.** No file operation
-  waits on a peer, so io waits for each, as it does a `Socket` or a
-  `Close`, and a `Cancel` of one is a broken invariant.
+- **An `Open`, `Read`, `Write` or `Sync` may be cancelled.** None waits
+  on a peer, but on a filesystem that can stall (NFS whose server went
+  away, a FUSE daemon that hangs) one may wait for good, and io must be
+  able to give up on it. So a `Cancel` may target one, with a socket's
+  outcomes (section 5): it stops one still queued for io_uring's worker,
+  or interrupts one running, or comes too late, the target answering its
+  own result. Even on tmpfs a `Read` goes to the worker, and the ring's
+  conformance run sees its `Cancel` stop it in some runs and come too late
+  in others. The ring reads `ECANCELED` and `EINTR` as `Cancelled` on an
+  operation a `Cancel` was submitted for. A `Stat`, `Rename`, `Remove`,
+  `MakeDirectory` or `List` completes without one: a `Cancel` of one is a
+  broken invariant, until a filesystem that stalls them pulls it.
 - **Only files and directories open.** A FIFO beneath a root opened to
   read opens at once, and its first `Read` then waits for a writer's
   bytes for good, which nothing above can stop. So every `Open` goes down
@@ -283,7 +292,7 @@ Some mistakes io never makes, so a backend may assume they never happen:
 - an operation on files on a socket's descriptor, or one on sockets on a
   file's; a read on a descriptor not opened to read, a write on one not
   opened to create, a list on one opened to create;
-- a cancel of an operation on files;
+- a cancel of a stat, a rename, a removal, a new directory or a listing;
 - a close with anything else in flight on its descriptor, an operation on
   files being on every descriptor it names.
 
@@ -343,7 +352,12 @@ for its backend.
 - **What only the simulator shows:** a disk beyond a healthy one (no
   space, a filesystem gone read-only, an I/O error) is the simulator's
   own tests' (simulator.md, 6), and an `Open` past the descriptor limit a
-  scenario on the simulator only. `EMLINK` (`TooManyLinks` on a `Rename`
+  scenario on the simulator only. A `Cancel` of a file's `Read` runs on
+  both: the ring stops it or comes too late, from one run to the next,
+  and requires a pairing the simulator draws; the simulator's `hung`
+  fault, a filesystem gone away, adds the `Read` that waits for good,
+  which no scratch directory shows, and every pairing must appear over
+  the fuzzy seeds. `EMLINK` (`TooManyLinks` on a `Rename`
   or a `MakeDirectory`) neither backend provokes. A `Rename` across
   filesystems (`Other(EXDEV)`) is the ring's own test, between the
   temporary directory and `/dev/shm` where they are two mounts. Short reads and writes

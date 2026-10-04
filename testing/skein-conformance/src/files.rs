@@ -12,8 +12,9 @@ use core::fmt::Debug;
 
 use skein_io::kernel::{Done, Error, Fd, Kind, Op, OpenHow, Stat};
 
+use crate::run::{BRIEFLY, NAMES, Run, unexpected};
 pub use crate::run::{Entries, Shortness};
-use crate::run::{NAMES, Run, unexpected};
+use crate::scenarios::{Cancelling, Target};
 use crate::{Backend, Check, Item};
 
 const NOTHING: Result<Done, Error> = Ok(Done::Nothing);
@@ -886,5 +887,43 @@ impl Check for OpenLimit {
     fn check(&self) {
         assert_eq!(self.past, Err(Error::TooManyOpenFiles), "the contract: an Open past the descriptor limit");
         assert_eq!(self.then, Ok(()), "the contract: an Open once a descriptor is free");
+    }
+}
+
+/// A `Read` of a file cancelled (kernel.md, 6.1). On the ring the `Read`
+/// goes to the ring's worker, and the `Cancel` stops it before the worker
+/// reads, or comes once it has: both, from one run to the next. A calm
+/// simulator reads at once, so its `Cancel` is too late; its `hung` fault,
+/// a filesystem gone away, makes one stop a `Read` that would wait for
+/// good, which no scratch directory shows. An `Open` that hangs is
+/// cancelled and made again, as io's deadline would.
+#[must_use]
+pub fn cancel_read<B: Backend>(backend: &mut B) -> Cancelling {
+    let mut run = Run::new(backend);
+    let process = run.process();
+    let root = run.root(process, &[Item::file(b"f", b"hello")]);
+    let file = open_patiently(&mut run, process, root);
+    let read = run.start(process, Op::read(file, Box::from([0; 8]), 0).expect("room to read"));
+    let (cancels, target) = run.cancel(process, read);
+    run.close(process, file);
+    run.close(process, root);
+    run.finish();
+    let target = target.result;
+    Cancelling { of: Target::Read, cancels, target, could_complete: true, decided_first: false, taken_once: true }
+}
+
+/// Opens `f` to read, an `Open` that hangs cancelled and made again.
+fn open_patiently<B: Backend>(run: &mut Run<'_, B>, process: B::Process, root: Fd) -> Fd {
+    loop {
+        let open = run.start(process, Op::Open { root, path: Box::from(&b"f"[..]), how: OpenHow::Read });
+        let complete = match run.within(process, open, BRIEFLY) {
+            Some(complete) => complete,
+            None => run.cancel(process, open).1,
+        };
+        match complete.result {
+            Ok(Done::Fd(fd)) => return fd,
+            Err(Error::Cancelled) => {}
+            other => unexpected("an Open of a file, or one cancelled", &other),
+        }
     }
 }

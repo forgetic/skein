@@ -31,9 +31,9 @@ pub struct Config {
 /// Loopback itself never refuses a listened address, resets a connection or
 /// times one out. `refuse`, `reset` and `timed_out` model the network beyond
 /// it, a remote peer or a path that can do all three, so that io meets them
-/// in a world that has only loopback. Likewise `no_space`, `read_only` and
-/// `io_error` model a disk beyond a healthy one, which a scratch directory
-/// never shows.
+/// in a world that has only loopback. Likewise `no_space`, `read_only`,
+/// `io_error` and `hung` model a disk beyond a healthy one, which a scratch
+/// directory never shows.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Faults {
     /// That a completion is delivered late, by up to `latency_max`. Latency
@@ -84,6 +84,9 @@ pub struct Faults {
     /// That a `Read`, `Write` or `Sync` fails with an I/O error (`Other(5)`,
     /// `EIO`), having done nothing.
     pub io_error: u32,
+    /// That an `Open`, `Read`, `Write` or `Sync` hangs, as on a network
+    /// filesystem whose server went away, until a `Cancel` stops it.
+    pub hung: u32,
 }
 
 impl Faults {
@@ -105,6 +108,7 @@ impl Faults {
         no_space: 0,
         read_only: 0,
         io_error: 0,
+        hung: 0,
     };
 
     /// Every fault, often enough that a few hundred seeds meet each one.
@@ -125,6 +129,7 @@ impl Faults {
         no_space: 5,
         read_only: 5,
         io_error: 5,
+        hung: 5,
     };
 }
 

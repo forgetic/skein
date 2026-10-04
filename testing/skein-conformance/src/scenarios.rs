@@ -776,6 +776,8 @@ pub enum Target {
     Accept,
     Recv,
     Connect,
+    /// A `Read` of a file.
+    Read,
 }
 
 /// When a racing target's `Cancel` is submitted.
@@ -841,9 +843,9 @@ impl Cancelling {
     /// operation does when nothing stops it.
     fn own(&self) -> bool {
         match (self.of, self.target) {
-            (Target::Recv, Ok(Done::Count(n))) => n > 0,
+            (Target::Recv | Target::Read, Ok(Done::Count(n))) => n > 0,
             (Target::Accept, Ok(Done::Accepted { .. })) | (Target::Connect, Ok(Done::Nothing)) => true,
-            (Target::Recv | Target::Accept | Target::Connect, _) => false,
+            (Target::Recv | Target::Accept | Target::Connect | Target::Read, _) => false,
         }
     }
 }

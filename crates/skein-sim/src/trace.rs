@@ -45,6 +45,7 @@ pub enum Fault {
     NoSpace,
     ReadOnly,
     IoError,
+    Hung,
 }
 
 /// An operation without its buffers: their lengths stand in for them, and
@@ -166,6 +167,33 @@ impl Summary {
             | Summary::Shutdown { .. }
             | Summary::Close { .. }
             | Summary::Cancel { .. } => false,
+        }
+    }
+
+    /// Whether a `Cancel` may target the operation: any but a `Cancel`, and
+    /// the operations on files that complete promptly (`Op::is_file`).
+    #[must_use]
+    pub const fn cancellable(&self) -> bool {
+        match self {
+            Summary::Cancel { .. }
+            | Summary::Stat { .. }
+            | Summary::Rename { .. }
+            | Summary::Remove { .. }
+            | Summary::MakeDirectory { .. }
+            | Summary::List { .. } => false,
+            Summary::Socket { .. }
+            | Summary::Bind { .. }
+            | Summary::Listen { .. }
+            | Summary::Accept { .. }
+            | Summary::Connect { .. }
+            | Summary::Recv { .. }
+            | Summary::Send { .. }
+            | Summary::Shutdown { .. }
+            | Summary::Close { .. }
+            | Summary::Open { .. }
+            | Summary::Read { .. }
+            | Summary::Write { .. }
+            | Summary::Sync { .. } => true,
         }
     }
 

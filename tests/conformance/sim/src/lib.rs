@@ -142,8 +142,20 @@ pub const fn loopback_chaos() -> Config {
         no_space: 0,
         read_only: 0,
         io_error: 0,
+        hung: 0,
         ..chaos.faults
     };
+    Config { faults, ..chaos }
+}
+
+/// The chaos of a healthy scratch directory, and a filesystem that hangs
+/// an operation until a `Cancel` stops it, and cancels the backend cannot
+/// submit: faults beyond a healthy disk, which only the cancel of a file's
+/// `Read` meets.
+#[must_use]
+pub fn file_cancel_chaos() -> Config {
+    let chaos = loopback_chaos();
+    let faults = Faults { hung: 300, cancel_unsubmitted: Faults::CHAOS.cancel_unsubmitted, ..chaos.faults };
     Config { faults, ..chaos }
 }
 

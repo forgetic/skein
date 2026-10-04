@@ -90,6 +90,29 @@ impl Sim {
             let process = self.process_mut(pid);
             process.opening = process.opening.checked_add(1).expect("fewer than 2^32 opens");
         }
+        let hangs = match op {
+            Op::Open { .. } | Op::Read { .. } | Op::Write { .. } | Op::Sync { .. } => true,
+            Op::Stat { .. }
+            | Op::Rename { .. }
+            | Op::Remove { .. }
+            | Op::MakeDirectory { .. }
+            | Op::List { .. }
+            | Op::Close { .. }
+            | Op::Socket { .. }
+            | Op::Bind { .. }
+            | Op::Listen { .. }
+            | Op::Accept { .. }
+            | Op::Connect { .. }
+            | Op::Recv { .. }
+            | Op::Send { .. }
+            | Op::Shutdown { .. }
+            | Op::Cancel { .. } => false,
+        };
+        // A hung operation asks the machine nothing: only a Cancel ends it.
+        if hangs && self.fault(pid, self.config.faults.hung, Fault::Hung) {
+            self.park(pid, token, op);
+            return;
+        }
         let (ask, len) = self.ask(pid, &op);
         let ticket = Ticket(serial);
         self.asked.insert(ticket, Asked { pid, token, len });

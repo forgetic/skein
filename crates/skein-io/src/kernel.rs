@@ -151,8 +151,11 @@
 //!   descriptor until its `Close`. A directory removed while open is empty
 //!   for good: `Open` beneath it, `MakeDirectory` in it and `List` of it
 //!   fail with `NotFound`.
-//! - **A file operation completes by itself, promptly:** none waits on a
-//!   peer, and io never cancels one.
+//! - **An `Open`, `Read`, `Write` or `Sync` may be cancelled,** as an
+//!   operation on sockets may, with the same outcomes (Cancelling, above):
+//!   none waits on a peer, but on a filesystem that can stall (NFS, FUSE)
+//!   one may wait long, and io's deadline gives up on it. A `Stat`,
+//!   `Rename`, `Remove`, `MakeDirectory` or `List` completes without one.
 //! - **Only files and directories open.** An `Open` of anything else beneath
 //!   a root (a FIFO, a device, a socket) fails with `NotAFile`: the backend
 //!   opens without blocking and never as a controlling terminal
@@ -164,8 +167,9 @@
 //!
 //! The errors each operation names, beyond `NoBufferSpace`,
 //! `InvalidArgument` and `Other`, which any operation but `Cancel` may
-//! answer; each variant of [`Error`] says which Linux error numbers it is,
-//! per operation:
+//! answer, and `Cancelled`, which any operation a `Cancel` may stop may;
+//! each variant of [`Error`] says which Linux error numbers it is, per
+//! operation:
 //!
 //! | Op | Errors |
 //! |---|---|
@@ -187,7 +191,8 @@
 //!
 //! - a record that is not [`Op::is_valid`];
 //! - a token already in flight;
-//! - a `Cancel` whose target is a `Cancel`, or an operation on files;
+//! - a `Cancel` whose target is a `Cancel`, a `Stat`, a `Rename`, a
+//!   `Remove`, a `MakeDirectory` or a `List`;
 //! - an operation on files ([`Op::is_file`]) on a socket's descriptor, or
 //!   an operation on sockets on a file's;
 //! - a `Read` on a descriptor not opened with [`OpenHow::Read`], a `Write`
@@ -574,10 +579,10 @@ pub enum Error {
     /// sockets (`ENOBUFS`, `ENOMEM`). A failed `Accept` consumed no waiting
     /// connection.
     NoBufferSpace,
-    /// Any operation on sockets, and `Close`: a `Cancel` stopped it
-    /// (`ECANCELED`, and `EINTR` on an operation io cancelled). It did
-    /// nothing, but for a `Connect`, which may still have reached its peer.
-    /// io never cancels an operation on files.
+    /// Any operation on sockets, `Close`, `Open`, `Read`, `Write`, `Sync`: a
+    /// `Cancel` stopped it (`ECANCELED`, and `EINTR` on an operation io
+    /// cancelled). It did nothing, but for a `Connect`, which may still have
+    /// reached its peer.
     Cancelled,
     /// `Cancel` only: the target had already completed, or was too far along
     /// to stop (`ENOENT`, `EALREADY`; on any other operation those are
@@ -951,8 +956,8 @@ fn fails_on_files(op: Files, error: Error) -> bool {
         | Error::AddressNotAvailable
         | Error::Unreachable
         | Error::TimedOut
-        | Error::Cancelled
         | Error::TooLate => false,
+        Error::Cancelled => among(op, &[Files::Open, Files::Read, Files::Write, Files::Sync]),
     }
 }
 

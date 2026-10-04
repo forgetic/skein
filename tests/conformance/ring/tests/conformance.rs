@@ -13,7 +13,7 @@
 
 use skein_conformance::{
     Cancelling, Check, Pairing, Race, Shortness, address_in_use, backpressure, cancel_accept,
-    cancel_accept_racing_a_connect, cancel_connect, cancel_connect_established_while_away, cancel_recv,
+    cancel_accept_racing_a_connect, cancel_connect, cancel_connect_established_while_away, cancel_read, cancel_recv,
     cancel_recv_racing_bytes, closed_before_accept, escapes, file_lifecycle, full_accept_queue, graceful_close,
     ipv6_only, lifecycle, list, listener_close_resets_waiting, make_directory, nested_roots, permissions, refused,
     remove, rename, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
@@ -196,4 +196,16 @@ fn paths_that_leave_their_root_and_paths_that_stay() {
 fn what_the_owner_may_not_do() {
     assert!(skein_conformance_ring::Ring::permissions_checked(), "run as root, whom no mode stops: run as a user");
     on_the_ring(permissions);
+}
+
+/// A file's `Read` goes to the ring's worker, even on tmpfs, so its `Cancel`
+/// stops it, or comes once it has read: either, as the simulator draws
+/// them. That a `Cancel` stops one that waits on a filesystem that stalls,
+/// no scratch directory shows; the simulator's `hung` fault does.
+#[test]
+fn a_cancel_of_a_read_of_a_file_stops_it_or_is_too_late() {
+    let seen = cancel_read(&mut Ring::new());
+    seen.check();
+    let drawn = [Pairing::Stopped, Pairing::Interrupted, Pairing::Completed];
+    assert!(drawn.contains(&seen.pairing()), "a pairing the simulator draws: {seen:?}");
 }

@@ -745,7 +745,8 @@ fn error(kind: &Op, errno: i32, cancelled: bool) -> Error {
             libc::EINVAL => Error::InvalidArgument,
             other => Error::Other(other),
         },
-        // Never cancelled: an ECANCELED or an EINTR is no cancel's.
+        // Cancelled only if a Cancel was submitted for it, which io does
+        // for an Open, a Read, a Write or a Sync only.
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
@@ -755,6 +756,7 @@ fn error(kind: &Op, errno: i32, cancelled: bool) -> Error {
         | Op::Remove { .. }
         | Op::MakeDirectory { .. }
         | Op::List { .. } => match errno {
+            libc::ECANCELED | libc::EINTR if cancelled => Error::Cancelled,
             libc::ENOBUFS | libc::ENOMEM => Error::NoBufferSpace,
             libc::EINVAL => Error::InvalidArgument,
             other => file_error(kind, other),

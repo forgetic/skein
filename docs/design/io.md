@@ -406,6 +406,14 @@ what the containers report (programming-model.md, 6.3).
   until an open for a path only is pulled. Reads and writes may be short,
   and io continues them; a listing comes an entry count at a time, and
   io's stated count is a limit it checks as the entries come.
+- **A deadline can give up on a file** (kernel.md, 6.1). An `Open`,
+  `Read`, `Write` or `Sync` on a filesystem that stalls may wait for good,
+  so a whole-file operation has a deadline, and at it io cancels what is
+  in flight, tells the owner, and keeps the entity settling until the
+  cancelled operation completes, as for a socket (section 3). Settling
+  entities still hold their slots and their operations, so io caps the
+  operations on files in flight, and refuses at its entrance past the
+  cap: that cap is part of io's files, the next task.
 - **File streams come later,** when a user needs to read a file by demand
   because it is too large to hold.
 

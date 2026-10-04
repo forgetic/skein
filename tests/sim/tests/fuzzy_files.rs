@@ -10,14 +10,17 @@ use skein_io::kernel::{Complete, Done, Entry, Error, Fd, Op, OpenHow};
 use skein_sim::{Config, Event, Fault, Pid};
 use skein_sim_tests::World;
 
-/// Submits `op` and lets time pass until it completes.
+/// Submits `op` and lets time pass until it completes; one that hangs, with
+/// nothing due, is cancelled, as io's deadline would.
 fn settle(world: &mut World, pid: Pid, op: Op) -> Complete {
     let token = world.submit(pid, op);
     loop {
         if let Some(complete) = world.reap(pid).into_iter().find(|complete| complete.op == token) {
             return complete;
         }
-        assert!(world.sim.advance(), "an operation on files completes");
+        if !world.sim.advance() {
+            world.submit(pid, Op::Cancel { target: token });
+        }
     }
 }
 
@@ -133,10 +136,11 @@ fn files_under_chaos_keep_the_contract_and_every_fault_falls() {
         Fault::NoSpace,
         Fault::ReadOnly,
         Fault::IoError,
+        Fault::Hung,
     ] {
         assert!(faults.contains(&fault), "{fault:?} fell in some seed: {faults:?}");
     }
-    for error in [Error::NoBufferSpace, Error::NoSpace, Error::ReadOnly, Error::Other(5)] {
+    for error in [Error::NoBufferSpace, Error::NoSpace, Error::ReadOnly, Error::Other(5), Error::Cancelled] {
         assert!(errors.contains(&error), "some operation failed with {error:?}: {errors:?}");
     }
 }

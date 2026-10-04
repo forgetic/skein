@@ -174,14 +174,17 @@ fn latency_delays_a_files_completion_too() {
 }
 
 /// Submits `op` and lets time pass until it completes, whatever chaos
-/// delays it by.
+/// delays it by; one that hangs, with nothing due, is cancelled, as io's
+/// deadline would.
 fn settle(world: &mut World, pid: Pid, op: Op) -> skein_io::kernel::Complete {
     let token = world.submit(pid, op);
     loop {
         if let Some(complete) = world.reap(pid).into_iter().find(|complete| complete.op == token) {
             return complete;
         }
-        assert!(world.sim.advance(), "an operation on files completes");
+        if !world.sim.advance() {
+            world.submit(pid, Op::Cancel { target: token });
+        }
     }
 }
 
@@ -209,6 +212,36 @@ fn a_seed_replays_a_world_of_files() {
         assert_eq!(run(seed), run(seed), "seed {seed}");
     }
     assert_ne!(run(3), run(4), "seeds differ");
+}
+
+/// An `Open`, a `Read`, a `Write` and a `Sync` that hang, as on a network
+/// filesystem whose server went away, wait for nothing time brings; a
+/// `Cancel` stops each, and the `Open`'s place against the limit is given
+/// back.
+#[test]
+fn a_hung_operation_on_files_waits_until_a_cancel_stops_it() {
+    let (mut world, pid, root) = rooted();
+    let read = world.open(pid, root, b"a.txt", OpenHow::Read).unwrap();
+    let write = world.open(pid, root, b"new", OpenHow::Create).unwrap();
+    world.sim.set_faults(Faults { hung: 1000, ..Faults::NONE });
+    let ops = [
+        Op::Open { root, path: Box::from(&b"a.txt"[..]), how: OpenHow::Read },
+        Op::read(read, Box::from([0; 4]), 0).unwrap(),
+        Op::write(write, Box::from(&b"x"[..]), 0, 0).unwrap(),
+        Op::Sync { fd: write },
+    ];
+    for op in ops {
+        let target = world.submit(pid, op);
+        assert!(world.reap(pid).is_empty() && world.sim.next_due().is_none(), "hung, with nothing due");
+        let cancel = world.submit(pid, Op::Cancel { target });
+        let mut got = world.reap(pid);
+        got.sort_by_key(|complete| complete.op);
+        let results: Vec<_> = got.into_iter().map(|complete| (complete.op, complete.result)).collect();
+        assert_eq!(results, [(target, Err(Error::Cancelled)), (cancel, Ok(Done::Nothing))]);
+    }
+    assert_eq!(world.sim.open_fds(pid), 3, "the hung Open made no descriptor and holds no place");
+    world.sim.set_faults(Faults::NONE);
+    close_all(&mut world, pid, &[read, write, root]);
 }
 
 /// A `Close` of a file and a `Cancel` of it in one batch: the `Close` is
@@ -281,12 +314,13 @@ fn a_list_of_a_file_opened_to_create() {
 }
 
 #[test]
-#[should_panic(expected = "io never cancels a file's")]
-fn a_cancel_of_an_operation_on_files() {
+#[should_panic(expected = "which io never cancels")]
+fn a_cancel_of_an_operation_on_files_that_completes_promptly() {
     let (mut world, pid, root) = rooted();
     world.serving = false;
-    let open = world.submit(pid, Op::Open { root, path: Box::from(&b"a.txt"[..]), how: OpenHow::Read });
-    world.submit(pid, Op::Cancel { target: open });
+    let rename = Op::Rename { from_dir: root, from: Box::from(&b"a.txt"[..]), to_dir: root, to: Box::from(&b"b"[..]) };
+    let rename = world.submit(pid, rename);
+    world.submit(pid, Op::Cancel { target: rename });
 }
 
 #[test]
