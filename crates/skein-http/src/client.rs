@@ -114,12 +114,16 @@ pub fn largest_room(limits: &Limits) -> u32 {
 /// read of nothing.
 ///
 /// It is the intake of the body's carry-over, allocated with the client;
-/// the request head, held until room comes for it; the head being read:
-/// its list of fields and their bytes, at most [`Limits::head`], twice
-/// while a fold joins a value; the delivery it reads, at most
-/// [`largest_read`]; and the carry-over an exchange leaves unread, moved
-/// out of the intake when it ends. What goes up (a response, the body's
-/// bytes) is the side above's to count from when it is emitted.
+/// the request head, held until room comes for it, with the list of the
+/// response's fields; the head being read: its fields' bytes and the line
+/// that holds the next, at most [`Limits::head`], and as much again while a
+/// fold joins a value; and, once the body is read, the delivery it reads
+/// (a line of its framing, within the twice [`Limits::head`] already
+/// counted, or a piece, at most [`Limits::read`]) or the carry-over an
+/// exchange leaves unread, moved out of the intake when it ends. A
+/// delivery is the client's to count (lib.md, 7). A call is the side
+/// above's, read and dropped by the step that writes it; what goes up (a
+/// response, the body's bytes) is the side above's from when it is emitted.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
     if limits.head < 2 || limits.read == 0 {
@@ -132,7 +136,6 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(fields)?
         .checked_add(head)?
         .checked_add(u64::from(limits.request))?
-        .checked_add(u64::from(largest_read(limits)))?
         .checked_add(u64::from(limits.read))
 }
 
@@ -721,13 +724,13 @@ fn head_complete(
     match status.code {
         101 => fail(exchange, Error::Upgrade, intake, above, below),
         // The next head is read within what is left of the budget, if
-        // anything is.
+        // anything is, into the same list of fields.
         100..=199 => {
-            let budget = reading.budget;
-            if budget == 0 {
+            if reading.budget == 0 {
                 return fail(exchange, Error::HeadTooLong, intake, above, below);
             }
-            exchange.response = Receiving::Head(Reading::new(budget, limits));
+            reading.status = None;
+            reading.headers.clear();
             settle(exchange, intake, limits, above, below)
         }
         _ => {
