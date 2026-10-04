@@ -22,6 +22,7 @@ members = [
     "tests/lib",
     "tests/ring",
     "tests/sim",
+    "tests/tls",
     "tests/world",
 ]
 
@@ -65,6 +66,12 @@ overflow-checks = true
 [profile.release]
 panic = "abort"
 overflow-checks = true
+
+# rustls is built in tests as it ships: its debug assertions hold an alert
+# after close_notify to be a bug, which a half-closed connection reading a
+# corrupted record reaches (tls.md, 7).
+[profile.dev.package.rustls]
+debug-assertions = false
 
 # The lints for the step crates (lib and every domain, protocol and io layer).
 # Disallowed types, macros and methods are listed in clippy.toml. Ordinary Rust
