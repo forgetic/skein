@@ -12,6 +12,9 @@ skein-io.workspace = true
 io-uring.workspace = true
 libc.workspace = true
 
+[dev-dependencies]
+skein-scratch.workspace = true
+
 # Ordinary Rust (programming-model.md, 10.2), with the lints that keep the one
 # module allowed `unsafe` small and documented (9.4), and the subset's checks
 # that matter next to the syscalls: no silent casts, overflow or panicking

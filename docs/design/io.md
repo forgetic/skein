@@ -390,7 +390,7 @@ what the containers report (programming-model.md, 6.3).
 - **Whole-file operations come first:**
   - read a file, up to a stated maximum;
   - write a file, replacing it atomically: write a temporary, sync it,
-    rename it;
+    rename it (below);
   - stat;
   - list a directory, up to a stated count;
   - make a directory;
@@ -399,6 +399,36 @@ what the containers report (programming-model.md, 6.3).
 
   Each is one request with one terminal event. Beneath it, io runs the
   open, the reads or writes, and the close.
+- **What the records allow** (kernel.md, 6.1). Only an `Open` resolves a
+  path beneath a root, so io opens the directory a name lies in, beneath
+  the root, before it renames or removes that name or makes a directory
+  there, and it stats what it has opened: a stat needs the file readable,
+  until an open for a path only is pulled. Reads and writes may be short,
+  and io continues them; a listing comes an entry count at a time, and
+  io's stated count is a limit it checks as the entries come.
+- **Replacing a file, in order:** `Stat` the old file, opened to read, for
+  its permission bits; `Create` the temporary, beside the target in its
+  directory, with those bits; `Write` it all; `Sync` it; `Close` it;
+  `Rename` it over the target; `Sync` the directory. A reader sees the old
+  file or the new, never part of either, and after the last `Sync` the
+  new one survives a crash (kernel.md, 6.1).
+  - The temporary is named from the target's name and a suffix drawn
+    from io's seeded randomness; a `Create` that finds the name taken
+    (`Exists`) draws another.
+  - The old file's permission bits are kept. A target that does not
+    exist, or cannot be opened to read, is made with the default,
+    `0o666` less the umask.
+  - A symbolic link at the target is replaced by the file, not written
+    through: the link's own name gets the new file. Writing through links
+    is not offered.
+- **A deadline can give up on a file** (kernel.md, 6.1). An `Open`,
+  `Read`, `Write` or `Sync` on a filesystem that stalls may wait for good,
+  so a whole-file operation has a deadline, and at it io cancels what is
+  in flight, tells the owner, and keeps the entity settling until the
+  cancelled operation completes, as for a socket (section 3). Settling
+  entities still hold their slots and their operations, so io caps the
+  operations on files in flight, and refuses at its entrance past the
+  cap: that cap is part of io's files, the next task.
 - **File streams come later,** when a user needs to read a file by demand
   because it is too large to hold.
 
@@ -436,7 +466,8 @@ invariant of testing-strategy.md, 6.
 
 Files and processes go to skein's minimal fake machine: a few files
 beneath a root, a program that echoes its input, one that exits with a
-given status, one that never exits.
+given status, one that never exits. Its files are built, behind the
+simulator's machine seam (testing.md, 4).
 
 Built, for sockets:
 
@@ -476,8 +507,11 @@ Built, for sockets:
 Sockets are built, with their io worlds. The order follows what temper
 pulls:
 
-1. processes, pipes and files, with the minimal fake machine and the
-   simulator's machine seam, for the worker;
+1. processes, pipes and files, for the worker: io's whole-file operations
+   (section 5), over the kernel records for files, which are built, as
+   are the simulator's files, its machine seam and the minimal fake
+   machine's files (kernel.md, 6.1; simulator.md, 3.1; testing.md, 4);
+   then processes, with their records and the machine's programs;
 2. signals to the service, with the shell's startup.
 
 File streams and datagram sockets come when a user needs them.

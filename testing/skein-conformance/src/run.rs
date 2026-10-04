@@ -1,7 +1,8 @@
 //! The driver the scenarios run on: records submitted one at a time to a
 //! [`Backend`], and every completion checked as it is reaped, as the
 //! simulator checks its own (simulator.md, 5): a valid completion of
-//! the operation's shape, one per submission, with the record handed back.
+//! the operation's shape, one per submission, with the record handed back,
+//! each of its boxes the same `Box`, written only where the contract says.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -10,10 +11,10 @@ use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::mem;
 
-use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, Submit};
+use skein_io::kernel::{Addr, Complete, Done, Entry, Error, Family, Fd, Kind, Op, OpenHow, Stat, Submit};
 use skein_lib::{Duration, Queue, Time, Token};
 
-use crate::Backend;
+use crate::{Backend, Item};
 
 /// How long a scenario waits for a completion it expects before it fails:
 /// on the ring, a SYN retransmitted after a full accept queue made room
@@ -60,9 +61,12 @@ pub(crate) struct Run<'b, B: Backend> {
 struct Flight<P> {
     process: P,
     summary: Summary,
-    /// A `Recv`'s or a `Send`'s buffer: its address, which the completion
-    /// hands back in the same `Box`, and what it held.
-    buffer: Option<(usize, Box<[u8]>)>,
+    /// Each box of bytes the record carries (a buffer, a path, a name): its
+    /// address, which the completion hands back in the same `Box`, and what
+    /// it held.
+    boxes: Vec<(usize, Box<[u8]>)>,
+    /// A `List`'s entries: their address, and what they held.
+    entries: Option<(usize, Box<[Entry]>)>,
 }
 
 impl<'b, B: Backend> Run<'b, B> {
@@ -89,8 +93,12 @@ impl<'b, B: Backend> Run<'b, B> {
     pub(crate) fn start(&mut self, process: B::Process, op: Op) -> Token {
         let token = Token::new(self.next);
         self.next = self.next.checked_add(1).expect("tokens never run out");
-        let buffer = buffer(&op).map(|held| (held.as_ptr().addr(), Box::from(held)));
-        self.flights.insert(token, Flight { process, summary: Summary::of(&op), buffer });
+        let mut boxes = Vec::new();
+        for held in boxes_of(&op) {
+            boxes.push((held.as_ptr().addr(), Box::from(held)));
+        }
+        let entries = entries_of(&op).map(|held| (held.as_ptr().addr(), Box::from(held)));
+        self.flights.insert(token, Flight { process, summary: Summary::of(&op), boxes, entries });
         self.submissions.push(Submit { op: token, kind: op });
         self.backend.submit(process, &mut self.submissions);
         assert!(self.submissions.is_empty(), "the backend takes every record of a scenario");
@@ -240,15 +248,7 @@ impl<'b, B: Backend> Run<'b, B> {
         let flight = flight.expect("every completion answers a submission still in flight, once");
         assert!(flight.process == process, "a completion comes back to the process that submitted it");
         assert!(flight.summary == Summary::of(&complete.kind), "the completion hands back the operation submitted");
-        if let (Some((address, held)), Some(back)) = (&flight.buffer, buffer(&complete.kind)) {
-            assert!(back.as_ptr().addr() == *address, "a buffer comes back in the Box it went down in");
-            let untouched = match (&complete.kind, complete.result) {
-                // A Recv wrote only the bytes it counts.
-                (Op::Recv { .. }, Ok(Done::Count(n))) => back.get(usize_of(n)..) == held.get(usize_of(n)..),
-                _ => back == &**held,
-            };
-            assert!(untouched, "a Send's bytes, and a Recv's buffer past its count, come back untouched");
-        }
+        handed_back(&flight, &complete);
         self.track(process, &complete);
         self.arrived.insert(complete.op, complete);
     }
@@ -262,7 +262,7 @@ impl<'b, B: Backend> Run<'b, B> {
                 None
             }
             (_, Ok(Done::Fd(fd) | Done::Accepted { fd, .. })) => Some(*fd),
-            (_, Ok(Done::Nothing | Done::Count(_) | Done::Bound(_)) | Err(_)) => None,
+            (_, Ok(Done::Nothing | Done::Count(_) | Done::Bound(_) | Done::Stat(_)) | Err(_)) => None,
         };
         if let Some(fd) = opened {
             assert!(self.open.insert((process, fd)), "a new descriptor is not one already open in its process");
@@ -433,6 +433,196 @@ impl<B: Backend> Run<'_, B> {
     }
 }
 
+/// Entries of a directory, each name with its kind.
+pub type Entries = BTreeSet<(Vec<u8>, Kind)>;
+
+/// How many bytes a `List` names hold: the least the contract allows, so
+/// that it holds no more than a few names.
+pub(crate) const NAMES: usize = 255;
+
+/// The bytes each `Read` of a file asks for: few, so a file takes several.
+const READ_CHUNK: usize = 7;
+
+// Files, a call each.
+impl<B: Backend> Run<'_, B> {
+    /// A root laid out as `tree` says, opened for `process`, which the
+    /// scenario closes.
+    pub(crate) fn root(&mut self, process: B::Process, tree: &[Item]) -> Fd {
+        let fd = self.backend.root(process, tree);
+        assert!(self.open.insert((process, fd)), "a root is a descriptor not already open in its process");
+        fd
+    }
+
+    pub(crate) fn open(&mut self, process: B::Process, root: Fd, path: &[u8], how: OpenHow) -> Result<Fd, Error> {
+        match self.call(process, Op::Open { root, path: Box::from(path), how }).result {
+            Ok(Done::Fd(fd)) => Ok(fd),
+            Err(error) => Err(error),
+            other => unexpected("an Open answers with a descriptor", &other),
+        }
+    }
+
+    /// Opens `path` to read, reads all of it and closes it.
+    pub(crate) fn contents(&mut self, process: B::Process, root: Fd, path: &[u8]) -> Result<Vec<u8>, Error> {
+        let file = self.open(process, root, path, OpenHow::Read)?;
+        let (read, _) = self.read_all(process, file);
+        self.close(process, file);
+        read
+    }
+
+    /// Reads the file open on `fd` from its start to its end, a few bytes a
+    /// `Read`, a short one continued: its bytes, or the first error; and
+    /// how the `Read`s counted, against what was there.
+    pub(crate) fn read_all(&mut self, process: B::Process, fd: Fd) -> (Result<Vec<u8>, Error>, Shortness) {
+        let mut got = Vec::new();
+        let mut counts = Vec::new();
+        loop {
+            let at = u64::try_from(got.len()).expect("a usize fits a u64");
+            let op = Op::read(fd, vec![0; READ_CHUNK].into_boxed_slice(), at).expect("room to read");
+            let complete = self.call(process, op);
+            match (complete.kind, complete.result) {
+                (Op::Read { buf, .. }, Ok(Done::Count(n))) => {
+                    let n = usize_of(n);
+                    if n == 0 {
+                        break;
+                    }
+                    counts.push((got.len(), n));
+                    got.extend_from_slice(buf.get(..n).expect("a count within its buffer"));
+                }
+                (_, Err(error)) => return (Err(error), Shortness::default()),
+                (_, other) => unexpected("a Read answers with a count", &other),
+            }
+        }
+        let mut shortness = Shortness::default();
+        for (at, n) in counts {
+            let there = got.len().saturating_sub(at).min(READ_CHUNK);
+            shortness.saw(n < there);
+        }
+        (Ok(got), shortness)
+    }
+
+    /// Writes all of `bytes` at `at`, a short `Write` continued from where
+    /// it stopped: how the `Write`s counted, or the first error.
+    pub(crate) fn write_all(&mut self, process: B::Process, fd: Fd, at: u64, bytes: &[u8]) -> Result<Shortness, Error> {
+        let mut from = 0_u32;
+        let mut shortness = Shortness::default();
+        while usize_of(from) < bytes.len() {
+            let offset = at.checked_add(u64::from(from)).expect("an offset in reach");
+            let op = Op::write(fd, Box::from(bytes), from, offset).expect("bytes left to write");
+            match self.call(process, op).result {
+                Ok(Done::Count(n)) => {
+                    let left = bytes.len().saturating_sub(usize_of(from));
+                    shortness.saw(usize_of(n) < left);
+                    from = from.checked_add(n).expect("no more than were left");
+                }
+                Err(error) => return Err(error),
+                other => unexpected("a Write answers with a count", &other),
+            }
+        }
+        Ok(shortness)
+    }
+
+    pub(crate) fn sync(&mut self, process: B::Process, fd: Fd) -> Result<Done, Error> {
+        self.call(process, Op::Sync { fd }).result
+    }
+
+    pub(crate) fn stat(&mut self, process: B::Process, fd: Fd) -> Result<Stat, Error> {
+        match self.call(process, Op::Stat { fd }).result {
+            Ok(Done::Stat(stat)) => Ok(stat),
+            Err(error) => Err(error),
+            other => unexpected("a Stat answers with what it found", &other),
+        }
+    }
+
+    pub(crate) fn rename(
+        &mut self,
+        process: B::Process,
+        (from_dir, from): (Fd, &[u8]),
+        (to_dir, to): (Fd, &[u8]),
+    ) -> Result<Done, Error> {
+        let op = Op::Rename { from_dir, from: Box::from(from), to_dir, to: Box::from(to) };
+        self.call(process, op).result
+    }
+
+    pub(crate) fn remove(&mut self, process: B::Process, dir: Fd, name: &[u8], directory: bool) -> Result<Done, Error> {
+        self.call(process, Op::Remove { dir, name: Box::from(name), directory }).result
+    }
+
+    pub(crate) fn make_directory(&mut self, process: B::Process, dir: Fd, name: &[u8]) -> Result<Done, Error> {
+        self.call(process, Op::MakeDirectory { dir, name: Box::from(name) }).result
+    }
+
+    /// One `List` of `fd` with room for `entries`, and `names` bytes: each
+    /// entry's name and kind.
+    pub(crate) fn list(
+        &mut self,
+        process: B::Process,
+        fd: Fd,
+        entries: usize,
+        names: usize,
+    ) -> Result<Vec<(Vec<u8>, Kind)>, Error> {
+        let op = Op::List { fd, entries: vec![Entry::BLANK; entries].into(), names: vec![0; names].into() };
+        let complete = self.call(process, op);
+        match (complete.kind, complete.result) {
+            (Op::List { entries, names, .. }, Ok(Done::Count(n))) => {
+                let mut listed = Vec::new();
+                for entry in entries.get(..usize_of(n)).expect("a count within the entries") {
+                    listed.push((entry.name(&names).expect("a name within names").to_vec(), entry.kind));
+                }
+                Ok(listed)
+            }
+            (_, Err(error)) => Err(error),
+            (_, other) => unexpected("a List answers with a count", &other),
+        }
+    }
+
+    /// `List`s of `fd` with room for `entries` each until the end: every
+    /// entry, each seen once, and how many each `List` counted.
+    pub(crate) fn list_all(
+        &mut self,
+        process: B::Process,
+        fd: Fd,
+        entries: usize,
+    ) -> Result<(Entries, Vec<usize>), Error> {
+        let mut all = BTreeSet::new();
+        let mut counts = Vec::new();
+        loop {
+            let listed = self.list(process, fd, entries, NAMES)?;
+            if listed.is_empty() {
+                return Ok((all, counts));
+            }
+            counts.push(listed.len());
+            for entry in listed {
+                assert!(all.insert(entry), "the contract: a List hands back each entry once");
+            }
+        }
+    }
+}
+
+/// Whether the `Read`s or the `Write`s of a scenario counted fewer bytes
+/// than they could, and whether they counted all: the outcomes the contract
+/// allows, which the simulator draws among.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub struct Shortness {
+    pub short: bool,
+    pub full: bool,
+}
+
+impl Shortness {
+    fn saw(&mut self, short: bool) {
+        if short {
+            self.short = true;
+        } else {
+            self.full = true;
+        }
+    }
+
+    /// Both, as seen over several.
+    #[must_use]
+    pub fn and(self, other: Shortness) -> Shortness {
+        Shortness { short: self.short || other.short, full: self.full || other.full }
+    }
+}
+
 /// An operation without its buffers, their lengths standing in for them:
 /// what a completion must hand back, whatever its buffers now hold. The
 /// simulator's trace summarises an operation the same way, but the suite
@@ -448,6 +638,15 @@ enum Summary {
     Send { fd: Fd, len: usize, from: u32 },
     Shutdown { fd: Fd },
     Close { fd: Fd },
+    Open { root: Fd, path: usize, how: OpenHow },
+    Read { fd: Fd, len: usize, at: u64 },
+    Write { fd: Fd, len: usize, from: u32, at: u64 },
+    Sync { fd: Fd },
+    Stat { fd: Fd },
+    Rename { from_dir: Fd, from: usize, to_dir: Fd, to: usize },
+    Remove { dir: Fd, name: usize, directory: bool },
+    MakeDirectory { dir: Fd, name: usize },
+    List { fd: Fd, entries: usize, names: usize },
     Cancel { target: Token },
 }
 
@@ -463,6 +662,19 @@ impl Summary {
             Op::Send { fd, bytes, from } => Summary::Send { fd: *fd, len: bytes.len(), from: *from },
             Op::Shutdown { fd } => Summary::Shutdown { fd: *fd },
             Op::Close { fd } => Summary::Close { fd: *fd },
+            Op::Open { root, path, how } => Summary::Open { root: *root, path: path.len(), how: *how },
+            Op::Read { fd, buf, at } => Summary::Read { fd: *fd, len: buf.len(), at: *at },
+            Op::Write { fd, bytes, from, at } => Summary::Write { fd: *fd, len: bytes.len(), from: *from, at: *at },
+            Op::Sync { fd } => Summary::Sync { fd: *fd },
+            Op::Stat { fd } => Summary::Stat { fd: *fd },
+            Op::Rename { from_dir, from, to_dir, to } => {
+                Summary::Rename { from_dir: *from_dir, from: from.len(), to_dir: *to_dir, to: to.len() }
+            }
+            Op::Remove { dir, name, directory } => {
+                Summary::Remove { dir: *dir, name: name.len(), directory: *directory }
+            }
+            Op::MakeDirectory { dir, name } => Summary::MakeDirectory { dir: *dir, name: name.len() },
+            Op::List { fd, entries, names } => Summary::List { fd: *fd, entries: entries.len(), names: names.len() },
             Op::Cancel { target } => Summary::Cancel { target: *target },
         }
     }
@@ -475,11 +687,15 @@ enum Retried {
     Shutdown(Fd),
 }
 
-/// The buffer a `Recv` or a `Send` carries.
-fn buffer(op: &Op) -> Option<&[u8]> {
+/// The boxes of bytes a record carries: a buffer, a path, names.
+fn boxes_of(op: &Op) -> Vec<&[u8]> {
     match op {
-        Op::Recv { buf, .. } => Some(buf),
-        Op::Send { bytes, .. } => Some(bytes),
+        Op::Recv { buf, .. } | Op::Read { buf, .. } => vec![buf],
+        Op::Send { bytes, .. } | Op::Write { bytes, .. } => vec![bytes],
+        Op::Open { path, .. } => vec![path],
+        Op::Rename { from, to, .. } => vec![from, to],
+        Op::Remove { name, .. } | Op::MakeDirectory { name, .. } => vec![name],
+        Op::List { names, .. } => vec![names],
         Op::Socket { .. }
         | Op::Bind { .. }
         | Op::Listen { .. }
@@ -487,8 +703,81 @@ fn buffer(op: &Op) -> Option<&[u8]> {
         | Op::Connect { .. }
         | Op::Shutdown { .. }
         | Op::Close { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Cancel { .. } => Vec::new(),
+    }
+}
+
+/// A `List`'s entries.
+fn entries_of(op: &Op) -> Option<&[Entry]> {
+    match op {
+        Op::List { entries, .. } => Some(entries),
+        Op::Socket { .. }
+        | Op::Bind { .. }
+        | Op::Listen { .. }
+        | Op::Accept { .. }
+        | Op::Connect { .. }
+        | Op::Recv { .. }
+        | Op::Send { .. }
+        | Op::Shutdown { .. }
+        | Op::Close { .. }
+        | Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
         | Op::Cancel { .. } => None,
     }
+}
+
+/// Checks that a completion hands back each of its record's boxes in the
+/// `Box` it went down in, written only where the contract says: a `Recv`'s
+/// or a `Read`'s buffer up to its count, a `List`'s entries up to its count
+/// and its names where those entries lie; everything else untouched.
+fn handed_back<P>(flight: &Flight<P>, complete: &Complete) {
+    let count = match complete.result {
+        Ok(Done::Count(n)) => Some(usize_of(n)),
+        Ok(Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) | Err(_) => None,
+    };
+    let back = boxes_of(&complete.kind);
+    assert_eq!(back.len(), flight.boxes.len(), "a record comes back with the boxes it went down with");
+    for ((address, held), back) in flight.boxes.iter().zip(back) {
+        assert!(back.as_ptr().addr() == *address, "a buffer comes back in the Box it went down in");
+        let untouched = match (&complete.kind, count) {
+            (Op::Recv { .. } | Op::Read { .. }, Some(n)) => back.get(n..) == held.get(n..),
+            (Op::List { entries, .. }, Some(n)) => names_untouched(held, back, entries.get(..n).unwrap_or_default()),
+            _ => back == &**held,
+        };
+        assert!(untouched, "a record's bytes come back untouched, but for what its count says was written");
+    }
+    if let (Some((address, held)), Some(back)) = (&flight.entries, entries_of(&complete.kind)) {
+        assert!(back.as_ptr().addr() == *address, "a List's entries come back in the Box they went down in");
+        let n = count.unwrap_or(0);
+        assert!(back.get(n..) == held.get(n..), "a List's entries past its count come back untouched");
+    }
+}
+
+/// Whether a `List`'s names are as they were but where `listed` lies.
+fn names_untouched(held: &[u8], back: &[u8], listed: &[Entry]) -> bool {
+    let mut written = vec![false; back.len()];
+    for entry in listed {
+        let start = usize_of(entry.start);
+        for at in start..start.saturating_add(usize_of(entry.len)) {
+            if let Some(slot) = written.get_mut(at) {
+                *slot = true;
+            }
+        }
+    }
+    for (at, (before, after)) in held.iter().zip(back).enumerate() {
+        if before != after && !written.get(at).copied().unwrap_or(false) {
+            return false;
+        }
+    }
+    true
 }
 
 /// The bytes a `Recv` completion received, or its error.

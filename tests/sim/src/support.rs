@@ -1,11 +1,13 @@
-//! A small harness over the simulator: one token counter per world, and calls
-//! that submit one record and reap what came of it.
+//! A small harness over the simulator: one token counter per world, the
+//! minimal fake machine, and calls that submit one record and reap what came
+//! of it.
 
 use std::net::{Ipv4Addr, SocketAddr};
 
-use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, Submit};
+use skein_fake_machine::{Item, Machine, serve};
+use skein_io::kernel::{Addr, Complete, Done, Entry, Error, Family, Fd, Kind, Op, OpenHow, Stat, Submit};
 use skein_lib::{Queue, Token};
-use skein_sim::{Config, Pid, Sim};
+use skein_sim::{Config, Handle, Pid, Sim};
 
 /// Room for every completion a test can have outstanding.
 const ROOM: u32 = 64;
@@ -13,12 +15,17 @@ const ROOM: u32 = 64;
 pub struct World {
     pub sim: Sim,
     pub next: u64,
+    /// What the simulator's operations on files go to.
+    pub machine: Machine,
+    /// Whether a submit is followed by the machine answering what it was
+    /// asked, as a world does; off, the calls wait.
+    pub serving: bool,
 }
 
 impl World {
     #[must_use]
     pub fn new(seed: u64, config: Config) -> World {
-        World { sim: Sim::new(seed, config), next: 1 }
+        World { sim: Sim::new(seed, config), next: 1, machine: Machine::new(), serving: true }
     }
 
     #[must_use]
@@ -37,11 +44,20 @@ impl World {
         token
     }
 
-    /// Submits `op` under `token`.
+    /// Submits `op` under `token`, and has the machine answer what it was
+    /// asked, if serving.
     pub fn submit_as(&mut self, pid: Pid, token: Token, op: Op) {
         let mut queue = Queue::with_capacity(1);
         queue.push(Submit { op: token, kind: op });
         self.sim.submit(pid, &mut queue);
+        if self.serving {
+            self.serve();
+        }
+    }
+
+    /// The machine answers every call waiting.
+    pub fn serve(&mut self) {
+        serve(&mut self.machine, &mut self.sim);
     }
 
     /// Submits `op` under a fresh token.
@@ -158,6 +174,69 @@ impl World {
     pub fn settled(&self, pid: Pid) {
         self.sim.assert_quiescent(pid);
         self.sim.assert_no_open_fds(pid);
+    }
+
+    /// A root laid out as `items` say, opened for `pid` as the shell opens
+    /// one at startup.
+    pub fn root(&mut self, pid: Pid, items: &[Item]) -> Fd {
+        let opened = self.machine.lay(items);
+        self.sim.root(pid, Handle::new(opened.raw()))
+    }
+
+    pub fn open(&mut self, pid: Pid, root: Fd, path: &[u8], how: OpenHow) -> Result<Fd, Error> {
+        match self.call(pid, Op::Open { root, path: Box::from(path), how }).result {
+            Ok(Done::Fd(fd)) => Ok(fd),
+            Ok(other) => panic!("an open answers with a descriptor: {other:?}"),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// One `Read` of up to `len` bytes at `at`: the bytes, or the error.
+    pub fn read(&mut self, pid: Pid, fd: Fd, at: u64, len: usize) -> Result<Vec<u8>, Error> {
+        let complete = self.call(pid, Op::read(fd, vec![0; len].into(), at).expect("room to read"));
+        bytes_read(complete)
+    }
+
+    /// One `Write` of all of `bytes` at `at`: what it answered.
+    pub fn write(&mut self, pid: Pid, fd: Fd, at: u64, bytes: &[u8]) -> Result<Done, Error> {
+        self.call(pid, Op::write(fd, Box::from(bytes), 0, at).expect("bytes to write")).result
+    }
+
+    pub fn stat(&mut self, pid: Pid, fd: Fd) -> Result<Stat, Error> {
+        match self.call(pid, Op::Stat { fd }).result {
+            Ok(Done::Stat(stat)) => Ok(stat),
+            Ok(other) => panic!("a stat answers with what it found: {other:?}"),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// One `List` with room for `entries`, and names of 255 bytes: each
+    /// name and kind.
+    pub fn list(&mut self, pid: Pid, fd: Fd, entries: usize) -> Result<Vec<(Vec<u8>, Kind)>, Error> {
+        let op = Op::List { fd, entries: vec![Entry::BLANK; entries].into(), names: vec![0; 255].into() };
+        let complete = self.call(pid, op);
+        match (complete.kind, complete.result) {
+            (Op::List { entries, names, .. }, Ok(Done::Count(n))) => {
+                let mut listed = Vec::new();
+                for entry in &entries[..usize::try_from(n).expect("a u32 fits a usize")] {
+                    listed.push((entry.name(&names).expect("a name within names").to_vec(), entry.kind));
+                }
+                Ok(listed)
+            }
+            (_, Err(error)) => Err(error),
+            (kind, result) => panic!("not a list: {kind:?}, {result:?}"),
+        }
+    }
+}
+
+/// The bytes a `Read` completion read, or its error.
+pub fn bytes_read(complete: Complete) -> Result<Vec<u8>, Error> {
+    match (complete.kind, complete.result) {
+        (Op::Read { buf, .. }, Ok(Done::Count(n))) => {
+            Ok(buf[..usize::try_from(n).expect("a u32 fits a usize")].to_vec())
+        }
+        (_, Err(error)) => Err(error),
+        (kind, result) => panic!("not a read: {kind:?}, {result:?}"),
     }
 }
 

@@ -1,0 +1,18 @@
+# A scratch directory for tests on the real kernel is ordinary Rust
+# (programming-model.md, 10.2): std, its filesystem calls and formatting are
+# in, since none of it runs in a service. What stays out is what would make
+# a run unrepeatable, and std handles that close on drop.
+
+disallowed-types = [
+    { path = "std::time::Instant", reason = "on the ring, skein_shell::Clock" },
+    { path = "std::time::SystemTime", reason = "on the ring, skein_shell::Clock" },
+    { path = "std::collections::HashMap", reason = "iteration order depends on a random seed: BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order depends on a random seed: BTreeSet" },
+    { path = "std::fs::File", reason = "closes on drop (programming-model.md, 2.1)" },
+    { path = "std::os::fd::OwnedFd", reason = "closes on drop (programming-model.md, 2.1)" },
+]
+
+disallowed-methods = [
+    { path = "std::thread::spawn", reason = "one thread, one loop" },
+    { path = "std::env::var", reason = "a run's settings come from its code, not the environment" },
+]

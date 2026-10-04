@@ -105,6 +105,20 @@ pub(crate) fn setup_error(error: kernel::Error) -> Error {
         | kernel::Error::TimedOut
         | kernel::Error::InvalidArgument
         | kernel::Error::Other(_) => Error::Other,
+        kernel::Error::NotFound
+        | kernel::Error::Exists
+        | kernel::Error::NotADirectory
+        | kernel::Error::IsADirectory
+        | kernel::Error::NotEmpty
+        | kernel::Error::Permission
+        | kernel::Error::NoSpace
+        | kernel::Error::ReadOnly
+        | kernel::Error::TooManyLinks
+        | kernel::Error::NameTooLong
+        | kernel::Error::Escape
+        | kernel::Error::NotAFile => {
+            unreachable!("an operation on sockets never fails with a file's error (skein_io::kernel)")
+        }
         kernel::Error::Cancelled | kernel::Error::TooLate => {
             unreachable!("io never cancels a socket's setup, and only a cancel is too late")
         }
@@ -128,6 +142,20 @@ pub(crate) fn connect_error(error: kernel::Error) -> Error {
         | kernel::Error::AddressInUse
         | kernel::Error::InvalidArgument
         | kernel::Error::Other(_) => Error::Other,
+        kernel::Error::NotFound
+        | kernel::Error::Exists
+        | kernel::Error::NotADirectory
+        | kernel::Error::IsADirectory
+        | kernel::Error::NotEmpty
+        | kernel::Error::Permission
+        | kernel::Error::NoSpace
+        | kernel::Error::ReadOnly
+        | kernel::Error::TooManyLinks
+        | kernel::Error::NameTooLong
+        | kernel::Error::Escape
+        | kernel::Error::NotAFile => {
+            unreachable!("an operation on sockets never fails with a file's error (skein_io::kernel)")
+        }
         kernel::Error::Cancelled | kernel::Error::TooLate => {
             unreachable!("a connect io cancelled is settled apart, and only a cancel is too late")
         }
@@ -149,6 +177,20 @@ pub(crate) fn stream_fault(error: kernel::Error) -> Fault {
         | kernel::Error::TooManyOpenFiles
         | kernel::Error::InvalidArgument
         | kernel::Error::Other(_) => Fault::Other,
+        kernel::Error::NotFound
+        | kernel::Error::Exists
+        | kernel::Error::NotADirectory
+        | kernel::Error::IsADirectory
+        | kernel::Error::NotEmpty
+        | kernel::Error::Permission
+        | kernel::Error::NoSpace
+        | kernel::Error::ReadOnly
+        | kernel::Error::TooManyLinks
+        | kernel::Error::NameTooLong
+        | kernel::Error::Escape
+        | kernel::Error::NotAFile => {
+            unreachable!("an operation on sockets never fails with a file's error (skein_io::kernel)")
+        }
         kernel::Error::NoBufferSpace | kernel::Error::Cancelled | kernel::Error::TooLate => {
             unreachable!("no buffer is retried, io cancels only when settling, and only a cancel is too late")
         }

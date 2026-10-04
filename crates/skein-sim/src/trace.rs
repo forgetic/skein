@@ -2,9 +2,9 @@
 //! so a failing seed can be printed and replayed (testing-strategy.md, 6).
 
 use alloc::string::String;
-use core::fmt::Write;
+use core::fmt::{self, Write};
 
-use skein_io::kernel::{Addr, Done, Error, Family, Fd, Op};
+use skein_io::kernel::{Addr, Done, Error, Family, Fd, Op, OpenHow};
 use skein_lib::{Time, Token};
 
 use crate::sim::Pid;
@@ -40,9 +40,16 @@ pub enum Fault {
     CancelRace,
     CancelUnsubmitted,
     LateReset,
+    ShortRead,
+    ShortWrite,
+    NoSpace,
+    ReadOnly,
+    IoError,
+    Hung,
 }
 
-/// An operation without its buffers: their lengths stand in for them.
+/// An operation without its buffers: their lengths stand in for them, and
+/// the start of each path or name for it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Summary {
     Socket { family: Family },
@@ -54,7 +61,49 @@ pub enum Summary {
     Send { fd: Fd, len: usize, from: u32 },
     Shutdown { fd: Fd },
     Close { fd: Fd },
+    Open { root: Fd, path: Text, how: OpenHow },
+    Read { fd: Fd, len: usize, at: u64 },
+    Write { fd: Fd, len: usize, from: u32, at: u64 },
+    Sync { fd: Fd },
+    Stat { fd: Fd },
+    Rename { from_dir: Fd, from: Text, to_dir: Fd, to: Text },
+    Remove { dir: Fd, name: Text, directory: bool },
+    MakeDirectory { dir: Fd, name: Text },
+    List { fd: Fd, entries: usize, names: usize },
     Cancel { target: Token },
+}
+
+/// The start of a path or a name, and its length: enough of it to read a
+/// trace by, and small, as every entry of a trace holds a summary.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Text {
+    head: [u8; Text::HEAD],
+    len: u32,
+}
+
+impl Text {
+    const HEAD: usize = 16;
+
+    #[must_use]
+    pub fn of(bytes: &[u8]) -> Text {
+        let mut head = [0; Text::HEAD];
+        for (slot, byte) in head.iter_mut().zip(bytes) {
+            *slot = *byte;
+        }
+        Text { head, len: u32::try_from(bytes.len()).unwrap_or(u32::MAX) }
+    }
+}
+
+impl fmt::Debug for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let len = usize::try_from(self.len).unwrap_or(usize::MAX);
+        let shown = self.head.get(..len.min(Text::HEAD)).unwrap_or_default();
+        write!(f, "\"{}\"", shown.escape_ascii())?;
+        if len > Text::HEAD {
+            write!(f, "..({len} bytes)")?;
+        }
+        Ok(())
+    }
 }
 
 impl Summary {
@@ -70,14 +119,88 @@ impl Summary {
             Op::Send { fd, bytes, from } => Summary::Send { fd: *fd, len: bytes.len(), from: *from },
             Op::Shutdown { fd } => Summary::Shutdown { fd: *fd },
             Op::Close { fd } => Summary::Close { fd: *fd },
+            Op::Open { root, path, how } => Summary::Open { root: *root, path: Text::of(path), how: *how },
+            Op::Read { fd, buf, at } => Summary::Read { fd: *fd, len: buf.len(), at: *at },
+            Op::Write { fd, bytes, from, at } => Summary::Write { fd: *fd, len: bytes.len(), from: *from, at: *at },
+            Op::Sync { fd } => Summary::Sync { fd: *fd },
+            Op::Stat { fd } => Summary::Stat { fd: *fd },
+            Op::Rename { from_dir, from, to_dir, to } => {
+                Summary::Rename { from_dir: *from_dir, from: Text::of(from), to_dir: *to_dir, to: Text::of(to) }
+            }
+            Op::Remove { dir, name, directory } => {
+                Summary::Remove { dir: *dir, name: Text::of(name), directory: *directory }
+            }
+            Op::MakeDirectory { dir, name } => Summary::MakeDirectory { dir: *dir, name: Text::of(name) },
+            Op::List { fd, entries, names } => Summary::List { fd: *fd, entries: entries.len(), names: names.len() },
             Op::Cancel { target } => Summary::Cancel { target: *target },
         }
     }
 
     /// The descriptor the operation is on, if any: a `Cancel` is on its
-    /// target, not on a descriptor.
+    /// target, not on a descriptor; an `Open` is on its root, and a `Rename`
+    /// on its first directory (see [`Summary::fds`]).
     #[must_use]
     pub const fn fd(&self) -> Option<Fd> {
+        self.fds()[0]
+    }
+
+    /// Whether the operation is one on files (`Op::is_file`).
+    #[must_use]
+    pub const fn is_file(&self) -> bool {
+        match self {
+            Summary::Open { .. }
+            | Summary::Read { .. }
+            | Summary::Write { .. }
+            | Summary::Sync { .. }
+            | Summary::Stat { .. }
+            | Summary::Rename { .. }
+            | Summary::Remove { .. }
+            | Summary::MakeDirectory { .. }
+            | Summary::List { .. } => true,
+            Summary::Socket { .. }
+            | Summary::Bind { .. }
+            | Summary::Listen { .. }
+            | Summary::Accept { .. }
+            | Summary::Connect { .. }
+            | Summary::Recv { .. }
+            | Summary::Send { .. }
+            | Summary::Shutdown { .. }
+            | Summary::Close { .. }
+            | Summary::Cancel { .. } => false,
+        }
+    }
+
+    /// Whether a `Cancel` may target the operation: any but a `Cancel`, and
+    /// the operations on files that complete promptly (`Op::is_file`).
+    #[must_use]
+    pub const fn cancellable(&self) -> bool {
+        match self {
+            Summary::Cancel { .. }
+            | Summary::Stat { .. }
+            | Summary::Rename { .. }
+            | Summary::Remove { .. }
+            | Summary::MakeDirectory { .. }
+            | Summary::List { .. } => false,
+            Summary::Socket { .. }
+            | Summary::Bind { .. }
+            | Summary::Listen { .. }
+            | Summary::Accept { .. }
+            | Summary::Connect { .. }
+            | Summary::Recv { .. }
+            | Summary::Send { .. }
+            | Summary::Shutdown { .. }
+            | Summary::Close { .. }
+            | Summary::Open { .. }
+            | Summary::Read { .. }
+            | Summary::Write { .. }
+            | Summary::Sync { .. } => true,
+        }
+    }
+
+    /// Every descriptor the operation is on: a `Rename` is on both its
+    /// directories.
+    #[must_use]
+    pub const fn fds(&self) -> [Option<Fd>; 2] {
         match self {
             Summary::Bind { fd, .. }
             | Summary::Listen { fd, .. }
@@ -86,8 +209,17 @@ impl Summary {
             | Summary::Recv { fd, .. }
             | Summary::Send { fd, .. }
             | Summary::Shutdown { fd }
-            | Summary::Close { fd } => Some(*fd),
-            Summary::Socket { .. } | Summary::Cancel { .. } => None,
+            | Summary::Close { fd }
+            | Summary::Open { root: fd, .. }
+            | Summary::Read { fd, .. }
+            | Summary::Write { fd, .. }
+            | Summary::Sync { fd }
+            | Summary::Stat { fd }
+            | Summary::Remove { dir: fd, .. }
+            | Summary::MakeDirectory { dir: fd, .. }
+            | Summary::List { fd, .. } => [Some(*fd), None],
+            Summary::Rename { from_dir, to_dir, .. } => [Some(*from_dir), Some(*to_dir)],
+            Summary::Socket { .. } | Summary::Cancel { .. } => [None, None],
         }
     }
 }

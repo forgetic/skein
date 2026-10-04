@@ -72,6 +72,20 @@ io and simulated worlds need one:
 It lives with skein's tests, and stays that small. A service's fake
 machine is the service's.
 
+Its files are built: `skein-fake-machine`, in `testing/`. A world lays a
+root in it from a scenario's items (files, directories, symbolic links,
+each with its mode) and gives its handle to a process as the shell would
+a root opened at startup; after each submit, the world takes the
+simulator's calls and has the machine answer each (simulator.md, 3.1).
+The machine resolves paths beneath a root as `openat2` with
+`RESOLVE_BENEATH` does, follows the links that stay beneath it, keeps its
+owner's permissions, and refuses what a real filesystem refuses, in the
+order Linux checks; the conformance suite holds it, through the
+simulator, to the real kernel in a scratch directory. It keeps a step
+machine's shape, a call in and an answer out, in a vocabulary of its own
+that a face translates to and from the simulator's. Its programs come
+with processes.
+
 ## 5. What skein supplies for a service's tiers
 
 | Service tier | Real | What skein supplies |
@@ -124,8 +138,10 @@ second, which is why it is skein's (testing-strategy.md, 7).
 crates/*/src/tests.rs           step tests; lib's, io's, JSON's, HTTP's and TLS's in a module per area, under src/tests/
 testing/skein-conformance       the conformance suite: the backend interface, the scenarios, the driver, the checks
 testing/skein-heap              the counting allocator, the meter that checks a step against its worst case, and the span a world meters its processes with
+testing/skein-scratch           a scratch directory beneath the system's temporary one, removed when dropped, for tests of files on the real kernel
 testing/skein-world             the world harness: processes' iterate over the simulator or the real ring, the referee, the trace, the heap
 testing/skein-echo-client       the fake echo client, a step machine
+testing/skein-fake-machine      the minimal fake machine: files beneath a root, and its face behind the simulator
 tests/heap                      the counting allocator's own tests, skein-heap-tests
 tests/echo                      the echo's simulated worlds and its real loop, skein-echo-world
 tests/io                        io worlds: io over the simulator, a scripted owner, a referee, skein-io-world
@@ -200,24 +216,35 @@ As of 2026-10-04.
 | io worlds | sockets, over the simulator; one exchange over the ring |
 | simulated worlds | the echo and its fake clients, seven scenarios |
 | real loop | the echo and its fake clients, on loopback |
-| conformance | sockets, against the simulator and the ring |
-| the simulator's and the ring's own tests | sockets |
+| conformance | sockets and files, against the simulator and the ring |
+| the simulator's and the ring's own tests | sockets and files |
 | the counting allocator | built, with its own tests; lib's worst cases checked against it |
 
-The simulator plays the kernel for sockets, with every fault of
-simulator.md, 4. Its own tests submit records by hand, and a client and a
-server exchange bytes, calm and replayed in the focused suite, and under
-chaos over 200 seeds in the fuzzy one. The conformance suite covers
+The simulator plays the kernel for sockets and files, with every fault
+of simulator.md, 4, files through its machine seam to the minimal fake
+machine. Its own tests submit records by hand, and a client and a server
+exchange bytes, calm and replayed in the focused suite, and under chaos
+over 200 seeds in the fuzzy one; for files, each broken invariant of the
+records and of the seam, each fault, and a replay in the focused suite,
+and a workload of every operation on files under chaos over 200 seeds in
+the fuzzy one, every fault of files falling. The conformance suite covers
 sockets: a connection's lifecycle over IPv4 and IPv6, graceful close, a
 send after the peer closed, refused connects, `AddressInUse`, IPv6-only
 sockets, the wrong-state records, a full accept queue, closes with bytes
 unread, a reset after the end of stream, a client closed before accept,
 a listener closing on waiting connections, backpressure, and cancels of
-every waiting operation and every race (kernel.md, 8). Against the
-simulator, the focused suite runs each scenario over 16 calm seeds and 4
-of chaos, and the fuzzy suite over 200 of chaos, counting the pairings
-each race shows over them; against the ring, each runs once, in the
-focused suite.
+every waiting operation and every race (kernel.md, 8). It covers files
+beneath a root each scenario lays out for itself, a scratch directory on
+the ring and the minimal fake machine in the simulator: a file's life at
+its offsets, renames, removals, new directories, listings, a root beneath
+a root, paths that escape their root and paths that stay, and
+permissions, each error its operations can be made to answer on a
+healthy scratch directory, and an `Open` past the descriptor limit on
+the simulator. Against the simulator, the focused suite runs each
+scenario over 16 calm seeds and 4 of chaos, and the fuzzy suite over 200
+of chaos, counting the pairings each race shows over them, and the short
+and whole counts of reads and writes; against the ring, each runs once,
+in the focused suite.
 
 The JSON tokenizer runs in a machine world between a stream below that
 cuts the peer's bytes at random, ends early, idle or not, and fails, and
@@ -377,12 +404,12 @@ to at least half its worst case, so that it keeps reaching the limits.
 
 By tier, in the order temper pulls the parts (README.md):
 
-- **io worlds for files and processes,** with the minimal machine and
-  the simulator's files, processes and machine seam, when the worker
-  pulls them. Sockets are built.
-- **Conformance** for files and processes, with a scratch directory as
-  the root, when io pulls them; against the readiness backend when it
-  exists.
+- **io worlds for files and processes,** with the minimal machine's files
+  and programs and the simulator's processes, when the worker pulls them.
+  Sockets are built, and so are the simulator's files, its machine seam
+  and the minimal machine's files.
+- **Conformance** for processes, when io pulls them; against the
+  readiness backend when it exists. Sockets and files are built.
 - **Fuzz targets** for every machine, JSON's, HTTP's and TLS's included,
   when a nightly toolchain is installed; and the heap metered in the
   protocol worlds, which meets the open question of heap handed between

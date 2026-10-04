@@ -10,9 +10,10 @@
 //! capacity in a `Box<[Slot]>` that is never resized or replaced while
 //! anything is in flight, so a slot's address is fixed for the life of the
 //! [`Kernel`]. A slot holds the [`Submit`] record and the kernel structures
-//! its operation needs (a socket address and its length); those structures
-//! never leave this module, and a record's buffers are pointed at in place,
-//! inside the record's own `Box`.
+//! its operation needs (a socket address and its length, an `open_how`, a
+//! `statx` buffer, and a path or two as the NUL-terminated strings the
+//! kernel reads); those structures never leave this module, and a record's
+//! buffers are pointed at in place, inside the record's own `Box`.
 //!
 //! An operation's `user_data` is its slot's index and the slot's generation,
 //! which moves on every time the slot is freed, so a completion or an async
@@ -21,32 +22,43 @@
 //!
 //! # The `unsafe`, and why it is sound
 //!
-//! - **Pushing an entry** hands the kernel pointers into the slot (the
-//!   address and its length) and into the record's buffer. Both stay valid
-//!   and unmoved until the entry's completion is reaped: the slot is not
-//!   freed or moved until then, and no Rust code reads or writes it (only
-//!   its token's entry in the map is read). The address and its length sit
-//!   in `UnsafeCell`s: the kernel gets the cells' raw pointers, and Rust
-//!   reaches their contents through `get_mut` only before the entry is
+//! - **Pushing an entry** hands the kernel pointers into the slot (an
+//!   address and its length, an `open_how`, a `statx` buffer), into the
+//!   slot's paths, and into the record's buffers. All stay valid and
+//!   unmoved until the entry's completion is reaped: the slot is not freed
+//!   or moved until then, and no Rust code reads or writes it (only its
+//!   token's entry in the map is read). The structures inline in the slot
+//!   sit in `UnsafeCell`s: the kernel gets the cells' raw pointers, and
+//!   Rust reaches their contents through `get_mut` only before the entry is
 //!   pushed and after its completion has moved the operation out of its
-//!   slot. The record's `Box` stays in the slot; a `Recv` buffer is written
-//!   by the kernel, a `Send` buffer only read. Reaching a free slot borrows
-//!   the table's slice for a moment, which touches no byte of a busy slot.
+//!   slot. The paths are boxes the slot owns, copies of the record's with a
+//!   NUL after them, made before the entry is pushed and only read by the
+//!   kernel. The record's `Box`es stay in the slot; a `Recv` or `Read`
+//!   buffer is written by the kernel, a `Send` or `Write` buffer only read.
+//!   Reaching a free slot borrows the table's slice for a moment, which
+//!   touches no byte of a busy slot.
 //! - **Entering the ring** passes the count of pushed entries and, for a
 //!   deadline, an argument that lives across the call.
 //! - **Socket addresses** are cast between `sockaddr_storage` and the
 //!   `sockaddr_in` or `sockaddr_in6` its family names: the storage is larger
 //!   and at least as aligned as either.
 //! - **The synchronous calls** (`setsockopt`, `getsockname`, `close`,
-//!   `clock_gettime`, `getrandom`) are given pointers to locals that live
-//!   across the call, with their true sizes.
+//!   `open`, `getdents64`, `lseek`, `fstatat`, `fstat`, `fcntl`,
+//!   `clock_gettime`, `getrandom`) are given pointers to locals, to strings
+//!   or to the
+//!   table's listing buffer, each of which lives across the call, with their
+//!   true sizes. `getdents64` is not a ring operation, so a `List` runs at
+//!   its submit and completes at the next reap.
 //! - **Dropping a [`Kernel`]** with operations in flight leaks the table
 //!   through `Box::into_raw`, creating no reference to it, so the kernel
 //!   never writes into freed memory while the ring winds down.
 //!
 //! The completion queue holds as many entries as the table has slots, and
 //! every slot has at most one entry in the kernel (single-shot operations
-//! only, each cancel in a slot of its own), so it cannot overflow.
+//! only, each cancel in a slot of its own), so it cannot overflow. An
+//! `Open` that a `..` race failed with `EAGAIN` is pushed again from its
+//! slot, under the same `user_data`, once its first entry has completed:
+//! still one entry a slot.
 
 #![expect(
     unsafe_code,
@@ -55,15 +67,18 @@
 
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
 use std::mem::{self, size_of};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::ptr;
 
 use io_uring::{EnterFlags, IoUring, Probe, opcode, squeue, types};
-use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, Submit};
+use skein_io::kernel::{Addr, Complete, Done, Entry, Error, Family, Fd, Kind, Op, OpenHow, PERMISSIONS, Stat, Submit};
 use skein_lib::{Queue, Time, Token};
 
 /// How large a [`Kernel`] is.
@@ -157,6 +172,18 @@ struct Table {
     /// The operations a `Cancel` was submitted for, so an `EINTR` reads as
     /// `Cancelled` on them only.
     cancelled: BTreeSet<Token>,
+    /// What `getdents64` writes, for a `List`: the call is synchronous, so
+    /// one buffer serves every one.
+    listing: Box<[u8]>,
+    /// How many times an `Open` was submitted again after `EAGAIN`.
+    resubmitted: u64,
+}
+
+/// What a reaped entry comes to: a completion to hand up, or an `Open` to
+/// submit again, its slot kept.
+enum Reaped {
+    Complete(Complete),
+    Again(u32),
 }
 
 struct Slot {
@@ -175,6 +202,19 @@ struct Flight {
     /// flight (see the module documentation).
     addr: UnsafeCell<libc::sockaddr_storage>,
     addr_len: UnsafeCell<libc::socklen_t>,
+    /// An `Open`'s path, or the name a `Rename`, `Remove` or
+    /// `MakeDirectory` acts on, with a NUL after it: what the kernel reads.
+    path: Box<[u8]>,
+    /// A `Rename`'s new name, with a NUL after it.
+    to: Box<[u8]>,
+    /// How an `Open` opens, which the kernel reads; in a cell, as the
+    /// address is.
+    open_how: UnsafeCell<types::OpenHow>,
+    /// What a `Stat` reads back, which the kernel writes; in a cell, as the
+    /// address is.
+    statx: UnsafeCell<libc::statx>,
+    /// How many times an `Open` was submitted again after `EAGAIN`.
+    again: u32,
     /// The result, for an operation the adapter completed itself.
     ready: Option<Result<Done, Error>>,
 }
@@ -189,7 +229,7 @@ enum Prepared {
 
 /// The operations the ring adapter submits, which the kernel's ring must
 /// have: all of them at the floor, 6.12.
-const OPERATIONS: [(u8, &str); 10] = [
+const OPERATIONS: [(u8, &str); 18] = [
     (opcode::Socket::CODE, "IORING_OP_SOCKET"),
     (opcode::Bind::CODE, "IORING_OP_BIND"),
     (opcode::Listen::CODE, "IORING_OP_LISTEN"),
@@ -199,10 +239,35 @@ const OPERATIONS: [(u8, &str); 10] = [
     (opcode::Send::CODE, "IORING_OP_SEND"),
     (opcode::Shutdown::CODE, "IORING_OP_SHUTDOWN"),
     (opcode::Close::CODE, "IORING_OP_CLOSE"),
+    (opcode::OpenAt2::CODE, "IORING_OP_OPENAT2"),
+    (opcode::Read::CODE, "IORING_OP_READ"),
+    (opcode::Write::CODE, "IORING_OP_WRITE"),
+    (opcode::Fsync::CODE, "IORING_OP_FSYNC"),
+    (opcode::Statx::CODE, "IORING_OP_STATX"),
+    (opcode::RenameAt::CODE, "IORING_OP_RENAMEAT"),
+    (opcode::UnlinkAt::CODE, "IORING_OP_UNLINKAT"),
+    (opcode::MkDirAt::CODE, "IORING_OP_MKDIRAT"),
     (opcode::AsyncCancel::CODE, "IORING_OP_ASYNC_CANCEL"),
 ];
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+/// How many times an `Open` is submitted again after `EAGAIN` before its
+/// `Other(EAGAIN)` goes up.
+const AGAIN: u32 = 16;
+
+/// The bytes of `getdents64`'s buffer: many entries a call, and room for
+/// the largest one.
+const LISTING: usize = 32 << 10;
+
+/// The path a `Stat` names with `AT_EMPTY_PATH`: the descriptor itself.
+const EMPTY: &CStr = c"";
+
+/// The new file's mode a `Create` that asks for none is made with, and a
+/// `MakeDirectory`'s, both less the umask (`skein_io::kernel`, backend
+/// defaults).
+const FILE_MODE: u64 = 0o666;
+const DIRECTORY_MODE: libc::mode_t = 0o777;
 
 impl Kernel {
     /// Sets up the ring for this thread alone: one issuer, and completions
@@ -287,13 +352,46 @@ impl Kernel {
             let result = flight.ready.expect("a ready slot holds its result");
             out.push(Complete { op: flight.op, kind: flight.kind, result });
         }
+        let mut again = Vec::new();
         let mut completions = self.ring.completion();
         while out.room() > 0 {
             let Some(entry) = completions.next() else {
                 break;
             };
-            out.push(self.table.complete(entry.user_data(), entry.result()));
+            match self.table.complete(entry.user_data(), entry.result()) {
+                Reaped::Complete(complete) => out.push(complete),
+                Reaped::Again(index) => again.push(index),
+            }
         }
+        drop(completions);
+        for index in again {
+            self.resubmit(index);
+        }
+    }
+
+    /// How many times an `Open` was submitted again after `EAGAIN`, its `..`
+    /// having raced a rename or a mount: for tests, which provoke it.
+    #[must_use]
+    pub const fn resubmitted(&self) -> u64 {
+        self.table.resubmitted
+    }
+
+    /// Pushes an `Open` that failed with `EAGAIN` again, in its slot under the
+    /// same `user_data`; the next enter submits it.
+    fn resubmit(&mut self, index: u32) {
+        let slot = self.table.slots.get(slot_index(index)).expect("an index in flight names a slot");
+        let flight = slot.flight.as_ref().expect("an operation submitted again is in its slot");
+        let Op::Open { root, .. } = flight.kind else {
+            unreachable!("only an Open is submitted again");
+        };
+        let entry = open_entry(root, &flight.path, &flight.open_how).user_data(user_data(index, slot.generation));
+        // SAFETY: as at the first push (`start`): the path and the
+        // `open_how` the entry points at are this slot's, which stays in
+        // place, untouched by Rust code, until the new completion is reaped;
+        // the kernel had done with them, having posted the first.
+        let pushed = unsafe { self.ring.submission().push(&entry) };
+        pushed.expect("the submission queue has an entry for every slot");
+        self.table.resubmitted = self.table.resubmitted.saturating_add(1);
     }
 
     fn start(&mut self, record: Submit) {
@@ -301,19 +399,21 @@ impl Kernel {
         assert!(kind.is_valid(), "io submits only valid records (skein_io::kernel, broken invariants)");
         assert!(!self.table.tokens.contains_key(&op), "io never reuses a token in flight (skein_io::kernel)");
         let index = self.table.free.pop().expect("a record is taken only while a slot is free");
-        let Table { slots, tokens, cancelled, ready, .. } = &mut self.table;
+        let Table { slots, tokens, cancelled, ready, listing, .. } = &mut self.table;
         let slot = slots.get_mut(slot_index(index)).expect("a free index names a slot");
         assert!(slot.flight.is_none(), "a free slot holds no operation");
         let user_data = user_data(index, slot.generation);
         let flight = slot.flight.insert(Flight::new(op, kind));
-        match prepare(flight, tokens, cancelled) {
+        match prepare(flight, tokens, cancelled, listing) {
             Prepared::Entry(entry) => {
                 let entry = entry.user_data(user_data);
                 // SAFETY: every pointer in the entry points into this slot's
-                // flight (its address and length) or into its record's `Box`
-                // buffer. The slot's table is never resized, and the flight
-                // stays in place, untouched by Rust code, until `complete`
-                // takes it after the kernel posts this entry's completion.
+                // flight (its address and length, its `open_how`, its
+                // `statx`), into the paths it owns, or into its record's
+                // `Box` buffers. The slot's table is never resized, and the
+                // flight stays in place, untouched by Rust code, until
+                // `complete` takes it after the kernel posts this entry's
+                // completion.
                 let pushed = unsafe { self.ring.submission().push(&entry) };
                 pushed.expect("the submission queue has an entry for every slot");
             }
@@ -405,6 +505,8 @@ impl Table {
             ready: VecDeque::with_capacity(capacity),
             tokens: BTreeMap::new(),
             cancelled: BTreeSet::new(),
+            listing: vec![0; LISTING].into_boxed_slice(),
+            resubmitted: 0,
         }
     }
 
@@ -424,32 +526,57 @@ impl Table {
 
     /// The completion of the ring entry named `user_data`, its result `res`
     /// decoded.
-    fn complete(&mut self, user_data: u64, res: i32) -> Complete {
+    fn complete(&mut self, user_data: u64, res: i32) -> Reaped {
         let (index, generation) = split(user_data);
-        let slot = self.slots.get(slot_index(index)).expect("a completion names a slot");
-        assert!(
-            slot.generation == generation && slot.flight.is_some(),
-            "every completion names an operation in flight, once"
-        );
+        let slot = self.slots.get_mut(slot_index(index)).expect("a completion names a slot");
+        assert!(slot.generation == generation, "every completion names an operation in flight, once");
+        let flight = slot.flight.as_mut().expect("every completion names an operation in flight, once");
+        // RESOLVE_BENEATH answers EAGAIN when a `..` raced a rename or a
+        // mount anywhere on the system: the same Open is likely to pass.
+        if let Op::Open { .. } = flight.kind
+            && res == -libc::EAGAIN
+            && flight.again < AGAIN
+            && !self.cancelled.contains(&flight.op)
+        {
+            flight.again = flight.again.saturating_add(1);
+            return Reaped::Again(index);
+        }
         let (mut flight, cancelled) = self.retire(index);
         let result = decode(&mut flight, res, cancelled);
-        Complete { op: flight.op, kind: flight.kind, result }
+        Reaped::Complete(Complete { op: flight.op, kind: flight.kind, result })
     }
 }
 
 impl Flight {
     fn new(op: Token, kind: Op) -> Flight {
-        Flight { op, kind, addr: UnsafeCell::new(zeroed_storage()), addr_len: UnsafeCell::new(0), ready: None }
+        Flight {
+            op,
+            kind,
+            addr: UnsafeCell::new(zeroed_storage()),
+            addr_len: UnsafeCell::new(0),
+            path: Box::default(),
+            to: Box::default(),
+            open_how: UnsafeCell::new(types::OpenHow::new()),
+            statx: UnsafeCell::new(zeroed_statx()),
+            again: 0,
+            ready: None,
+        }
     }
 }
 
 /// Maps a record onto its one submission entry, with the backend defaults
 /// that are not records (`skein_io::kernel`): close-on-exec on every new
 /// descriptor, `SO_REUSEADDR` on a socket that binds (set here, before the
-/// `Bind`), `MSG_NOSIGNAL` on every send. A `Cancel` whose target is not in
-/// flight is too late, without asking the kernel.
-fn prepare(flight: &mut Flight, tokens: &BTreeMap<Token, u64>, cancelled: &mut BTreeSet<Token>) -> Prepared {
-    let Flight { kind, addr, addr_len, .. } = flight;
+/// `Bind`), `MSG_NOSIGNAL` on every send, the modes of new files and
+/// directories. A `Cancel` whose target is not in flight is too late,
+/// without asking the kernel; a `List` runs here, synchronously.
+fn prepare(
+    flight: &mut Flight,
+    tokens: &BTreeMap<Token, u64>,
+    cancelled: &mut BTreeSet<Token>,
+    listing: &mut [u8],
+) -> Prepared {
+    let Flight { kind, addr, addr_len, path, to: to_path, open_how, statx, .. } = flight;
     let entry = match kind {
         Op::Socket { family } => {
             let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
@@ -492,6 +619,48 @@ fn prepare(flight: &mut Flight, tokens: &BTreeMap<Token, u64>, cancelled: &mut B
         }
         Op::Shutdown { fd } => opcode::Shutdown::new(types::Fd(fd.raw()), libc::SHUT_WR).build(),
         Op::Close { fd } => opcode::Close::new(types::Fd(fd.raw())).build(),
+        Op::Open { root, path: asked, how } => {
+            *path = c_path(asked);
+            *open_how.get_mut() = open(*how);
+            open_entry(*root, path, open_how)
+        }
+        Op::Read { fd, buf, at } => {
+            let len = u32::try_from(buf.len()).expect("a valid Read buffer's length is a count");
+            opcode::Read::new(types::Fd(fd.raw()), buf.as_mut_ptr(), len).offset(*at).build()
+        }
+        Op::Write { fd, bytes, from, at } => {
+            let from = usize::try_from(*from).expect("a u32 fits in a usize");
+            let left = bytes.get(from..).expect("a valid Write has bytes left from its offset");
+            let len = u32::try_from(left.len()).expect("a valid Write's length is a count");
+            opcode::Write::new(types::Fd(fd.raw()), left.as_ptr(), len).offset(*at).build()
+        }
+        Op::Sync { fd } => opcode::Fsync::new(types::Fd(fd.raw())).build(),
+        Op::Stat { fd } => opcode::Statx::new(types::Fd(fd.raw()), EMPTY.as_ptr(), statx.get().cast())
+            .flags(libc::AT_EMPTY_PATH)
+            .mask(libc::STATX_TYPE | libc::STATX_SIZE | libc::STATX_MODE)
+            .build(),
+        Op::Rename { from_dir, from, to_dir, to } => {
+            *path = c_path(from);
+            *to_path = c_path(to);
+            let (from_dir, to_dir) = (types::Fd(from_dir.raw()), types::Fd(to_dir.raw()));
+            opcode::RenameAt::new(from_dir, path.as_ptr().cast(), to_dir, to_path.as_ptr().cast()).build()
+        }
+        Op::Remove { dir, name, directory } => {
+            *path = c_path(name);
+            let flags = if *directory { libc::AT_REMOVEDIR } else { 0 };
+            opcode::UnlinkAt::new(types::Fd(dir.raw()), path.as_ptr().cast()).flags(flags).build()
+        }
+        Op::MakeDirectory { dir, name } => {
+            *path = c_path(name);
+            opcode::MkDirAt::new(types::Fd(dir.raw()), path.as_ptr().cast()).mode(DIRECTORY_MODE).build()
+        }
+        Op::List { fd, entries, names } => {
+            let listed = list(fd.raw(), entries, names, listing);
+            return Prepared::Done(match listed {
+                Ok(n) => Ok(Done::Count(n)),
+                Err(errno) => Err(error(kind, errno, false)),
+            });
+        }
         Op::Cancel { target } => {
             let Some(target_data) = tokens.get(target) else {
                 return Prepared::Done(Err(Error::TooLate));
@@ -509,7 +678,7 @@ fn prepare(flight: &mut Flight, tokens: &BTreeMap<Token, u64>, cancelled: &mut B
 /// `IPV6_V6ONLY` on every IPv6 socket, before io can bind it. A `Bind` reads
 /// the address bound back with `getsockname`.
 fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error> {
-    let Flight { kind, addr, addr_len, .. } = flight;
+    let Flight { kind, addr, addr_len, statx, .. } = flight;
     let (addr, addr_len) = (addr.get_mut(), addr_len.get_mut());
     if res < 0 {
         return Err(error(kind, 0_i32.saturating_sub(res), cancelled));
@@ -549,12 +718,21 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
                 Err(errno) => Err(error(kind, errno, false)),
             }
         }
-        Op::Recv { .. } | Op::Send { .. } => {
+        Op::Recv { .. } | Op::Send { .. } | Op::Read { .. } | Op::Write { .. } => {
             Ok(Done::Count(u32::try_from(res).expect("a non-negative i32 fits in a u32")))
         }
-        Op::Listen { .. } | Op::Connect { .. } | Op::Shutdown { .. } | Op::Close { .. } | Op::Cancel { .. } => {
-            Ok(Done::Nothing)
-        }
+        Op::Open { .. } => opened(res),
+        Op::Stat { .. } => Ok(Done::Stat(stat(statx.get_mut()))),
+        Op::Listen { .. }
+        | Op::Connect { .. }
+        | Op::Shutdown { .. }
+        | Op::Close { .. }
+        | Op::Sync { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::Cancel { .. } => Ok(Done::Nothing),
+        Op::List { .. } => unreachable!("a List completes at its submit"),
     }
 }
 
@@ -567,6 +745,22 @@ fn error(kind: &Op, errno: i32, cancelled: bool) -> Error {
             libc::ENOENT | libc::EALREADY => Error::TooLate,
             libc::EINVAL => Error::InvalidArgument,
             other => Error::Other(other),
+        },
+        // Cancelled only if a Cancel was submitted for it, which io does
+        // for an Open, a Read, a Write or a Sync only.
+        Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. } => match errno {
+            libc::ECANCELED | libc::EINTR if cancelled => Error::Cancelled,
+            libc::ENOBUFS | libc::ENOMEM => Error::NoBufferSpace,
+            libc::EINVAL => Error::InvalidArgument,
+            other => file_error(kind, other),
         },
         Op::Socket { .. }
         | Op::Bind { .. }
@@ -625,9 +819,310 @@ fn operation_error(kind: &Op, errno: i32) -> Error {
             _ => None,
         },
         Op::Close { .. } => None,
-        Op::Cancel { .. } => unreachable!("a Cancel's errors are mapped apart"),
+        Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. }
+        | Op::Cancel { .. } => unreachable!("an operation on files' errors, and a Cancel's, are mapped apart"),
     };
     named.unwrap_or(Error::Other(errno))
+}
+
+/// The errors of an operation on files: each names those the contract
+/// tables for it (`skein_io::kernel`), and anything else is `Other`.
+fn file_error(kind: &Op, errno: i32) -> Error {
+    let named = match kind {
+        Op::Open { .. } => match errno {
+            libc::ENOENT => Some(Error::NotFound),
+            libc::EEXIST => Some(Error::Exists),
+            libc::ENOTDIR => Some(Error::NotADirectory),
+            libc::EISDIR => Some(Error::IsADirectory),
+            libc::EACCES | libc::EPERM => Some(Error::Permission),
+            libc::ENOSPC | libc::EDQUOT => Some(Error::NoSpace),
+            libc::EROFS => Some(Error::ReadOnly),
+            libc::ELOOP => Some(Error::TooManyLinks),
+            libc::ENAMETOOLONG => Some(Error::NameTooLong),
+            // RESOLVE_BENEATH's answer to a path out of its root.
+            libc::EXDEV => Some(Error::Escape),
+            // A socket, or a device with no driver.
+            libc::ENXIO => Some(Error::NotAFile),
+            libc::EMFILE | libc::ENFILE => Some(Error::TooManyOpenFiles),
+            _ => None,
+        },
+        Op::Read { .. } => match errno {
+            libc::EISDIR => Some(Error::IsADirectory),
+            _ => None,
+        },
+        Op::Write { .. } => match errno {
+            libc::ENOSPC | libc::EDQUOT => Some(Error::NoSpace),
+            libc::EROFS => Some(Error::ReadOnly),
+            _ => None,
+        },
+        Op::Sync { .. } => match errno {
+            libc::ENOSPC | libc::EDQUOT => Some(Error::NoSpace),
+            _ => None,
+        },
+        Op::Stat { .. } => None,
+        // EXDEV here is two filesystems, not an escape: Other.
+        Op::Rename { .. } => match errno {
+            libc::ENOENT => Some(Error::NotFound),
+            libc::ENOTDIR => Some(Error::NotADirectory),
+            libc::EISDIR => Some(Error::IsADirectory),
+            libc::ENOTEMPTY | libc::EEXIST => Some(Error::NotEmpty),
+            libc::EACCES | libc::EPERM => Some(Error::Permission),
+            libc::ENOSPC | libc::EDQUOT => Some(Error::NoSpace),
+            libc::EROFS => Some(Error::ReadOnly),
+            libc::EMLINK => Some(Error::TooManyLinks),
+            libc::ENAMETOOLONG => Some(Error::NameTooLong),
+            _ => None,
+        },
+        Op::Remove { .. } => match errno {
+            libc::ENOENT => Some(Error::NotFound),
+            libc::ENOTDIR => Some(Error::NotADirectory),
+            libc::EISDIR => Some(Error::IsADirectory),
+            libc::ENOTEMPTY | libc::EEXIST => Some(Error::NotEmpty),
+            libc::EACCES | libc::EPERM => Some(Error::Permission),
+            libc::EROFS => Some(Error::ReadOnly),
+            libc::ENAMETOOLONG => Some(Error::NameTooLong),
+            _ => None,
+        },
+        Op::MakeDirectory { .. } => match errno {
+            libc::EEXIST => Some(Error::Exists),
+            libc::ENOENT => Some(Error::NotFound),
+            libc::ENOTDIR => Some(Error::NotADirectory),
+            libc::EACCES | libc::EPERM => Some(Error::Permission),
+            libc::ENOSPC | libc::EDQUOT => Some(Error::NoSpace),
+            libc::EROFS => Some(Error::ReadOnly),
+            libc::EMLINK => Some(Error::TooManyLinks),
+            libc::ENAMETOOLONG => Some(Error::NameTooLong),
+            _ => None,
+        },
+        Op::List { .. } => match errno {
+            libc::ENOENT => Some(Error::NotFound),
+            libc::ENOTDIR => Some(Error::NotADirectory),
+            libc::ENAMETOOLONG => Some(Error::NameTooLong),
+            _ => None,
+        },
+        Op::Socket { .. }
+        | Op::Bind { .. }
+        | Op::Listen { .. }
+        | Op::Accept { .. }
+        | Op::Connect { .. }
+        | Op::Recv { .. }
+        | Op::Send { .. }
+        | Op::Shutdown { .. }
+        | Op::Close { .. }
+        | Op::Cancel { .. } => unreachable!("only an operation on files' errors are mapped here"),
+    };
+    named.unwrap_or(Error::Other(errno))
+}
+
+/// An `Open`'s entry, of the path and the `open_how` its slot holds.
+fn open_entry(root: Fd, path: &[u8], open_how: &UnsafeCell<types::OpenHow>) -> squeue::Entry {
+    opcode::OpenAt2::new(types::Fd(root.raw()), path.as_ptr().cast(), open_how.get().cast_const()).build()
+}
+
+/// `bytes` and a NUL after them: the string the kernel reads for a path or
+/// a name, in which a valid record holds no NUL.
+fn c_path(bytes: &[u8]) -> Box<[u8]> {
+    let mut path = Vec::with_capacity(bytes.len().checked_add(1).expect("a path's length and one more fit a usize"));
+    path.extend_from_slice(bytes);
+    path.push(0);
+    path.into_boxed_slice()
+}
+
+/// What an `Open` that the kernel answered with the descriptor `fd` comes
+/// to: a file or a directory, or `NotAFile`, the descriptor closed. A file
+/// blocks again, so that io_uring sends a read it cannot do at once to its
+/// worker rather than answer `EAGAIN`.
+fn opened(fd: i32) -> Result<Done, Error> {
+    // SAFETY: `libc::stat` is a plain C struct of integers, for which all
+    // zeroes is a valid value.
+    let mut raw: libc::stat = unsafe { mem::zeroed() };
+    // SAFETY: `raw` is a live, exclusive borrow of a `stat`, which the
+    // kernel writes during the call only; `fd` was just opened for this
+    // adapter.
+    let stated = unsafe { libc::fstat(fd, ptr::from_mut(&mut raw)) };
+    let checked = if stated != 0 {
+        Err(Error::Other(last_errno()))
+    } else {
+        match kind_of(raw.st_mode) {
+            Kind::File => blocking(fd),
+            Kind::Directory => Ok(()),
+            Kind::Symlink | Kind::Other => Err(Error::NotAFile),
+        }
+    };
+    match checked {
+        Ok(()) => Ok(Done::Fd(Fd::new(fd))),
+        Err(error) => {
+            close(fd);
+            Err(error)
+        }
+    }
+}
+
+/// The status flags of what is open on `fd` (`F_GETFL`), or the error
+/// number.
+pub(crate) fn status_flags(fd: i32) -> Result<i32, i32> {
+    // SAFETY: integers only.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 { Err(last_errno()) } else { Ok(flags) }
+}
+
+/// Clears `O_NONBLOCK` from the file open on `fd`.
+fn blocking(fd: i32) -> Result<(), Error> {
+    let flags = match status_flags(fd) {
+        Ok(flags) => flags,
+        Err(errno) => return Err(Error::Other(errno)),
+    };
+    // SAFETY: integers only.
+    let set = unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+    if set < 0 { Err(Error::Other(last_errno())) } else { Ok(()) }
+}
+
+/// What `openat2` is told for each way io opens: close-on-exec always,
+/// without blocking or taking a controlling terminal, and resolved beneath
+/// the root, without magic links (kernel.md, 6.1).
+fn open(how: OpenHow) -> types::OpenHow {
+    let (flags, mode) = match how {
+        OpenHow::Read => (libc::O_RDONLY, 0),
+        OpenHow::Directory => (libc::O_RDONLY | libc::O_DIRECTORY, 0),
+        OpenHow::Create { mode } => {
+            let mode = match mode {
+                Some(mode) => u64::from(mode),
+                None => FILE_MODE,
+            };
+            (libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode)
+        }
+    };
+    let flags = flags | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
+    let flags = u64::try_from(flags).expect("open's flags are positive");
+    types::OpenHow::new().flags(flags).mode(mode).resolve(libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS)
+}
+
+/// What a `Stat`'s `statx` found.
+fn stat(raw: &libc::statx) -> Stat {
+    let kind = if raw.stx_mask & libc::STATX_TYPE == 0 { Kind::Other } else { kind_of(u32::from(raw.stx_mode)) };
+    let mode = if raw.stx_mask & libc::STATX_MODE == 0 { 0 } else { u32::from(raw.stx_mode) & PERMISSIONS };
+    Stat { kind, size: raw.stx_size, mode }
+}
+
+/// The kind of a file whose mode is `mode`.
+fn kind_of(mode: libc::mode_t) -> Kind {
+    match mode & libc::S_IFMT {
+        libc::S_IFREG => Kind::File,
+        libc::S_IFDIR => Kind::Directory,
+        libc::S_IFLNK => Kind::Symlink,
+        _ => Kind::Other,
+    }
+}
+
+/// The kind of a `getdents64` entry, or `None` when its filesystem did not
+/// say (`DT_UNKNOWN`).
+fn kind_of_entry(d_type: u8) -> Option<Kind> {
+    match d_type {
+        libc::DT_REG => Some(Kind::File),
+        libc::DT_DIR => Some(Kind::Directory),
+        libc::DT_LNK => Some(Kind::Symlink),
+        libc::DT_UNKNOWN => None,
+        _ => Some(Kind::Other),
+    }
+}
+
+/// The offsets of a `linux_dirent64`'s fields: `d_off`, `d_reclen`,
+/// `d_type`, and where `d_name` starts.
+const D_OFF: usize = 8;
+const D_RECLEN: usize = 16;
+const D_TYPE: usize = 18;
+const D_NAME: usize = 19;
+
+/// A `List` (`skein_io::kernel`): `getdents64` into `listing`, the entries
+/// copied out until `entries` or `names` is full, `.` and `..` skipped,
+/// and the directory's position set back to just past the last entry taken,
+/// so that the next `List` starts there. A filesystem that does not say an
+/// entry's kind is asked with `fstatat`. Fails with the error number of a
+/// call, or `ENAMETOOLONG` for a next name longer than all of `names`, when
+/// no entry was taken.
+pub(crate) fn list(fd: i32, entries: &mut [Entry], names: &mut [u8], listing: &mut [u8]) -> Result<u32, i32> {
+    let mut count = 0_usize;
+    let mut used = 0_usize;
+    // Where the next List starts: past the last entry taken.
+    let mut resume = seek(fd, 0, libc::SEEK_CUR)?;
+    while count < entries.len() {
+        let read = match getdents(fd, listing) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(errno) if count == 0 => return Err(errno),
+            // Those taken are handed back; the next List meets the error.
+            Err(_) => break,
+        };
+        let mut at = 0_usize;
+        while at < read {
+            let record = listing.get(at..read).expect("a record starts within what was read");
+            let next = i64::from_ne_bytes(field(record, D_OFF));
+            let len = usize::from(u16::from_ne_bytes(field(record, D_RECLEN)));
+            let d_type = u8::from_ne_bytes(field(record, D_TYPE));
+            let tail = record.get(D_NAME..len).expect("a record holds its name");
+            let nul = tail.iter().position(|&byte| byte == 0).expect("a name ends in a NUL");
+            let name = tail.get(..nul).expect("a name lies within its record");
+            at = at.checked_add(len).expect("records lie within what was read");
+            if name == b"." || name == b".." {
+                resume = next;
+                continue;
+            }
+            let end = used.checked_add(name.len()).expect("a name's end fits a usize");
+            let (Some(entry), Some(room)) = (entries.get_mut(count), names.get_mut(used..end)) else {
+                return match (count, seek(fd, resume, libc::SEEK_SET)) {
+                    (0, Err(errno)) => Err(errno),
+                    // A name longer than all of names: nothing can be taken.
+                    (0, Ok(_)) => Err(libc::ENAMETOOLONG),
+                    // Those taken are handed back, whether or not the
+                    // position could be set back: they were read.
+                    (_, Ok(_) | Err(_)) => Ok(u32::try_from(count).expect("no more entries than a valid List's count")),
+                };
+            };
+            room.copy_from_slice(name);
+            let kind = match kind_of_entry(d_type) {
+                Some(kind) => kind,
+                None => kind_at(fd, name),
+            };
+            let start = u32::try_from(used).expect("a valid List's names fit a count");
+            let len = u32::try_from(name.len()).expect("a name's length fits a count");
+            *entry = Entry { kind, start, len };
+            count = count.checked_add(1).expect("no more entries than fit a usize");
+            used = end;
+            resume = next;
+        }
+    }
+    Ok(u32::try_from(count).expect("no more entries than a valid List's count"))
+}
+
+/// The `N` bytes of a record from `at`.
+fn field<const N: usize>(record: &[u8], at: usize) -> [u8; N] {
+    let end = at.checked_add(N).expect("a field's end fits a usize");
+    let bytes = record.get(at..end).expect("a record holds its fields");
+    bytes.try_into().expect("N bytes")
+}
+
+/// The kind of the entry `name` of the directory open on `fd`, not
+/// following it: `Other` if it is gone.
+fn kind_at(fd: i32, name: &[u8]) -> Kind {
+    let Ok(name) = CString::new(name) else {
+        return Kind::Other;
+    };
+    // SAFETY: `libc::stat` is a plain C struct of integers, for which all
+    // zeroes is a valid value.
+    let mut raw: libc::stat = unsafe { mem::zeroed() };
+    // SAFETY: `name` is a NUL-terminated string, and `raw` a live,
+    // exclusive borrow of a `stat`, which the kernel writes during the call
+    // only; both live across it.
+    let done = unsafe { libc::fstatat(fd, name.as_ptr(), ptr::from_mut(&mut raw), libc::AT_SYMLINK_NOFOLLOW) };
+    if done == 0 { kind_of(raw.st_mode) } else { Kind::Other }
 }
 
 /// The errors of a connection, on `Connect`, `Recv` and `Send`.
@@ -681,6 +1176,12 @@ fn family_of(family: i32) -> libc::sa_family_t {
 fn zeroed_storage() -> libc::sockaddr_storage {
     // SAFETY: `sockaddr_storage` is a plain C struct of integers, for which
     // all zeroes is a valid value (an unspecified family).
+    unsafe { mem::zeroed() }
+}
+
+fn zeroed_statx() -> libc::statx {
+    // SAFETY: `statx` is a plain C struct of integers, for which all zeroes
+    // is a valid value (nothing in its mask).
     unsafe { mem::zeroed() }
 }
 
@@ -764,9 +1265,43 @@ fn local_addr(fd: i32, storage: &mut libc::sockaddr_storage, len: &mut libc::soc
     if read == 0 { Ok(()) } else { Err(last_errno()) }
 }
 
+/// `getdents64` of the directory open on `fd` into `listing`: the bytes it
+/// wrote, 0 at the end, or the error number.
+fn getdents(fd: i32, listing: &mut [u8]) -> Result<usize, i32> {
+    let len = libc::c_uint::try_from(listing.len()).expect("the listing buffer's length fits a c_uint");
+    // SAFETY: `listing` is a live, exclusive borrow of `len` bytes, which the
+    // kernel writes during the call only.
+    let read = unsafe { libc::syscall(libc::SYS_getdents64, fd, listing.as_mut_ptr(), len) };
+    match usize::try_from(read) {
+        Ok(read) => Ok(read),
+        Err(_) => Err(last_errno()),
+    }
+}
+
+/// Moves the position of `fd`, as `lseek` does: where it is now.
+fn seek(fd: i32, to: libc::off_t, whence: i32) -> Result<libc::off_t, i32> {
+    // SAFETY: integers only.
+    let at = unsafe { libc::lseek(fd, to, whence) };
+    if at < 0 { Err(last_errno()) } else { Ok(at) }
+}
+
+/// Opens the directory at `path` as a root for io's files (kernel.md, 6.1),
+/// as a service's `main` does at startup, from its configuration (shell.md,
+/// 6): close-on-exec, and released only by a `Close` record. Fails with the
+/// error number: `ENOTDIR` when `path` is not a directory, `EINVAL` when
+/// it holds a NUL.
+pub fn open_root(path: &Path) -> Result<Fd, i32> {
+    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+        return Err(libc::EINVAL);
+    };
+    // SAFETY: `path` is a NUL-terminated string that lives across the call.
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if fd < 0 { Err(last_errno()) } else { Ok(Fd::new(fd)) }
+}
+
 /// Releases a descriptor the adapter made but cannot hand up. The descriptor
 /// is released whatever `close` answers, so there is nothing to do with it.
-fn close(fd: i32) {
+pub(crate) fn close(fd: i32) {
     // SAFETY: `fd` is a descriptor the kernel just made for this adapter,
     // which nothing else has seen.
     let _closed: i32 = unsafe { libc::close(fd) };

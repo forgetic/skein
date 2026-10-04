@@ -21,6 +21,9 @@ document is the design behind it.
   cancel is an operation of its own.
 - **Sockets behave as Linux's do,** and the simulator matches them; one
   conformance suite holds every backend to the contract.
+- **Files stay beneath a root.** A root is an open directory. Only `Open`
+  takes a path, which the kernel resolves beneath its root; every other
+  operation on a name acts on one entry of an open directory.
 
 ## 2. In skein
 
@@ -50,7 +53,7 @@ pub struct Submit   { pub op: Token, pub kind: Op }
 pub struct Complete { pub op: Token, pub kind: Op, pub result: Result<Done, Error> }
 
 // one success shape per operation
-pub enum Done { Nothing, Count(u32), Fd(Fd), Accepted { fd: Fd, peer: Addr }, Bound(Addr) }
+pub enum Done { Nothing, Count(u32), Fd(Fd), Accepted { fd: Fd, peer: Addr }, Bound(Addr), Stat(Stat) }
 
 pub enum Op {
     // sockets
@@ -63,13 +66,16 @@ pub enum Op {
     Send     { fd: Fd, bytes: Box<[u8]>, from: u32 },
     Shutdown { fd: Fd },
     Close    { fd: Fd },
-    // files, beneath a root
-    Open     { root: Fd, path: Box<[u8]>, how: OpenHow },
-    Read     { fd: Fd, buf: Box<[u8]>, at: u64 },
-    Write    { fd: Fd, bytes: Box<[u8]>, from: u32, at: u64 },
-    Sync     { fd: Fd },
-    Stat     { root: Fd, path: Box<[u8]> },
-    // ... rename, remove, make a directory, list a directory
+    // files, beneath a root (section 6.1)
+    Open          { root: Fd, path: Box<[u8]>, how: OpenHow },   // Read, Directory, Create
+    Read          { fd: Fd, buf: Box<[u8]>, at: u64 },
+    Write         { fd: Fd, bytes: Box<[u8]>, from: u32, at: u64 },
+    Sync          { fd: Fd },
+    Stat          { fd: Fd },
+    Rename        { from_dir: Fd, from: Box<[u8]>, to_dir: Fd, to: Box<[u8]> },
+    Remove        { dir: Fd, name: Box<[u8]>, directory: bool },
+    MakeDirectory { dir: Fd, name: Box<[u8]> },
+    List          { fd: Fd, entries: Box<[Entry]>, names: Box<[u8]> },  // synchronous
     // processes
     Wait     { pidfd: Fd },
     // ... spawn, signal, make a pipe: synchronous (section 6)
@@ -100,6 +106,9 @@ error means the operation did nothing usable: a failed `Socket` or
   in-flight table, beside the record. They are decoded into plain values
   (`Addr`, `Stat`, `Exit`) before they go up. A backend for another
   kernel translates.
+- **A path or a name is bytes,** a `Box<[u8]>` in the record with no NUL
+  in it. The NUL-terminated string the kernel reads is the backend's own
+  copy, held beside the record until its completion.
 - **Errors cross as a skein enum:** the errors io handles by name, plus an
   `Other` code. Each backend maps its kernel's error numbers onto it, per
   operation: the same number can mean different things on a cancel and
@@ -163,6 +172,121 @@ error means the operation did nothing usable: a failed `Socket` or
 - **Timers are not operations.** The shell waits for completions with one
   timeout: the earliest deadline over every layer.
 
+### 6.1 Files beneath a root
+
+What the records promise is stated exactly in the kernel module's
+documentation, with each operation's errors; the decisions behind it:
+
+- **A root is an open directory:** one the shell opened at startup
+  (shell.md, 6), or one an `Open` of a directory made beneath another. A
+  root opened beneath a root is a root like any other: nothing it opens
+  leaves it, though its parent's other entries lie just above.
+- **`Open` resolves beneath its root, and follows the symbolic links that
+  stay there.** It is `openat2` with `RESOLVE_BENEATH` and
+  `RESOLVE_NO_MAGICLINKS`: `..` above the root, an absolute path, and a
+  link leading out of the root fail with `Escape` (`EXDEV`), checked by
+  the kernel as it resolves, so no race with a rename gets out. Links that
+  stay beneath the root are followed, since a workspace holds them (a
+  repository's `CLAUDE.md -> AGENTS.md`); `RESOLVE_NO_SYMLINKS` would
+  refuse those too and keep nothing more in. Magic links (`/proc/*/fd/*`)
+  are refused by name, with `RESOLVE_NO_MAGICLINKS`, as the man page
+  asks: `RESOLVE_BENEATH` refuses them today, but may not always. That
+  answers `ELOOP` before the escape is looked at, so a magic link is
+  `TooManyLinks`, not `Escape`.
+- **A `..` that races is tried again.** `RESOLVE_BENEATH` cannot tell a
+  `..` from an escape when a rename or a mount anywhere on the system
+  moves under it, and answers `EAGAIN` for the caller to retry. The
+  backend does, not io: the ring pushes the same `Open` again from its
+  slot, up to 16 times, and only one still racing goes up, as
+  `Other(11)`. io_uring's worker meets the race only once a quick attempt
+  inline has too, so it is rare, about one `Open` in a thousand under a
+  storm of renames; the ring's own tests provoke it with renames in its
+  workers beside creates through `..`. The simulator has no race, and
+  never answers it.
+- **Every other operation on a name acts on one entry of an open
+  directory.** `renameat`, `unlinkat`, `mkdirat` and `statx` take no
+  `RESOLVE_*` flags, and a path with a `/` in it could leave the root
+  through `..` or a link. So `Rename`, `Remove` and `MakeDirectory` take a
+  name, never a path (no `/`, not `.` or `..`, which `Op::is_valid`
+  holds), and `Stat` takes a descriptor. io opens the directory a name
+  lies in first, beneath the root (io.md, 5). None of them follows the
+  entry it names: removing a link removes the link.
+- **The opens io makes, not `open`'s flags.** `OpenHow` is `Read` (an
+  existing file or directory), `Directory` (an existing directory: a
+  root, or one to list) or `Create` (a new file, exclusively, to write).
+  Each is one well-defined case for the simulator and the suite to hold,
+  and more come when a user pulls them: opening a path only to stat it
+  (`O_PATH`), say, which `Read` cannot when the file is unreadable.
+- **Reads and writes are at an offset,** never at the descriptor's
+  position, so concurrent ones need no order. Both may be short: a `Read`
+  at the end of the file, and whenever the backend says (POSIX allows it;
+  Linux does not cut a regular file's read short but at its end, and the
+  simulator draws it); a `Write` likewise, continued by io from where it
+  stopped, as a `Send` is. An offset that would pass `i64::MAX` is an
+  invalid record: the kernel's offsets are signed, and the ring would read
+  `u64::MAX` as the descriptor's position.
+- **`Rename` is the atomic step.** It replaces its target whole, so the
+  idiom that replaces a file is: `Stat` the old file for its permission
+  bits, `Create` a temporary in the same directory with them, `Write` it,
+  `Sync` it, `Close` it, `Rename` it over the old name, `Sync` the
+  directory. A reader sees the old file or the new, and after the last
+  `Sync` the new one survives a crash. Its pieces are io's decisions
+  (io.md, 5): the temporary's name drawn from the seed, drawn again on
+  `Exists`; the old file's bits kept, which is why `Create` takes a mode
+  and `Stat` answers one; a symbolic link at the target replaced by the
+  file, as `Rename` replaces a link and does not follow it, since writing
+  through links is not offered.
+- **`List` hands back entries as plain values,** `getdents64`'s structures
+  staying in the backend: each entry's kind and its name, packed into the
+  record's `names`, at most `entries.len()` of them, `.` and `..` left
+  out, from where the last `List` of the descriptor stopped. It is
+  synchronous: `getdents64` is not a ring operation. A `names` of at
+  least 255 bytes always takes the next entry, so a `List` stops short but
+  never makes no progress while entries are left; `Count(0)` is the end.
+  A filesystem whose names may be longer than 255 bytes (one storing them
+  in another encoding) fails a `List` with `NameTooLong` when its next
+  name fits in none of `names`, rather than answer the end; entries a
+  `List` took are handed back even if the directory's position could not
+  be set back after them.
+- **An `Open`, `Read`, `Write` or `Sync` may be cancelled.** None waits
+  on a peer, but on a filesystem that can stall (NFS whose server went
+  away, a FUSE daemon that hangs) one may wait for good, and io must be
+  able to give up on it. So a `Cancel` may target one, with a socket's
+  outcomes (section 5): it stops one still queued for io_uring's worker,
+  or interrupts one running, or comes too late, the target answering its
+  own result. Even on tmpfs a `Read` goes to the worker, and the ring's
+  conformance run sees its `Cancel` stop it in some runs and come too late
+  in others. The ring reads `ECANCELED` and `EINTR` as `Cancelled` on an
+  operation a `Cancel` was submitted for. A `Stat`, `Rename`, `Remove`,
+  `MakeDirectory` or `List` completes without one: a `Cancel` of one is a
+  broken invariant, until a filesystem that stalls them pulls it.
+- **Only files and directories open.** A FIFO beneath a root opened to
+  read opens at once, and its first `Read` then waits for a writer's
+  bytes for good, which nothing above can stop. So every `Open` goes down
+  with `O_NONBLOCK | O_NOCTTY`, and the ring stats what it opened, at once,
+  in its own call, as a `List` makes its own: anything but a regular file
+  or a directory (a FIFO, a device) is closed and answered `NotAFile`,
+  and a regular file is made blocking again, so that io_uring sends a read
+  it cannot do at once to its worker rather than answer `EAGAIN`. A
+  socket, or a device with no driver, the kernel itself refuses (`ENXIO`,
+  `NotAFile` too). A device's own `open` may still act (a tape rewinds),
+  so roots belong on filesystems mounted `nodev`, where the kernel refuses
+  every device with `Permission`; the shell's startup says so
+  (shell.md, 6).
+- **Errors are named per operation,** on a table the module documentation
+  keeps and `Complete::is_valid` checks: an operation on files answers its
+  own errors, never a socket's or `Cancelled`, and an operation on sockets
+  never answers a file's. The same number means different things per
+  operation: `EXDEV` is `Escape` on an `Open` and `Other` on a `Rename`
+  (two filesystems); `ENOENT` is `NotFound` on a file and `TooLate` on a
+  cancel; `EEXIST` is `Exists` on a `Create` and `NotEmpty` on a `Rename`
+  over a directory.
+- **Modes are backend defaults,** as socket options are, but for the one
+  a `Create` asks for: a new file is `0o666` unless asked otherwise, and a
+  new directory `0o777`, less the process's umask, and every descriptor
+  is close-on-exec. The fake machine keeps a umask of `0o022`; the suite
+  compares a created file's owner bits, which no usual umask takes.
+
 ## 7. Broken invariants
 
 Some mistakes io never makes, so a backend may assume they never happen:
@@ -175,7 +299,12 @@ Some mistakes io never makes, so a backend may assume they never happen:
 - any operation but close after a failed connect, a connect on a socket
   that is not fresh, a listen on an unbound socket;
 - a half-close on a socket that is not a connection, or during a send;
-- a close with anything else in flight.
+- an operation on files on a socket's descriptor, or one on sockets on a
+  file's; a read on a descriptor not opened to read, a write on one not
+  opened to create, a list on one opened to create;
+- a cancel of a stat, a rename, a removal, a new directory or a listing;
+- a close with anything else in flight on its descriptor, an operation on
+  files being on every descriptor it names.
 
 The simulator fails the world on each; the ring checks the first two at
 submit.
@@ -204,8 +333,47 @@ for its backend.
   each race as the ring does.
 - **On the ring,** each scenario runs once, and fails, saying so, if
   io_uring is not usable.
-- What no record can observe (close-on-exec, `TCP_NODELAY`) is not
-  checked; `SO_REUSEADDR` and `IPV6_V6ONLY` are, by their effects.
+- What no record can observe (close-on-exec, `TCP_NODELAY`, the modes of
+  new files) is not checked; `SO_REUSEADDR` and `IPV6_V6ONLY` are, by
+  their effects.
+- **Files beneath a root of the scenario's own.** Each scenario on files
+  lays out its root from a tree in the suite's own vocabulary (files,
+  directories, symbolic links, each with its mode): on the ring, a scratch
+  directory made per scenario beneath the system's temporary directory,
+  with a directory beside it for a link to lead out to, and removed with
+  the backend; in the simulator, the minimal fake machine (testing.md, 4).
+  The scenarios: a file made, written at offsets over itself and past its
+  end, synced, read back and stated; renames over a file, across
+  directories, of a file over a directory and the other way, over a full
+  and an empty directory, beneath itself, over itself, and the idiom that
+  replaces a file whole; removals of files, directories, a link and a file
+  open; new directories, and one removed while open; listings whole, one
+  entry at a time, and cut short by long names; a root beneath a root;
+  forty-four paths that leave their root, stay beneath it, or name a FIFO,
+  which opens as no file; and what the
+  owner may not do. Each names every error its operations can be made to
+  answer on a healthy scratch directory, and, where two could answer, the
+  one Linux checks first: a removed directory before a name's length, a
+  final `/` before the last name on a create, both directories of a
+  `Rename` before its source, its source before its target, a name
+  looked up before its directory is written. The driver checks that every
+  path, name and buffer comes back in its `Box`, written only where the
+  count says.
+- **What only the simulator shows:** a disk beyond a healthy one (no
+  space, a filesystem gone read-only, an I/O error) is the simulator's
+  own tests' (simulator.md, 6), and an `Open` past the descriptor limit a
+  scenario on the simulator only. A `Cancel` of a file's `Read` runs on
+  both: the ring stops it or comes too late, from one run to the next,
+  and requires a pairing the simulator draws; the simulator's `hung`
+  fault, a filesystem gone away, adds the `Read` that waits for good,
+  which no scratch directory shows, and every pairing must appear over
+  the fuzzy seeds. `EMLINK` (`TooManyLinks` on a `Rename`
+  or a `MakeDirectory`) neither backend provokes. A `Rename` across
+  filesystems (`Other(EXDEV)`) is the ring's own test, between the
+  temporary directory and `/dev/shm` where they are two mounts. Short reads and writes
+  are an outcome the simulator draws and the ring never gives on a
+  regular file: the fuzzy suite asserts both counts appear over its
+  seeds, and a calm world counts every byte, as the ring does.
 
 ## 9. Open questions
 
@@ -214,9 +382,8 @@ for its backend.
 
 ## 10. Not built yet
 
-- **The records for files and processes,** with their rules and their
-  conformance scenarios (a scratch directory as the root), when io pulls
-  them. Sockets are built.
+- **The records for processes,** with their rules and their conformance
+  scenarios, when io pulls them.
 - **The descriptor limit on the ring.** The simulator checks it; lowering
   a process's limit on the real kernel takes `unsafe` outside the ring
   adapter, or a child process, and neither is allowed.

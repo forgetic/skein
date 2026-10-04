@@ -3,13 +3,15 @@
 //! in `fuzzy_conformance.rs`.
 
 use skein_conformance::{
-    Check, Pairing, accept_past_the_descriptor_limit, address_in_use, backpressure, cancel_accept, cancel_connect,
-    cancel_connect_established_while_away, cancel_recv, closed_before_accept, full_accept_queue, graceful_close,
-    ipv6_only, lifecycle, listener_close_resets_waiting, refused, reset_after_end_of_stream, send_after_peer_closed,
-    unread_close_meets_recv, unread_close_meets_send, wrong_state,
+    Check, Pairing, Shortness, accept_past_the_descriptor_limit, address_in_use, backpressure, cancel_accept,
+    cancel_connect, cancel_connect_established_while_away, cancel_read, cancel_recv, closed_before_accept, escapes,
+    file_lifecycle, full_accept_queue, graceful_close, ipv6_only, lifecycle, list, listener_close_resets_waiting,
+    make_directory, nested_roots, open_past_the_descriptor_limit, permissions, refused, remove, rename,
+    reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv, unread_close_meets_send, wrong_state,
 };
 use skein_conformance_sim::{
-    CALM, RACES, SMOKE, Simulated, cancel_chaos, each_seed, loopback_chaos, racing_accept, racing_recv,
+    CALM, RACES, SMOKE, Simulated, cancel_chaos, each_seed, file_cancel_chaos, loopback_chaos, racing_accept,
+    racing_recv,
 };
 use skein_io::kernel::Family;
 use skein_sim::Config;
@@ -181,6 +183,82 @@ fn loopback_chaos_draws_no_fault_beyond_loopback() {
     let faults = loopback_chaos().faults;
     assert_eq!((faults.reset, faults.refuse, faults.timed_out, faults.no_buffer), (0, 0, 0, 0));
     assert_eq!(faults.cancel_unsubmitted, 0);
+    assert_eq!((faults.no_space, faults.read_only, faults.io_error, faults.hung), (0, 0, 0, 0), "a healthy disk");
     assert!(faults.latency > 0 && faults.short_send > 0 && faults.short_recv > 0 && faults.cancel_race > 0);
+    assert!(faults.short_read > 0 && faults.short_write > 0, "short reads and writes are a file's too");
     assert!(faults.late_reset > 0, "a late reset is loopback's too, as timing");
+}
+
+#[test]
+fn a_file_is_made_written_at_offsets_read_back_and_stated() {
+    calm_and_chaos(file_lifecycle);
+}
+
+/// A calm world counts every byte a read or a write could, as the ring
+/// does for a regular file.
+#[test]
+fn a_calm_world_reads_and_writes_whole_as_the_ring_does() {
+    let whole = Shortness { short: false, full: true };
+    for seed in 0..CALM {
+        let seen = file_lifecycle(&mut Simulated::new(seed, Config::calm()));
+        assert_eq!((seen.reads, seen.writes()), (whole, whole), "seed {seed}: {seen:?}");
+    }
+}
+
+#[test]
+fn renames_over_across_and_beneath() {
+    calm_and_chaos(rename);
+}
+
+#[test]
+fn removes_of_files_directories_and_links() {
+    calm_and_chaos(remove);
+}
+
+#[test]
+fn new_directories_and_one_removed_while_open() {
+    calm_and_chaos(make_directory);
+}
+
+#[test]
+fn listings_whole_one_at_a_time_and_cut_short() {
+    calm_and_chaos(list);
+}
+
+#[test]
+fn a_root_beneath_a_root() {
+    calm_and_chaos(nested_roots);
+}
+
+#[test]
+fn paths_that_leave_their_root_and_paths_that_stay() {
+    calm_and_chaos(escapes);
+}
+
+#[test]
+fn what_the_owner_may_not_do() {
+    calm_and_chaos(permissions);
+}
+
+/// Simulator only: the ring's descriptor limit is the process's, which a
+/// test cannot lower without `unsafe` (programming-model.md, 2.1).
+#[test]
+fn an_open_past_the_descriptor_limit() {
+    let few = |config: Config| Config { max_fds: 4, ..config };
+    each_seed(few(Config::calm()), CALM, open_past_the_descriptor_limit);
+    each_seed(few(loopback_chaos()), SMOKE, open_past_the_descriptor_limit);
+}
+
+/// A calm world answers a `Cancel` of a file's `Read` too late, the `Read`
+/// having read, as the ring does in some runs; a world that hangs it is
+/// stopped by one.
+#[test]
+fn a_cancel_of_a_read_of_a_file() {
+    for seed in 0..CALM {
+        let seen = cancel_read(&mut Simulated::new(seed, Config::calm()));
+        seen.check();
+        assert_eq!(seen.pairing(), Pairing::Completed, "seed {seed}: {seen:?}");
+    }
+    each_seed(loopback_chaos(), SMOKE, cancel_read);
+    each_seed(file_cancel_chaos(), SMOKE, cancel_read);
 }

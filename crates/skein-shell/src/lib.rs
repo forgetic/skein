@@ -4,6 +4,7 @@
 //! - [`Kernel`]: the io_uring backend of io's kernel records
 //!   (`skein_io::kernel`; shell.md, 3), opened once, then submitted to
 //!   and reaped from once per iteration.
+//! - [`open_root`]: a directory opened at startup as a root for io's files.
 //! - [`Clock`]: monotonic and wall time, read together once per iteration.
 //! - [`seed`]: the random seed, from `getrandom`, once at startup.
 //!
@@ -17,7 +18,9 @@
 mod clock;
 mod ring;
 mod seed;
+#[cfg(test)]
+mod tests;
 
 pub use clock::{Clock, Now};
-pub use ring::{Config, Kernel, OpenError, Wait};
+pub use ring::{Config, Kernel, OpenError, Wait, open_root};
 pub use seed::seed;

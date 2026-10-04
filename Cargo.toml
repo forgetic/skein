@@ -10,7 +10,9 @@ members = [
     "examples/echo/shell",
     "testing/skein-conformance",
     "testing/skein-echo-client",
+    "testing/skein-fake-machine",
     "testing/skein-heap",
+    "testing/skein-scratch",
     "testing/skein-world",
     "tests/conformance/ring",
     "tests/conformance/sim",
@@ -43,10 +45,12 @@ skein-shell = { path = "crates/skein-shell" }
 skein-sim = { path = "crates/skein-sim" }
 skein-conformance = { path = "testing/skein-conformance" }
 skein-heap = { path = "testing/skein-heap" }
+skein-scratch = { path = "testing/skein-scratch" }
 skein-echo-domain = { path = "examples/echo/domain" }
 skein-echo-protocol = { path = "examples/echo/protocol" }
 skein-echo-service = { path = "examples/echo/service" }
 skein-echo-client = { path = "testing/skein-echo-client" }
+skein-fake-machine = { path = "testing/skein-fake-machine" }
 skein-world = { path = "testing/skein-world" }
 
 # The only dependencies from outside the workspace (programming-model.md,

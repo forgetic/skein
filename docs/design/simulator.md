@@ -62,6 +62,39 @@ runs against it in `tests/conformance/sim` (testing.md, 6).
   and hosts, so one world can hold a parent and the children it starts.
   skein ships no fake machine.
 
+### 3.1 The machine seam, for files
+
+The seam is data, as the kernel boundary is: no callback, no trait. The
+machine is a value the world owns, beside the simulator, and the world
+moves what crosses between them, as it moves records between its
+processes and the simulator.
+
+- **Calls out, answers in.** An operation on files that passes the checks
+  and draws no failure becomes a `Call`, which waits in the simulator
+  until the world takes it (`Sim::calls`). The world hands each to its
+  machine, and gives the machine's `Answer`s back (`Sim::answer`), each
+  echoing its call's `Ticket`; the simulator makes the completion of each,
+  buffers filled from what the answer carried.
+- **In the machine's names.** A call names what the machine has open by
+  its `Handle`, which the simulator holds behind each descriptor of a file
+  or a directory, beside how it was opened. Paths and names go as copies;
+  a `Read` asks for a count and is answered with the bytes; a `Write`
+  carries the bytes to write; a `List` asks for a count and a room for
+  names, and is answered with each entry's kind and name.
+- **Who keeps what.** The simulator keeps what is the kernel's:
+  descriptors and their limit, the contract's checks, faults, latency,
+  the trace. The machine keeps what is the filesystem's: what lies beneath
+  its roots, resolved beneath a root as `openat2` resolves, refused as a
+  real filesystem refuses, and what each handle has open. It answers each
+  call once, exactly as asked: faults are drawn by the simulator, not by
+  the machine.
+- **Roots.** The shell opens the first roots at startup; in a world, the
+  world asks its machine for a root and gives the handle to a process
+  (`Sim::root`), which then holds it as a descriptor.
+- **The machine's shape is a step machine's:** its state, one call in, one
+  answer out. It is ordinary Rust, a test's; a service's fake machine can
+  be the same step machine its other tiers host.
+
 ## 4. Faults
 
 A world's configuration sets its sizes and limits (receive buffers,
@@ -75,7 +108,13 @@ accept queues, descriptors, connect timeouts) and each fault's chance:
 - a cancel that lands late, racing its target; a cancel the backend
   cannot submit;
 - the reset of a closed peer arriving late, so one more send succeeds,
-  its bytes lost.
+  its bytes lost;
+- short reads and short writes of files;
+- a disk beyond a healthy one: no space, a filesystem gone read-only, an
+  I/O error, and the kernel out of memory, each failing an operation on
+  files before the machine is asked; and a filesystem that hangs an
+  `Open`, `Read`, `Write` or `Sync` until a `Cancel` stops it, the
+  machine never asked.
 
 A calm configuration has no faults and roomy buffers; a chaotic one turns
 every fault on, often enough that a few hundred seeds meet each one, with
@@ -89,6 +128,9 @@ small buffers so that sends are cut and stall.
   trace.
 - **At every completion it makes:** a valid completion of the operation's
   shape, each token completed once, every record handed back.
+- **At every answer of the machine:** an answer to a call waiting, of its
+  call's shape, with no more bytes or entries than were asked, and a new
+  handle that no process holds.
 - **At quiescence, on request:** nothing in flight, and every descriptor
   closed.
 
@@ -112,9 +154,11 @@ was metered as its own, which also finds a leak.
 
 - **Its own tests** (`tests/sim`) submit records by hand: each rule of
   the contract, each broken invariant, and a client and a server
-  exchanging bytes, calm and replayed; and, in the fuzzy suite
-  (testing-strategy.md, 8), under chaos over a few hundred seeds,
-  asserting that every fault fell.
+  exchanging bytes, calm and replayed; files through the seam to skein's
+  minimal fake machine, each broken invariant of files and of the seam,
+  each fault of files, and a replay; and, in the fuzzy suite
+  (testing-strategy.md, 8), the exchange and a workload of files under
+  chaos over a few hundred seeds, asserting that every fault fell.
 - **The conformance suite** (kernel.md, 8) is `testing/skein-conformance`,
   over a small backend interface the simulator implements in
   `tests/conformance/sim` and the ring in `tests/conformance/ring`. Where
@@ -125,8 +169,13 @@ was metered as its own, which also finds a leak.
 
 ## 7. Not built yet
 
-- **Files and processes,** and with them the machine seam and hosting the
-  services a spawn starts, when io pulls them. Sockets are built.
+- **Processes,** and with them hosting the services a spawn starts, and
+  the seam's calls for programs, when io pulls them. Sockets and files are
+  built, with the machine seam for files.
+- **Files in the world harness.** `skein-world` hosts processes over the
+  simulator but does not yet answer the machine's calls: a world whose
+  services open files serves the seam after each submit, as the
+  conformance suite's backend does, once a service pulls files.
 - **A state digest** in the trace, beside the records (lib.md, 11).
 
 Hosting services is built for sockets: `skein-world` (testing.md, 5)

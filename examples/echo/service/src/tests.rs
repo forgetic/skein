@@ -143,6 +143,15 @@ impl Rig {
                 return;
             }
             Op::Connect { .. } => panic!("the echo connects to no one"),
+            Op::Open { .. }
+            | Op::Read { .. }
+            | Op::Write { .. }
+            | Op::Sync { .. }
+            | Op::Stat { .. }
+            | Op::Rename { .. }
+            | Op::Remove { .. }
+            | Op::MakeDirectory { .. }
+            | Op::List { .. } => panic!("the echo opens no file"),
         };
         self.done.push(Complete { op, kind, result });
     }

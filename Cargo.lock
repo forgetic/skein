@@ -134,6 +134,7 @@ dependencies = [
  "skein-conformance",
  "skein-io",
  "skein-lib",
+ "skein-scratch",
  "skein-shell",
 ]
 
@@ -142,6 +143,7 @@ name = "skein-conformance-sim"
 version = "0.0.0"
 dependencies = [
  "skein-conformance",
+ "skein-fake-machine",
  "skein-io",
  "skein-lib",
  "skein-sim",
@@ -203,6 +205,15 @@ dependencies = [
  "skein-shell",
  "skein-sim",
  "skein-world",
+]
+
+[[package]]
+name = "skein-fake-machine"
+version = "0.0.0"
+dependencies = [
+ "skein-io",
+ "skein-lib",
+ "skein-sim",
 ]
 
 [[package]]
@@ -298,8 +309,13 @@ dependencies = [
  "libc",
  "skein-io",
  "skein-lib",
+ "skein-scratch",
  "skein-shell",
 ]
+
+[[package]]
+name = "skein-scratch"
+version = "0.0.0"
 
 [[package]]
 name = "skein-shell"
@@ -309,6 +325,7 @@ dependencies = [
  "libc",
  "skein-io",
  "skein-lib",
+ "skein-scratch",
 ]
 
 [[package]]
@@ -323,6 +340,7 @@ dependencies = [
 name = "skein-sim-tests"
 version = "0.0.0"
 dependencies = [
+ "skein-fake-machine",
  "skein-io",
  "skein-lib",
  "skein-sim",

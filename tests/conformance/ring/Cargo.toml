@@ -11,6 +11,7 @@ skein-lib.workspace = true
 skein-io.workspace = true
 skein-shell.workspace = true
 skein-conformance.workspace = true
+skein-scratch.workspace = true
 libc.workspace = true
 
 # Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.

@@ -1,0 +1,18 @@
+[package]
+name = "skein-fake-machine"
+description = "skein's minimal fake machine: a few files beneath a root, answering the simulator's operations on files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-io.workspace = true
+skein-sim.workspace = true
+
+# Ordinary Rust (programming-model.md, 10.2), held to the step crates' lints
+# as the simulator is: its own clippy.toml lets in the std types, closures and
+# formatting it needs, and the subset's other checks stay on.
+[lints]
+workspace = true

@@ -132,7 +132,7 @@ impl Script {
                     self.received.push((now, bytes::copy_of(&buf[..n])));
                 }
             }
-            Ok(Done::Nothing | Done::Bound(_)) => {}
+            Ok(Done::Nothing | Done::Bound(_) | Done::Stat(_)) => {}
             Err(_) => self.closing = true,
         }
     }

@@ -31,7 +31,9 @@ pub struct Config {
 /// Loopback itself never refuses a listened address, resets a connection or
 /// times one out. `refuse`, `reset` and `timed_out` model the network beyond
 /// it, a remote peer or a path that can do all three, so that io meets them
-/// in a world that has only loopback.
+/// in a world that has only loopback. Likewise `no_space`, `read_only`,
+/// `io_error` and `hung` model a disk beyond a healthy one, which a scratch
+/// directory never shows.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Faults {
     /// That a completion is delivered late, by up to `latency_max`. Latency
@@ -48,8 +50,8 @@ pub struct Faults {
     /// That a `Connect` to a listener is refused anyway, as by a remote host
     /// whose listener went away.
     pub refuse: u32,
-    /// That a `Socket`, `Accept`, `Connect`, `Recv` or `Send` fails with
-    /// `NoBufferSpace`, having done nothing.
+    /// That a `Socket`, `Accept`, `Connect`, `Recv`, `Send`, or any operation
+    /// on files fails with `NoBufferSpace`, having done nothing.
     pub no_buffer: u32,
     /// That a `Connect` fails with `TimedOut`, or that a `Recv` or a `Send`
     /// on an established connection finds it timed out (the peer then sees
@@ -66,6 +68,25 @@ pub struct Faults {
     /// That the reset a closed peer answers a `Send` with arrives late: the
     /// next `Send` succeeds too, its bytes lost.
     pub late_reset: u32,
+    /// That a `Read` reads fewer bytes than it asked for and are there (at
+    /// least one), as the contract allows.
+    pub short_read: u32,
+    /// That a `Write` writes fewer bytes than it was given (at least one).
+    pub short_write: u32,
+    /// That an `Open` with `Create`, a `Write`, `Sync`, `Rename` or
+    /// `MakeDirectory` fails with `NoSpace`, the disk full, having done
+    /// nothing.
+    pub no_space: u32,
+    /// That an `Open` with `Create`, a `Write`, `Rename`, `Remove` or
+    /// `MakeDirectory` fails with `ReadOnly`, as on a filesystem remounted
+    /// read-only after an error, having done nothing.
+    pub read_only: u32,
+    /// That a `Read`, `Write` or `Sync` fails with an I/O error (`Other(5)`,
+    /// `EIO`), having done nothing.
+    pub io_error: u32,
+    /// That an `Open`, `Read`, `Write` or `Sync` hangs, as on a network
+    /// filesystem whose server went away, until a `Cancel` stops it.
+    pub hung: u32,
 }
 
 impl Faults {
@@ -82,6 +103,12 @@ impl Faults {
         cancel_race: 0,
         cancel_unsubmitted: 0,
         late_reset: 0,
+        short_read: 0,
+        short_write: 0,
+        no_space: 0,
+        read_only: 0,
+        io_error: 0,
+        hung: 0,
     };
 
     /// Every fault, often enough that a few hundred seeds meet each one.
@@ -97,6 +124,12 @@ impl Faults {
         cancel_race: 500,
         cancel_unsubmitted: 100,
         late_reset: 300,
+        short_read: 300,
+        short_write: 300,
+        no_space: 5,
+        read_only: 5,
+        io_error: 5,
+        hung: 5,
     };
 }
 
