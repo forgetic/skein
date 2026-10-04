@@ -67,6 +67,7 @@ impl Seen {
             (fell.tired, "a client tired of waiting for a 100"),
             (fell.head_waited, "a head waited for a discard"),
             (fell.room_after_end, "room after the end"),
+            (fell.reply_withdrawn, "a reply's demand withdrawn"),
         ] {
             if flag {
                 self.note(what.into());
@@ -154,6 +155,7 @@ fn generated_mutated_and_corrupted_requests_are_served_as_the_reference_reads_th
         "a client tired of waiting for a 100",
         "a head waited for a discard",
         "room after the end",
+        "a reply's demand withdrawn",
         "failed while waiting for Next",
         "failed while waiting for Room",
         "failed while waiting for Request",

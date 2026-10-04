@@ -194,6 +194,42 @@ fn a_head_at_the_limit_goes_and_one_past_it_is_refused() {
 }
 
 #[test]
+fn a_withdrawal_of_the_reply_s_demand_withdraws_the_room_below_and_waits_for_the_close() {
+    // As a writer stacked on the reply withdraws its demand when it closes.
+    let mut machine = Machine::new(LIMITS);
+    machine.call(get());
+    machine.down(Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
+    machine.down(Request::Respond(response(200, Body::Chunked)));
+    let (_, requests) = machine.down(Request::Reply(Down::Demand { read: Read::Nothing, room: 8 }));
+    assert_eq!(requests, [Down::Demand { read: Read::Nothing, room: 8 + 1 + 4 }]);
+    let (events, requests) = machine.down(Request::Reply(Down::Demand { read: Read::Nothing, room: 0 }));
+    assert!(events.is_empty());
+    assert_eq!(requests, [Down::Demand { read: Read::Nothing, room: 0 }], "the room below withdrawn with it");
+    assert_eq!(machine.server.waiting(), Waiting::Above, "for the close");
+    let (events, requests) = machine.up(Up::Room);
+    assert!(events.is_empty() && requests.is_empty(), "room on its way, dropped");
+    let (events, requests) = machine.down(Request::Close);
+    assert_eq!(events, [Event::Closed]);
+    assert!(requests.is_empty(), "nothing left to withdraw");
+    // One that crosses the room's answer withdraws all the same.
+    let mut machine = Machine::new(LIMITS);
+    machine.call(get());
+    machine.down(Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
+    machine.down(Request::Respond(response(200, Body::Length(4))));
+    machine.down(Request::Reply(Down::Demand { read: Read::Nothing, room: 4 }));
+    let (events, _) = machine.up(Up::Room);
+    assert_eq!(events, [Event::Reply(Up::Room)]);
+    let (events, requests) = machine.down(Request::Reply(Down::Demand { read: Read::Nothing, room: 0 }));
+    assert!(events.is_empty() && requests.is_empty(), "nothing demanded below to withdraw");
+    let (events, _) = machine.up(Up::Failed(skein_lib::stream::Fault::Reset));
+    assert_eq!(
+        events,
+        [Event::Failed(crate::server::Error::Stream(skein_lib::stream::Fault::Reset))],
+        "nothing on a reply withdrawn"
+    );
+}
+
+#[test]
 #[should_panic(expected = "a reply before the response")]
 fn no_reply_before_the_response() {
     let mut machine = Machine::new(LIMITS);

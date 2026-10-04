@@ -617,6 +617,10 @@ enum Reply {
     Last,
     /// No body, or all of it went down.
     Finished,
+    /// The side above withdrew its demand, as a machine stacked on the
+    /// reply does when it closes: it writes no more, and closes the server
+    /// next.
+    Withdrawn,
 }
 
 /// The room of the response body's stream.
@@ -789,6 +793,9 @@ fn exchange_up(
         Up::Room => {
             match exchange.below.take() {
                 Some(Demand::Room(_)) => {}
+                // The answer to room the server withdrew with the reply, on
+                // its way (lib.md, 7).
+                None if exchange.withdrawn => return State::Exchange(exchange),
                 Some(Demand::Read(_)) | None => unreachable!("room answers a demand for room"),
             }
             exchange.response = match exchange.response {
@@ -817,7 +824,8 @@ fn exchange_up(
                         Reply::Length { room: Room::Idle | Room::Granted(_), .. }
                         | Reply::Chunked { room: Room::Idle | Room::Granted(_) }
                         | Reply::UntilEnd { room: Room::Idle | Room::Granted(_) }
-                        | Reply::Finished => unreachable!("room is demanded for the reply when it wants some"),
+                        | Reply::Finished
+                        | Reply::Withdrawn => unreachable!("room is demanded for the reply when it wants some"),
                     };
                     Responding::Sending { reply, persist }
                 }
@@ -1022,6 +1030,9 @@ fn reply(
     above: &mut Queue<Event>,
     below: &mut Queue<Down>,
 ) -> State {
+    if down == (Down::Demand { read: Read::Nothing, room: 0 }) {
+        return reply_withdrawn(exchange, below);
+    }
     let reply = match &mut exchange.response {
         Responding::Head { reply, .. } | Responding::Sending { reply, .. } => reply,
         Responding::Awaited => unreachable!("a reply before the response"),
@@ -1029,7 +1040,6 @@ fn reply(
     *reply = match down {
         Down::Demand { read, room } => {
             assert!(read == Read::Nothing, "the response body's stream is written, not read");
-            assert!(room > 0, "the reply's demand is not withdrawn: the side above closes the server instead");
             assert!(room <= limits.send, "no room past Limits::send");
             match *reply {
                 Reply::Length { left, room: Room::Idle } => {
@@ -1044,6 +1054,7 @@ fn reply(
                 Reply::Last | Reply::Finished => {
                     unreachable!("a reply demand for a body that has none, or after Finish")
                 }
+                Reply::Withdrawn => unreachable!("a reply demand after its withdrawal: the side above writes no more"),
             }
         }
         Down::Send(bytes) => {
@@ -1073,6 +1084,7 @@ fn reply(
                     unreachable!("a Send within the room granted")
                 }
                 Reply::Last | Reply::Finished => unreachable!("a Send for a body that has none, or after Finish"),
+                Reply::Withdrawn => unreachable!("a Send after the reply's withdrawal"),
             }
         }
         Down::Finish => match *reply {
@@ -1089,9 +1101,33 @@ fn reply(
                 Reply::Finished
             }
             Reply::Last | Reply::Finished => unreachable!("a Finish for a body that has none, or after Finish"),
+            Reply::Withdrawn => unreachable!("a Finish after the reply's withdrawal"),
         },
     };
     settle(exchange, intake, limits, above, below)
+}
+
+/// The side above withdrew the reply's demand: it writes no more, so the
+/// response can never end, and it closes the server next. Whatever the
+/// server demanded below is withdrawn with it, and nothing more is
+/// demanded; an answer on its way is dropped when it comes. A withdrawal
+/// may cross its demand's answer, as room granted.
+fn reply_withdrawn(mut exchange: Exchange, below: &mut Queue<Down>) -> State {
+    let reply = match &mut exchange.response {
+        Responding::Head { reply, .. } | Responding::Sending { reply, .. } => reply,
+        Responding::Awaited => unreachable!("a reply's withdrawal before the response"),
+    };
+    *reply = match *reply {
+        Reply::Length { .. } | Reply::Chunked { .. } | Reply::UntilEnd { .. } => Reply::Withdrawn,
+        Reply::Last | Reply::Finished | Reply::Withdrawn => {
+            unreachable!("a reply's withdrawal with no demand of the side above's to withdraw")
+        }
+    };
+    if exchange.below.take().is_some() {
+        below.push(Down::Demand { read: Read::Nothing, room: 0 });
+        exchange.withdrawn = true;
+    }
+    State::Exchange(exchange)
 }
 
 /// `Close`, in any state.
@@ -1140,19 +1176,20 @@ fn settle(
     }
     if exchange.aside == Aside::Held && body_over_below(&exchange) {
         exchange.response = match exchange.response {
-            Responding::Head { head, reply, persist } => {
+            Responding::Head { head, reply, persist } if reply != Reply::Withdrawn => {
                 exchange.aside = Aside::Spent;
                 below.push(Down::Send(head));
                 Responding::Sending { reply, persist }
             }
-            responding @ (Responding::Awaited | Responding::Sending { .. }) => responding,
+            responding @ (Responding::Awaited | Responding::Head { .. } | Responding::Sending { .. }) => responding,
         };
     }
     if exchange.body.is_none() {
         match exchange.response {
             Responding::Sending { reply: Reply::Finished, persist } => return done(exchange, persist, below, above),
             Responding::Sending {
-                reply: Reply::Length { .. } | Reply::Chunked { .. } | Reply::UntilEnd { .. } | Reply::Last,
+                reply:
+                    Reply::Length { .. } | Reply::Chunked { .. } | Reply::UntilEnd { .. } | Reply::Last | Reply::Withdrawn,
                 ..
             }
             | Responding::Head { .. }
@@ -1185,6 +1222,8 @@ fn settle(
 /// as a chunk's room for a chunked body, and for the last chunk.
 fn wanted(exchange: &Exchange, intake: &Intake, limits: &Limits) -> Option<Demand> {
     match &exchange.response {
+        // The side above writes no more, and closes the server next.
+        Responding::Head { reply: Reply::Withdrawn, .. } | Responding::Sending { reply: Reply::Withdrawn, .. } => None,
         Responding::Awaited => body_read(exchange, intake, limits),
         Responding::Head { head, .. } => {
             if !body_over_below(exchange) {
@@ -1204,7 +1243,8 @@ fn wanted(exchange: &Exchange, intake: &Intake, limits: &Limits) -> Option<Deman
             Reply::Length { room: Room::Idle | Room::Granted(_), .. }
             | Reply::Chunked { room: Room::Idle | Room::Granted(_) }
             | Reply::UntilEnd { room: Room::Idle | Room::Granted(_) }
-            | Reply::Finished => None,
+            | Reply::Finished
+            | Reply::Withdrawn => None,
         },
     }
 }
@@ -1254,8 +1294,9 @@ fn fail(
             Reply::Length { .. } | Reply::Chunked { .. } | Reply::UntilEnd { .. } => {
                 above.push(Event::Reply(Up::Failed(fault)));
             }
-            // Finished from the side above's side: it is told nothing.
-            Reply::Last | Reply::Finished => {}
+            // Finished or withdrawn from the side above's side: it is told
+            // nothing.
+            Reply::Last | Reply::Finished | Reply::Withdrawn => {}
         },
         Responding::Awaited => {}
     }

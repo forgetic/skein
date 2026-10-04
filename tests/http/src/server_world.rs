@@ -318,6 +318,9 @@ pub struct Fell {
     pub head_waited: bool,
     /// Room came after the stream's end.
     pub room_after_end: bool,
+    /// The side above withdrew the reply's demand as it closed, as a
+    /// machine stacked on the reply does.
+    pub reply_withdrawn: bool,
 }
 
 /// Runs the world over `client`, the client's bytes for every request in
@@ -875,7 +878,19 @@ impl World<'_> {
         let over = self.above.exchange.as_ref().is_none_or(|exchange| exchange.terminal);
         let last = over && !self.above.asked && (self.above.spent || self.above.seen.len() >= self.above.plans.len());
         if closes_now || (last && self.rng.chance(self.settings.eagerness)) {
-            self.above.closing = Some(self.server.waiting());
+            let waiting = self.server.waiting();
+            // As a machine stacked on the reply withdraws its demand as it
+            // closes.
+            if let Some(exchange) = &mut self.above.exchange
+                && !exchange.terminal
+                && matches!(exchange.reply, Reply::Demanded(_) | Reply::Granted(_))
+                && self.rng.chance(500)
+            {
+                exchange.reply = Reply::Over;
+                self.fell.reply_withdrawn = true;
+                self.down(Request::Reply(Down::Demand { read: Read::Nothing, room: 0 }));
+            }
+            self.above.closing = Some(waiting);
             self.down(Request::Close);
             return;
         }
@@ -1073,6 +1088,7 @@ impl World<'_> {
         let stopping = match rq {
             Request::Close => Stopping::Closing,
             Request::Respond(_) | Request::Discard => Stopping::Maybe,
+            Request::Reply(Down::Demand { read: Read::Nothing, room: 0 }) => Stopping::Closing,
             Request::Next | Request::Body(_) | Request::Reply(_) => Stopping::No,
         };
         server::down(&mut self.server, &self.env, rq, &mut self.events, &mut self.requests);

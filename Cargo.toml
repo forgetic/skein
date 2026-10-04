@@ -20,6 +20,7 @@ members = [
     "tests/io",
     "tests/json",
     "tests/lib",
+    "tests/protocol",
     "tests/ring",
     "tests/sim",
     "tests/world",

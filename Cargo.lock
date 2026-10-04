@@ -194,6 +194,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-protocol-world"
+version = "0.0.0"
+dependencies = [
+ "skein-http",
+ "skein-json",
+ "skein-json-world",
+ "skein-lib",
+]
+
+[[package]]
 name = "skein-ring-tests"
 version = "0.0.0"
 dependencies = [
