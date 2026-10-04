@@ -12,6 +12,12 @@ use super::{Body, Call, Limits, Rejection};
 use crate::header::{self, content, is_field_byte, is_ows, is_tchar, trim};
 use crate::{Header, Method, Version};
 
+/// The bytes of the shortest request line the server reads that are not
+/// its target, `GET `, ` HTTP/1.1` and an LF: of a request line filling
+/// the head, its target, copied while the line is held, is this much
+/// shorter than the head.
+pub(super) const LINE_BUT_TARGET: u32 = 14;
+
 /// A request head being read.
 #[derive(Debug)]
 pub(super) struct Head {

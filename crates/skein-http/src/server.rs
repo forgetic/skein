@@ -133,19 +133,28 @@ pub fn largest_room(limits: &Limits) -> u32 {
 /// small for the server's own answers, or a chunk's room past a `u32`.
 ///
 /// It is the intake of the request body's carry-over, allocated with the
-/// server; the list of a request's fields (`headers`); the head being
-/// read: its target's and its fields' bytes, and the line that holds the
-/// next, within [`Limits::head`] each; the response head, held until the
-/// request body is all read and room comes for it ([`Limits::response`]);
-/// and, once the body is read, the delivery it reads (a line of its
-/// framing, within the head already counted, or a piece, at most
-/// [`Limits::read`]) or the carry-over an exchange leaves unread, moved out
-/// of the intake when it ends. A delivery is made to the server's demand,
-/// so it counts it. A response and a piece of the response body are
-/// counted by the side above, which made them, and the step that takes one
-/// reads it and drops it or passes it on (testing.md, 5); what goes down (a
-/// head, a chunk, an answer of the server's own) and what goes up (a call,
-/// the body's bytes) is handed out when it is emitted.
+/// server, and the larger of what the two phases of a request hold, which
+/// never meet:
+///
+/// - **Its head being read:** the list of its fields (`headers`), and the
+///   bytes of its target and fields, copied from the lines that held them,
+///   with the line being read. All of them are within [`Limits::head`], but
+///   a line and its copy are held at once: the most is the request line
+///   filling the head, `GET`, a space, its target, a space, `HTTP/1.1` and
+///   an LF, and its target's copy, the head twice less the 14 bytes of the
+///   line that are not its target.
+/// - **Its exchange:** the response head, held until the request body is
+///   all read below and room comes for it ([`Limits::response`]), and a
+///   delivery read for the body (a line of its framing, within the head, or
+///   a piece, at most [`Limits::read`]) or the carry-over an exchange
+///   leaves unread, moved out of the intake when it ends.
+///
+/// A delivery is made to the server's demand, so it counts it. A response
+/// and a piece of the response body are counted by the side above, which
+/// made them, and the step that takes one reads it and drops it or passes
+/// it on (testing.md, 5); what goes down (a head, a chunk, an answer of the
+/// server's own) and what goes up (a call, the body's bytes) is handed out
+/// when it is emitted.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
     if limits.head < 2 || limits.read == 0 || limits.send == 0 || limits.response < response::longest_answer() {
@@ -154,12 +163,10 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     response::chunk_room(limits.send)?;
     let intake = Intake::worst_case(limits.read)?;
     let fields = List::<Header>::worst_case(limits.headers)?;
-    let head = u64::from(limits.head).checked_mul(2)?;
-    intake
-        .checked_add(fields)?
-        .checked_add(head)?
-        .checked_add(u64::from(limits.response))?
-        .checked_add(u64::from(limits.read))
+    let line = u64::from(limits.head).checked_add(u64::from(limits.head.saturating_sub(head::LINE_BUT_TARGET)))?;
+    let reading = fields.checked_add(line)?;
+    let exchanging = u64::from(limits.response).checked_add(u64::from(limits.read.max(limits.head)))?;
+    intake.checked_add(reading.max(exchanging))
 }
 
 /// [`up`]'s: above, the stream's failure told to both bodies' streams and

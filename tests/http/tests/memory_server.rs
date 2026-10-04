@@ -58,7 +58,7 @@ struct Script<'a> {
 }
 
 /// The steps of one request, each checked: the most the server held of its
-/// own in a step.
+/// own in a step, less the input it was given.
 fn serve(limits: Limits, request: &[u8], script: Script<'_>, interrupt: Interrupt) -> u64 {
     let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
     let mut above = Queue::with_capacity(server::UP_MAX_OUT.above.max(server::DOWN_MAX_OUT.above));
@@ -97,7 +97,7 @@ fn serve(limits: Limits, request: &[u8], script: Script<'_>, interrupt: Interrup
         }
         let step = meter.end();
         flags.take(&mut above, &mut below);
-        most = most.max(meter.check(step, bound + input_size, &what));
+        most = most.max(meter.check(step, bound + input_size, &what).saturating_sub(input_size));
     }
     panic!("{what}: a request is served in a few steps a byte");
 }
@@ -359,6 +359,32 @@ fn every_entry_point_of_the_server_holds_no_more_than_its_worst_case_at_its_limi
             let _ = serve(LIMITS, request, script, Interrupt::Discard(at));
         }
     }
+}
+
+#[test]
+fn the_server_s_peak_is_its_worst_case_in_either_phase() {
+    // Reading a head, the larger phase under these limits: a request line
+    // filling the head, ended by an LF alone, and its target's copy.
+    let mut line = b"GET /".to_vec();
+    line.resize(usize::try_from(LIMITS.head).unwrap() - " HTTP/1.1\n".len(), b't');
+    line.extend_from_slice(b" HTTP/1.1\n");
+    let response = Response { status: 204, headers: Box::new([]), body: Body::None, close: false };
+    let script = Script { response: &response, reply: b"", read: Read::Fill(LIMITS.read), first: false };
+    let most = serve(LIMITS, &line, script, Interrupt::Nothing);
+    assert_eq!(most, server::worst_case(&LIMITS).unwrap(), "a head at its limit");
+    // An exchange, the larger phase under these: a response head at its
+    // limit, held for a connection kept as the side above discards the
+    // body, and a piece of the most a read is.
+    let limits = Limits { head: 64, headers: 2, body: 4096, read: 1024, response: 2048, send: 64 };
+    let mut request = b"POST / HTTP/1.1\r\nHost: h\r\nContent-Length: 2000\r\n\r\n".to_vec();
+    request.resize(request.len() + 2000, b'b');
+    let mut response = Response { status: 200, headers: Box::new([]), body: Body::None, close: false };
+    let kept = head_len(&response) - "Connection: close\r\n".len();
+    let value = vec![b'v'; usize::try_from(limits.response).unwrap() - kept - "X: \r\n".len()];
+    response.headers = Box::new([Header { name: b"X".to_vec().into(), value: value.into() }]);
+    let script = Script { response: &response, reply: b"", read: Read::Fill(limits.read), first: false };
+    let most = serve(limits, &request, script, Interrupt::Discard(0));
+    assert_eq!(most, server::worst_case(&limits).unwrap(), "a response head at its limit, held");
 }
 
 #[test]

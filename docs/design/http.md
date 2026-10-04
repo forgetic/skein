@@ -757,16 +757,23 @@ pub struct Limits {
 }
 ```
 
-- **`worst_case(&limits)`** is the intake (`read`); the list of a
-  request's fields (`headers`); the head being read, its target's and
-  its fields' bytes and the line that holds the next (`2 × head`); the
-  response head, held until the body is all read below and room comes
-  for it (`response`); and, once the body is read, a delivery or the
-  carry-over an exchange leaves unread (`read`). A response and a piece of
-  the reply are counted by the side above, which made them, and the step
-  that takes one is checked against the worst case and that input
-  (testing.md, 5); what goes down (a head, a chunk, an answer of the
-  server's own) and what goes up is handed out when it is emitted. `None`
+- **`worst_case(&limits)`** is the intake (`read`), and the larger of
+  what a request's two phases hold, which never meet: `intake +
+  max(fields + 2 × head − 14, response + max(read, head))`. Reading its
+  head, the list of its fields (`headers`), and the bytes of its target
+  and fields with the line being read, each line held with its copy: the
+  most is a request line filling the head, `GET`, its target and
+  `HTTP/1.1` ended by an LF, held with its target, the head twice less
+  the 14 bytes that are not the target. Its exchange, the response head,
+  held until the body is all read below and room comes for it
+  (`response`), with a delivery read for the body, a piece (`read`) or a
+  line of its framing (`head`), or the carry-over an exchange leaves
+  unread. The memory tests reach each exactly, under limits where it is
+  the larger. A response and a piece of the reply are counted by the side
+  above, which made them, and the step that takes one is checked against
+  the worst case and that input (testing.md, 5); what goes down (a head, a
+  chunk, an answer of the server's own) and what goes up is handed out
+  when it is emitted. `None`
   for a head shorter than a blank line, a read of nothing, room for
   nothing of a reply, room set aside short of the server's own answers,
   or a chunk's room past a `u32`.
