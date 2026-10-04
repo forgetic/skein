@@ -314,13 +314,16 @@ io keeps the contract of a stream (lib.md, 7) as the side below:
   next. The side above states its next demand only after an answer, never
   in place of one outstanding, which io asserts.
 - **`Read::Nothing` with no room withdraws** the outstanding demand, and
-  only when the side above will read no more (it is closing). An answer
+  only when the side above will read no more: it is closing, or its read
+  crossed `End`. An answer
   already on its way may still arrive, and the side above drops it. No
   other `Bytes` or `Room` come without a demand.
 - **`End` comes once nothing io holds can meet a demand:** with one
   outstanding, when it can never be met; with none, only when nothing is
-  held. It comes once, and ends reading only: a read that crosses it is
-  never met, but room may still be granted after it, as the stream can
+  held. It comes once, and ends reading only. A read that crosses it is
+  never met, and `End` does not end the demand: it stays outstanding
+  until `Room` answers it, if it asked for room, or until the side above
+  withdraws it. Room may still be granted after `End`, as the stream can
   still send to a peer that only half-closed. A read larger than what is
   left before the end is never met; a side above that must see every
   byte reads by its framing.

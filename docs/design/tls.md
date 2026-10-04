@@ -81,9 +81,12 @@ pub enum Event {
   the side above demanded came below. A `Room` grants one `Send`, as io's
   does (io.md, 3.3), and a demand of room comes only once the last grant
   was sent within, by a `Send`, empty or not, or given up by `Finish`. A
-  read that crosses `End` is never met and stays outstanding until the
-  side above withdraws it, as io's does: a side above that writes on
-  after the end withdraws it first.
+  read that crosses `End` is never met, and its demand stays outstanding,
+  as io's does: until `Room` answers it, if it asked room, or until the
+  side above withdraws it. A side above that writes on after the end
+  waits for that `Room`, or withdraws the demand and then demands room
+  alone; room that came below for the demand withdrawn is handed on to the
+  next or asked for again (3.2).
 - **`Finish`** sends `close_notify`, then finishes the stream below. It
   comes with no demand outstanding, unless a read that crossed `End`: a
   read the client is still reading below for would hold `close_notify`
@@ -120,10 +123,12 @@ pub enum Event {
   intake does not meet. A read stated alone, ahead of a demand, would
   hold a demand that room for the side above's next `Send` could not join
   (http.md, 3.1).
-- **At the stream's end,** a read outstanding crosses it and stays
-  outstanding below, never met, as io keeps it: the client reads nothing
-  more, so it withdraws it, which leaves it free to demand room after the
-  end (a peer that only half-closed still reads).
+- **At the stream's end,** a read the client has outstanding crosses it
+  and is never met, and io keeps the demand outstanding (lib.md, 7). The
+  client reads nothing more: it withdraws a demand that only read at
+  once, and one that asked room too stays until `Room` answers it. Either
+  way it is then free to demand room after the end, for a peer that only
+  half-closed still reads.
 - **Room, in one demand with the read:** for what TLS owes (a flight of
   the handshake, `close_notify`), alone and first; or, once the handshake
   is done, for the side above's demand of `n` bytes of room, `room_for(n)`:
@@ -318,11 +323,11 @@ wall time each test chooses.
   one `Send` a grant, as io grants one; what arose while the side above
   held its grant goes in front of the side above's `Send`, within
   `room_for`'s slack.
-- **A read that crosses the end stays outstanding,** both ways, as io's
-  does (lib.md, 7 says it is never met; io keeps it until it is
-  withdrawn): the client withdraws its own, as it reads no more after the
-  end, and holds the side above to withdrawing its, so that a side above
-  that works over TLS works over a socket.
+- **A read that crosses the end stays outstanding,** both ways, as
+  lib.md, 7 says and io does, until `Room` answers it or it is withdrawn:
+  the client withdraws its own, as it reads no more after the end, unless
+  it asked room, and holds the side above to the same, so that a side
+  above that works over TLS works over a socket.
 - **`Finish` comes with no read outstanding,** but one that crossed the
   end, rather than `close_notify` waiting behind a read below.
 - **The length of what rustls encrypts is asked until two answers
