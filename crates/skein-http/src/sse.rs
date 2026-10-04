@@ -1,6 +1,7 @@
 //! The server-sent events reader (http.md, 4): a step machine that reads an
 //! event stream (WHATWG HTML, 9.2) from the body below, by demand, and
-//! hands the side above one event at a time, each when it asks for it.
+//! hands the side above one event at a time, each when it asks for it. Its
+//! other side, which writes one, is [`writer`].
 //!
 //! # Its two sides
 //!
@@ -53,6 +54,7 @@ use crate::MaxOut;
 
 mod data;
 mod lines;
+pub mod writer;
 
 pub use data::Data;
 use lines::{Lines, Step};

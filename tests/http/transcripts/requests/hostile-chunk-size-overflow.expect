@@ -1,0 +1,7 @@
+# Hostile: a chunk size past a u64. Drafted by the reference reader, then
+# checked by hand.
+request POST /upload HTTP/1.1
+header Host "localhost:8080"
+header Transfer-Encoding "chunked"
+framing chunked
+failed chunk-size

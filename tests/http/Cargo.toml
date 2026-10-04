@@ -1,6 +1,6 @@
 [package]
 name = "skein-http-world"
-description = "The HTTP client's and the server-sent events reader's machine worlds: transcripts, generated and mutated responses and streams, reference readers, and the two stacked with JSON"
+description = "The machine worlds of the HTTP client and server and of the server-sent events reader and writer: transcripts, generated and mutated responses, requests and streams, reference readers, and the client and the reader stacked with JSON"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

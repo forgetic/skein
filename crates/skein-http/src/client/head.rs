@@ -6,7 +6,7 @@ use skein_lib::{List, Reader, Writer, bytes};
 
 use super::{Error, Framing, Method, Reading, Status, Version};
 use crate::Header;
-use crate::header::{self, is_field_byte, is_ows, is_tchar, trim};
+use crate::header::{self, content, is_field_byte, is_ows, is_tchar, trim};
 
 /// What a line of a head comes to.
 pub(super) enum Parsed {
@@ -39,17 +39,6 @@ pub(super) fn line(reading: &mut Reading, bytes: &[u8]) -> Result<Parsed, Error>
         return Err(Error::HeadTooLong);
     }
     Ok(Parsed::More)
-}
-
-/// A line's content: the bytes before its LF, and before a CR that
-/// precedes it (RFC 9112, 2.2). `None` for bytes that do not end with LF:
-/// a scan that reached its maximum first.
-pub(super) fn content(bytes: &[u8]) -> Option<&[u8]> {
-    let line = bytes.strip_suffix(b"\n")?;
-    match line.strip_suffix(b"\r") {
-        Some(line) => Some(line),
-        None => Some(line),
-    }
 }
 
 /// `HTTP/1.1 200 OK` (RFC 9112, 4): the version, a space, three digits,

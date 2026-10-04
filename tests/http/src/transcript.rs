@@ -376,7 +376,7 @@ fn sse_error_name(error: sse::Error) -> &'static str {
 }
 
 /// The first word of `line`, and the rest after the spaces that follow it.
-fn word(line: &[u8]) -> (&[u8], &[u8]) {
+pub(crate) fn word(line: &[u8]) -> (&[u8], &[u8]) {
     match line.iter().position(|&byte| byte == b' ') {
         Some(space) => (&line[..space], line[space + 1..].trim_ascii_start()),
         None => (line, &[]),
@@ -400,7 +400,7 @@ fn pairs(line: &[u8]) -> Option<Vec<(&[u8], u32)>> {
 
 /// Text in quotes, as an expectation writes it: printable ASCII as it is,
 /// and the rest escaped.
-fn quote(text: &[u8]) -> String {
+pub(crate) fn quote(text: &[u8]) -> String {
     let mut out = String::from("\"");
     for chunk in text.utf8_chunks() {
         for character in chunk.valid().chars() {
@@ -428,7 +428,7 @@ fn quote(text: &[u8]) -> String {
 }
 
 /// The text of `"..."`, unescaped, which must be all of `quoted`.
-fn unquote(quoted: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn unquote(quoted: &[u8]) -> Option<Vec<u8>> {
     match self::quoted(quoted)? {
         (text, []) => Some(text),
         _ => None,
@@ -437,7 +437,7 @@ fn unquote(quoted: &[u8]) -> Option<Vec<u8>> {
 
 /// The text of the `"..."` `line` begins with, unescaped, and the rest
 /// after it.
-fn quoted(line: &[u8]) -> Option<(Vec<u8>, &[u8])> {
+pub(crate) fn quoted(line: &[u8]) -> Option<(Vec<u8>, &[u8])> {
     let inner = line.strip_prefix(b"\"")?;
     let mut text = Vec::new();
     let mut at = 0;

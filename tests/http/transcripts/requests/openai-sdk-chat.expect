@@ -1,0 +1,18 @@
+# Written by hand after the request OpenAI's Python SDK sends for a streamed
+# Chat Completions call: its headers, the key redacted, and its JSON body.
+# Drafted by the reference reader, then checked by hand.
+request POST /v1/chat/completions HTTP/1.1
+header Host "api.openai.com"
+header Accept-Encoding "gzip, deflate"
+header Connection "keep-alive"
+header Accept "application/json"
+header Content-Type "application/json"
+header User-Agent "OpenAI/Python 1.54.3"
+header X-Stainless-Lang "python"
+header X-Stainless-Package-Version "1.54.3"
+header Authorization "Bearer sk-proj-REDACTED"
+header Content-Length "139"
+framing length 139
+body "{\"messages\":[{\"role\":\"system\",\"content\":\"You are terse.\"},{\"role\":\"user\",\"content\":\"Why is the sky blue?\"}],\"model\":\"gpt-4o\",\"stream\":true}"
+done keep
+ended

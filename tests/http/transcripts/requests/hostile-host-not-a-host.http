@@ -1,0 +1,4 @@
+GET /v1/models HTTP/1.1
+Host: a b/c@evil.example
+Accept: */*
+

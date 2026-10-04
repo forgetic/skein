@@ -363,5 +363,6 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   whole and encoded a piece at a time, as io grants room. The writer
   writes a document whole.
 - **Several documents in one stream,** concatenated or as JSON lines.
-- **Protocol worlds,** once the tokenizer is stacked under a service's
-  decoder and over HTTP or server-sent events (http.md, 9).
+
+The protocol worlds stack the tokenizer over HTTP and server-sent events,
+and the writer under them, at both ends of an LLM exchange (http.md, 6).

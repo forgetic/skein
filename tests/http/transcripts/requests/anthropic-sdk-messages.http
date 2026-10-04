@@ -1,0 +1,20 @@
+POST /v1/messages HTTP/1.1
+Host: api.anthropic.com
+Accept-Encoding: gzip, deflate
+Connection: keep-alive
+Accept: application/json
+X-Stainless-Lang: python
+X-Stainless-Package-Version: 0.39.0
+X-Stainless-OS: Linux
+X-Stainless-Arch: x64
+X-Stainless-Runtime: CPython
+X-Stainless-Runtime-Version: 3.12.3
+anthropic-version: 2023-06-01
+x-api-key: sk-ant-api03-REDACTED
+x-stainless-retry-count: 0
+x-stainless-timeout: 600
+Content-Type: application/json
+User-Agent: Anthropic/Python 0.39.0
+Content-Length: 149
+
+{"max_tokens":1024,"messages":[{"role":"user","content":"Why is the sky blue?"}],"model":"claude-sonnet-4-5","stream":true,"system":"You are terse."}

@@ -1,0 +1,4 @@
+# Hostile: two spaces in the request line, which a server refuses rather than
+# repairs (RFC 9112, 3). Drafted by the reference reader, then checked by
+# hand.
+rejected request-line

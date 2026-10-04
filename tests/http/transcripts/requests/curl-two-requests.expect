@@ -1,0 +1,16 @@
+# Written by hand after what curl 8 sends for two URLs on one host: two
+# requests on one connection. Drafted by the reference reader, then checked by
+# hand.
+request GET /a HTTP/1.1
+header Host "localhost:8080"
+header User-Agent "curl/8.5.0"
+header Accept "*/*"
+framing none
+done keep
+request GET /b HTTP/1.1
+header Host "localhost:8080"
+header User-Agent "curl/8.5.0"
+header Accept "*/*"
+framing none
+done keep
+ended

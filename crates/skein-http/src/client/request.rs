@@ -7,46 +7,8 @@ use alloc::boxed::Box;
 use skein_lib::{Decimal, Writer};
 
 use super::Limits;
-use crate::Header;
 use crate::header::{is_field_byte, is_tchar};
-
-/// A request method (RFC 9110, 9.3): those an API's client sends.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Method {
-    Get,
-    /// A response to it has no body, whatever its head says.
-    Head,
-    Post,
-    Put,
-    Patch,
-    Delete,
-    Options,
-}
-
-impl Method {
-    /// The method's name, as the request line spells it.
-    #[must_use]
-    pub fn as_bytes(self) -> &'static [u8] {
-        match self {
-            Method::Get => b"GET",
-            Method::Head => b"HEAD",
-            Method::Post => b"POST",
-            Method::Put => b"PUT",
-            Method::Patch => b"PATCH",
-            Method::Delete => b"DELETE",
-            Method::Options => b"OPTIONS",
-        }
-    }
-
-    /// Whether the method gives a body a meaning, so that a call without
-    /// one says `Content-Length: 0` (RFC 9110, 8.6).
-    fn expects_body(self) -> bool {
-        match self {
-            Method::Post | Method::Put | Method::Patch => true,
-            Method::Get | Method::Head | Method::Delete | Method::Options => false,
-        }
-    }
-}
+use crate::{Header, Method};
 
 /// The request body a call announces in its head.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

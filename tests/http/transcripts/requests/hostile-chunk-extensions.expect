@@ -1,0 +1,11 @@
+# Hostile: chunk extensions, each size line within the head's limit, here
+# 128 bytes, past it in all (RFC 9112, 7.1.1): the body fails at the third
+# size line, after two chunks (http.md, 5.3). Drafted by the reference
+# reader, then checked by hand.
+limits head 128
+request POST /upload HTTP/1.1
+header Host "localhost:8080"
+header Transfer-Encoding "chunked"
+framing chunked
+body "ab"
+failed extensions

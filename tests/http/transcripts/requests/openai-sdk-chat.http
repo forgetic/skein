@@ -1,0 +1,13 @@
+POST /v1/chat/completions HTTP/1.1
+Host: api.openai.com
+Accept-Encoding: gzip, deflate
+Connection: keep-alive
+Accept: application/json
+Content-Type: application/json
+User-Agent: OpenAI/Python 1.54.3
+X-Stainless-Lang: python
+X-Stainless-Package-Version: 1.54.3
+Authorization: Bearer sk-proj-REDACTED
+Content-Length: 139
+
+{"messages":[{"role":"system","content":"You are terse."},{"role":"user","content":"Why is the sky blue?"}],"model":"gpt-4o","stream":true}

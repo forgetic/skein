@@ -1,0 +1,25 @@
+# Written by hand after the request Anthropic's Python SDK sends for a
+# streamed Messages call: its headers, the key redacted, and its JSON body.
+# Drafted by the reference reader, then checked by hand.
+request POST /v1/messages HTTP/1.1
+header Host "api.anthropic.com"
+header Accept-Encoding "gzip, deflate"
+header Connection "keep-alive"
+header Accept "application/json"
+header X-Stainless-Lang "python"
+header X-Stainless-Package-Version "0.39.0"
+header X-Stainless-OS "Linux"
+header X-Stainless-Arch "x64"
+header X-Stainless-Runtime "CPython"
+header X-Stainless-Runtime-Version "3.12.3"
+header anthropic-version "2023-06-01"
+header x-api-key "sk-ant-api03-REDACTED"
+header x-stainless-retry-count "0"
+header x-stainless-timeout "600"
+header Content-Type "application/json"
+header User-Agent "Anthropic/Python 0.39.0"
+header Content-Length "149"
+framing length 149
+body "{\"max_tokens\":1024,\"messages\":[{\"role\":\"user\",\"content\":\"Why is the sky blue?\"}],\"model\":\"claude-sonnet-4-5\",\"stream\":true,\"system\":\"You are terse.\"}"
+done keep
+ended

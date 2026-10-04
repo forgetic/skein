@@ -1,0 +1,16 @@
+PUT /upload HTTP/1.1
+Host: localhost:8080
+User-Agent: curl/8.5.0
+Accept: */*
+Transfer-Encoding: chunked
+Expect: 100-continue
+
+1e
+first line of the upload, sent
+17
+ as it was read from st
+5
+din.
+
+0
+

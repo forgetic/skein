@@ -1,0 +1,12 @@
+# Written by hand after what curl 8 sends for -d with a JSON body and its
+# Content-Type. Drafted by the reference reader, then checked by hand.
+request POST /v1/messages HTTP/1.1
+header Host "localhost:8080"
+header User-Agent "curl/8.5.0"
+header Accept "*/*"
+header Content-Type "application/json"
+header Content-Length "92"
+framing length 92
+body "{\"model\":\"claude-sonnet-4-5\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}"
+done keep
+ended
