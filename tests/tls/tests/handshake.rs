@@ -287,6 +287,34 @@ fn room_held_for_a_demand_withdrawn_is_handed_on_or_asked_for_again() {
     assert_eq!(pair.wire.server.received, late);
 }
 
+#[test]
+fn keys_at_their_limit_are_updated_in_front_of_the_next_records() {
+    // TLS 1.3 keys good for three records: rustls asks for new ones before
+    // the fourth, in front of its data and within the room granted for it;
+    // answering the server's request instead starts them over.
+    let server = pki::Server { versions: Versions::Tls13, ..pki::Server::plain() };
+    let mut pair = pair(&server, "skein.test", pki::VALID, &pki::short_lived(3), LIMITS);
+    assert_eq!(handshake(&mut pair), ready(Version::Tls13, None));
+    let before = pair.wire.sends.len();
+    let mut data = Vec::new();
+    for n in 0..9_u8 {
+        if n == 5 {
+            pair.wire.server.key_update();
+            pair.wire.pull();
+        }
+        let mut events = pair.down(Request::Stream(Down::Demand { read: Read::Fill(1), room: 16 }));
+        events.extend(pair.settle());
+        assert_eq!(events, vec![Event::Stream(Up::Room)], "send {n}");
+        // The whole grant.
+        let piece = [b'a' + n; 16];
+        data.extend_from_slice(&piece);
+        assert_eq!(pair.down(Request::Stream(Down::Send(Box::from(&piece[..])))), vec![]);
+    }
+    // A record of 16 bytes takes 38; a key update in front of it, 27 more.
+    assert_eq!(pair.wire.sends[before..], [38, 38, 38, 92, 38, 65, 38, 38, 92]);
+    assert_eq!(pair.wire.server.received, data, "the server read each record with the keys of its time");
+}
+
 /// The records in `bytes`: each one's type and body's length.
 fn records(mut bytes: &[u8]) -> Vec<(u8, usize)> {
     let mut records = Vec::new();
@@ -324,10 +352,10 @@ fn a_renegotiation_refused_goes_alone_or_before_the_data_of_a_grant_held() {
         // An alert of two bytes, sealed with 8 of nonce and 16 of tag.
         if held {
             assert_eq!(pair.wire.sent.len(), before, "the refusal waits for the side above's Send");
-            assert_eq!(pair.down(Request::Stream(Down::Send(Box::from(&b"data"[..])))), vec![]);
-            assert_eq!(records(&pair.wire.sent[before..]), [(21, 26), (23, 28)], "the refusal first, one Send");
+            assert_eq!(pair.down(Request::Stream(Down::Send(Box::from(&[b'd'; 16][..])))), vec![]);
+            assert_eq!(records(&pair.wire.sent[before..]), [(21, 26), (23, 40)], "the refusal first, one Send");
             let send = *pair.wire.sends.last().unwrap();
-            assert!(send == 31 + 33 && send <= usize::try_from(client::room_for(16).unwrap()).unwrap());
+            assert!(send == 31 + 45 && send <= usize::try_from(client::room_for(16).unwrap()).unwrap());
         } else {
             assert_eq!(records(&pair.wire.sent[before..]), [(21, 26)], "the refusal, alone, within its room");
         }

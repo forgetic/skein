@@ -141,17 +141,24 @@ pub(crate) fn encrypt(
     let sealed = match state {
         Ok(ConnectionState::WriteTraffic(mut traffic)) => {
             // Its length first: rustls says how much room it needs. Asked
-            // twice, as a query that finds its keys at their limit schedules
-            // a key update, which the next call writes before the data: the
-            // second query counts it.
-            let mut length = 0;
-            for _ in 0..2_u32 {
-                length = match traffic.encrypt(plain, &mut []) {
+            // until two answers agree: a query that finds the keys at their
+            // limit schedules a key update, which the next call writes before
+            // the data; and that update's own record, sealed at the limit,
+            // schedules a second (RFC 8446, 4.6.3), which the call after
+            // writes. Fresh keys schedule no third.
+            let mut length = None;
+            for _ in 0..4_u32 {
+                let asked = match traffic.encrypt(plain, &mut []) {
                     Ok(written) => written,
                     Err(EncryptError::InsufficientSize(size)) => size.required_size,
                     Err(EncryptError::EncryptExhausted) => return Err(Error::Other),
                 };
+                if length == Some(asked) {
+                    break;
+                }
+                length = Some(asked);
             }
+            let length = length.expect("asked at least once");
             let owing = usize::try_from(owed.len()).expect("a u32 fits in a usize");
             let total = owing.checked_add(length).expect("within the room granted");
             if total == 0 {
@@ -162,10 +169,12 @@ pub(crate) fn encrypt(
                 for (to, from) in front.iter_mut().zip(owed.filled()) {
                     *to = *from;
                 }
+                // Past what 0.23 does, a length that never settles fails the
+                // connection, rather than the service.
                 match traffic.encrypt(plain, back) {
-                    Ok(written) => assert!(written == length, "rustls writes the length it asked room for"),
-                    Err(EncryptError::InsufficientSize(_) | EncryptError::EncryptExhausted) => {
-                        unreachable!("rustls encrypts into the room it asked for")
+                    Ok(written) if written == length => {}
+                    Ok(_) | Err(EncryptError::InsufficientSize(_) | EncryptError::EncryptExhausted) => {
+                        return Err(Error::Other);
                     }
                 }
                 owed.clear();

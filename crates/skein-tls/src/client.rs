@@ -86,11 +86,12 @@ pub const FLIGHT: u32 = 2_048;
 /// TLS 1.3's adds 22.
 const OVERHEAD: u32 = HEADER + 8 + 16;
 
-/// What rustls may write before the next data it encrypts, besides the
-/// records of the data: in TLS 1.3, the key update that answers the
-/// peer's, and one it asks for itself as its keys near their limit, each a
-/// record of 27 bytes (RFC 8446, 4.6.3); in TLS 1.2, a refusal of a
-/// renegotiation the client owes, 31 bytes.
+/// What may go before the next data rustls encrypts, besides the records
+/// of the data: in TLS 1.3, the key update rustls asks for as its keys
+/// reach their limit, and a second, as the first's own record reaches it,
+/// each a record of 27 bytes (RFC 8446, 4.6.3), while the one that answers
+/// the peer's comes alone, as it starts the keys over; in TLS 1.2, a
+/// refusal of a renegotiation the client owes, 31 bytes.
 const SLACK: u32 = 2 * 27;
 
 /// rustls's own heap besides the server's certificates and the record it

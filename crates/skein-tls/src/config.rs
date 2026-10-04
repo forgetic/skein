@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use rustls::client::Resumption;
-use rustls::crypto::ring;
+use rustls::crypto::{CryptoProvider, ring};
 use rustls::pki_types::{ServerName, UnixTime};
 use rustls::time_provider::TimeProvider;
 use rustls::{ClientConfig, RootCertStore};
@@ -48,12 +48,22 @@ pub enum Refusal {
     /// A protocol offered by ALPN is empty or longer than 255 bytes, or all
     /// of them take more than [`ALPN`] bytes.
     Alpn,
+    /// The crypto provider has no suite of TLS 1.2 or 1.3: ring's has both.
+    Provider,
 }
 
 impl Config {
     /// The configuration that trusts `roots` and offers `alpn`, in order of
     /// preference, or none (RFC 7301).
     pub fn new(roots: RootCertStore, alpn: &[&[u8]]) -> Result<Config, Refusal> {
+        Config::with_provider(roots, alpn, ring::default_provider())
+    }
+
+    /// As [`Config::new`], with `provider` for the cryptography in place of
+    /// ring's own: for a test that changes a suite, as its keys' limit. Not
+    /// for a service, whose exception is ring (tls.md, 4).
+    #[doc(hidden)]
+    pub fn with_provider(roots: RootCertStore, alpn: &[&[u8]], provider: CryptoProvider) -> Result<Config, Refusal> {
         if roots.is_empty() {
             return Err(Refusal::Roots);
         }
@@ -69,13 +79,14 @@ impl Config {
         if wire > ALPN {
             return Err(Refusal::Alpn);
         }
-        let provider = Arc::new(ring::default_provider());
-        let mut client =
-            ClientConfig::builder_with_details(provider, Arc::new(At(UnixTime::since_unix_epoch(Duration::ZERO))))
-                .with_safe_default_protocol_versions()
-                .expect("ring's provider has suites for TLS 1.2 and 1.3")
-                .with_root_certificates(roots)
-                .with_no_client_auth();
+        let builder = ClientConfig::builder_with_details(
+            Arc::new(provider),
+            Arc::new(At(UnixTime::since_unix_epoch(Duration::ZERO))),
+        );
+        let Ok(builder) = builder.with_safe_default_protocol_versions() else {
+            return Err(Refusal::Provider);
+        };
+        let mut client = builder.with_root_certificates(roots).with_no_client_auth();
         client.alpn_protocols = protocols;
         client.resumption = Resumption::disabled();
         Ok(Config { client: Arc::new(client) })

@@ -13,8 +13,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::ServerConfig;
 use rustls::version::{TLS12, TLS13};
 use rustls::{
-    ConnectionTrafficSecrets, ContentType, ProtocolVersion, RootCertStore, SupportedCipherSuite,
-    SupportedProtocolVersion,
+    CipherSuiteCommon, ConnectionTrafficSecrets, ContentType, ProtocolVersion, RootCertStore, SupportedCipherSuite,
+    SupportedProtocolVersion, Tls13CipherSuite,
 };
 use skein_lib::Wall;
 use skein_tls::{Config, Name};
@@ -88,6 +88,29 @@ impl Sealer {
         self.seq += 1;
         record
     }
+}
+
+/// The client's configuration as [`client`]'s, with TLS 1.3's AES-128-GCM
+/// alone, its keys good for `records` records: rustls asks for new ones
+/// itself as they reach their limit (RFC 8446, 5.5).
+#[must_use]
+pub fn short_lived(records: u64) -> Config {
+    let SupportedCipherSuite::Tls13(suite) = ring::cipher_suite::TLS13_AES_128_GCM_SHA256 else {
+        panic!("a suite of TLS 1.3")
+    };
+    let short = Box::leak(Box::new(Tls13CipherSuite {
+        common: CipherSuiteCommon {
+            suite: suite.common.suite,
+            hash_provider: suite.common.hash_provider,
+            confidentiality_limit: records,
+        },
+        hkdf_provider: suite.hkdf_provider,
+        aead_alg: suite.aead_alg,
+        quic: suite.quic,
+    }));
+    let provider =
+        CryptoProvider { cipher_suites: vec![SupportedCipherSuite::Tls13(short)], ..ring::default_provider() };
+    Config::with_provider(roots(), &[], provider).expect("a suite of TLS 1.3")
 }
 
 /// The server's name the certificates are for.

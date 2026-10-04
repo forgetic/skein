@@ -128,9 +128,11 @@ pub enum Event {
   the handshake, `close_notify`), alone and first; or, once the handshake
   is done, for the side above's demand of `n` bytes of room, `room_for(n)`:
   its records, 29 bytes each at most (TLS 1.2's AES-GCM), and 54 bytes of
-  slack for what may go before them: in TLS 1.3, the key update that
-  answers the server's and one rustls asks for itself, 27 bytes each; in
-  TLS 1.2, the refusal of a renegotiation, 31. What TLS owes that arose
+  slack for what may go before them: in TLS 1.3, the key update rustls
+  asks for as its keys reach their limit and a second, as the first's own
+  record reaches it, 27 bytes each (the one that answers the server's
+  comes alone, as it starts the keys over); in TLS 1.2, the refusal of a
+  renegotiation, 31. What TLS owes that arose
   while the side above held its grant goes in the same `Send`, in front:
   records go in the order rustls sealed them. Room that comes for a
   demand the side above withdrew meanwhile is held for no one: handed on
@@ -322,9 +324,11 @@ wall time each test chooses.
   that works over TLS works over a socket.
 - **`Finish` comes with no read outstanding,** but one that crossed the
   end, rather than `close_notify` waiting behind a read below.
-- **The length of what rustls encrypts is asked twice:** a query that
-  finds the keys at their limit schedules a key update that the next call
-  writes before the data, and the second query counts it.
+- **The length of what rustls encrypts is asked until two answers
+  agree:** a query that finds the keys at their limit schedules a key
+  update that the next call writes before the data, and that update's own
+  record, sealed at the limit, schedules a second. A length that never
+  settles, or a write that does not fit it, fails the connection, Other.
 - **A truncation fails the stream as invalid,** never ends it, once what
   was deciphered is delivered; a peer's fatal alert is a reset.
 - **No session resumed,** and no alert sent after a failure.
