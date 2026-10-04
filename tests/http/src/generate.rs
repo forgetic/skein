@@ -6,17 +6,17 @@ use skein_http::Header;
 use skein_http::client::{Body, Call, Limits, Method, Refusal};
 use skein_lib::Rng;
 
-fn pick<'a, T>(rng: &mut Rng, items: &'a [T]) -> &'a T {
+pub(crate) fn pick<'a, T>(rng: &mut Rng, items: &'a [T]) -> &'a T {
     &items[usize::try_from(rng.below(items.len() as u64)).expect("fits a usize")]
 }
 
-fn draw(rng: &mut Rng, low: usize, high: usize) -> usize {
+pub(crate) fn draw(rng: &mut Rng, low: usize, high: usize) -> usize {
     usize::try_from(rng.between(low as u64, high as u64)).expect("fits a usize")
 }
 
 /// Text a value or a body is made of: printable ASCII, tabs, and UTF-8 of
 /// two, three and four bytes.
-fn text(rng: &mut Rng, low: usize, high: usize, out: &mut Vec<u8>) {
+pub(crate) fn text(rng: &mut Rng, low: usize, high: usize, out: &mut Vec<u8>) {
     const PIECES: &[&str] =
         &["a", "b", "z", "Q", "0", "9", " ", "\t", "-", "/", "=", ";", ",", ":", "\"", "é", "€", "😀"];
     for _ in 0..draw(rng, low, high) {
@@ -280,7 +280,7 @@ fn trim_end(mut field: Vec<u8>) -> Vec<u8> {
     field
 }
 
-fn shuffle<T>(rng: &mut Rng, items: &mut [T]) {
+pub(crate) fn shuffle<T>(rng: &mut Rng, items: &mut [T]) {
     for at in (1..items.len()).rev() {
         let other = usize::try_from(rng.below(at as u64 + 1)).expect("fits a usize");
         items.swap(at, other);
@@ -290,7 +290,7 @@ fn shuffle<T>(rng: &mut Rng, items: &mut [T]) {
 /// `body` as chunks of sizes drawn at random, each size in either case and
 /// with leading zeros now and then, an extension now and then, lines ended
 /// by CRLF or LF, then the last chunk and a trailer section.
-fn chunks(rng: &mut Rng, body: &[u8], out: &mut Vec<u8>) {
+pub(crate) fn chunks(rng: &mut Rng, body: &[u8], out: &mut Vec<u8>) {
     let lf = |rng: &mut Rng| if rng.chance(100) { &b"\n"[..] } else { &b"\r\n"[..] };
     let mut rest = body;
     while !rest.is_empty() {
@@ -459,7 +459,7 @@ pub fn corrupt(rng: &mut Rng, server: &[u8]) -> Vec<u8> {
     out
 }
 
-fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|window| window == needle)
 }
 

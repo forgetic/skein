@@ -25,5 +25,7 @@
 pub mod client_world;
 pub mod generate;
 pub mod reference;
+pub mod requests;
+pub mod server_world;
 pub mod sse_world;
 pub mod transcript;

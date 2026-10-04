@@ -1,22 +1,24 @@
-//! Simple reference readers (http.md, 6): a response, and an event stream,
-//! each read whole from bytes held in memory, which the machines are
-//! checked against.
+//! Simple reference readers (http.md, 6 and 7): a response, a request,
+//! and an event stream, each read whole from bytes held in memory, which
+//! the machines are checked against.
 //!
 //! They share no code with the machines: plain loops over a whole buffer,
 //! with the standard library's conveniences. What they mirror is only what
 //! the machines promise:
 //!
-//! - **what their scans see:** the client reads a head and the framing of
-//!   a chunked body a line at a time, each line a scan to LF of at most
-//!   what is left of its limit, and the reader scans to the byte that ended
-//!   the last line; a scan the end of the stream leaves unmet is never
-//!   seen;
+//! - **what their scans see:** the client and the server read a head and
+//!   the framing of a chunked body a line at a time, each line a scan to LF
+//!   of at most what is left of its limit, and the reader scans to the byte
+//!   that ended the last line; a scan the end of the stream leaves unmet is
+//!   never seen;
 //! - **the order of errors:** a line's length before its bytes, its bytes
-//!   before the room for one more field; an event's size before a line's
-//!   length, a byte at a time.
+//!   before the room for one more field; a request line's form before its
+//!   version, its version before its method; at a request's blank line, its
+//!   `Host`, then its framing, then its length; an event's size before a
+//!   line's length, a byte at a time.
 
 use skein_http::client::{Error, Framing, Limits, Method, Reuse, Version};
-use skein_http::sse;
+use skein_http::{server, sse};
 
 /// A response's head, as the reference reads it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -71,7 +73,7 @@ pub fn response(bytes: &[u8], method: Method, close: bool, limits: &Limits) -> R
     let result = match framing {
         Framing::Empty => Ok(()),
         Framing::Length(length) => reader.take(length, &mut out.body),
-        Framing::Chunked => chunked(&mut reader, limits, &mut out.body),
+        Framing::Chunked => chunked(&mut reader, limits.head, &mut out.body),
         Framing::UntilEnd => {
             out.body.extend_from_slice(&bytes[reader.at..]);
             reader.at = bytes.len();
@@ -225,9 +227,15 @@ fn trim(bytes: &[u8]) -> &[u8] {
 
 /// The non-empty elements of every field named `name`, trimmed.
 fn elements<'a>(head: &'a Head, name: &str) -> (bool, Vec<&'a [u8]>) {
+    listed(&head.headers, name)
+}
+
+/// The non-empty elements of every field named `name` among `headers`,
+/// trimmed.
+fn listed<'a>(headers: &'a [(Vec<u8>, Vec<u8>)], name: &str) -> (bool, Vec<&'a [u8]>) {
     let mut present = false;
     let mut elements = Vec::new();
-    for (field, value) in &head.headers {
+    for (field, value) in headers {
         if field.eq_ignore_ascii_case(name.as_bytes()) {
             present = true;
             for element in value.split(|&byte| byte == b',') {
@@ -282,15 +290,16 @@ fn persistent(head: &Head) -> bool {
     }
 }
 
-fn chunked(reader: &mut Lines<'_>, limits: &Limits, body: &mut Vec<u8>) -> Result<(), Error> {
+/// A chunked body, its size lines and its trailer section within `head`.
+fn chunked(reader: &mut Lines<'_>, head: u32, body: &mut Vec<u8>) -> Result<(), Error> {
     loop {
-        let size = match reader.line(limits.head) {
+        let size = match reader.line(head) {
             Line::Whole(content, _) => chunk_size(content).ok_or(Error::ChunkSize)?,
             Line::Long => return Err(Error::ChunkSize),
             Line::Short => return Err(Error::Truncated { answered: true }),
         };
         if size == 0 {
-            let mut budget = limits.head;
+            let mut budget = head;
             loop {
                 match reader.line(budget) {
                     Line::Whole([], _) => return Ok(()),
@@ -332,6 +341,236 @@ fn chunk_size(line: &[u8]) -> Option<u64> {
         Some(b';') if rest.iter().all(|&byte| is_field_byte(byte)) => Some(size),
         Some(_) => None,
     }
+}
+
+/// A request's head, as the reference reads it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RequestHead {
+    pub method: Method,
+    pub target: Vec<u8>,
+    pub version: Version,
+    pub headers: Vec<(Vec<u8>, Vec<u8>)>,
+    pub body: server::Body,
+}
+
+/// How a request read whole ended.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum RequestEnding {
+    /// Whole: its head, and its body to the end of its framing.
+    Whole,
+    /// No request: the bytes ran out before a request line.
+    None,
+    /// Rejected at its head, with the server's answer.
+    Rejected(server::Rejection),
+    /// Cut short, or its body's framing bad.
+    Failed(server::Error),
+}
+
+/// What bytes from a client come to as one request.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Request {
+    /// The head, if it was read whole and sound.
+    pub head: Option<RequestHead>,
+    /// The body, as far as the bytes hold it.
+    pub body: Vec<u8>,
+    pub ending: RequestEnding,
+    /// Whether the request asks to keep the connection (RFC 9112, 9.3).
+    pub persist: bool,
+    /// Whether the client waits for a 100 (Continue) before its body.
+    pub expects: bool,
+    /// Where its head ends in the bytes, once read whole.
+    pub head_end: usize,
+    /// How many of the bytes the request took, for the next on the same
+    /// connection.
+    pub used: usize,
+}
+
+/// What `bytes`, the stream from a client, come to as the next request
+/// under `limits`, as the server reads them: its head a line at a time,
+/// each a scan to LF of at most what is left of the head, empty lines
+/// before the request line skipped; then its body by its framing.
+#[must_use]
+pub fn request(bytes: &[u8], limits: &server::Limits) -> Request {
+    let mut reader = Lines { bytes, at: 0 };
+    let mut out = Request {
+        head: None,
+        body: Vec::new(),
+        ending: RequestEnding::Whole,
+        persist: false,
+        expects: false,
+        head_end: 0,
+        used: 0,
+    };
+    let head = match request_head(&mut reader, limits) {
+        Ok(head) => head,
+        Err(ending) => {
+            out.ending = ending;
+            out.used = reader.at;
+            return out;
+        }
+    };
+    let (_, connection) = listed(&head.headers, "connection");
+    let close = connection.iter().any(|token| token.eq_ignore_ascii_case(b"close"));
+    let keep = connection.iter().any(|token| token.eq_ignore_ascii_case(b"keep-alive"));
+    out.persist = match head.version {
+        Version::Http11 => !close,
+        Version::Http10 => keep && !close,
+    };
+    let (_, expect) = listed(&head.headers, "expect");
+    let sends = match head.body {
+        server::Body::None | server::Body::Length(0) => false,
+        server::Body::Length(_) | server::Body::Chunked => true,
+    };
+    out.expects = sends
+        && head.version == Version::Http11
+        && expect.iter().any(|token| token.eq_ignore_ascii_case(b"100-continue"));
+    out.head_end = reader.at;
+    let result = match head.body {
+        server::Body::None => Ok(()),
+        server::Body::Length(length) => reader.take(length, &mut out.body),
+        server::Body::Chunked => chunked(&mut reader, limits.head, &mut out.body),
+    };
+    out.head = Some(head);
+    out.used = reader.at;
+    out.ending = match result {
+        Ok(()) => RequestEnding::Whole,
+        Err(Error::Truncated { .. }) => RequestEnding::Failed(server::Error::Truncated),
+        Err(Error::ChunkSize) => RequestEnding::Failed(server::Error::ChunkSize),
+        Err(Error::Chunk) => RequestEnding::Failed(server::Error::Chunk),
+        Err(Error::Trailer) => RequestEnding::Failed(server::Error::Trailer),
+        Err(other) => unreachable!("a body's framing fails no other way: {other:?}"),
+    };
+    out
+}
+
+/// A request's head, checked as the server checks it, or how reading it
+/// ended.
+fn request_head(reader: &mut Lines<'_>, limits: &server::Limits) -> Result<RequestHead, RequestEnding> {
+    use server::Rejection;
+    let mut budget = limits.head;
+    let mut line_read: Option<(Method, Vec<u8>, Version)> = None;
+    let mut headers: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    loop {
+        let (content, len) = match reader.line(budget) {
+            Line::Whole(content, len) => (content, len),
+            Line::Long if line_read.is_none() => return Err(RequestEnding::Rejected(Rejection::TargetTooLong)),
+            Line::Long => return Err(RequestEnding::Rejected(Rejection::HeadTooLong)),
+            Line::Short if line_read.is_none() => return Err(RequestEnding::None),
+            Line::Short => return Err(RequestEnding::Failed(server::Error::Truncated)),
+        };
+        budget -= u32::try_from(len).expect("fits a u32");
+        if line_read.is_none() {
+            if !content.is_empty() {
+                line_read = Some(request_line(content).map_err(RequestEnding::Rejected)?);
+            }
+        } else if content.is_empty() {
+            break;
+        } else if content[0] == b' ' || content[0] == b'\t' {
+            return Err(RequestEnding::Rejected(Rejection::Header));
+        } else {
+            let colon = content.iter().position(|&byte| byte == b':');
+            let name_end = colon.unwrap_or(content.len());
+            if name_end == 0 || colon.is_none() || !content[..name_end].iter().all(|&byte| is_tchar(byte)) {
+                return Err(RequestEnding::Rejected(Rejection::Header));
+            }
+            let value = trim(&content[name_end + 1..]);
+            if check_value(value).is_err() {
+                return Err(RequestEnding::Rejected(Rejection::Header));
+            }
+            if headers.len() >= usize::try_from(limits.headers).expect("fits a usize") {
+                return Err(RequestEnding::Rejected(Rejection::TooManyHeaders));
+            }
+            headers.push((content[..name_end].to_vec(), value.to_vec()));
+        }
+        if budget == 0 {
+            return Err(RequestEnding::Rejected(Rejection::HeadTooLong));
+        }
+    }
+    let (method, target, version) = line_read.expect("read before the blank line");
+    let hosts = headers.iter().filter(|(name, _)| name.eq_ignore_ascii_case(b"host")).count();
+    let host = match version {
+        Version::Http11 => hosts == 1,
+        Version::Http10 => hosts <= 1,
+    };
+    if !host {
+        return Err(RequestEnding::Rejected(Rejection::Host));
+    }
+    let body = request_framing(version, &headers).map_err(RequestEnding::Rejected)?;
+    if let server::Body::Length(length) = body
+        && length > limits.body
+    {
+        return Err(RequestEnding::Rejected(Rejection::BodyTooLong));
+    }
+    Ok(RequestHead { method, target, version, headers, body })
+}
+
+/// `METHOD SP target SP HTTP/x.y`, exactly so.
+fn request_line(line: &[u8]) -> Result<(Method, Vec<u8>, Version), server::Rejection> {
+    use server::Rejection;
+    let parts: Vec<&[u8]> = line.split(|&byte| byte == b' ').collect();
+    let [method, target, version] = parts[..] else { return Err(Rejection::RequestLine) };
+    if method.is_empty() || !method.iter().all(|&byte| is_tchar(byte)) {
+        return Err(Rejection::RequestLine);
+    }
+    if target.is_empty() || !target.iter().all(u8::is_ascii_graphic) {
+        return Err(Rejection::RequestLine);
+    }
+    let [b'H', b'T', b'T', b'P', b'/', major, b'.', minor] = *version else { return Err(Rejection::RequestLine) };
+    if !major.is_ascii_digit() || !minor.is_ascii_digit() {
+        return Err(Rejection::RequestLine);
+    }
+    if major != b'1' {
+        return Err(Rejection::Version);
+    }
+    let version = if minor == b'0' { Version::Http10 } else { Version::Http11 };
+    let method = match method {
+        b"GET" => Method::Get,
+        b"HEAD" => Method::Head,
+        b"POST" => Method::Post,
+        b"PUT" => Method::Put,
+        b"PATCH" => Method::Patch,
+        b"DELETE" => Method::Delete,
+        b"OPTIONS" => Method::Options,
+        _ => return Err(Rejection::Method),
+    };
+    Ok((method, target.to_vec(), version))
+}
+
+/// A request's framing (RFC 9112, 6.1 and 6.3), as the server decides it.
+fn request_framing(version: Version, headers: &[(Vec<u8>, Vec<u8>)]) -> Result<server::Body, server::Rejection> {
+    use server::Rejection;
+    let (coded, codings) = listed(headers, "transfer-encoding");
+    let (lengthed, lengths) = listed(headers, "content-length");
+    if coded {
+        if version == Version::Http10 || lengthed {
+            return Err(Rejection::Framing);
+        }
+        let chunked = codings.iter().filter(|coding| coding.eq_ignore_ascii_case(b"chunked")).count();
+        let last = codings.last().is_some_and(|coding| coding.eq_ignore_ascii_case(b"chunked"));
+        if !last || chunked > 1 {
+            return Err(Rejection::Framing);
+        }
+        if codings.len() > 1 {
+            return Err(Rejection::Coding);
+        }
+        return Ok(server::Body::Chunked);
+    }
+    if !lengthed {
+        return Ok(server::Body::None);
+    }
+    let mut length = None;
+    for element in lengths {
+        let parsed = std::str::from_utf8(element)
+            .ok()
+            .filter(|text| text.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|text| text.parse::<u64>().ok())
+            .ok_or(Rejection::Framing)?;
+        if length.is_some_and(|earlier| earlier != parsed) {
+            return Err(Rejection::Framing);
+        }
+        length = Some(parsed);
+    }
+    length.map(server::Body::Length).ok_or(Rejection::Framing)
 }
 
 /// How an event stream ended.
