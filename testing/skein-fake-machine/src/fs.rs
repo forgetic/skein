@@ -17,6 +17,9 @@ const LONGEST_PATH: usize = 4096;
 const MOST_LINKS: u32 = 40;
 
 /// The largest file the fake disk holds: a write past it finds no space.
+/// The machine keeps every file in memory, so a write at a large offset,
+/// which a real filesystem makes sparse, would take that much of the test's
+/// heap; no test writes a file near this.
 const LARGEST_FILE: usize = 64 << 20;
 
 /// The owner's permission bits, which are all the machine checks: the

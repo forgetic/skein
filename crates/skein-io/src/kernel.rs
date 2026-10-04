@@ -98,8 +98,8 @@
 //!   `RESOLVE_NO_MAGICLINKS`: `..` above the root, an absolute path, and a
 //!   symbolic link that leads out of it (an absolute one among them) fail
 //!   with `Escape`; a symbolic link that stays beneath it is followed. A
-//!   loop of links, or more than 40 in one resolution, fails with
-//!   `TooManyLinks`. A name longer than 255 bytes, or a path of 4096 or
+//!   loop of links, more than 40 in one resolution, and a magic link
+//!   (`/proc/*/fd/*`, should a root hold one) fail with `TooManyLinks`. A name longer than 255 bytes, or a path of 4096 or
 //!   more, fails with `NameTooLong`; an empty path with `NotFound`. A `..`
 //!   that races a rename or a mount anywhere on the system, which
 //!   `RESOLVE_BENEATH` answers with `EAGAIN`, has the backend submit the
@@ -151,8 +151,8 @@
 //!   listed may or may not be seen.
 //! - **A file removed while open** stays readable and writable through its
 //!   descriptor until its `Close`. A directory removed while open is empty
-//!   for good: `Open` beneath it, `MakeDirectory` in it and `List` of it
-//!   fail with `NotFound`.
+//!   for good: any name beneath it fails with `NotFound`, to an `Open`, a
+//!   `Rename`, a `Remove` or a `MakeDirectory`, and so does a `List` of it.
 //! - **An `Open`, `Read`, `Write` or `Sync` may be cancelled,** as an
 //!   operation on sockets may, with the same outcomes (Cancelling, above):
 //!   none waits on a peer, but on a filesystem that can stall (NFS, FUSE)
@@ -633,9 +633,10 @@ pub enum Error {
     /// `Open` with `Create`, `Write`, `Rename`, `Remove`, `MakeDirectory`:
     /// the filesystem is read-only (`EROFS`).
     ReadOnly,
-    /// `Open`: a loop of symbolic links, or more than 40 in one resolution
-    /// (`ELOOP`). `Rename`, `MakeDirectory`: the directory has as many links
-    /// as its filesystem allows (`EMLINK`).
+    /// `Open`: a loop of symbolic links, more than 40 in one resolution, or
+    /// a magic link, which `RESOLVE_NO_MAGICLINKS` refuses (`ELOOP`).
+    /// `Rename`, `MakeDirectory`: the directory has as many links as its
+    /// filesystem allows (`EMLINK`).
     TooManyLinks,
     /// `Open`, `Rename`, `Remove`, `MakeDirectory`: a name longer than
     /// [`LONGEST_NAME`] bytes, or a path of 4096 bytes or more

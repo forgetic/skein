@@ -190,7 +190,9 @@ documentation, with each operation's errors; the decisions behind it:
   repository's `CLAUDE.md -> AGENTS.md`); `RESOLVE_NO_SYMLINKS` would
   refuse those too and keep nothing more in. Magic links (`/proc/*/fd/*`)
   are refused by name, with `RESOLVE_NO_MAGICLINKS`, as the man page
-  asks: `RESOLVE_BENEATH` refuses them today, but may not always.
+  asks: `RESOLVE_BENEATH` refuses them today, but may not always. That
+  answers `ELOOP` before the escape is looked at, so a magic link is
+  `TooManyLinks`, not `Escape`.
 - **A `..` that races is tried again.** `RESOLVE_BENEATH` cannot tell a
   `..` from an escape when a rename or a mount anywhere on the system
   moves under it, and answers `EAGAIN` for the caller to retry. The

@@ -424,9 +424,10 @@ pub struct MakeDirectories {
     pub in_a_file: Result<Done, Error>,
     pub too_long: Result<Done, Error>,
     /// The directory removed while open; then a `MakeDirectory` in it, an
-    /// `Open` to create beneath it, and a `List` of it.
+    /// `Open` to create beneath it, a `List` of it, a `Rename` out of it
+    /// and a `Remove` in it.
     pub removed: Result<Done, Error>,
-    pub in_removed: [Result<Done, Error>; 3],
+    pub in_removed: [Result<Done, Error>; 5],
     /// Beneath the directory removed: an `Open` of a name too long, which it
     /// does not hold however long; an `Open` to create a path ending in
     /// `/`, refused for the `/` first.
@@ -462,7 +463,13 @@ pub fn make_directory<B: Backend>(backend: &mut B) -> MakeDirectories {
         Ok(listed) => unexpected("a List of a directory removed fails", &listed),
         Err(error) => Err(error),
     };
-    let in_removed = [run.make_directory(process, gone, b"x"), create, listed];
+    let in_removed = [
+        run.make_directory(process, gone, b"x"),
+        create,
+        listed,
+        run.rename(process, (gone, b"x"), (root, b"y")),
+        run.remove(process, gone, b"x", false),
+    ];
     let removed_long = opens(&mut run, process, gone, &far_too_long(), OpenHow::Read);
     let removed_slash = opens(&mut run, process, gone, b"x/", OpenHow::Create { mode: None });
     run.close(process, gone);
