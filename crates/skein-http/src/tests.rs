@@ -11,6 +11,7 @@ mod request;
 mod response;
 mod server;
 mod sse;
+mod writer;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;

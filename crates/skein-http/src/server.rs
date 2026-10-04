@@ -874,10 +874,8 @@ fn respond(
     };
     // The connection is kept only if what is left of the body is read to its
     // end before the head goes: the side above discards it.
-    let persist = exchange.keep
-        && !response.close
-        && framing != Framing::UntilEnd
-        && (discarding || body_over_below(&exchange));
+    let persist =
+        exchange.keep && !response.close && framing != Framing::UntilEnd && (discarding || body_over_below(&exchange));
     let head = match response::write(&response, exchange.version, persist, limits) {
         Ok(head) => head,
         Err(refusal) => {
