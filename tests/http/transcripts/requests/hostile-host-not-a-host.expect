@@ -1,0 +1,4 @@
+# Hostile: a Host that is not a host and a port (RFC 9110, 7.2), which a
+# server routing by it, or a cache keying by it, would take at its word.
+# Drafted by the reference reader, then checked by hand.
+rejected host

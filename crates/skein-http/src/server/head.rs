@@ -99,21 +99,24 @@ impl Head {
     }
 
     /// The head, whole, checked in a fixed order: one `Host` (RFC 9112,
-    /// 3.2), then the body's framing (RFC 9112, 6.1 and 6.3), then its
-    /// length against [`Limits::body`].
+    /// 3.2), and a sound one, then the body's framing (RFC 9112, 6.1 and
+    /// 6.3), then its length against [`Limits::body`].
     pub(super) fn request(self, limits: &Limits) -> Result<Request, Rejection> {
         let line = self.line.expect("a head is complete only after its request line");
         let headers = self.headers.into_boxed();
         let mut hosts = 0_u32;
+        let mut sound = true;
         for header in &headers {
             if header.is(b"host") {
                 hosts = hosts.saturating_add(1);
+                sound &= is_host(&header.value);
             }
         }
-        let host = match line.version {
-            Version::Http11 => hosts == 1,
-            Version::Http10 => hosts <= 1,
-        };
+        let host = sound
+            && match line.version {
+                Version::Http11 => hosts == 1,
+                Version::Http10 => hosts <= 1,
+            };
         if !host {
             return Err(Rejection::Host);
         }
@@ -133,6 +136,66 @@ impl Head {
         let call = Call { method: line.method, target: line.target, version: line.version, headers, body };
         Ok(Request { call, persist, expects })
     }
+}
+
+/// Where a `Host`'s value is read to.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum HostPart {
+    /// A registered name or an IPv4 address.
+    Name,
+    /// An IP literal, within its brackets.
+    Literal,
+    /// Past an IP literal's closing bracket.
+    Closed,
+    /// The port, past its colon.
+    Port,
+}
+
+/// Whether `value` is a `Host` (RFC 9110, 7.2): `uri-host [":" port]`, the
+/// host an IP literal in brackets, of hexadecimal digits, colons, dots
+/// and the bytes of a future one, or a registered name or an IPv4 address,
+/// of unreserved bytes, sub-delimiters and percent-escapes (RFC 3986,
+/// 3.2.2), and the port digits. It may be empty, as a client sends it for a
+/// target with no authority (RFC 9112, 3.2).
+fn is_host(value: &[u8]) -> bool {
+    let mut part = HostPart::Name;
+    // The hexadecimal digits a percent-escape still holds.
+    let mut escape = 0_u8;
+    for (at, &byte) in value.iter().enumerate() {
+        part = match part {
+            HostPart::Name if at == 0 && byte == b'[' => HostPart::Literal,
+            HostPart::Name if escape > 0 && byte.is_ascii_hexdigit() => {
+                escape = escape.saturating_sub(1);
+                HostPart::Name
+            }
+            HostPart::Name if escape == 0 && byte == b'%' => {
+                escape = 2;
+                HostPart::Name
+            }
+            HostPart::Name if escape == 0 && (is_unreserved(byte) || is_sub_delim(byte)) => HostPart::Name,
+            HostPart::Literal if byte == b']' => HostPart::Closed,
+            HostPart::Literal if is_unreserved(byte) || is_sub_delim(byte) || byte == b':' => HostPart::Literal,
+            HostPart::Name | HostPart::Closed if escape == 0 && byte == b':' => HostPart::Port,
+            HostPart::Port if byte.is_ascii_digit() => HostPart::Port,
+            HostPart::Name | HostPart::Literal | HostPart::Closed | HostPart::Port => return false,
+        };
+    }
+    match part {
+        HostPart::Name => escape == 0,
+        HostPart::Literal => false,
+        HostPart::Closed | HostPart::Port => true,
+    }
+}
+
+/// `ALPHA / DIGIT / "-" / "." / "_" / "~"` (RFC 3986, 2.3).
+fn is_unreserved(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"-._~".contains(&byte)
+}
+
+/// `"!" / "$" / "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="` (RFC
+/// 3986, 2.2).
+fn is_sub_delim(byte: u8) -> bool {
+    b"!$&'()*+,;=".contains(&byte)
 }
 
 /// `GET /v1/messages HTTP/1.1` (RFC 9112, 3): a method, a space, a target,

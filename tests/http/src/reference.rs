@@ -481,6 +481,44 @@ pub fn request(bytes: &[u8], limits: &server::Limits) -> Request {
     out
 }
 
+/// Whether `value` is `uri-host [":" port]` (RFC 9110, 7.2): an IP literal
+/// in brackets, or a name of unreserved bytes, sub-delimiters and
+/// percent-escapes (RFC 3986, 3.2.2), then, after a colon, digits.
+fn sound_host(value: &[u8]) -> bool {
+    let plain = |byte: &u8| byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=".contains(byte);
+    let port = if let Some(rest) = value.strip_prefix(b"[") {
+        let Some(close) = rest.iter().position(|&byte| byte == b']') else { return false };
+        if !rest[..close].iter().all(|byte| plain(byte) || *byte == b':') {
+            return false;
+        }
+        match &rest[close + 1..] {
+            [] => return true,
+            [b':', port @ ..] => port,
+            _ => return false,
+        }
+    } else {
+        let (name, port) = match value.iter().position(|&byte| byte == b':') {
+            Some(at) => (&value[..at], &value[at + 1..]),
+            None => (value, &b""[..]),
+        };
+        let mut at = 0;
+        while at < name.len() {
+            if name[at] == b'%' {
+                if !name.get(at + 1..at + 3).is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit)) {
+                    return false;
+                }
+                at += 3;
+            } else if plain(&name[at]) {
+                at += 1;
+            } else {
+                return false;
+            }
+        }
+        port
+    };
+    port.iter().all(u8::is_ascii_digit)
+}
+
 /// A request's head, checked as the server checks it, or how reading it
 /// ended.
 fn request_head(reader: &mut Lines<'_>, limits: &server::Limits) -> Result<RequestHead, RequestEnding> {
@@ -525,12 +563,13 @@ fn request_head(reader: &mut Lines<'_>, limits: &server::Limits) -> Result<Reque
         }
     }
     let (method, target, version) = line_read.expect("read before the blank line");
-    let hosts = headers.iter().filter(|(name, _)| name.eq_ignore_ascii_case(b"host")).count();
+    let hosts: Vec<&[u8]> =
+        headers.iter().filter(|(name, _)| name.eq_ignore_ascii_case(b"host")).map(|(_, value)| &value[..]).collect();
     let host = match version {
-        Version::Http11 => hosts == 1,
-        Version::Http10 => hosts <= 1,
+        Version::Http11 => hosts.len() == 1,
+        Version::Http10 => hosts.len() <= 1,
     };
-    if !host {
+    if !host || !hosts.iter().all(|host| sound_host(host)) {
         return Err(RequestEnding::Rejected(Rejection::Host));
     }
     let body = request_framing(version, &headers).map_err(RequestEnding::Rejected)?;

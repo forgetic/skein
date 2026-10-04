@@ -225,6 +225,51 @@ fn one_host_is_required_of_http_one_one_and_two_are_refused_of_any() {
 }
 
 #[test]
+fn a_host_is_a_name_or_an_address_and_a_port() {
+    let head = |host: &[u8]| {
+        let mut head = Vec::from(&b"GET / HTTP/1.1\r\nHost: "[..]);
+        head.extend_from_slice(host);
+        head.extend_from_slice(b"\r\n\r\n");
+        head
+    };
+    let sound: [&[u8]; 10] = [
+        b"example.com",
+        b"localhost:8080",
+        b"127.0.0.1:443",
+        b"[::1]",
+        b"[2001:db8::1]:8443",
+        b"[v1.fe80::a+en1]",
+        b"api.example.com:",
+        b"xn--bcher-kva.example",
+        b"a%2Db.example",
+        b"sub_delims!$&'()*+,;=",
+    ];
+    for host in sound {
+        assert!(read(&head(host), LIMITS).is_ok(), "{}", host.escape_ascii());
+    }
+    let unsound: [&[u8]; 13] = [
+        b"a b/c@",
+        b"a b",
+        b"a/b",
+        b"user@example.com",
+        b"example.com:80a",
+        b"example.com:80:81",
+        b"[::1",
+        b"[::1]x",
+        b"::1",
+        b"a%2",
+        b"a%zz",
+        b"\"quoted\"",
+        b"exa\xc3\xa9mple",
+    ];
+    for host in unsound {
+        assert_eq!(rejected(&head(host)), Rejection::Host, "{}", host.escape_ascii());
+    }
+    // In HTTP/1.0, which needs none, one is checked all the same.
+    assert_eq!(rejected(b"GET / HTTP/1.0\r\nHost: a b\r\n\r\n"), Rejection::Host);
+}
+
+#[test]
 fn the_framing_each_head_decides() {
     let head = |fields: &str| {
         let mut head = Vec::from(&b"POST / HTTP/1.1\r\nHost: h\r\n"[..]);

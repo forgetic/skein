@@ -581,13 +581,20 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
   `HTTP/x.y`, exactly so: one that is not is rejected rather than
   repaired (RFC 9112, 3). The method is a token, and one of `Method`'s,
   the methods an API's client sends; the target is visible ASCII, kept as
-  it came, in whatever form the client wrote it. A minor version past 1
-  is read as 1.1.
+  it came, in whatever form the client wrote it. In absolute form its
+  authority names the host, and `Host` is to be ignored (RFC 9112,
+  3.2.2): the server still checks `Host`, and the side above, which
+  reads the target, takes the host from it. A minor version past 1 is
+  read as 1.1.
 - **A field** is read as the client reads one (3.2), but an obsolete
   fold, or whitespace before the first field, is rejected (RFC 9112, 5.2
   lets a server).
 - **At the blank line:** one `Host` in HTTP/1.1, at most one in HTTP/1.0
-  (RFC 9112, 3.2); then the framing (RFC 9112, 6.1 and 6.3):
+  (RFC 9112, 3.2), and that one a host and a port, `uri-host [":"
+  port]` (RFC 9110, 7.2): an IP literal in brackets, or a name or an IPv4
+  address of unreserved bytes, sub-delimiters and percent-escapes, then
+  digits, or empty, as a client sends it for a target with no authority;
+  `a b/c@` is no host. Then the framing (RFC 9112, 6.1 and 6.3):
   `Transfer-Encoding` is read only in HTTP/1.1 and only alone, so in
   HTTP/1.0 or beside a `Content-Length` it is faulty framing, as it is
   how requests are smuggled; its codings end with `chunked`, given once,
@@ -613,7 +620,7 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
   | `Header` | a field line that is not a field, or a fold | 400 |
   | `HeadTooLong` | a head past `Limits::head` | 431 |
   | `TooManyHeaders` | more than `Limits::headers` fields | 431 |
-  | `Host` | no `Host` in HTTP/1.1, or more than one | 400 |
+  | `Host` | no `Host` in HTTP/1.1, more than one, or one that is not a host and a port | 400 |
   | `Framing` | framing that cannot be read | 400 |
   | `Coding` | a transfer coding other than `chunked` | 501 |
   | `BodyTooLong` | a body by length past `Limits::body` | 413 |

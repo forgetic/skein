@@ -148,10 +148,10 @@ fn trim_end(value: &[u8]) -> &[u8] {
 /// random edit seldom lands: another major version, a method the server
 /// does not know, an obsolete fold, whitespace before a colon, both
 /// framing headers, a coding not undone, two lengths, a chunk size past a
-/// `u64`, no `Host`, a field past the head, too many fields, a request line
-/// past the head, a body past the limit, by length or in chunks, a length
-/// with a sign, a trailer section that never ends, chunk extensions past
-/// the head in all, or HTTP/2's preface.
+/// `u64`, no `Host` or one that names none, a field past the head, too many
+/// fields, a request line past the head, a body past the limit, by length
+/// or in chunks, a length with a sign, a trailer section that never ends,
+/// chunk extensions past the head in all, or HTTP/2's preface.
 #[must_use]
 pub fn corrupt(rng: &mut Rng, client: &[u8]) -> Vec<u8> {
     let mut out = client.to_vec();
@@ -185,7 +185,8 @@ pub fn corrupt(rng: &mut Rng, client: &[u8]) -> Vec<u8> {
             }
         }
         8 => {
-            // Every line of the head that is a `Host`, gone.
+            // Every line of the head that is a `Host`, gone, and half the
+            // time one that names no host in their place.
             let end = find(&out, b"\n\r\n").or_else(|| find(&out, b"\n\n")).map_or(out.len(), |at| at + 1);
             let mut head: Vec<u8> = Vec::new();
             for line in out[..end].split_inclusive(|&byte| byte == b'\n') {
@@ -195,6 +196,10 @@ pub fn corrupt(rng: &mut Rng, client: &[u8]) -> Vec<u8> {
             }
             head.extend_from_slice(&out[end..]);
             out = head;
+            if rng.chance(500) {
+                let host = pick(rng, &["a b/c@", "user@example.com", "[::1", "example.com:8o", "a%zz", "a/b"]);
+                insert(&mut out, format!("Host: {host}\r\n").as_bytes());
+            }
         }
         9 => {
             let mut huge = b"X-Huge: ".to_vec();

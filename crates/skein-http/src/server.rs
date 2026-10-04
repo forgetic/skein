@@ -256,7 +256,10 @@ pub enum Reuse {
 pub struct Call {
     pub method: Method,
     /// The request target, as it came: visible ASCII, at least one byte, in
-    /// whatever form the client wrote it (RFC 9112, 3.2).
+    /// whatever form the client wrote it (RFC 9112, 3.2). In absolute form,
+    /// its authority names the host, and `Host` is to be ignored (RFC 9112,
+    /// 3.2.2): the server checks `Host` all the same, and leaves which
+    /// names the host to the side above, which reads the target.
     pub target: Box<[u8]>,
     pub version: Version,
     /// The fields, in the order the head gave them.
@@ -333,8 +336,8 @@ pub enum Rejection {
     HeadTooLong,
     /// The head holds more than [`Limits::headers`] fields: 431.
     TooManyHeaders,
-    /// No `Host` in an HTTP/1.1 request, or more than one in any (RFC 9112,
-    /// 3.2): 400.
+    /// No `Host` in an HTTP/1.1 request, more than one in any (RFC 9112,
+    /// 3.2), or one that is not a host and a port (RFC 9110, 7.2): 400.
     Host,
     /// The body's framing cannot be read: `Transfer-Encoding` in HTTP/1.0
     /// or beside a `Content-Length`, codings that do not end with `chunked`
