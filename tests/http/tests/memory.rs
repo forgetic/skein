@@ -4,13 +4,14 @@
 //! never more than its `worst_case`.
 //!
 //! What the connection holds is made before the meter: the queues, the
-//! stream below and its buffer. Each delivery is made between steps, by the
-//! stream below, and is the machine's to count from when it is handed over
-//! (lib.md, 7); so is a piece of the request body, which the client passes
-//! on in the same step. A call is the side above's, read and dropped by the
-//! step that writes it: that step is checked against the worst case and the
-//! call's own size. What a step emits is handed out: dropped before the
-//! check, as its receiver's.
+//! stream below and its buffer. An input moved into a step was counted by
+//! whoever made it (testing.md, 5). Each delivery is made between steps, by
+//! the stream below, to the machine's demand: the machine's worst case
+//! covers it. A call, and a piece of the request body, which the client
+//! passes on in the same step, are the side above's, which made them: the
+//! step that takes one is checked against the worst case and the input's
+//! own size. What a step emits is handed out: dropped before the check, as
+//! the next step's input.
 
 use std::mem::size_of;
 
@@ -84,6 +85,10 @@ fn exchange(limits: Limits, call: &Call, upload: usize, response: &[u8], read: R
             return Ran { most, done: flags.done };
         }
         let input = next(&mut flags, &mut intake, &limits, read, interrupt, steps);
+        let input_size = match &input {
+            Input::Down(Request::Upload(Down::Send(piece))) => u64::try_from(piece.len()).expect("fits a u64"),
+            Input::Up(_) | Input::Down(_) => 0,
+        };
         meter.start();
         match input {
             Input::Up(ev) => client::up(&mut client, &env, ev, &mut above, &mut below),
@@ -91,7 +96,7 @@ fn exchange(limits: Limits, call: &Call, upload: usize, response: &[u8], read: R
         }
         let step = meter.end();
         flags.take(&mut above, &mut below);
-        most = most.max(meter.check(step, bound, &what));
+        most = most.max(meter.check(step, bound + input_size, &what));
     }
     panic!("{what}: an exchange is read in a few steps a byte");
 }
@@ -343,16 +348,18 @@ fn events(limits: sse::Limits, stream: &[u8], close: Option<u32>) -> u64 {
     let mut over = false;
     for steps in 0..100_000 {
         let closing = close == Some(steps) || over;
+        // The delivery, made between steps to the reader's demand.
+        let delivered = match (closing, demanded.take()) {
+            (false, Some(read)) => Some(match intake.meet(read) {
+                Some(bytes) => Up::Bytes(bytes),
+                None => Up::End,
+            }),
+            (true, _) | (false, None) => None,
+        };
         meter.start();
-        match (closing, demanded.take()) {
+        match (closing, delivered) {
             (true, _) => sse::down(&mut reader, &env, sse::Request::Close, &mut above, &mut below),
-            (false, Some(read)) => {
-                let ev = match intake.meet(read) {
-                    Some(bytes) => Up::Bytes(bytes),
-                    None => Up::End,
-                };
-                sse::up(&mut reader, &env, ev, &mut above, &mut below);
-            }
+            (false, Some(ev)) => sse::up(&mut reader, &env, ev, &mut above, &mut below),
             (false, None) => sse::down(&mut reader, &env, sse::Request::Next, &mut above, &mut below),
         }
         let step = meter.end();

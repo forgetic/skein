@@ -286,10 +286,11 @@ pub struct Limits {
   holds the next within `head`, and as much again while a fold joins a
   value; and, once the body is read, a delivery or the carry-over an
   exchange leaves unread (`read`, a line of the framing being within the
-  `2 × head` already counted). A delivery is the client's to count
-  (lib.md, 7); a call is the side above's, read and dropped by the step
-  that writes it; what goes up is the side above's from when it is
-  emitted. `None` for a head shorter than a blank line, a read of
+  `2 × head` already counted). A delivery is made to the client's
+  demand, so it counts it; a call and a piece of the request body are
+  counted by the side above, which made them, and the step that takes one
+  reads it and drops it or passes it on (testing.md, 5); what goes up is
+  handed out when it is emitted. `None` for a head shorter than a blank line, a read of
   nothing, or room for nothing of a request body (`send` of 0), which
   no upload could get past.
 - **`largest_read`** is the larger of `head` and `read`, and at least 2;

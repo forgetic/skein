@@ -213,9 +213,11 @@ is built at capacities from 0 to 300, filled to them, emptied and filled
 again, every operation a step of the meter, and what it held of its own is
 never more than `worst_case(capacity)`. What an item owns is its owner's
 to count, so the items own no heap; they come in several sizes and
-alignments, up to 64 bytes, as a container's price depends on both. What
-an operation hands out (an item taken, a delivery, a list moved into a
-box) is its receiver's.
+alignments, up to 64 bytes, as a container's price depends on both. An
+input moved into a step was counted by whoever made it; the step's bound
+covers what it keeps and what it allocates (testing.md, 5). What an
+operation hands out (an item taken, a delivery, a list moved into a box)
+is no longer the container's, and the meter takes it off.
 
 - **A slab, a queue, a list, a stack and an intake** are allocated once,
   at their capacity, and hold exactly their worst case from the start.

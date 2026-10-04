@@ -122,9 +122,11 @@ pub fn largest_room(limits: &Limits) -> u32 {
 /// (a line of its framing, within the twice [`Limits::head`] already
 /// counted, or a piece, at most [`Limits::read`]) or the carry-over an
 /// exchange leaves unread, moved out of the intake when it ends. A
-/// delivery is the client's to count (lib.md, 7). A call is the side
-/// above's, read and dropped by the step that writes it; what goes up (a
-/// response, the body's bytes) is the side above's from when it is emitted.
+/// delivery is made to the client's demand, so it counts it. A call and a
+/// piece of the request body are counted by the side above, which made
+/// them, and the step that takes one reads it and drops it or passes it on
+/// (testing.md, 5); what goes up (a response, the body's bytes) is handed
+/// out when it is emitted.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
     if limits.head < 2 || limits.read == 0 || limits.send == 0 {

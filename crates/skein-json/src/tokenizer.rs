@@ -84,8 +84,9 @@ pub fn largest_demand(limits: &Limits) -> u32 {
 ///
 /// It is the stack of open objects and arrays and the text of the string or
 /// number being read, both allocated when the tokenizer is made, and the
-/// delivery it reads: a delivery is its receiver's to count (lib.md, 7),
-/// held for the step that reads it, and at most [`largest_demand`] bytes. A
+/// delivery it reads: a delivery is made to its demand, so it counts it
+/// (testing.md, 5), held for the step that reads it, and at most
+/// [`largest_demand`] bytes. A
 /// token's box is the side above's to count from when it is emitted.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
