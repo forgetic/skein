@@ -307,6 +307,7 @@ fn limits_must_hold_a_connection_the_refusals_and_a_deadline() {
     assert!(!Limits { line: 8, ..LIMITS }.is_usable(), "too short for too long");
     assert!(Limits { line: 9, ..LIMITS }.is_usable());
     assert!(!Limits { idle: Duration::ZERO, ..LIMITS }.is_usable());
+    assert!(!Limits { retry: Duration::ZERO, ..LIMITS }.is_usable(), "a retry that waits");
     assert_eq!(LIMITS.largest_read(), 16);
     assert_eq!(LIMITS.largest_room(), 16);
 }

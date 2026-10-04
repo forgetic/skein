@@ -26,6 +26,10 @@ pub struct Limits {
     /// How far each idle deadline is spread past `idle`, drawn from the seed,
     /// so that connections opened together do not all expire together.
     pub spread: Duration,
+    /// How long the listener waits to listen again after io refused it for
+    /// want of resources (`Error::Busy`, io.md, 2). Never zero, or it would
+    /// spin while the shortage lasts.
+    pub retry: Duration,
 }
 
 impl Limits {
@@ -44,14 +48,15 @@ impl Limits {
     }
 
     /// Whether the layer can run under these limits: a connection, a line
-    /// that holds the longest refusal, and an idle deadline that waits.
+    /// that holds the longest refusal, and an idle deadline and a retry that
+    /// wait.
     #[must_use]
     pub fn is_usable(&self) -> bool {
         let holds_refusals = match usize::try_from(self.line) {
             Ok(line) => line >= TOO_LONG.len() && line >= BUSY.len(),
             Err(_) => true,
         };
-        self.conns > 0 && holds_refusals && self.idle.as_nanos() > 0
+        self.conns > 0 && holds_refusals && self.idle.as_nanos() > 0 && self.retry.as_nanos() > 0
     }
 }
 

@@ -23,7 +23,13 @@ use crate::{Limits, MAX_OUT_DOWN, MAX_OUT_FIRE, MAX_OUT_RESUME, MAX_OUT_UP, MaxO
 
 /// Tiny limits: two connections, lines of sixteen bytes, a second idle and
 /// no spread, so that deadlines are exact.
-const LIMITS: Limits = Limits { conns: 2, line: 16, idle: Duration::from_secs(1), spread: Duration::ZERO };
+const LIMITS: Limits = Limits {
+    conns: 2,
+    line: 16,
+    idle: Duration::from_secs(1),
+    spread: Duration::ZERO,
+    retry: Duration::from_millis(10),
+};
 
 const SEED: u64 = 7;
 

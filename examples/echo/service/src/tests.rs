@@ -30,7 +30,13 @@ const fn limits() -> Limits {
             close_timeout: Duration::from_secs(1),
             retry: Duration::from_millis(10),
         },
-        protocol: protocol::Limits { conns: 2, line: 16, idle: Duration::from_secs(2), spread: Duration::ZERO },
+        protocol: protocol::Limits {
+            conns: 2,
+            line: 16,
+            idle: Duration::from_secs(2),
+            spread: Duration::ZERO,
+            retry: Duration::from_millis(10),
+        },
         domain: domain::Limits { sessions: 1 },
         queue: Limits::LEAST_QUEUE,
     }

@@ -74,6 +74,7 @@ A foreign-style line protocol, so scanned framing (programming-model.md,
 | protocol | `conns` | connections at once: an accepted socket past it is rejected |
 | protocol | `line` | the longest line, `\n` included, and the room each answer asks for: at least the longest refusal |
 | protocol | `idle`, `spread` | the idle deadline, and how far it is spread |
+| protocol | `retry` | how long the listener waits to listen again after io refused it for want of resources |
 | io | io.md, 2 | `intake` and `output` at least `line`: the protocol's largest read and room |
 | service | `queue` | each queue between the stages, at least the largest `MAX_OUT` |
 
@@ -144,7 +145,7 @@ granted is progress (programming-model.md, 7).
 | Admitting, Answering | `End` | the same, the end noted |
 | Greeting, Reading, Draining | `End` | Closing: `Close`, `Gone` if admitted |
 | Greeting, Reading, Draining | the idle deadline | Closing: `Close`, `Gone` if admitted |
-| any open state | `Failed` | Closing: `Close`, `Gone` once no call is out |
+| any open state | `Failed` | Closing: `Close`, and `Gone` if the session is known; in Admitting, once the domain answers |
 | Closing | the reply to its call | `Admitted`: its session owed `Gone`; `Busy`, `Echo`: dropped |
 | Closing | `Bytes`, `Room`, `End`, `Failed` | ignored: told before io took the close |
 | Closing | `Closed` | retired once no call is out and nothing is owed |
@@ -157,10 +158,13 @@ granted is progress (programming-model.md, 7).
 A `Gone` owed by a down-pass cell (a reply that finds the connection
 closing) is up from the down pass (programming-model.md, 2): the
 connection goes on the protocol's ready list, and `resume` tells it.
-`Gone` comes only once no call is out, so the domain never answers for a
-session it has retired. A connection retires once io told `Closed`, no
-call is out, and its session was told gone: the bindings above and below
-have both ended (programming-model.md, 5.2).
+`Gone` always comes after the session's last call in the domain's queue,
+which is first in, first out: a stream that fails while its line is out
+tells `Gone` at once, behind the line, which the domain answers first. So
+the domain never answers for a session it has retired. A connection
+retires once io told `Closed`, no call is out, and its session was told
+gone: the bindings above and below have both ended (programming-model.md,
+5.2).
 
 **The listener.**
 
@@ -174,9 +178,18 @@ have both ended (programming-model.md, 5.2).
 | Listening | `Failed` (its accept stopped) | Closing: `Close` |
 | Listening | `Stop` | Closing: `Close` |
 | Closing | `Accepted` | `Reject`: announced before io took the close |
-| Failed, Closing | `Closed` | Closed |
-| Unopened | `Stop` | Closed |
-| Failed, Closing, Closed | `Stop` | ignored |
+| Failed | `Closed` | `Busy`, and not stopped: Backoff, its deadline `retry` on; otherwise Closed, the failure kept |
+| Backoff | its deadline | Opening: `Listen` |
+| Closing | `Closed` | Closed |
+| Unopened, Backoff | `Stop` | Closed |
+| Failed | `Stop` | Failed, stopped |
+| Closing, Closed | `Stop` | ignored |
+
+io's `Busy` says that nothing was made and the request may be made again
+later (io.md, 2): a listen refused for want of descriptors or buffers is a
+shortage, not a failure, so the listener listens again after `retry`.
+Any other failure stops it for good, and the service with it: `main` then
+says why and exits.
 
 **The session** is active from `Open` admitted to `Gone`, and counts the
 lines it answered. **The domain** admits until `Shutdown`, then answers
@@ -231,19 +244,32 @@ processes, each a host of an `iterate` (a service, or a fake client):
 - **Trace and replay:** a run returns the simulator's trace, which the
   same seed replays.
 - **Memory** (simulator.md, 5): under the counting allocator, the heap
-  that grew within the processes' own calls, at the peak of each
-  iteration, against the sum of their worst cases. What grew within the
-  simulator's calls and the harness's is left out, by metering around the
-  processes' calls rather than theirs.
+  that grew within the processes' own calls (building each, and each
+  `iterate`), at its peak within each call, against the sum of their
+  worst cases. What grew within the simulator's calls and the harness's is
+  left out, by metering around the processes' calls rather than theirs.
+  A process frees in one call what it allocated in another, so the heap
+  falls below where a call began: the counting allocator's span measures
+  a call's growth signed, where its meter, which checks a step from a base
+  it never falls below, cannot.
+- **Contracts:** each process keeps its own as it goes, as its loop is
+  its own: the echo's and the fake client's `iterate` assert each call
+  within its `MAX_OUT`, the protocol layer one reply per call, the fake
+  client the echo's contract; the simulator, the kernel boundary's.
 - **Settled:** once the referee passed and nothing is busy, every process
   holds nothing, the simulator has nothing in flight, and every
   descriptor is closed.
 - **The referee** holds a scenario's expectations, each with a deadline:
   safety on every observation, liveness as the deadline; it may also
-  inject what belongs to no fake, such as a shutdown.
+  inject what belongs to no fake. The echo's tells the fake clients the
+  echo's address once it listens, as a directory would, and shuts the
+  echo down once the clients are done, or at a given time, so that the
+  world settles.
 - **The real loop** runs the same processes and referee, each process on
-  a ring of its own (as a process would be), in one thread on loopback,
-  with deadlines on the real clock.
+  a ring of its own (as a process would be: its tokens are its own), in
+  one thread on loopback, with deadlines on the real clock. One thread
+  cannot block on several rings, so each turn enters every ring without
+  waiting, and an idle loop blocks on one ring for a millisecond at most.
 
 ## 7. Testing
 
@@ -256,9 +282,17 @@ processes, each a host of an `iterate` (a service, or a fake client):
   clients; a line too long; a busy refusal at the entrance, and a
   rejection; an idle timeout; a client that stops reading, stopped at the
   server by backpressure; closes and resets in every state; and a
-  shutdown. Focused seeds in the default suite; sweeps in the fuzzy one,
-  asserting that every fault fell. Every binary checks memory at every
-  iteration.
+  shutdown. Calm, each scenario holds whole; under faults, a stream may
+  break, so each expects only that every connection finishes, while the
+  fake clients still check every answer they get, and the idle deadline's
+  "not before" is calm's alone: a server whose side of a stream broke
+  ends it at once, which the client cannot tell from an early idle. Each
+  admission point's scenario checks what the clients saw for evidence
+  that it was reached; the protocol layer's rejection shows as the end
+  without a word, or as a reset when the client's first line was already
+  there unread. Focused seeds in the default suite; sweeps in the fuzzy
+  one, asserting that every fault fell. Every binary checks memory at
+  every iteration.
 - **The real loop** (`tests/echo/tests/real.rs`): the echo and its fake
   clients in one loop over the shell's rings, on loopback, quick, failing
   clearly where `io_uring` is unusable.

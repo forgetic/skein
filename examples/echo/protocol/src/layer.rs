@@ -20,6 +20,8 @@ const LISTENER: Token = Token::new(u64::MAX);
 /// The protocol layer's state.
 #[derive(Debug)]
 pub struct Protocol {
+    /// Where the listener listens.
+    addr: Addr,
     listener: Listener,
     conns: Slab<Conn>,
     tables: Tables,
@@ -41,10 +43,8 @@ pub(crate) struct Tables {
 /// The listener (examples.md, 3.4).
 #[derive(Debug)]
 enum Listener {
-    /// On the ready list: `resume` asks io to listen at `addr`.
-    Unopened {
-        addr: Addr,
-    },
+    /// On the ready list: `resume` asks io to listen.
+    Unopened,
     /// `Listen` asked; whether the domain asked it to stop meanwhile.
     Opening {
         stop: bool,
@@ -57,9 +57,16 @@ enum Listener {
     Closing {
         error: Option<Error>,
     },
-    /// The listen failed: io closes what it made.
+    /// The listen failed: io closes what it made; whether the domain asked it
+    /// to stop meanwhile.
     Failed {
         error: Error,
+        stop: bool,
+    },
+    /// The listen was refused for want of resources (`Error::Busy`): it is
+    /// asked again at `at`.
+    Backoff {
+        at: Time,
     },
     Closed {
         error: Option<Error>,
@@ -87,7 +94,8 @@ impl Protocol {
     pub fn new(limits: &Limits, addr: Addr, seed: u64) -> Protocol {
         assert!(limits.is_usable(), "the protocol layer runs only under usable limits (Limits::is_usable)");
         Protocol {
-            listener: Listener::Unopened { addr },
+            addr,
+            listener: Listener::Unopened,
             conns: Slab::with_capacity(limits.conns),
             tables: Tables {
                 deadlines: Deadlines::with_capacity(limits.conns),
@@ -112,27 +120,41 @@ impl Protocol {
     #[must_use]
     pub fn is_ready(&self) -> bool {
         let listen = match self.listener {
-            Listener::Unopened { .. } => true,
+            Listener::Unopened => true,
             Listener::Opening { .. }
             | Listener::Listening { .. }
             | Listener::Closing { .. }
             | Listener::Failed { .. }
+            | Listener::Backoff { .. }
             | Listener::Closed { .. } => false,
         };
         listen || self.shutdown == Shutdown::Asked || !self.tables.ready.is_empty()
     }
 
-    /// When the earliest idle deadline falls due.
+    /// When the earliest deadline falls due: a connection's idle deadline, or
+    /// the listener's next listen.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Time> {
-        self.tables.deadlines.next()
+        let idle = self.tables.deadlines.next();
+        match self.listener {
+            Listener::Backoff { at } => match idle {
+                Some(idle) => Some(idle.min(at)),
+                None => Some(at),
+            },
+            Listener::Unopened
+            | Listener::Opening { .. }
+            | Listener::Listening { .. }
+            | Listener::Closing { .. }
+            | Listener::Failed { .. }
+            | Listener::Closed { .. } => idle,
+        }
     }
 
-    /// Whether an idle deadline is due at `now`. While one is, the loop calls
+    /// Whether a deadline is due at `now`. While one is, the loop calls
     /// `fire`, once io's events are all taken.
     #[must_use]
     pub fn is_due(&self, now: Time) -> bool {
-        match self.tables.deadlines.next() {
+        match self.next_deadline() {
             Some(at) => at <= now,
             None => false,
         }
@@ -144,10 +166,11 @@ impl Protocol {
     pub const fn listening(&self) -> Option<Addr> {
         match self.listener {
             Listener::Listening { addr, .. } => Some(addr),
-            Listener::Unopened { .. }
+            Listener::Unopened
             | Listener::Opening { .. }
             | Listener::Closing { .. }
             | Listener::Failed { .. }
+            | Listener::Backoff { .. }
             | Listener::Closed { .. } => None,
         }
     }
@@ -156,9 +179,11 @@ impl Protocol {
     #[must_use]
     pub const fn failure(&self) -> Option<Error> {
         match self.listener {
-            Listener::Failed { error } => Some(error),
+            Listener::Failed { error, .. } => Some(error),
             Listener::Closing { error } | Listener::Closed { error } => error,
-            Listener::Unopened { .. } | Listener::Opening { .. } | Listener::Listening { .. } => None,
+            Listener::Unopened | Listener::Opening { .. } | Listener::Listening { .. } | Listener::Backoff { .. } => {
+                None
+            }
         }
     }
 
@@ -174,11 +199,12 @@ impl Protocol {
     pub fn is_empty(&self) -> bool {
         let closed = match self.listener {
             Listener::Closed { .. } => true,
-            Listener::Unopened { .. }
+            Listener::Unopened
             | Listener::Opening { .. }
             | Listener::Listening { .. }
             | Listener::Closing { .. }
-            | Listener::Failed { .. } => false,
+            | Listener::Failed { .. }
+            | Listener::Backoff { .. } => false,
         };
         closed
             && self.conns.is_empty()
@@ -208,15 +234,15 @@ impl Tables {
 /// `Shutdown` told the domain; or a connection's `Gone`.
 pub fn resume(proto: &mut Protocol, _env: &Env<Limits>, up: &mut Queue<Call>, down: &mut Queue<Io>) {
     match proto.listener {
-        Listener::Unopened { addr } => {
-            down.push(Io::Listen { owner: LISTENER, addr });
-            proto.listener = Listener::Opening { stop: false };
+        Listener::Unopened => {
+            proto.listener = listen(proto.addr, down);
             return;
         }
         Listener::Opening { .. }
         | Listener::Listening { .. }
         | Listener::Closing { .. }
         | Listener::Failed { .. }
+        | Listener::Backoff { .. }
         | Listener::Closed { .. } => {}
     }
     if proto.shutdown == Shutdown::Asked {
@@ -263,7 +289,7 @@ pub fn up(proto: &mut Protocol, env: &Env<Limits>, event: Told, up: &mut Queue<C
         }
         Told::Closed { owner } => {
             if owner == LISTENER {
-                listener_closed(proto);
+                listener_closed(proto, env);
             } else {
                 let id = Id::<Conn>::from_token(owner);
                 conn::closed(proto.conns.get_mut(id).expect("a connection outlives what io tells it"));
@@ -273,9 +299,23 @@ pub fn up(proto: &mut Protocol, env: &Env<Limits>, event: Told, up: &mut Queue<C
     }
 }
 
-/// Fires the earliest idle deadline due at `env.now`, if one is, emitting at
-/// most [`MAX_OUT_FIRE`](crate::MAX_OUT_FIRE): its connection is closed.
+/// Fires the earliest deadline due at `env.now`, if one is, emitting at most
+/// [`MAX_OUT_FIRE`](crate::MAX_OUT_FIRE): the listener listens again, or an
+/// idle connection is closed.
 pub fn fire(proto: &mut Protocol, env: &Env<Limits>, up: &mut Queue<Call>, down: &mut Queue<Io>) {
+    match proto.listener {
+        Listener::Backoff { at } if at <= env.now => {
+            proto.listener = listen(proto.addr, down);
+            return;
+        }
+        Listener::Unopened
+        | Listener::Opening { .. }
+        | Listener::Listening { .. }
+        | Listener::Closing { .. }
+        | Listener::Failed { .. }
+        | Listener::Backoff { .. }
+        | Listener::Closed { .. } => {}
+    }
     let Some(id) = proto.tables.deadlines.expire(env.now) else {
         return;
     };
@@ -328,10 +368,18 @@ fn accepted(proto: &mut Protocol, socket: Token, env: &Env<Limits>, down: &mut Q
             Err(_refused) => down.push(Io::Reject { socket }),
         },
         Listener::Closing { .. } => down.push(Io::Reject { socket }),
-        Listener::Unopened { .. } | Listener::Opening { .. } | Listener::Failed { .. } | Listener::Closed { .. } => {
-            unreachable!("io announces a socket only to a listener that listens")
-        }
+        Listener::Unopened
+        | Listener::Opening { .. }
+        | Listener::Failed { .. }
+        | Listener::Backoff { .. }
+        | Listener::Closed { .. } => unreachable!("io announces a socket only to a listener that listens"),
     }
+}
+
+/// io asked to listen at `addr`.
+fn listen(addr: Addr, down: &mut Queue<Io>) -> Listener {
+    down.push(Io::Listen { owner: LISTENER, addr });
+    Listener::Opening { stop: false }
 }
 
 fn listening(proto: &mut Protocol, listener: Token, addr: Addr, down: &mut Queue<Io>) {
@@ -342,10 +390,11 @@ fn listening(proto: &mut Protocol, listener: Token, addr: Addr, down: &mut Queue
             down.push(Io::Close { entity: listener });
             Listener::Closing { error: None }
         }
-        Listener::Unopened { .. }
+        Listener::Unopened
         | Listener::Listening { .. }
         | Listener::Closing { .. }
         | Listener::Failed { .. }
+        | Listener::Backoff { .. }
         | Listener::Closed { .. } => unreachable!("Listening is told once, to the Listen"),
     };
 }
@@ -355,25 +404,37 @@ fn listening(proto: &mut Protocol, listener: Token, addr: Addr, down: &mut Queue
 fn listener_failed(proto: &mut Protocol, error: Error, down: &mut Queue<Io>) {
     let state = mem::replace(&mut proto.listener, CLOSED);
     proto.listener = match state {
-        Listener::Opening { .. } => Listener::Failed { error },
+        Listener::Opening { stop } => Listener::Failed { error, stop },
         Listener::Listening { listener, .. } => {
             down.push(Io::Close { entity: listener });
             Listener::Closing { error: Some(error) }
         }
         // Told before io took the close.
         Listener::Closing { .. } => Listener::Closing { error: Some(error) },
-        Listener::Unopened { .. } | Listener::Failed { .. } | Listener::Closed { .. } => {
+        Listener::Unopened | Listener::Failed { .. } | Listener::Backoff { .. } | Listener::Closed { .. } => {
             unreachable!("a listener fails once, while it is open")
         }
     };
 }
 
-fn listener_closed(proto: &mut Protocol) {
+/// io closed the listener: after its close, or after its listen failed. A
+/// listen refused for want of resources is asked again after
+/// `Limits::retry`, as io's `Busy` allows (io.md, 2); any other failure
+/// stops the listener for good, and the service with it.
+fn listener_closed(proto: &mut Protocol, env: &Env<Limits>) {
     let state = mem::replace(&mut proto.listener, CLOSED);
     proto.listener = match state {
-        Listener::Failed { error } => Listener::Closed { error: Some(error) },
+        Listener::Failed { error: Error::Busy, stop: false } => {
+            Listener::Backoff { at: env.now.saturating_add(env.limits.retry) }
+        }
+        Listener::Failed { stop: true, .. } => Listener::Closed { error: None },
+        Listener::Failed { error, stop: false } => Listener::Closed { error: Some(error) },
         Listener::Closing { error } => Listener::Closed { error },
-        Listener::Unopened { .. } | Listener::Opening { .. } | Listener::Listening { .. } | Listener::Closed { .. } => {
+        Listener::Unopened
+        | Listener::Opening { .. }
+        | Listener::Listening { .. }
+        | Listener::Backoff { .. }
+        | Listener::Closed { .. } => {
             unreachable!("io tells the listener Closed after its close, or after its listen failed")
         }
     };
@@ -383,13 +444,14 @@ fn listener_closed(proto: &mut Protocol) {
 fn stop(proto: &mut Protocol, down: &mut Queue<Io>) {
     let state = mem::replace(&mut proto.listener, CLOSED);
     proto.listener = match state {
-        Listener::Unopened { .. } => Listener::Closed { error: None },
+        Listener::Unopened | Listener::Backoff { .. } => Listener::Closed { error: None },
         Listener::Opening { .. } => Listener::Opening { stop: true },
+        Listener::Failed { error, .. } => Listener::Failed { error, stop: true },
         Listener::Listening { listener, .. } => {
             down.push(Io::Close { entity: listener });
             Listener::Closing { error: None }
         }
-        listener @ (Listener::Closing { .. } | Listener::Failed { .. } | Listener::Closed { .. }) => listener,
+        listener @ (Listener::Closing { .. } | Listener::Closed { .. }) => listener,
     };
 }
 

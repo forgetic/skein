@@ -5,9 +5,10 @@
 
 use skein_echo_domain::{Event as Call, Request as Domain};
 use skein_io::{Error, Event as Told, Request as Io};
+use skein_lib::Time;
 use skein_lib::stream::Up;
 
-use super::{LISTENER, Rig, addr, close, socket, stream};
+use super::{LIMITS, LISTENER, Rig, addr, close, socket, stream};
 
 #[test]
 fn the_listener_listens_from_the_ready_list_and_keeps_its_address() {
@@ -30,6 +31,45 @@ fn a_listen_that_fails_is_closed_by_io_and_its_failure_kept() {
     rig.up(Told::Closed { owner }).nothing();
     assert_eq!(rig.proto.failure(), Some(Error::Other), "kept once closed, for main to say why it stopped");
     assert!(rig.proto.is_empty(), "nothing left: the service has stopped");
+}
+
+#[test]
+fn a_listen_refused_for_want_of_resources_is_asked_again_after_the_retry() {
+    let mut rig = Rig::new();
+    let out = rig.resume();
+    let [Io::Listen { owner, .. }] = out.io.as_slice() else { panic!("listens: {out:?}") };
+    let owner = *owner;
+    rig.up(Told::Failed { owner, error: Error::Busy }).nothing();
+    rig.up(Told::Closed { owner }).nothing();
+    assert_eq!(rig.proto.failure(), None, "a shortage is not a failure");
+    assert!(!rig.proto.is_empty(), "it will listen again");
+    let again = Time::ZERO.saturating_add(LIMITS.retry);
+    assert_eq!(rig.proto.next_deadline(), Some(again));
+    assert!(!rig.proto.is_due(Time::ZERO));
+    rig.at(again);
+    let out = rig.fire();
+    assert_eq!(out.io, [Io::Listen { owner, addr: addr() }], "asked again, at the same address");
+    rig.up(Told::Listening { owner, listener: LISTENER, addr: addr() }).nothing();
+    assert_eq!(rig.proto.listening(), Some(addr()));
+}
+
+#[test]
+fn a_stop_while_the_listener_waits_to_listen_again_closes_it() {
+    let mut rig = Rig::new();
+    let out = rig.resume();
+    let [Io::Listen { owner, .. }] = out.io.as_slice() else { panic!("listens: {out:?}") };
+    let owner = *owner;
+    rig.up(Told::Failed { owner, error: Error::Busy }).nothing();
+    rig.down(Domain::Stop).nothing();
+    rig.up(Told::Closed { owner }).nothing();
+    assert!(rig.proto.is_empty(), "stopped while its listen failed: it will not listen again");
+    let mut rig = Rig::new();
+    let _listen = rig.resume();
+    rig.up(Told::Failed { owner, error: Error::Busy }).nothing();
+    rig.up(Told::Closed { owner }).nothing();
+    rig.down(Domain::Stop).nothing();
+    assert_eq!(rig.proto.next_deadline(), None, "stopped while it waited");
+    assert!(rig.proto.is_empty());
 }
 
 #[test]

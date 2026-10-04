@@ -100,6 +100,7 @@ const fn limits() -> Limits {
             line: 4096,
             idle: Duration::from_secs(60),
             spread: Duration::from_secs(6),
+            retry: Duration::from_millis(100),
         },
         domain: skein_echo_domain::Limits { sessions: 1000 },
         queue: 256,
