@@ -303,9 +303,9 @@ for its backend.
 
 ## 10. Not built yet
 
-- **Files on the ring and in the simulator,** with their conformance
-  scenarios (a scratch directory as the root). Their records and rules
-  are built, with sockets'.
+- **Files in the simulator,** with their conformance scenarios, against
+  it and against the ring (a scratch directory as the root). Their
+  records and rules are built, with sockets', and so is the ring's side.
 - **The records for processes,** with their rules and their conformance
   scenarios, when io pulls them.
 - **The descriptor limit on the ring.** The simulator checks it; lowering

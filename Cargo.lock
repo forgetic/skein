@@ -298,8 +298,13 @@ dependencies = [
  "libc",
  "skein-io",
  "skein-lib",
+ "skein-scratch",
  "skein-shell",
 ]
+
+[[package]]
+name = "skein-scratch"
+version = "0.0.0"
 
 [[package]]
 name = "skein-shell"

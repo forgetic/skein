@@ -50,6 +50,17 @@ on the service's own `iterate`.
   never leave the module. An operation's `user_data` is its slot's index
   and generation, so a completion or an async cancel can never name the
   slot's next operation.
+- **Paths are the slot's own.** A record's path or name has no NUL; the
+  slot holds the NUL-terminated copy the kernel reads, made at submit and
+  freed with the slot, beside the `open_how` an `Open` hands over and the
+  `statx` buffer a `Stat` reads back.
+- **Synchronous operations run at submit.** A record that is not a ring
+  operation (listing a directory: `getdents64` has none) is performed when
+  it is submitted, and its completion waits in the table's ready list for
+  the next reap, so io cannot tell it from a ring operation (kernel.md,
+  6). A `List` reads with `getdents64` into one buffer of the table's,
+  copies out what fits the record, and sets the directory's position back
+  to just past the last entry it took.
 - **The `unsafe`, and why it is sound,** is stated in the ring adapter's
   module documentation, case by case: the pointers handed to the kernel,
   entering the ring, the socket address casts, the synchronous calls, and
@@ -61,11 +72,14 @@ on the service's own `iterate`.
 ## 4. The kernel floor
 
 - **One floor, no feature checks.** The first floor is 6.12, an LTS
-  release that has every ring operation io uses. An operation newer than
-  the floor stays synchronous until the floor moves: making a pipe, for
-  example, has been a ring operation only since 6.16. Lowering the floor
-  for a deployment that needs it means making the operations newer than
-  the new floor synchronous, and io cannot see that change.
+  release that has every ring operation io uses: for sockets, and for
+  files `OPENAT2`, `READ`, `WRITE`, `FSYNC`, `STATX`, `RENAMEAT`,
+  `UNLINKAT` and `MKDIRAT`, the newest of them from 5.15. An operation
+  newer than the floor stays synchronous until the floor moves: making a
+  pipe, for example, has been a ring operation only since 6.16; listing a
+  directory has none at all. Lowering the floor for a deployment that
+  needs it means making the operations newer than the new floor
+  synchronous, and io cannot see that change.
 - **The probe at startup** checks the ring for every operation it uses. It
   confirms the floor; it does not choose between features. If an
   operation is missing, or the ring cannot be set up at all (io_uring
@@ -92,7 +106,8 @@ Before its loop, a service's `main`, with the kit:
    memory, and refuses to start past it (programming-model.md, 6.3);
 3. blocks the termination signals that io will read, so they arrive as
    `Shutdown` events (io.md);
-4. opens the first roots for io's files, from configuration (io.md);
+4. opens the first roots for io's files, from configuration, with
+   `open_root` (io.md, 5; kernel.md, 6.1);
 5. resolves the configured peer names into addresses (io.md);
 6. reads certificates, keys and root stores for TLS (tls.md);
 7. reads the seed and opens the kernel.
@@ -151,9 +166,12 @@ and changes no code above io:
 ## 9. Testing
 
 - **The ring's own tests** (`tests/ring`) run on the real kernel, on
-  loopback: its slots and waits, a large transfer through short sends,
-  what it completes itself, the invariants it asserts, and dropping it
-  with operations in flight.
+  loopback and in a scratch directory: its slots and waits, a large
+  transfer through short sends, a large file through its reads and
+  writes, what it completes itself (a `List` among them), a listing's
+  position handed from one `List` to the next across its own buffer, a
+  root opened at startup, the invariants it asserts, and dropping it with
+  operations in flight.
 - **The conformance suite** runs against the ring, each scenario once
   (`tests/conformance/ring`; kernel.md, 8).
 - **The real loop** exercises the rest: the probe at startup, the signal
@@ -171,14 +189,15 @@ and changes no code above io:
 
 ## 11. Not built yet
 
-- **Startup** (section 6): blocking the termination signals, roots, names,
-  and TLS's configuration. The ring's probe is built, and the echo's
-  `main` runs the rest of startup as a service's would (examples.md, 4):
+- **Startup** (section 6): blocking the termination signals, names, and
+  TLS's configuration. The ring's probe is built, and so is `open_root`
+  for roots; the echo's `main` runs the rest of startup as a service's
+  would (examples.md, 4):
   its limits checked, each machine's largest demand within io's caps, and
   the sum of the worst cases within the memory configured, before the
   seed and the kernel. Startup is each service's `main`, with the kit, so
   the kit holds no startup function of its own.
-- **The operations for files and processes,** and the synchronous ones
-  (spawning, signalling, making a pipe, listing a directory), when io
-  pulls them. Sockets are built.
+- **The operations for processes,** and the synchronous ones (spawning,
+  signalling, making a pipe), when io pulls them. Sockets and files are
+  built, listing a directory, the first synchronous one, among them.
 - **The readiness backend** and the deferred optimisations.

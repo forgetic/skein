@@ -1,6 +1,6 @@
 [package]
 name = "skein-ring-tests"
-description = "The ring adapter's own tests, on the real kernel: its slots and waits, what it completes itself, the invariants it asserts"
+description = "The ring adapter's own tests, on the real kernel: its slots and waits, what it completes itself, the invariants it asserts, a listing's position"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ publish.workspace = true
 skein-lib.workspace = true
 skein-io.workspace = true
 skein-shell.workspace = true
+skein-scratch.workspace = true
 libc.workspace = true
 
 # Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.

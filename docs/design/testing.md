@@ -124,6 +124,7 @@ second, which is why it is skein's (testing-strategy.md, 7).
 crates/*/src/tests.rs           step tests; lib's, io's, JSON's, HTTP's and TLS's in a module per area, under src/tests/
 testing/skein-conformance       the conformance suite: the backend interface, the scenarios, the driver, the checks
 testing/skein-heap              the counting allocator, the meter that checks a step against its worst case, and the span a world meters its processes with
+testing/skein-scratch           a scratch directory beneath the system's temporary one, removed when dropped, for tests of files on the real kernel
 testing/skein-world             the world harness: processes' iterate over the simulator or the real ring, the referee, the trace, the heap
 testing/skein-echo-client       the fake echo client, a step machine
 tests/heap                      the counting allocator's own tests, skein-heap-tests
@@ -201,7 +202,7 @@ As of 2026-10-04.
 | simulated worlds | the echo and its fake clients, seven scenarios |
 | real loop | the echo and its fake clients, on loopback |
 | conformance | sockets, against the simulator and the ring |
-| the simulator's and the ring's own tests | sockets |
+| the simulator's and the ring's own tests | sockets; the ring's, files too |
 | the counting allocator | built, with its own tests; lib's worst cases checked against it |
 
 The simulator plays the kernel for sockets, with every fault of

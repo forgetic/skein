@@ -1,0 +1,13 @@
+[package]
+name = "skein-scratch"
+description = "For tests on the real kernel: a scratch directory beneath the system's temporary one, removed when dropped"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Ordinary Rust (programming-model.md, 10.2), held to the step crates' lints
+# as the conformance suite is: its own clippy.toml lets in the std types and
+# formatting it needs.
+[lints]
+workspace = true
