@@ -96,10 +96,11 @@ the live heap against the sum of the worst cases of the services it hosts
 ## 6. Layout
 
 ```
-crates/*/src/tests.rs           step tests; lib's and JSON's in a module per area, under src/tests/
+crates/*/src/tests.rs           step tests; lib's, io's and JSON's in a module per area, under src/tests/
 testing/skein-conformance       the conformance suite: the backend interface, the scenarios, the driver, the checks
 testing/skein-heap              the counting allocator, and the meter that checks a step against its worst case
 tests/heap                      the counting allocator's own tests, skein-heap-tests
+tests/io                        io worlds: io over the simulator, a scripted owner, a referee, skein-io-world
 tests/lib                       lib's comparisons with naive functions, run long, and its worst cases against the counting allocator, skein-lib-tests
 tests/sim                       the simulator's own tests, skein-sim-tests
 tests/ring                      the ring adapter's own tests, skein-ring-tests
@@ -143,9 +144,9 @@ place, with a scoped
 block.
 
 A machine's worlds are a crate of their own, `tests/<machine>`, with its
-transcripts in `transcripts/` beside its tests. The io worlds with the
-minimal machine, and the protocol worlds, find their homes under `tests/`
-when the first of each is built. `scripts/check.sh` runs what CI runs:
+transcripts in `transcripts/` beside its tests. The minimal machine joins
+the io worlds with files and processes; the protocol worlds find their
+home under `tests/` when the first is built. `scripts/check.sh` runs what CI runs:
 formatting, the lints as errors, then the focused suite and the fuzzy
 suite, with nextest (section 7).
 
@@ -155,10 +156,10 @@ As of 2026-10-03.
 
 | Tier | Built |
 |---|---|
-| step tests | lib: every container and value type; io: the kernel records' rules; JSON: the tokenizer and the writer |
+| step tests | lib: every container and value type; io: the kernel records' rules, and every cell of its listener and stream; JSON: the tokenizer and the writer |
 | machine worlds | JSON: the tokenizer, with its transcripts, and the writer against it |
 | protocol worlds | none |
-| io worlds | none: no io yet |
+| io worlds | sockets, over the simulator; one exchange over the ring |
 | simulated worlds | none: no examples |
 | real loop | not yet: no examples |
 | conformance | sockets, against the simulator and the ring |
@@ -191,6 +192,26 @@ reading back what it writes. The fuzzy suite runs 20,000 generated and mutated
 documents and 5,000 cut and mutated transcripts under neighbours drawn
 from each seed, and writes 5,000 documents and reads them back.
 
+io's worlds run io over the simulator with a scripted owner above it and
+a referee beside it, every process in one loop (io.md, 8). Their harness
+checks `MAX_OUT` and the accept batch at every call, both halves of the
+stream contract as it goes, and, once settled, every slab empty, nothing
+in flight and every descriptor closed. Thirteen scenarios, with slabs of
+two to four sockets and caps of a few dozen bytes, reach every admission
+point, each checking its trace for the evidence: accept, bind and reject;
+connects made, refused for a slot and by the peer; connects waiting on a
+full backlog, cancelled; descriptors run out; two listeners under one
+accept batch; a socket discarded for want of a slot; a burst of connects
+past the slab and the refusals; an exchange both ways under demands of
+every kind; backpressure; a refusal mid-upload that still reaches the
+peer; abort; the close deadline; closes and aborts at random moments, in
+every state.
+The focused suite runs each over 4 calm seeds and 3 of chaos, and the
+fuzzy suite over 150 of each, asserting that every fault of the
+simulator fell and that a cancel of each operation io cancels was seen
+to stop it, to come too late and to go unsubmitted. One exchange runs
+through io over the real ring, in the focused suite.
+
 The two suites of testing-strategy.md, section 8, are
 `.config/nextest.toml`'s profiles, each with its budget as a global
 timeout: the focused suite by default, within 15 seconds, and the fuzzy
@@ -200,22 +221,24 @@ with a plain reference run 300 random cases as step tests, and 20,000
 from the same seeds in the fuzzy suite.
 
 Replay: a seed replays to the same trace of submissions and completions,
-and a JSON world to the same run. No state digest yet.
+and a JSON world and an io world to the same run. No state digest yet.
 
 Memory: the counting allocator is temper's heap meter, ported with its
 own tests. Each of lib's containers is checked against its worst case
 (lib.md, 10), in the focused suite, and so are the JSON tokenizer's and
-writer's, a call of an entry point at a time (json.md, 6). No world of
-skein's checks memory yet: its io worlds and simulated worlds are not
-built (section 8).
+writer's, a call of an entry point at a time (json.md, 6), and io (io.md,
+8): driven by hand to its limits and back, every call a step of the
+meter, as an io world's simulator would allocate on the same thread. No
+world of skein's checks memory at every iteration: its simulated worlds
+are not built (section 8).
 
 ## 8. Not built yet
 
 By tier, in the order temper pulls the parts (README.md):
 
-- **io worlds,** with the minimal machine, when the agent's LLM client
-  pulls io sockets. The simulator's files, processes and machine seam
-  come with io's.
+- **io worlds for files and processes,** with the minimal machine and
+  the simulator's files, processes and machine seam, when the worker
+  pulls them. Sockets are built.
 - **Conformance** for files and processes, with a scratch directory as
   the root, when io pulls them; against the readiness backend when it
   exists.
@@ -228,7 +251,8 @@ By tier, in the order temper pulls the parts (README.md):
 
 By check: memory at every iteration of a simulated world, with the world
 harness that runs it (simulator.md, 5); state digests for replay,
-transition coverage, fuzzing.
+transition coverage, fuzzing. Transition coverage of io's handlers needs
+`cargo llvm-cov`, which is not installed.
 
 ## 9. Open questions
 

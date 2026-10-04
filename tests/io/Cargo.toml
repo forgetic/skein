@@ -1,0 +1,36 @@
+[package]
+name = "skein-io-world"
+description = "io worlds: io over the simulator, a scripted owner above it, a referee beside it, and the checks every world makes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-io.workspace = true
+skein-sim.workspace = true
+
+# The ring, for tests/ring.rs; the counting allocator, for tests/memory.rs.
+[dev-dependencies]
+skein-shell.workspace = true
+skein-heap.workspace = true
+
+# Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.
+# tests/clippy.toml bans what would make a run unrepeatable.
+[lints.rust]
+unsafe_code = "forbid"
+elided_lifetimes_in_paths = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_panics_doc = "allow"          # the harness asserts what it relies on by panicking
+missing_errors_doc = "allow"          # an Err is the kernel's answer, documented on skein_io::kernel::Error
+wildcard_enum_match_arm = "deny"      # a new variant must break the tests
+match_wildcard_for_single_variants = "deny"
+unwrap_used = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+disallowed_types = "deny"
+disallowed_methods = "deny"

@@ -8,6 +8,12 @@ use crate::bytes::{count, find, find_from};
 use crate::{Decimal, List, Overflow, Reader, Rng, Writer};
 
 #[test]
+fn a_zeroed_buffer_is_its_length_of_zeros() {
+    assert_eq!(crate::bytes::zeroed(0), Box::from([0_u8; 0]));
+    assert_eq!(crate::bytes::zeroed(3), Box::from([0_u8; 3]));
+}
+
+#[test]
 fn find_gives_the_first_occurrence() {
     assert_eq!(find(b"abacabad", b"aba"), Some(0));
     assert_eq!(find(b"abacabad", b"cab"), Some(3));
