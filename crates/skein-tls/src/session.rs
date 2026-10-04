@@ -136,12 +136,18 @@ pub(crate) fn encrypt(
     let UnbufferedStatus { discard, state } = tls.0.process_tls_records(records.filled_mut());
     let sealed = match state {
         Ok(ConnectionState::WriteTraffic(mut traffic)) => {
-            // Its length first: rustls says how much room it needs.
-            let length = match traffic.encrypt(plain, &mut []) {
-                Ok(written) => written,
-                Err(EncryptError::InsufficientSize(size)) => size.required_size,
-                Err(EncryptError::EncryptExhausted) => return Err(Error::Other),
-            };
+            // Its length first: rustls says how much room it needs. Asked
+            // twice, as a query that finds its keys at their limit schedules
+            // a key update, which the next call writes before the data: the
+            // second query counts it.
+            let mut length = 0;
+            for _ in 0..2_u32 {
+                length = match traffic.encrypt(plain, &mut []) {
+                    Ok(written) => written,
+                    Err(EncryptError::InsufficientSize(size)) => size.required_size,
+                    Err(EncryptError::EncryptExhausted) => return Err(Error::Other),
+                };
+            }
             let owing = usize::try_from(owed.len()).expect("a u32 fits in a usize");
             let total = owing.checked_add(length).expect("within the room granted");
             if total == 0 {
