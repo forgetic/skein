@@ -16,6 +16,7 @@ use crate::server::Server;
 
 /// The stream below a client, to a server.
 #[derive(Debug)]
+#[expect(clippy::struct_excessive_bools, reason = "the stream's state, a flag each")]
 pub struct Wire {
     pub server: Server,
     /// The server's bytes on their way, and what else is on the wire: a
@@ -30,6 +31,11 @@ pub struct Wire {
     pub finished: bool,
     /// The length of each `Send`, in order.
     pub sends: Vec<usize>,
+    /// What the client sent, all of it.
+    pub sent: Vec<u8>,
+    /// Whether the server reads what the client sends: not once its keys
+    /// were taken out.
+    pub forward: bool,
 }
 
 impl Wire {
@@ -44,6 +50,8 @@ impl Wire {
             ended: false,
             finished: false,
             sends: Vec::new(),
+            sent: Vec::new(),
+            forward: true,
         }
     }
 
@@ -76,8 +84,11 @@ impl Wire {
                 let granted = self.granted.take().expect("a Send within room granted");
                 assert!(bytes.len() <= usize::try_from(granted).expect("fits"), "a Send within room granted");
                 self.sends.push(bytes.len());
-                self.server.receive(&bytes);
-                self.pull();
+                self.sent.extend_from_slice(&bytes);
+                if self.forward {
+                    self.server.receive(&bytes);
+                    self.pull();
+                }
             }
             Down::Finish => {
                 assert!(!self.finished, "one Finish");

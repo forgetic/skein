@@ -7,6 +7,7 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
 
+use rustls::ExtractedSecrets;
 use rustls::server::{ServerConfig, ServerConnection};
 
 /// A server's connection.
@@ -73,5 +74,12 @@ impl Server {
     #[must_use]
     pub fn handshaking(&self) -> bool {
         self.tls.is_handshaking()
+    }
+
+    /// Its keys and sequence numbers, the connection given up for them: a
+    /// server configured `extractable`, its handshake done.
+    #[must_use]
+    pub fn into_secrets(self) -> ExtractedSecrets {
+        self.tls.dangerous_extract_secrets().expect("an extractable server, its handshake done")
     }
 }

@@ -7,11 +7,15 @@
 
 use std::sync::Arc;
 
+use rustls::crypto::cipher::{MessageEncrypter, OutboundChunks, OutboundPlainMessage};
 use rustls::crypto::{CryptoProvider, ring};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::ServerConfig;
 use rustls::version::{TLS12, TLS13};
-use rustls::{RootCertStore, SupportedProtocolVersion};
+use rustls::{
+    ConnectionTrafficSecrets, ContentType, ProtocolVersion, RootCertStore, SupportedCipherSuite,
+    SupportedProtocolVersion,
+};
 use skein_lib::Wall;
 use skein_tls::{Config, Name};
 
@@ -49,6 +53,43 @@ pub fn client(alpn: &[&[u8]]) -> Config {
     Config::new(roots(), alpn).expect("a configuration of the test root")
 }
 
+/// The suite of a server whose keys are taken out: TLS 1.2's, so that a
+/// test can seal what TLS 1.3 forbids, a renegotiation request.
+pub const EXTRACTABLE: SupportedCipherSuite = ring::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256;
+
+/// What seals records as a TLS 1.2 server would, with its keys taken out.
+pub struct Sealer {
+    encrypter: Box<dyn MessageEncrypter>,
+    seq: u64,
+}
+
+impl std::fmt::Debug for Sealer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sealer").field("seq", &self.seq).finish_non_exhaustive()
+    }
+}
+
+impl Sealer {
+    /// A sealer of the direction `secrets` are for, from its next sequence
+    /// number on.
+    #[must_use]
+    pub fn new(secrets: (u64, ConnectionTrafficSecrets)) -> Sealer {
+        let (seq, ConnectionTrafficSecrets::Aes128Gcm { key, iv }) = secrets else { panic!("AES-128-GCM's keys") };
+        let SupportedCipherSuite::Tls12(suite) = EXTRACTABLE else { panic!("a suite of TLS 1.2") };
+        let iv = iv.as_ref();
+        Sealer { encrypter: suite.aead_alg.encrypter(key, &iv[..4], &iv[4..]), seq }
+    }
+
+    /// `payload` sealed in a record of `typ`.
+    pub fn seal(&mut self, typ: ContentType, payload: &[u8]) -> Vec<u8> {
+        let message =
+            OutboundPlainMessage { typ, version: ProtocolVersion::TLSv1_2, payload: OutboundChunks::Single(payload) };
+        let record = self.encrypter.encrypt(message, self.seq).expect("sealed").encode();
+        self.seq += 1;
+        record
+    }
+}
+
 /// The server's name the certificates are for.
 #[must_use]
 pub fn name() -> Name {
@@ -84,13 +125,17 @@ pub struct Server {
     pub retry: bool,
     /// The protocols it accepts by ALPN, in order of preference.
     pub alpn: Vec<Vec<u8>>,
+    /// Whether its keys may be taken out once the handshake is done, to
+    /// seal its records by hand: TLS 1.2's ECDHE-ECDSA with AES-128-GCM
+    /// only, then.
+    pub extractable: bool,
 }
 
 impl Server {
     /// A server of the leaf, either version, no retry, no ALPN.
     #[must_use]
     pub fn plain() -> Server {
-        Server { chain: Chain::Leaf, versions: Versions::Both, retry: false, alpn: Vec::new() }
+        Server { chain: Chain::Leaf, versions: Versions::Both, retry: false, alpn: Vec::new(), extractable: false }
     }
 
     /// rustls's configuration for it.
@@ -99,6 +144,9 @@ impl Server {
         let mut provider = ring::default_provider();
         if self.retry {
             provider = CryptoProvider { kx_groups: vec![ring::kx_group::SECP384R1], ..provider };
+        }
+        if self.extractable {
+            provider = CryptoProvider { cipher_suites: vec![EXTRACTABLE], ..provider };
         }
         let versions: &[&SupportedProtocolVersion] = match self.versions {
             Versions::Both => &[&TLS13, &TLS12],
@@ -118,6 +166,7 @@ impl Server {
             .with_single_cert(chain, key)
             .expect("the key is the certificate's");
         config.alpn_protocols.clone_from(&self.alpn);
+        config.enable_secret_extraction = self.extractable;
         Arc::new(config)
     }
 }

@@ -3,6 +3,7 @@
 //! longer than the records held, peers that are not TLS or give up, and the
 //! stream ending or failing before the handshake and during it.
 
+use rustls::ContentType;
 use skein_lib::stream::{Down, Fault, Read, Up};
 use skein_lib::{Env, Time, Wall};
 use skein_tls::client::{self, Agreed, Certificate, Client, Error, Event, Limits, Request, Version, Waiting};
@@ -240,6 +241,53 @@ fn a_read_that_crosses_the_end_stays_outstanding_until_withdrawn() {
 fn a_demand_over_a_read_that_crossed_the_end_is_a_bug() {
     let mut pair = ended_with_a_read_outstanding();
     drop(pair.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 4 })));
+}
+
+/// The records in `bytes`: each one's type and body's length.
+fn records(mut bytes: &[u8]) -> Vec<(u8, usize)> {
+    let mut records = Vec::new();
+    while let [typ, _, _, high, low, rest @ ..] = bytes {
+        let length = usize::from(u16::from_be_bytes([*high, *low]));
+        records.push((*typ, length));
+        bytes = &rest[length..];
+    }
+    records
+}
+
+#[test]
+fn a_renegotiation_refused_goes_alone_or_before_the_data_of_a_grant_held() {
+    for held in [false, true] {
+        let server = pki::Server { versions: Versions::Tls12, extractable: true, ..pki::Server::plain() };
+        let mut pair = pair(&server, "skein.test", pki::VALID, &pki::client(&[]), LIMITS);
+        assert_eq!(handshake(&mut pair), ready(Version::Tls12, None));
+        // The server's keys taken out, to seal what rustls's server never
+        // sends; what the client sends is kept, not read.
+        let taken = std::mem::replace(&mut pair.wire.server, Server::new(server.config()));
+        let mut sealer = pki::Sealer::new(taken.into_secrets().tx);
+        pair.wire.forward = false;
+        let before = pair.wire.sent.len();
+        if held {
+            let mut events = pair.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 16 }));
+            events.extend(pair.settle());
+            assert_eq!(events, vec![Event::Stream(Up::Room)]);
+        }
+        // A HelloRequest (RFC 5246, 7.4.1.1), which the client refuses with
+        // a warning alert (RFC 5746, 4.2).
+        pair.wire.bytes.extend(sealer.seal(ContentType::Handshake, &[0, 0, 0, 0]));
+        let mut events = pair.down(Request::Stream(Down::Demand { read: Read::Fill(1), room: 0 }));
+        events.extend(pair.settle());
+        assert_eq!(events, vec![], "held: {held}");
+        // An alert of two bytes, sealed with 8 of nonce and 16 of tag.
+        if held {
+            assert_eq!(pair.wire.sent.len(), before, "the refusal waits for the side above's Send");
+            assert_eq!(pair.down(Request::Stream(Down::Send(Box::from(&b"data"[..])))), vec![]);
+            assert_eq!(records(&pair.wire.sent[before..]), [(21, 26), (23, 28)], "the refusal first, one Send");
+            let send = *pair.wire.sends.last().unwrap();
+            assert!(send == 31 + 33 && send <= usize::try_from(client::room_for(16).unwrap()).unwrap());
+        } else {
+            assert_eq!(records(&pair.wire.sent[before..]), [(21, 26)], "the refusal, alone, within its room");
+        }
+    }
 }
 
 #[test]
