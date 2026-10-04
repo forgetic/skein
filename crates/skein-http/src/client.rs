@@ -216,10 +216,16 @@ pub struct Response {
 }
 
 impl Response {
-    /// The value of the first field named `name`, without regard to case.
+    /// The value of the first field named `name`, without regard to case:
+    /// what a field that occurs once is read by.
     #[must_use]
     pub fn header(&self, name: &[u8]) -> Option<&[u8]> {
-        Header::find(&self.headers, name)
+        for header in &self.headers {
+            if header.is(name) {
+                return Some(&header.value);
+            }
+        }
+        None
     }
 }
 

@@ -21,18 +21,6 @@ impl Header {
     pub fn is(&self, name: &[u8]) -> bool {
         self.name.eq_ignore_ascii_case(name)
     }
-
-    /// The value of the first field named `name` among `headers`, without
-    /// regard to case: what a field that occurs once is read by.
-    #[must_use]
-    pub fn find<'a>(headers: &'a [Header], name: &[u8]) -> Option<&'a [u8]> {
-        for header in headers {
-            if header.is(name) {
-                return Some(&header.value);
-            }
-        }
-        None
-    }
 }
 
 /// Whether `byte` may be part of a token, as a field's name or a method is
