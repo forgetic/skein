@@ -126,18 +126,29 @@ machine's:
   answer, never in place of one outstanding. A state that wants nothing
   more after an answer states nothing (programming-model.md, 5.4).
 - **`Read::Nothing` with no room withdraws** the outstanding demand, and
-  only when the side above will read no more (it is closing). An answer
+  only when the side above will read no more: it is closing, or its read
+  crossed `End`. An answer
   already on its way may still arrive, and the side above drops it:
   dropping `Bytes` loses data, so only a reader giving up the stream may.
   No other `Bytes` or `Room` come without a demand.
 - **`End` comes once nothing the side below holds can meet a demand:**
   with one outstanding, when it can never be met; with none, only when
-  nothing is held. It comes once, and ends reading only: a read that
-  crosses it is never met, but room may still be granted after it, as the
-  stream can still send to a peer that only half-closed. A read larger
-  than what is left before the end is never met; a side above that must
-  see every byte reads by its framing (a scan, or fills no larger than
-  its framing says remain).
+  nothing is held. It comes once, and ends reading only. A read that
+  crosses it is never met, and `End` does not end the demand: it stays
+  outstanding until `Room` answers it, if it asked for room, or until the
+  side above withdraws it, and the side above states no other demand
+  meanwhile. Room may still be granted after `End`, as the stream can
+  still send to a peer that only half-closed. A read larger than what is
+  left before the end is never met; a side above that must see every byte
+  reads by its framing (a scan, or fills no larger than its framing says
+  remain).
+- **`Room` grants one `Send`** of at most the room asked for; the side
+  above sends within it (an empty `Send` gives it up), or finishes, before
+  it demands room again. **`Finish` comes with no read outstanding,**
+  other than one that crossed `End`: a side below that reads another
+  stream to meet a read, as TLS does, could not send the end behind it.
+  io asserts neither; a side above keeps both, so that it works over any
+  side below.
 - **`Failed` may come at any time,** a demand outstanding or not, and
   nothing follows it. After `End` it says only that the stream can no
   longer send: what was read stands.

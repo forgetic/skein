@@ -41,11 +41,18 @@ pub enum Down {
     /// What this state needs, and the output room it wants: answered at most
     /// once, by `Bytes` or `Room`, whichever the side below gives first, and
     /// stated only after the last was answered. `Read::Nothing` with no room
-    /// withdraws the outstanding demand, only when the side above is closing.
+    /// withdraws the outstanding demand, only when the side above will read
+    /// no more: it is closing, or its read crossed `End`.
     Demand { read: Read, room: u32 },
-    /// Bytes moved down, within the room granted.
+    /// Bytes moved down, within the room granted: a `Room` grants one `Send`
+    /// of at most the room asked for (an empty one gives it up), and the side
+    /// above sends within it, or finishes, before it demands room again.
     Send(Box<[u8]>),
-    /// Nothing more to send: flush, then end the stream.
+    /// Nothing more to send: flush, then end the stream. It comes with no read
+    /// outstanding, other than one that crossed `End`: a side below that reads
+    /// another stream to meet a read, as TLS does, could not send the end
+    /// behind it. io asserts neither this nor one `Send` a grant; a side above
+    /// keeps both, so that it works over any side below.
     Finish,
 }
 
@@ -55,11 +62,16 @@ pub enum Up {
     /// Exactly what the demand's read asks for: its one answer. One already
     /// on its way when the demand was withdrawn may still arrive.
     Bytes(Box<[u8]>),
-    /// The room asked for is free: the demand's one answer.
+    /// The room asked for is free: the demand's one answer, which grants one
+    /// `Send`.
     Room,
     /// The other side will send nothing more: `End` concerns reading. It
-    /// comes once, when nothing the side below holds can meet a read; a read
-    /// that crosses it is never met, but room may still be granted after it.
+    /// comes once, when nothing the side below holds can meet a read. A read
+    /// that crosses it is never met, and `End` does not end the demand: it
+    /// stays outstanding until `Room` answers it, if it asked for room, or
+    /// until the side above withdraws it, which states no other demand
+    /// meanwhile. Room may still be granted after `End`, to send to a peer
+    /// that only half-closed.
     End,
     /// The stream is broken: nothing follows. After `End`, it says only that
     /// the stream can no longer send: what was read stands.

@@ -140,12 +140,17 @@ effects use the same request and event shapes as ring operations, so step
 code cannot tell them apart. Anything that can be a ring operation is one:
 accept, connect, read, write, open, close, waiting for a child.
 
-- **The ring adapter is the only `unsafe` code a service runs,** since it
-  makes every kernel call: ring operations through the `io-uring` crate,
-  the other syscalls through `libc`. With rustls in the TLS machine
-  (section 3), these are the only crates from outside skein and the
-  service. In tests, the only `unsafe` is the counting allocator's `unsafe
-  impl GlobalAlloc` (skein's testing.md, section 6).
+- **Outside the TLS machine's crates, the ring adapter is the only
+  `unsafe` code a service runs,** since it makes every kernel call: ring
+  operations through the `io-uring` crate, the other syscalls through
+  `libc`. The TLS machine's crates are the exception (section 3): rustls,
+  which forbids `unsafe` in its own code, and its dependencies, the only
+  other crates from outside skein and the service. Among them `ring` runs
+  `unsafe` code for its cryptography, and `getrandom` for the entropy
+  `ring` draws from the kernel; `zeroize`, `subtle` and `once_cell`,
+  beneath rustls, a few lines each. In tests, the only `unsafe` is the
+  counting allocator's `unsafe impl GlobalAlloc` (skein's testing.md,
+  section 6).
 - **No std handle types that close on drop.** `OwnedFd`, `File`,
   `TcpStream`, `TcpListener` and `std::process::Child` release kernel
   resources in their destructors, at a moment the lifecycle did not

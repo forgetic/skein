@@ -670,8 +670,11 @@ fn ended(
     above: &mut Queue<Event>,
     below: &mut Queue<Down>,
 ) -> State {
-    // A read outstanding crosses the end and is never met; room may still
-    // come after it, and a failure below withdraws a demand for room.
+    // A read outstanding crosses the end and is never met, and stays
+    // outstanding below (lib.md, 7): the client, which reads no more, forgets
+    // it and states nothing more on this stream. Room may still come after
+    // the end, so a demand for room is kept until it is answered or
+    // withdrawn.
     match exchange.below {
         Some(demand) if demand.room == 0 => exchange.below = None,
         Some(_) | None => {}

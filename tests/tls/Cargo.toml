@@ -1,0 +1,38 @@
+[package]
+name = "skein-tls-world"
+description = "The TLS client's machine worlds: in-memory handshakes and exchanges against a rustls server, its worst case against the counting allocator, and the HTTP client stacked on it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-tls.workspace = true
+# The server: rustls's buffered connection, over std's readers and writers.
+rustls = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+# The counting allocator, for tests/memory.rs only.
+skein-heap.workspace = true
+# The HTTP client, stacked on the TLS client in tests/stack.rs.
+skein-http.workspace = true
+
+# Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.
+# tests/clippy.toml bans what would make a run unrepeatable; what rustls draws
+# from the kernel makes it so anyway (tls.md, 5).
+[lints.rust]
+unsafe_code = "forbid"
+elided_lifetimes_in_paths = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_panics_doc = "allow"          # the harness asserts what it relies on by panicking
+wildcard_enum_match_arm = "deny"      # a new variant must break the tests
+match_wildcard_for_single_variants = "deny"
+unwrap_used = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+disallowed_types = "deny"
+disallowed_methods = "deny"
