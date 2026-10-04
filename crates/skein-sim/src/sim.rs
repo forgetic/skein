@@ -800,7 +800,7 @@ impl Sim {
             return;
         }
         let waiting = match self.process(pid).flights.get(&target) {
-            Some(flight) if flight.held.is_some() => Some(flight.serial),
+            Some(flight) if self.stoppable(flight) => Some(flight.serial),
             Some(_) | None => None,
         };
         let Some(serial) = waiting else {
@@ -822,7 +822,7 @@ impl Sim {
     /// longer stop: `TooLate`, and the target `Cancelled`.
     fn land(&mut self, pid: Pid, token: Token, op: Op, target: Token, serial: u64, raced: bool) {
         let wins = match self.process(pid).flights.get(&target) {
-            Some(flight) => flight.serial == serial && flight.held.is_some(),
+            Some(flight) => flight.serial == serial && self.stoppable(flight),
             None => false,
         };
         if !wins {
@@ -839,6 +839,13 @@ impl Sim {
             self.complete(pid, token, op, answer);
             self.complete(pid, target, stopped, Err(Error::Cancelled));
         }
+    }
+
+    /// Whether a `Cancel` can still stop an operation: it waits, and not on
+    /// the machine, which is doing it, as a ring's worker would be (a
+    /// `Close` of a file's descriptor among them): too late.
+    fn stoppable(&self, flight: &Flight) -> bool {
+        flight.held.is_some() && !self.asked.contains_key(&Ticket(flight.serial))
     }
 
     /// Stops a waiting operation from waiting.

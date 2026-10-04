@@ -211,6 +211,26 @@ fn a_seed_replays_a_world_of_files() {
     assert_ne!(run(3), run(4), "seeds differ");
 }
 
+/// A `Close` of a file and a `Cancel` of it in one batch: the `Close` is
+/// with the machine when the `Cancel` comes, as a ring's close is with the
+/// kernel, so the `Cancel` is too late.
+#[test]
+fn a_cancel_of_a_close_waiting_on_the_machine_is_too_late() {
+    let (mut world, pid, root) = rooted();
+    let file = world.open(pid, root, b"a.txt", OpenHow::Read).unwrap();
+    let (close, cancel) = (world.token(), world.token());
+    let mut batch = Queue::with_capacity(2);
+    batch.push(skein_io::kernel::Submit { op: close, kind: Op::Close { fd: file } });
+    batch.push(skein_io::kernel::Submit { op: cancel, kind: Op::Cancel { target: close } });
+    world.sim.submit(pid, &mut batch);
+    world.serve();
+    let mut got = world.reap(pid);
+    got.sort_by_key(|complete| complete.op);
+    let results: Vec<_> = got.into_iter().map(|complete| (complete.op, complete.result)).collect();
+    assert_eq!(results, [(close, Ok(Done::Nothing)), (cancel, Err(Error::TooLate))]);
+    close_all(&mut world, pid, &[root]);
+}
+
 // Broken invariants.
 
 #[test]
