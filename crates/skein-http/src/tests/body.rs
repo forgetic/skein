@@ -87,6 +87,28 @@ fn a_scan_whose_delimiter_is_split_across_two_chunks_finds_it() {
 }
 
 #[test]
+fn a_delimiter_split_across_two_chunks_is_completed_a_byte_at_a_time_and_nothing_past_it_is_read() {
+    let mut machine = Machine::new(LIMITS);
+    machine.called(get());
+    machine.bytes(b"HTTP/1.1 200 OK\r\n");
+    machine.bytes(b"Transfer-Encoding: chunked\r\n");
+    machine.bytes(b"\r\n");
+    let crlf = Read::Scan { until: Delimiter::CRLF, max: 8 };
+    machine.down(Request::Body(Down::Demand { read: crlf, room: 0 }));
+    let (_, requests) = machine.bytes(b"3\r\n");
+    assert_eq!(requests, [Down::Demand { read: Read::Scan { until: Delimiter::CRLF, max: 3 }, room: 0 }]);
+    machine.bytes(b"ab\r");
+    machine.bytes(b"\r\n");
+    let (_, requests) = machine.bytes(b"3\r\n");
+    assert_eq!(requests, [Down::Demand { read: Read::Fill(1), room: 0 }], "held: ab and a CR, partway through CRLF");
+    let (events, requests) = machine.bytes(b"\n");
+    assert_eq!(events, [Event::Body(Up::Bytes(super::boxed(b"ab\r\n")))]);
+    assert!(requests.is_empty(), "cd, past the delimiter, is not read until it is demanded");
+    let (_, requests) = machine.down(Request::Body(Down::Demand { read: crlf, room: 0 }));
+    assert_eq!(requests, [Down::Demand { read: Read::Scan { until: Delimiter::CRLF, max: 2 }, room: 0 }]);
+}
+
+#[test]
 fn a_body_to_the_end_of_the_stream_ends_with_it_on_a_connection_not_used_again() {
     let exchanged = respond(b"HTTP/1.1 200 OK\r\n\r\nline one\nline two\n", LINE);
     assert!(exchanged.ended);

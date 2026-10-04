@@ -191,8 +191,9 @@ client.
   so a slow event stream is read as each event comes; nothing is read
   ahead of a demand. A delivery that meets the demand whole, with nothing
   held, goes up as it came; others are met from the intake, across the
-  chunks of a chunked body too, a delimiter split between two chunks
-  included.
+  chunks of a chunked body too. A delimiter split between two chunks is
+  completed a byte at a time, while what is held ends partway through
+  it, so that nothing past it is read either.
 - **The framing is read only when a demand needs what lies past it:** a
   chunk's size line (a scan to LF of at most `Limits::head`, then
   hexadecimal digits, then nothing or an extension, which is ignored),

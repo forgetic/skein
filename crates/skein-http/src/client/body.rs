@@ -9,7 +9,8 @@
 //! and never past the body's framing, so a scan for a line passes through
 //! as a scan, and a slow event stream is read as it comes. A demand met by
 //! one delivery whole, with nothing held, goes up as it came; others are
-//! met from the intake, across the chunks of a chunked body too. The
+//! met from the intake, across the chunks of a chunked body too, a
+//! delimiter split between two chunks completed a byte at a time. The
 //! framing itself (a chunk's size line, the line ending after its data,
 //! the trailer section) is read only when a demand needs what lies past
 //! it.
@@ -105,8 +106,14 @@ fn piece(face: Face, intake: &Intake, limits: &Limits, left: u64) -> Read {
         }
         Face::Demand(Read::Scan { until, max }) => {
             let wanted = at_most(max.checked_sub(held).expect("a scan the intake has not met"), left);
+            // What is held ends partway through the delimiter, which the next
+            // bytes may complete: a scan below would not see it, and would
+            // read past it. A byte at a time until it is whole, or is not.
+            if intake.ends_partway(until) {
+                return Read::Fill(1);
+            }
             // A scan holds its delimiter (lib.md, 7); a shorter read is a
-            // fill, and the intake finds a delimiter split across the two.
+            // fill, which cannot hold one.
             if index(wanted) >= until.as_bytes().len() { Read::Scan { until, max: wanted } } else { Read::Fill(wanted) }
         }
         Face::Demand(Read::Nothing) | Face::Idle | Face::Withdrawn => {

@@ -96,6 +96,26 @@ fn a_delimiter_split_across_appends_is_found() {
 }
 
 #[test]
+fn an_intake_knows_when_it_ends_partway_through_a_delimiter() {
+    let mut intake = Intake::with_capacity(16);
+    assert!(!intake.ends_partway(Delimiter::CRLF), "nothing buffered");
+    assert_eq!(intake.append(b"ab"), Ok(()));
+    assert!(!intake.ends_partway(Delimiter::CRLF));
+    assert_eq!(intake.append(b"\r"), Ok(()));
+    assert!(intake.ends_partway(Delimiter::CRLF), "its first byte");
+    assert!(!intake.ends_partway(Delimiter::LF), "a delimiter of one byte has no part");
+    assert_eq!(intake.append(b"\n"), Ok(()));
+    assert!(!intake.ends_partway(Delimiter::CRLF), "all of it is no part of it");
+    assert!(intake.ends_partway(Delimiter::CRLF_CRLF), "its first two bytes");
+    assert_eq!(intake.append(b"\r"), Ok(()));
+    assert!(intake.ends_partway(Delimiter::CRLF_CRLF), "its first three");
+    assert_eq!(intake.meet(Read::Fill(4)), Some(boxed(b"ab\r\n")));
+    assert!(intake.ends_partway(Delimiter::CRLF_CRLF), "what is left, from the front");
+    assert_eq!(intake.meet(Read::Fill(1)), Some(boxed(b"\r")));
+    assert!(!intake.ends_partway(Delimiter::CRLF_CRLF), "empty again");
+}
+
+#[test]
 fn a_delimiter_ending_at_max_is_found() {
     let mut intake = Intake::with_capacity(8);
     assert_eq!(intake.append(b"abc\r\nde"), Ok(()));

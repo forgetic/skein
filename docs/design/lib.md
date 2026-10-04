@@ -161,6 +161,10 @@ it is made. It is allocated once, at the cap, and never grows.
   asserted.
 - A scan remembers how far it has searched, so a scan for the same
   delimiter does not search the same bytes again.
+- It says whether what it holds ends partway through a delimiter
+  (`ends_partway`): a side below that fills its own intake from another
+  stream, as the HTTP client does a body's, then reads a byte at a time,
+  so that it never reads past a delimiter its next bytes complete.
 
 ## 8. Time, deadlines and randomness
 

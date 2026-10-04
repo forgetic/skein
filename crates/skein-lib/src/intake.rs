@@ -119,6 +119,25 @@ impl Intake {
         }
     }
 
+    /// Whether what is buffered ends partway through `until`: with its first
+    /// byte, or its first bytes, but not all of them. A side below that
+    /// fills its own intake from another stream reads one byte at a time
+    /// while it does, so that it never reads past a delimiter that its next
+    /// bytes complete.
+    #[must_use]
+    pub fn ends_partway(&self, until: Delimiter) -> bool {
+        let needle = until.as_bytes();
+        let len = self.bytes.len();
+        // Bounded by the delimiter's length, at most four.
+        for part in 1..needle.len() {
+            let Some(start) = len.checked_sub(part) else { break };
+            if self.occurs_at(needle.get(..part).expect("a part of the delimiter"), start) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// How many bytes a scan for `until` within `max` delivers, if it can be
     /// met yet.
     fn scan(&mut self, until: Delimiter, max: u32) -> Option<u32> {
