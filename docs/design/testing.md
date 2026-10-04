@@ -72,6 +72,20 @@ io and simulated worlds need one:
 It lives with skein's tests, and stays that small. A service's fake
 machine is the service's.
 
+Its files are built: `skein-fake-machine`, in `testing/`. A world lays a
+root in it from a scenario's items (files, directories, symbolic links,
+each with its mode) and gives its handle to a process as the shell would
+a root opened at startup; after each submit, the world takes the
+simulator's calls and has the machine answer each (simulator.md, 3.1).
+The machine resolves paths beneath a root as `openat2` with
+`RESOLVE_BENEATH` does, follows the links that stay beneath it, keeps its
+owner's permissions, and refuses what a real filesystem refuses, in the
+order Linux checks; the conformance suite holds it, through the
+simulator, to the real kernel in a scratch directory. It keeps a step
+machine's shape, a call in and an answer out, in a vocabulary of its own
+that a face translates to and from the simulator's. Its programs come
+with processes.
+
 ## 5. What skein supplies for a service's tiers
 
 | Service tier | Real | What skein supplies |
@@ -127,6 +141,7 @@ testing/skein-heap              the counting allocator, the meter that checks a 
 testing/skein-scratch           a scratch directory beneath the system's temporary one, removed when dropped, for tests of files on the real kernel
 testing/skein-world             the world harness: processes' iterate over the simulator or the real ring, the referee, the trace, the heap
 testing/skein-echo-client       the fake echo client, a step machine
+testing/skein-fake-machine      the minimal fake machine: files beneath a root, and its face behind the simulator
 tests/heap                      the counting allocator's own tests, skein-heap-tests
 tests/echo                      the echo's simulated worlds and its real loop, skein-echo-world
 tests/io                        io worlds: io over the simulator, a scripted owner, a referee, skein-io-world
@@ -202,13 +217,17 @@ As of 2026-10-04.
 | simulated worlds | the echo and its fake clients, seven scenarios |
 | real loop | the echo and its fake clients, on loopback |
 | conformance | sockets, against the simulator and the ring |
-| the simulator's and the ring's own tests | sockets; the ring's, files too |
+| the simulator's and the ring's own tests | sockets and files |
 | the counting allocator | built, with its own tests; lib's worst cases checked against it |
 
-The simulator plays the kernel for sockets, with every fault of
-simulator.md, 4. Its own tests submit records by hand, and a client and a
-server exchange bytes, calm and replayed in the focused suite, and under
-chaos over 200 seeds in the fuzzy one. The conformance suite covers
+The simulator plays the kernel for sockets and files, with every fault
+of simulator.md, 4, files through its machine seam to the minimal fake
+machine. Its own tests submit records by hand, and a client and a server
+exchange bytes, calm and replayed in the focused suite, and under chaos
+over 200 seeds in the fuzzy one; for files, each broken invariant of the
+records and of the seam, each fault, and a replay in the focused suite,
+and a workload of every operation on files under chaos over 200 seeds in
+the fuzzy one, every fault of files falling. The conformance suite covers
 sockets: a connection's lifecycle over IPv4 and IPv6, graceful close, a
 send after the peer closed, refused connects, `AddressInUse`, IPv6-only
 sockets, the wrong-state records, a full accept queue, closes with bytes
@@ -378,9 +397,10 @@ to at least half its worst case, so that it keeps reaching the limits.
 
 By tier, in the order temper pulls the parts (README.md):
 
-- **io worlds for files and processes,** with the minimal machine and
-  the simulator's files, processes and machine seam, when the worker
-  pulls them. Sockets are built.
+- **io worlds for files and processes,** with the minimal machine's files
+  and programs and the simulator's processes, when the worker pulls them.
+  Sockets are built, and so are the simulator's files, its machine seam
+  and the minimal machine's files.
 - **Conformance** for files and processes, with a scratch directory as
   the root, when io pulls them; against the readiness backend when it
   exists.

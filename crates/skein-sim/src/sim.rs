@@ -1,5 +1,8 @@
 //! The world: processes, their descriptors and operations in flight, the
-//! sockets and the network between them, time, and the trace.
+//! sockets and the network between them, the calls to the machine, time,
+//! and the trace.
+
+mod files;
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
@@ -8,15 +11,17 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::net::SocketAddr;
 
-use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, Submit};
+use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, OpenHow, Submit};
 use skein_lib::{Duration, Queue, Rng, Time, Token, Wall};
 
 use crate::config::Config;
+use crate::machine::{Call, Ticket};
 use crate::net::{
     EPHEMERAL_FIRST, EPHEMERAL_LAST, Fate, Listener, Socket, SocketId, State, Stream, bindable, loopback, mapped,
     overlaps,
 };
 use crate::trace::{self, Entry, Event, Fault, Summary};
+use files::{Asked, File};
 
 /// A simulated process: a plain handle, from [`Sim::spawn_process`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -49,8 +54,14 @@ const UNSUBMITTED: i32 = 11;
 struct Process {
     /// The next descriptor number: numbers are never reused.
     next_fd: i32,
-    /// The open descriptors, and the socket each names.
+    /// The open descriptors of sockets, and the socket each names.
     fds: BTreeMap<Fd, SocketId>,
+    /// The open descriptors of files and directories, and what each is in
+    /// the machine. They are counted with the sockets' against the limit.
+    files: BTreeMap<Fd, File>,
+    /// `Open`s the machine has yet to answer: each holds a descriptor's
+    /// place against the limit.
+    opening: u32,
     /// Every operation submitted and not yet reaped.
     flights: BTreeMap<Token, Flight>,
     /// Completions delivered and not yet reaped, in delivery order.
@@ -105,6 +116,10 @@ pub struct Sim {
     /// The process inside a `submit` or a `reap`, whose waiting operations
     /// are decided at once.
     entering: Option<Pid>,
+    /// Calls for the machine, oldest first, until the world takes them.
+    calls: VecDeque<Call>,
+    /// Calls taken or not, until the machine answers them.
+    asked: BTreeMap<Ticket, Asked>,
     trace: Vec<Entry>,
 }
 
@@ -125,6 +140,8 @@ impl Sim {
             schedule: BTreeMap::new(),
             pokes: VecDeque::new(),
             entering: None,
+            calls: VecDeque::new(),
+            asked: BTreeMap::new(),
             trace: Vec::new(),
         }
     }
@@ -164,6 +181,8 @@ impl Sim {
         self.processes.push(Process {
             next_fd: FIRST_FD,
             fds: BTreeMap::new(),
+            files: BTreeMap::new(),
+            opening: 0,
             flights: BTreeMap::new(),
             ready: VecDeque::new(),
             deferred: VecDeque::new(),
@@ -234,10 +253,12 @@ impl Sim {
         u32::try_from(self.process(pid).flights.len()).expect("fewer than 2^32 operations")
     }
 
-    /// Descriptors of `pid` that are open.
+    /// Descriptors of `pid` that are open, sockets' and files'.
     #[must_use]
     pub fn open_fds(&self, pid: Pid) -> u32 {
-        u32::try_from(self.process(pid).fds.len()).expect("fewer than 2^32 descriptors")
+        let process = self.process(pid);
+        let open = process.fds.len().checked_add(process.files.len()).expect("fewer than 2^64 descriptors");
+        u32::try_from(open).expect("fewer than 2^32 descriptors")
     }
 
     /// When the world next does something by itself: a completion delivered
@@ -315,6 +336,9 @@ impl Sim {
         if let Some((fd, _)) = process.fds.first_key_value() {
             self.fail(pid, &format!("{} descriptors open, the first {fd:?}", process.fds.len()));
         }
+        if let Some((fd, file)) = process.files.first_key_value() {
+            self.fail(pid, &format!("{} files open, the first {fd:?}, {file:?}", process.files.len()));
+        }
     }
 
     /// Every submission and every completion reaped so far.
@@ -342,14 +366,19 @@ impl Sim {
         if self.process(pid).flights.contains_key(&token) {
             self.fail(pid, &format!("{token:?} is already in flight"));
         }
-        if kind.is_file() {
-            self.fail(pid, &format!("{summary:?}: this simulator plays no files yet"));
-        }
-        let socket = self.check(pid, summary);
+        let named = self.check(pid, summary);
         let serial = self.next_serial;
         self.next_serial = serial.checked_add(1).expect("fewer than 2^64 submissions");
         let flight = Flight { serial, kind: summary, held: None, done: false, timer: None };
         self.process_mut(pid).flights.insert(token, flight);
+        let socket = match named {
+            On::Files => {
+                self.file(pid, token, serial, kind);
+                return;
+            }
+            On::Socket(id) => Some(id),
+            On::Nothing => None,
+        };
         match kind {
             Op::Socket { family } => self.socket(pid, token, kind, family),
             Op::Bind { addr, .. } => self.bind(pid, token, kind, on(socket), addr),
@@ -369,23 +398,38 @@ impl Sim {
             | Op::Rename { .. }
             | Op::Remove { .. }
             | Op::MakeDirectory { .. }
-            | Op::List { .. } => self.bug("an operation on files passed the checks"),
+            | Op::List { .. } => self.bug("an operation on files is the machine's"),
         }
     }
 
     /// Fails the world on a broken invariant of the contract about `kind`'s
-    /// descriptor or target, and answers the socket its descriptor names.
-    fn check(&self, pid: Pid, kind: Summary) -> Option<SocketId> {
+    /// descriptors or target, and answers what its descriptor names.
+    fn check(&self, pid: Pid, kind: Summary) -> On {
         let process = self.process(pid);
         if let Summary::Cancel { target } = kind {
-            if let Some(flight) = process.flights.get(&target)
-                && let Summary::Cancel { .. } = flight.kind
-            {
-                self.fail(pid, &format!("a Cancel of {target:?}, which is a Cancel"));
+            if let Some(flight) = process.flights.get(&target) {
+                if let Summary::Cancel { .. } = flight.kind {
+                    self.fail(pid, &format!("a Cancel of {target:?}, which is a Cancel"));
+                }
+                if flight.kind.is_file() {
+                    self.fail(pid, &format!("a Cancel of {target:?}, {:?}: io never cancels a file's", flight.kind));
+                }
             }
-            return None;
+            return On::Nothing;
         }
-        let fd = kind.fd()?;
+        let [first, second] = kind.fds();
+        let Some(fd) = first else {
+            return On::Nothing;
+        };
+        for named in [Some(fd), second].into_iter().flatten() {
+            if !process.fds.contains_key(&named) && !process.files.contains_key(&named) {
+                self.fail(pid, &format!("{kind:?} on {named:?}, which is not open in this process"));
+            }
+        }
+        if kind.is_file() || process.files.contains_key(&fd) {
+            self.check_file(pid, kind);
+            return On::Files;
+        }
         let Some(&id) = process.fds.get(&fd) else {
             self.fail(pid, &format!("{kind:?} on {fd:?}, which is not open in this process"));
         };
@@ -451,8 +495,74 @@ impl Sim {
         if let Some(broken) = broken {
             self.fail(pid, &format!("{broken}: {kind:?}, with {on_fd:?} in flight on {fd:?}"));
         }
-        Some(id)
+        On::Socket(id)
     }
+
+    /// Fails the world on a broken invariant of an operation on files whose
+    /// descriptors are open, or of any other on a file's: each a file's, and
+    /// opened as the operation needs; only a `Close` beside an operation on
+    /// sockets, and nothing in flight beside it.
+    fn check_file(&self, pid: Pid, kind: Summary) {
+        let process = self.process(pid);
+        if let Summary::Close { fd } = kind {
+            for flight in process.flights.values() {
+                if flight.kind.fds().contains(&Some(fd)) {
+                    self.fail(pid, &format!("a Close while {:?} is in flight on {fd:?}", flight.kind));
+                }
+            }
+            return;
+        }
+        if !kind.is_file() {
+            self.fail(pid, &format!("an operation on sockets on a file's descriptor: {kind:?}"));
+        }
+        for fd in kind.fds().into_iter().flatten() {
+            if process.fds.contains_key(&fd) {
+                self.fail(pid, &format!("an operation on files on {fd:?}, a socket's descriptor: {kind:?}"));
+            }
+        }
+        let Some(fd) = kind.fd() else {
+            self.bug("an operation on files names a descriptor");
+        };
+        let how = process.files.get(&fd).expect("checked open, and not a socket's").how;
+        let broken = match kind {
+            Summary::Read { .. } if how != OpenHow::Read => Some("a Read on a descriptor not opened to read"),
+            Summary::Write { .. } if how != OpenHow::Create => Some("a Write on a descriptor not opened to create"),
+            Summary::List { .. } if how == OpenHow::Create => Some("a List on a descriptor opened to create"),
+            Summary::Open { .. }
+            | Summary::Read { .. }
+            | Summary::Write { .. }
+            | Summary::Sync { .. }
+            | Summary::Stat { .. }
+            | Summary::Rename { .. }
+            | Summary::Remove { .. }
+            | Summary::MakeDirectory { .. }
+            | Summary::List { .. } => None,
+            Summary::Socket { .. }
+            | Summary::Bind { .. }
+            | Summary::Listen { .. }
+            | Summary::Accept { .. }
+            | Summary::Connect { .. }
+            | Summary::Recv { .. }
+            | Summary::Send { .. }
+            | Summary::Shutdown { .. }
+            | Summary::Close { .. }
+            | Summary::Cancel { .. } => self.bug("only an operation on files is checked as one"),
+        };
+        if let Some(broken) = broken {
+            self.fail(pid, &format!("{broken}, opened {how:?}: {kind:?}"));
+        }
+    }
+}
+
+/// What a submission's descriptor names, once checked.
+#[derive(Clone, Copy, Debug)]
+enum On {
+    /// No descriptor: a `Socket`, a `Cancel`.
+    Nothing,
+    Socket(SocketId),
+    /// An operation on files, or a `Close` of a file's descriptor: the
+    /// machine's.
+    Files,
 }
 
 // The operations.
@@ -1125,10 +1235,14 @@ impl Sim {
         falls
     }
 
+    /// Whether `pid` holds as many descriptors as it may, counting those its
+    /// `Open`s in flight will take.
     fn fds_full(&self, pid: Pid) -> bool {
-        match u32::try_from(self.process(pid).fds.len()) {
-            Ok(open) => open >= self.config.max_fds,
-            Err(_) => true,
+        let process = self.process(pid);
+        let open = process.fds.len().checked_add(process.files.len());
+        match open.and_then(|open| u32::try_from(open).ok()) {
+            Some(open) => open.saturating_add(process.opening) >= self.config.max_fds,
+            None => true,
         }
     }
 

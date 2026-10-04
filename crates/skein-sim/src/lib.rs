@@ -22,6 +22,12 @@
 //!   waits for the process to enter, not for time. A world that hosts
 //!   services moves time to the earlier of [`Sim::next_due`] and their
 //!   earliest deadline.
+//! - Files go to the embedder's fake machine, through the machine seam
+//!   (simulator.md, 3.1): after each submit, the world takes the [`Call`]s
+//!   waiting ([`Sim::calls`]), has its machine answer each, and hands the
+//!   [`Answer`]s back ([`Sim::answer`]), which completes the operations. A
+//!   root the shell would open at startup is the machine's [`Handle`] of a
+//!   directory, given to a process with [`Sim::root`].
 //! - [`Sim::assert_quiescent`] and [`Sim::assert_no_open_fds`] check a
 //!   process at the end; [`Sim::render_trace`] prints the run with its seed,
 //!   every fault drawn included.
@@ -31,7 +37,9 @@
 //! Every broken invariant of the contract fails the world at submit, with a
 //! panic naming the seed and the end of the trace, as does any operation on a
 //! descriptor the process does not have open. Every completion it makes is
-//! checked with `Complete::is_valid`, and each token completes once.
+//! checked with `Complete::is_valid`, and each token completes once. So is
+//! every answer of the machine: one per call, of its call's shape, no more
+//! bytes or entries than asked, and a handle no process holds.
 //!
 //! # Conformance
 //!
@@ -76,15 +84,29 @@
 //! - **Faults beyond loopback:** `refuse`, `reset` and `timed_out` model a
 //!   remote network, which loopback never is. A timed-out end reports
 //!   `TimedOut`; its peer sees a reset.
+//! - **Files are the machine's, the kernel's part the simulator's:** the
+//!   descriptors (a file's counted with the sockets' against
+//!   `Config::max_fds`, an `Open` the machine has yet to answer holding its
+//!   place), the checks, and the faults. An operation on files is decided
+//!   when the machine answers it, which a world does as soon as the process
+//!   submits; latency then delays its delivery, as any other's.
+//! - **Faults of files:** a short `Read` is cut from what the machine read,
+//!   so it is short of what is there; a short `Write` gives the machine
+//!   fewer bytes. `no_space`, `read_only` and `io_error` (`Other(5)`), and
+//!   `no_buffer`, model a disk beyond a healthy scratch directory, and fall
+//!   instead of the call, before the machine is asked: the operation did
+//!   nothing.
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
 mod config;
+mod machine;
 mod net;
 mod sim;
 mod trace;
 
 pub use config::{Config, Faults};
+pub use machine::{Answer, Ask, Call, Handle, Reply, Ticket};
 pub use sim::{Pid, Sim};
 pub use trace::{Entry, Event, Fault, Summary, Text, render};

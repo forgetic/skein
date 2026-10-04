@@ -1,6 +1,6 @@
 [package]
 name = "skein-sim-tests"
-description = "The simulator's own tests: kernel records submitted by hand, and a client and a server exchanging bytes"
+description = "The simulator's own tests: kernel records submitted by hand, a client and a server exchanging bytes, and files through the machine seam"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ publish.workspace = true
 skein-lib.workspace = true
 skein-io.workspace = true
 skein-sim.workspace = true
+skein-fake-machine.workspace = true
 
 # Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.
 # tests/clippy.toml bans what would make a run unrepeatable.

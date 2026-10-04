@@ -206,6 +206,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-fake-machine"
+version = "0.0.0"
+dependencies = [
+ "skein-io",
+ "skein-lib",
+ "skein-sim",
+]
+
+[[package]]
 name = "skein-heap"
 version = "0.0.0"
 
@@ -328,6 +337,7 @@ dependencies = [
 name = "skein-sim-tests"
 version = "0.0.0"
 dependencies = [
+ "skein-fake-machine",
  "skein-io",
  "skein-lib",
  "skein-sim",

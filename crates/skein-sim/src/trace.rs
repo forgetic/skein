@@ -40,6 +40,11 @@ pub enum Fault {
     CancelRace,
     CancelUnsubmitted,
     LateReset,
+    ShortRead,
+    ShortWrite,
+    NoSpace,
+    ReadOnly,
+    IoError,
 }
 
 /// An operation without its buffers: their lengths stand in for them, and
@@ -135,6 +140,32 @@ impl Summary {
     #[must_use]
     pub const fn fd(&self) -> Option<Fd> {
         self.fds()[0]
+    }
+
+    /// Whether the operation is one on files (`Op::is_file`).
+    #[must_use]
+    pub const fn is_file(&self) -> bool {
+        match self {
+            Summary::Open { .. }
+            | Summary::Read { .. }
+            | Summary::Write { .. }
+            | Summary::Sync { .. }
+            | Summary::Stat { .. }
+            | Summary::Rename { .. }
+            | Summary::Remove { .. }
+            | Summary::MakeDirectory { .. }
+            | Summary::List { .. } => true,
+            Summary::Socket { .. }
+            | Summary::Bind { .. }
+            | Summary::Listen { .. }
+            | Summary::Accept { .. }
+            | Summary::Connect { .. }
+            | Summary::Recv { .. }
+            | Summary::Send { .. }
+            | Summary::Shutdown { .. }
+            | Summary::Close { .. }
+            | Summary::Cancel { .. } => false,
+        }
     }
 
     /// Every descriptor the operation is on: a `Rename` is on both its

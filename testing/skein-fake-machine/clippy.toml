@@ -1,0 +1,29 @@
+# The minimal fake machine is ordinary Rust (programming-model.md, 10.2), as
+# the simulator is: std, Vec, closures and formatting are in, since none of it
+# runs in a service. What stays out is what would break a seed's replay (a
+# clock, threads, OS randomness, hash maps with a random seed), and std
+# handles that close on drop. It keeps the shape of a step machine: its state,
+# a call in, an answer out (testing-strategy.md, 4).
+
+disallowed-types = [
+    { path = "std::time::Instant", reason = "the simulator owns time" },
+    { path = "std::time::SystemTime", reason = "the simulator owns time" },
+    { path = "std::collections::HashMap", reason = "iteration order depends on a random seed: BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order depends on a random seed: BTreeSet" },
+    { path = "std::hash::RandomState", reason = "iteration order would depend on a random seed: BTreeMap" },
+    { path = "std::sync::Arc", reason = "one thread, one owner" },
+    { path = "std::sync::Mutex", reason = "one thread" },
+    { path = "std::sync::RwLock", reason = "one thread" },
+    { path = "std::fs::File", reason = "the machine is a fake: no file of the host's" },
+    { path = "std::os::fd::OwnedFd", reason = "closes on drop (programming-model.md, 2.1)" },
+    { path = "std::process::Child", reason = "std::process is not used (io.md, 6)" },
+]
+
+disallowed-methods = [
+    { path = "std::thread::spawn", reason = "one thread: a seed replays" },
+    { path = "std::collections::HashMap::new", reason = "a random seed: BTreeMap, or a fixed hasher" },
+    { path = "std::collections::HashMap::with_capacity", reason = "a random seed: BTreeMap, or a fixed hasher" },
+    { path = "std::collections::HashSet::new", reason = "a random seed: BTreeSet, or a fixed hasher" },
+    { path = "std::collections::HashSet::with_capacity", reason = "a random seed: BTreeSet, or a fixed hasher" },
+    { path = "std::env::var", reason = "the machine's behaviour comes from what is laid in it" },
+]
