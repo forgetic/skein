@@ -1,0 +1,3 @@
+# Hostile: an HTTP/1.1 request without Host (RFC 9112, 3.2). Drafted by the
+# reference reader, then checked by hand.
+rejected host

@@ -1,0 +1,13 @@
+# Written by hand after what curl sends for -T - , an upload from standard
+# input: chunked, and it asks for a 100 (Continue). Drafted by the reference
+# reader, then checked by hand.
+request PUT /upload HTTP/1.1
+header Host "localhost:8080"
+header User-Agent "curl/8.5.0"
+header Accept "*/*"
+header Transfer-Encoding "chunked"
+header Expect "100-continue"
+framing chunked
+body "first line of the upload, sent as it was read from stdin.\n"
+done keep
+ended

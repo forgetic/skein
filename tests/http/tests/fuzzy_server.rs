@@ -1,7 +1,7 @@
 //! The server's machine world, swept (testing-strategy.md, 8; http.md, 8):
 //! many connections of generated requests, valid, mutated, and corrupted
-//! where a random edit seldom lands, under limits and neighbours drawn
-//! from each seed, each exchange checked against the reference reader and
+//! where a random edit seldom lands, and the request transcripts cut and
+//! mutated, under limits and neighbours drawn from each seed, each exchange checked against the reference reader and
 //! the test's own writer. This stands in for the fuzz target, which waits
 //! for a nightly toolchain.
 //!
@@ -15,10 +15,13 @@ use std::collections::BTreeMap;
 
 use skein_http::server::Error;
 use skein_http_world::server_world::{self, Outcome, Plan, Run, Settings};
-use skein_http_world::{generate, requests};
+use skein_http_world::{generate, request_transcript, requests};
 use skein_lib::Rng;
 
 const ROUNDS: u64 = 20_000;
+
+/// The transcripts, longer, are swept fewer times.
+const TRANSCRIPT_ROUNDS: u64 = 2_000;
 
 /// How often each thing a sweep injects or reaches fell.
 #[derive(Default)]
@@ -166,5 +169,30 @@ fn generated_mutated_and_corrupted_requests_are_served_as_the_reference_reads_th
     for rejection in server_world::rejections() {
         every.push(format!("Failed(Rejected({rejection:?}))"));
     }
+    tally.assert_fell(&every);
+}
+
+#[test]
+fn request_transcripts_cut_mutated_and_failed_are_served_as_the_reference_reads_them() {
+    let transcripts = request_transcript::all();
+    let mut tally = Seen::default();
+    for round in 0..TRANSCRIPT_ROUNDS {
+        let seed = 0x0091_0000 + round;
+        let mut rng = Rng::new(seed);
+        let transcript = &transcripts[usize::try_from(rng.below(transcripts.len() as u64)).unwrap()];
+        let mut client = transcript.bytes.clone();
+        if rng.chance(500) {
+            client = generate::mutate(&mut rng, &client);
+        }
+        let plans: Vec<Plan> = (0..4).map(|_| server_world::plan(&mut rng)).collect();
+        let settings = Settings::chaotic(&mut rng, transcript.limits, client.len());
+        let run = server_world::check(&client, &plans, &settings, seed);
+        tally.record(&run, &settings);
+    }
+    let every: Vec<String> =
+        ["Done(Keep)", "Done(Close)", "Ended", "Failed(Truncated)", "failed Stream", "closed before the outcome"]
+            .iter()
+            .map(|what| (*what).to_string())
+            .collect();
     tally.assert_fell(&every);
 }

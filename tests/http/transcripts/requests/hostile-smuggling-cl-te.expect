@@ -1,0 +1,3 @@
+# Hostile: request smuggling, Content-Length before Transfer-Encoding (RFC
+# 9112, 6.1). Drafted by the reference reader, then checked by hand.
+rejected framing

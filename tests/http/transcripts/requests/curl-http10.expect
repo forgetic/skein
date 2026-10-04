@@ -1,0 +1,8 @@
+# Written by hand after what curl 8 sends with -0: HTTP/1.0, which does not
+# keep the connection. Drafted by the reference reader, then checked by hand.
+request GET / HTTP/1.0
+header Host "localhost:8080"
+header User-Agent "curl/8.5.0"
+header Accept "*/*"
+framing none
+done close

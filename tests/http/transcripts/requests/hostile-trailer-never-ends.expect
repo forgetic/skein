@@ -1,0 +1,8 @@
+# Hostile: a trailer section that never reaches its blank line within the
+# head's limit. Drafted by the reference reader, then checked by hand.
+request POST / HTTP/1.1
+header Host "localhost:8080"
+header Transfer-Encoding "chunked"
+framing chunked
+body "abc"
+failed trailer

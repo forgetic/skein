@@ -1,0 +1,8 @@
+# Hostile: a chunk's data longer than its size says, so no line ending follows
+# it. Drafted by the reference reader, then checked by hand.
+request POST / HTTP/1.1
+header Host "localhost:8080"
+header Transfer-Encoding "chunked"
+framing chunked
+body "abc"
+failed chunk

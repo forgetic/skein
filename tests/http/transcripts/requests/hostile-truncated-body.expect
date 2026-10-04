@@ -1,0 +1,8 @@
+# Hostile: a body cut short of its length. Drafted by the reference reader,
+# then checked by hand.
+request POST / HTTP/1.1
+header Host "localhost:8080"
+header Content-Length "100"
+framing length 100
+body "only a little"
+failed truncated

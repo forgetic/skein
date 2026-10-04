@@ -1,0 +1,3 @@
+# Hostile: more fields than the server's limit. Drafted by the reference
+# reader, then checked by hand.
+rejected too-many-headers

@@ -1,0 +1,4 @@
+# Hostile: request smuggling, Transfer-Encoding before Content-Length, a
+# second request hidden in the chunk. Drafted by the reference reader, then
+# checked by hand.
+rejected framing

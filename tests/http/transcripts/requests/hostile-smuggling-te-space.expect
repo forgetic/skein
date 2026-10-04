@@ -1,0 +1,4 @@
+# Hostile: request smuggling, whitespace before a colon to hide
+# Transfer-Encoding (RFC 9112, 5.1). Drafted by the reference reader, then
+# checked by hand.
+rejected header

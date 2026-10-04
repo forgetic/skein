@@ -1,0 +1,10 @@
+# Written by hand after what curl 8 sends with -H 'Connection: close': the
+# second request is never read. Drafted by the reference reader, then checked
+# by hand.
+request GET / HTTP/1.1
+header Host "localhost:8080"
+header User-Agent "curl/8.5.0"
+header Accept "*/*"
+header Connection "close"
+framing none
+done close
