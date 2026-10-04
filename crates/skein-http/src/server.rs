@@ -34,7 +34,8 @@
 //!   side above discards it, it gives up the rest of the body, whose stream
 //!   hears `Failed(Fault::Other)`, on a connection not used again.
 //! - **The response body is a stream** (`Reply`), written: room demanded,
-//!   `Send`s within it, then `Finish`. A response that has no body (to
+//!   `Send`s within it, then `Finish`, or a withdrawal, as a machine
+//!   stacked on it sends when it closes. A response that has no body (to
 //!   `HEAD`, a 204, a 304, or one without) has no such stream.
 //! - **`Close` ends the server in any state:** it withdraws what it
 //!   demanded below, ends the exchange in progress without a word, and
@@ -193,7 +194,9 @@ pub enum Request {
     /// was given, if it has a body: a demand for room only, of at most
     /// [`Limits::send`]; a `Send` within the room granted; `Finish` once
     /// the response's length is sent, or, for one in chunks, when it is
-    /// over. No withdrawal: the side above closes the server instead.
+    /// over. A withdrawal, as a machine stacked on the reply sends when it
+    /// closes, means the side above writes no more: it closes the server
+    /// next.
     Reply(Down),
     /// Closes the server, in any state. `Closed` answers it.
     Close,
