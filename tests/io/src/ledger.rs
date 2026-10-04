@@ -191,7 +191,10 @@ impl Ledger {
                 }
             }
             Event::Failed { .. } => {
-                assert!(told.made != Made::Bind && !told.failed && !told.connected, "Failed once, before Connected");
+                assert!(
+                    told.made != Made::Bind && !told.failed && !told.connected && !told.closing,
+                    "Failed once, before Connected, and never after the owner's own close"
+                );
                 told.failed = true;
             }
             Event::Closed { .. } => told.closed = true,
