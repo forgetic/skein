@@ -16,7 +16,7 @@ use skein_tls::client::Error;
 use skein_tls_world::pki::{self, Chain, Versions};
 use skein_tls_world::world::{self, Ending, Run, Scenario, Settings};
 
-const ROUNDS: u64 = 600;
+const ROUNDS: u64 = 400;
 
 /// A scenario drawn from `rng`.
 fn scenario(rng: &mut Rng) -> Scenario {

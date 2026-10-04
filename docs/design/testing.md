@@ -256,7 +256,7 @@ corrupted record), certificates refused at the wall time handed in, and
 `close_notify` sent on a finish or a close. Focused tests handshake each
 version, retry, agree ALPN, refuse each kind of certificate and a chain
 longer than the records held, cut the ciphertext a byte at a time, and
-stack the HTTP client on the TLS client; the fuzzy suite runs 600 drawn
+stack the HTTP client on the TLS client; the fuzzy suite runs 400 drawn
 scenarios, asserting that each outcome and each oddity of the neighbours
 fell.
 

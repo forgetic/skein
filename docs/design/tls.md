@@ -253,7 +253,7 @@ wall time each test chooses.
   deciphers or encrypts a record of 16 KB, and 82 KB for the 39 KB chain,
   held twice. The longest chain reaches three quarters of the worst case.
   Dropped, the client frees what it held.
-- **The fuzzy suite** (`tests/tls/tests/fuzzy_world.rs`): 600 runs of
+- **The fuzzy suite** (`tests/tls/tests/fuzzy_world.rs`): 400 runs of
   scenarios and neighbours drawn from each seed, every version, retries,
   ALPN, the big chain, key updates, every ending and every refused
   certificate, asserting that each outcome, each wait a close came in,
