@@ -108,6 +108,60 @@ fn a_handshake_message_longer_than_the_records_held_is_too_long() {
     assert_eq!(machine.bytes(&[22, 3, 3, 0x40, 0x00]), (failed(Error::TooLong), Vec::new()));
 }
 
+/// The random a `HelloRetryRequest` carries (RFC 8446, 4.1.3).
+const RETRY: [u8; 32] = [
+    0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91, 0xc2, 0xa2, 0x11,
+    0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
+];
+
+/// A `HelloRetryRequest` in a record, as any on-path attacker can send in
+/// the clear (RFC 8446, 4.1.4): it echoes the `ClientHello`'s session id,
+/// asks for a P-256 key share, and sends a cookie of `cookie` bytes, which
+/// the second `ClientHello` must echo.
+fn retry(hello: &[u8], cookie: usize) -> Vec<u8> {
+    let session = &hello[44..44 + usize::from(hello[43])];
+    let cookie_len = u16::try_from(cookie).unwrap();
+    let mut extensions =
+        Vec::from([0x00, 0x2b, 0x00, 0x02, 0x03, 0x04, 0x00, 0x33, 0x00, 0x02, 0x00, 0x17, 0x00, 0x2c]);
+    extensions.extend_from_slice(&cookie_len.checked_add(2).unwrap().to_be_bytes());
+    extensions.extend_from_slice(&cookie_len.to_be_bytes());
+    extensions.resize(extensions.len().checked_add(cookie).unwrap(), 0xc0);
+    let mut body = Vec::from([0x03, 0x03]);
+    body.extend_from_slice(&RETRY);
+    body.push(u8::try_from(session.len()).unwrap());
+    body.extend_from_slice(session);
+    body.extend_from_slice(&[0x13, 0x01, 0x00]);
+    body.extend_from_slice(&u16::try_from(extensions.len()).unwrap().to_be_bytes());
+    body.extend_from_slice(&extensions);
+    let mut record = Vec::from([22, 3, 3]);
+    record.extend_from_slice(&u16::try_from(body.len().checked_add(4).unwrap()).unwrap().to_be_bytes());
+    record.push(2);
+    record.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes()[1..]);
+    record.extend_from_slice(&body);
+    record
+}
+
+#[test]
+fn a_retry_whose_cookie_the_flight_cannot_echo_fails_the_handshake_not_the_service() {
+    for cookie in [100, 2_000] {
+        let (mut machine, hello) = started(LIMITS);
+        let record = retry(&hello, cookie);
+        let length = u32::try_from(record.len() - 5).unwrap();
+        let (_, requests) = machine.bytes(&record[..5]);
+        assert_eq!(requests, [Down::Demand { read: Read::Fill(length), room: 0 }]);
+        let (events, requests) = machine.bytes(&record[5..]);
+        if cookie == 100 {
+            // The second hello, owed, its cookie echoed.
+            assert_eq!(events, []);
+            let [Down::Demand { read: Read::Fill(5), room }] = requests[..] else { panic!("{requests:?}") };
+            assert!(room > 100 && room <= client::FLIGHT, "{room}");
+        } else {
+            assert_eq!((events, requests), (failed(Error::FlightTooLong), Vec::new()));
+            assert_eq!(machine.client.waiting(), Waiting::Close);
+        }
+    }
+}
+
 #[test]
 fn the_stream_ending_or_failing_during_the_handshake_fails_it() {
     let (mut ended, _) = started(LIMITS);

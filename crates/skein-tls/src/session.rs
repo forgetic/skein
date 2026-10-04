@@ -98,7 +98,10 @@ pub(crate) fn process(
             Ok(ConnectionState::EncodeTlsData(mut encode)) => {
                 match encode.encode(owed.spare_mut()) {
                     Ok(written) => owed.wrote(written),
-                    Err(EncodeError::InsufficientSize(_)) => unreachable!("TLS's own output fits FLIGHT"),
+                    // The peer can make a flight longer than FLIGHT: a
+                    // HelloRetryRequest's cookie, sent in the clear, is
+                    // echoed in the second ClientHello.
+                    Err(EncodeError::InsufficientSize(_)) => return Err(Error::FlightTooLong),
                     Err(EncodeError::AlreadyEncoded) => unreachable!("each record is encoded once"),
                 }
                 false
@@ -121,7 +124,8 @@ pub(crate) fn process(
             return Ok(closed);
         }
     }
-    unreachable!("rustls comes to rest within ROUNDS states")
+    // Past what 0.23 does: the connection fails, rather than the service.
+    Err(Error::Other)
 }
 
 /// `plain` encrypted, after what TLS owes the stream below, in one box: what
@@ -181,9 +185,8 @@ pub(crate) fn close_notify(tls: &mut Connection, records: &mut Held, owed: &mut 
     match state {
         Ok(ConnectionState::WriteTraffic(mut traffic)) => match traffic.queue_close_notify(owed.spare_mut()) {
             Ok(written) => owed.wrote(written),
-            Err(EncryptError::InsufficientSize(_) | EncryptError::EncryptExhausted) => {
-                unreachable!("close_notify fits what TLS owes: FLIGHT")
-            }
+            Err(EncryptError::InsufficientSize(_)) => return Err(Error::FlightTooLong),
+            Err(EncryptError::EncryptExhausted) => return Err(Error::Other),
         },
         Err(error) => return Err(failure(error)),
         Ok(_) => unreachable!("at rest after the handshake, rustls writes"),

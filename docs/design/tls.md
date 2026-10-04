@@ -148,6 +148,7 @@ pub enum Event {
 | a record fails to decrypt | `Failed(Invalid)` | `Decrypt` |
 | the server's certificate is refused | `Failed(Invalid)` | `Certificate(why)` |
 | anything else wrong with the server's records | `Failed(Invalid)` | `Protocol`, `TooLong` |
+| a `HelloRetryRequest`'s cookie too long to echo within `FLIGHT` | `Failed(Invalid)` | `FlightTooLong` |
 | the server sends a fatal alert | `Failed(Reset)` | `Alert(description)` |
 | the stream below fails | `Failed(fault)`, at once | `Stream(fault)` |
 | rustls fails for a reason of its own | `Failed(Other)` | `Other` |

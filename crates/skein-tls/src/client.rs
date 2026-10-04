@@ -260,6 +260,10 @@ pub enum Error {
     Protocol,
     /// A handshake message longer than [`Limits::records`] holds.
     TooLong,
+    /// What TLS would owe the stream below is longer than [`FLIGHT`]: a
+    /// `HelloRetryRequest` sent a cookie too long to echo in the second
+    /// `ClientHello`.
+    FlightTooLong,
     /// The stream below ended before the server's `close_notify`: during the
     /// handshake, or after it, a truncation (RFC 8446, 6.1).
     Truncated,
@@ -278,9 +282,12 @@ impl Error {
     #[must_use]
     pub fn fault(self) -> Fault {
         match self {
-            Error::Certificate(_) | Error::Decrypt | Error::Protocol | Error::TooLong | Error::Truncated => {
-                Fault::Invalid
-            }
+            Error::Certificate(_)
+            | Error::Decrypt
+            | Error::Protocol
+            | Error::TooLong
+            | Error::FlightTooLong
+            | Error::Truncated => Fault::Invalid,
             Error::Alert(_) => Fault::Reset,
             Error::Stream(fault) => fault,
             Error::Other => Fault::Other,
