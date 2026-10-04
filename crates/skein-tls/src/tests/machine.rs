@@ -111,7 +111,9 @@ fn a_handshake_message_longer_than_the_records_held_is_too_long() {
 #[test]
 fn the_stream_ending_or_failing_during_the_handshake_fails_it() {
     let (mut ended, _) = started(LIMITS);
-    assert_eq!(ended.up(Up::End), (failed(Error::Truncated), Vec::new()));
+    let withdrawal = Down::Demand { read: Read::Nothing, room: 0 };
+    // The header read crosses the end: TLS reads no more, and withdraws it.
+    assert_eq!(ended.up(Up::End), (failed(Error::Truncated), Vec::from([withdrawal])));
     let (mut broken, _) = started(LIMITS);
     assert_eq!(broken.up(Up::Failed(Fault::Other)), (failed(Error::Stream(Fault::Other)), Vec::new()));
     assert_eq!(broken.client.waiting(), Waiting::Close);
@@ -189,6 +191,14 @@ fn a_send_without_room_granted_is_a_bug() {
 fn finishing_with_room_demanded_is_a_bug() {
     let (mut machine, _) = started(LIMITS);
     drop(machine.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 4 })));
+    drop(machine.down(Request::Stream(Down::Finish)));
+}
+
+#[test]
+#[should_panic(expected = "Finish with no read outstanding")]
+fn finishing_with_a_read_outstanding_is_a_bug() {
+    let (mut machine, _) = started(LIMITS);
+    drop(machine.down(Request::Stream(Down::Demand { read: Read::Fill(4), room: 0 })));
     drop(machine.down(Request::Stream(Down::Finish)));
 }
 

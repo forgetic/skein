@@ -22,7 +22,8 @@ const ROUNDS: u64 = 400;
 fn scenario(rng: &mut Rng) -> Scenario {
     let request = usize::try_from(rng.below(3_000)).expect("fits");
     let most = if rng.chance(300) { 60_000 } else { 3_000 };
-    let response = usize::try_from(rng.below(most)).expect("fits");
+    // A byte at least, which an ending may corrupt.
+    let response = usize::try_from(rng.between(1, most)).expect("fits");
     let mut scenario = Scenario::exchange(rng, request, response);
     scenario.server.versions = world::pick(rng, &[Versions::Both, Versions::Tls12, Versions::Tls13]);
     scenario.server.retry = rng.chance(150);
@@ -82,6 +83,7 @@ impl Seen {
             (fell.late_answer, "an answer after the withdrawal"),
             (fell.idle_end, "an end with nothing demanded"),
             (fell.early_response, "a response before the request was sent"),
+            (fell.withdrew_after_end, "the read that crossed the end withdrawn"),
         ] {
             if flag {
                 self.note(what.into());
@@ -135,6 +137,7 @@ fn exchanges_swept() {
         "an answer after the withdrawal",
         "an end with nothing demanded",
         "a response before the request was sent",
+        "the read that crossed the end withdrawn",
         "close_notify read by the server",
     ]);
 }

@@ -184,11 +184,11 @@ fn the_stream_ending_or_failing_during_the_handshake_fails_it() {
         assert_eq!(pair.up(room), vec![]);
         assert_eq!(pair.client.waiting(), Waiting::Handshaking);
         assert_eq!(pair.wire.demand, Some((Read::Fill(client::HEADER), 0)), "a record's header");
-        if ev == Up::End {
-            pair.wire.demand = None;
-        }
         assert_eq!(pair.up(ev), failed(error));
         assert_eq!(pair.client.waiting(), Waiting::Close);
+        if error == Error::Truncated {
+            assert_eq!(pair.wire.demand, None, "the read that crossed the end, withdrawn");
+        }
     }
 }
 
@@ -205,6 +205,41 @@ fn closes_before_and_during_the_handshake_send_nothing() {
     assert_eq!(running.down(Request::Close), vec![Event::Closed]);
     assert_eq!(running.wire.demand, None);
     assert!(running.wire.sends.is_empty());
+}
+
+/// A client ready, whose server sent three bytes and `close_notify`, and
+/// whose side above demanded a fill of five, which the end crossed.
+fn ended_with_a_read_outstanding() -> Pair {
+    let mut pair = pair(&pki::Server::plain(), "skein.test", pki::VALID, &pki::client(&[]), LIMITS);
+    assert_eq!(handshake(&mut pair), ready(Version::Tls13, None));
+    pair.wire.server.write(b"abc");
+    pair.wire.server.close_notify();
+    pair.wire.pull();
+    pair.wire.eof = true;
+    let mut events = pair.down(Request::Stream(Down::Demand { read: Read::Fill(5), room: 0 }));
+    events.extend(pair.settle());
+    assert_eq!(events, vec![Event::Stream(Up::End)], "the end, once the fill can never be met");
+    pair
+}
+
+#[test]
+fn a_read_that_crosses_the_end_stays_outstanding_until_withdrawn() {
+    let mut pair = ended_with_a_read_outstanding();
+    // Withdrawn, the side above writes on to a server that only closed its
+    // side.
+    assert_eq!(pair.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 0 })), vec![]);
+    let mut events = pair.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 4 }));
+    events.extend(pair.settle());
+    assert_eq!(events, vec![Event::Stream(Up::Room)]);
+    assert_eq!(pair.down(Request::Stream(Down::Send(Box::from(&b"late"[..])))), vec![]);
+    assert_eq!(pair.wire.server.received, b"late");
+}
+
+#[test]
+#[should_panic(expected = "one demand at a time")]
+fn a_demand_over_a_read_that_crossed_the_end_is_a_bug() {
+    let mut pair = ended_with_a_read_outstanding();
+    drop(pair.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 4 })));
 }
 
 #[test]

@@ -202,9 +202,10 @@ pub enum Request {
     /// The plaintext stream (lib.md, 7), once the handshake is asked for: a
     /// demand of at most [`Limits::read`] and [`Limits::send`], waiting for
     /// the handshake if it is not done; a `Send` within the room granted,
-    /// one a grant; `Finish`, which sends `close_notify`. A demand of room
-    /// comes only once the last grant was sent within, and none after
-    /// `Finish`.
+    /// one a grant, empty or not; `Finish`, with no demand outstanding,
+    /// which sends `close_notify`. A demand of room comes only once the last
+    /// grant was sent within, and none after `Finish`. A read that crosses
+    /// `End` stays outstanding until it is withdrawn, as io's does.
     Stream(Down),
     /// Closes the client, in any state. `Closed` answers it.
     Close,
@@ -680,13 +681,8 @@ fn open_up(mut open: Open, buffers: &mut Buffers, ev: Up, above: &mut Queue<Even
             settle(open, buffers, above, below)
         }
         Up::End => {
-            // A read outstanding crosses the end and is never met; room may
-            // still come after it (lib.md, 7).
             open.below.ended = true;
-            open.below.demand = match open.below.demand {
-                Some(Demand { room: Room::None, .. }) | None => None,
-                Some(Demand { room, .. }) => Some(Demand { read: Read::Nothing, room }),
-            };
+            open.below.demand = ended(open.below.demand, below);
             match open.handshake {
                 Handshake::Running => return fail(open, Error::Truncated, above),
                 Handshake::Done => {}
@@ -716,10 +712,13 @@ fn stream(
     match down {
         // A withdrawal: the side above reads no more (lib.md, 7), and closes
         // next. What the client reads below for it may still come, and is
-        // dropped with the intake.
+        // dropped with the intake. After the end, it gives up the read that
+        // crossed it, and may write on.
         Down::Demand { read: Read::Nothing, room: 0 } => {
             open.above.demand = None;
-            open.above.reading = Reading::Withdrawn;
+            if open.above.reading == Reading::Open {
+                open.above.reading = Reading::Withdrawn;
+            }
         }
         Down::Demand { read, room } => {
             assert!(
@@ -744,11 +743,18 @@ fn stream(
         Down::Send(bytes) => return sent(open, &bytes, buffers, above, below),
         Down::Finish => {
             assert!(open.writing == Writing::Open, "one Finish");
-            let room = match open.above.demand {
-                Some(wanted) => wanted.room,
-                None => 0,
+            let wanted = match open.above.demand {
+                Some(wanted) => wanted,
+                None => Wanted { read: Read::Nothing, room: 0 },
             };
-            assert!(room == 0, "Finish with no room demanded");
+            assert!(wanted.room == 0, "Finish with no room demanded");
+            // A read the client is still reading below for would hold
+            // close_notify behind it, while the server may wait for the end
+            // of what it is sent before it answers.
+            assert!(
+                wanted.read == Read::Nothing || open.above.reading == Reading::Ended,
+                "Finish with no read outstanding, but one that crossed the end"
+            );
             // Nothing more to send: a grant not sent within is TLS's now.
             open.above.grant = None;
             open.writing = Writing::Finishing;
@@ -863,11 +869,9 @@ fn answer(open: &mut Open, intake: &mut Intake, above: &mut Queue<Event>) -> boo
         Peer::Open => true,
         Peer::Cut => false,
         Peer::Closed => {
-            // The end ends the read: room may still be granted after it.
-            open.above.demand = match open.above.demand {
-                Some(Wanted { room: 0, .. }) | None => None,
-                Some(Wanted { room, .. }) => Some(Wanted { read: Read::Nothing, room }),
-            };
+            // The end answers nothing: a read outstanding stays so, never
+            // met, until the side above withdraws it, as io keeps it
+            // (lib.md, 7); room may still be granted.
             open.above.reading = Reading::Ended;
             above.push(Event::Stream(Up::End));
             true
@@ -938,15 +942,29 @@ fn fail(open: Open, error: Error, above: &mut Queue<Event>) -> State {
     State::Failed(open.below.demand)
 }
 
+/// The demand outstanding below once the stream ended. A read outstanding
+/// crosses the end and is never met, but stays outstanding, as io keeps it
+/// (lib.md, 7; io.md, 3.3): TLS reads no more after the end, so it
+/// withdraws a demand that only reads, which leaves it free to demand room.
+/// One with room keeps it, as room may still be granted.
+fn ended(demand: Option<Demand>, below: &mut Queue<Down>) -> Option<Demand> {
+    match demand {
+        Some(Demand { room: Room::None, .. }) => {
+            below.push(Down::Demand { read: Read::Nothing, room: 0 });
+            None
+        }
+        Some(Demand { room, .. }) => Some(Demand { read: Read::Nothing, room }),
+        None => None,
+    }
+}
+
 /// An event below after the connection failed: an answer to the demand
-/// outstanding, which ends it, or the stream's end or failure.
+/// outstanding, which ends it, or the stream's end or failure. A read that
+/// crosses the end stays outstanding, for the close to withdraw.
 fn failed_up(demand: Option<Demand>, ev: Up) -> Option<Demand> {
     match ev {
         Up::Bytes(_) | Up::Room | Up::Failed(_) => None,
-        Up::End => match demand {
-            Some(Demand { room: Room::None, .. }) | None => None,
-            Some(Demand { room, .. }) => Some(Demand { read: Read::Nothing, room }),
-        },
+        Up::End => demand,
     }
 }
 
@@ -1025,12 +1043,7 @@ fn closing_up(
             assert!(room > 0, "room answers a demand for room");
             below.push(Down::Send(owed.take(room)));
         }
-        Up::End => {
-            closing.demand = match closing.demand {
-                Some(Demand { room: Room::None, .. }) | None => None,
-                Some(Demand { room, .. }) => Some(Demand { read: Read::Nothing, room }),
-            };
-        }
+        Up::End => closing.demand = ended(closing.demand, below),
         // Nothing more can be sent.
         Up::Failed(_) => {
             above.push(Event::Closed);

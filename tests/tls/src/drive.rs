@@ -105,7 +105,7 @@ impl Wire {
         }
         if read != Read::Nothing && self.eof && !self.ended {
             self.ended = true;
-            self.demand = None;
+            // The read stays outstanding, never met, as io keeps it.
             return Some(Up::End);
         }
         None

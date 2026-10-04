@@ -50,6 +50,8 @@ struct Connection {
     done: Option<Reuse>,
     http_closed: bool,
     tls_closed: bool,
+    /// Whether the server wrote its response: once.
+    responded: bool,
 }
 
 impl Connection {
@@ -77,6 +79,7 @@ impl Connection {
             done: None,
             http_closed: false,
             tls_closed: false,
+            responded: false,
         }
     }
 
@@ -91,9 +94,10 @@ impl Connection {
                 return;
             }
             let server = &mut self.tls.wire.server;
-            if self.tls.wire.bytes.is_empty() && whole(&server.received) && !server.closed {
+            if !self.responded && whole(&server.received) {
                 server.write(response);
                 self.tls.wire.pull();
+                self.responded = true;
             }
             let events = self.tls.settle();
             self.hops.extend(events.into_iter().map(Hop::Tls));

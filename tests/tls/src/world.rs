@@ -261,6 +261,8 @@ pub struct Run {
     pub closed_while: Waiting,
     /// The fault the stream below failed with, if it did.
     pub below_failed: Option<Fault>,
+    /// The server's error, if what the client sent broke TLS.
+    pub server_failed: Option<String>,
     pub fell: Fell,
 }
 
@@ -283,6 +285,8 @@ pub struct Fell {
     pub idle_end: bool,
     /// A response that came before the request was all sent.
     pub early_response: bool,
+    /// The side above withdrew the read that crossed the end, to write on.
+    pub withdrew_after_end: bool,
 }
 
 struct World<'a> {
@@ -427,6 +431,8 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Run {
         }
         world.iteration += 1;
         if world.above.closed {
+            // What failed before the close, not what fails after it.
+            let below_failed = world.below.failed;
             world.late();
             let above = world.above;
             return Run {
@@ -440,7 +446,8 @@ pub fn run(scenario: &Scenario, settings: &Settings, seed: u64) -> Run {
                 sent: above.sent == scenario.request.len(),
                 finished: above.finished,
                 closed_while: above.closing.expect("closed after a close"),
-                below_failed: world.below.failed,
+                below_failed,
+                server_failed: world.server.server.failed.map(|error| format!("{error:?}")),
                 fell: world.fell,
             };
         }
@@ -458,6 +465,8 @@ pub fn check(scenario: &Scenario, settings: &Settings, seed: u64) -> Run {
     let what = || format!("seed {seed}, {settings:?}, {:?} {:?}", scenario.server, scenario.ending);
     assert!(scenario.response.starts_with(&run.received), "what the client read is the response, in order; {}", what());
     assert!(scenario.request.starts_with(&run.served), "what the server read is the request, in order; {}", what());
+    // Nothing on the way to the server is changed: its records are TLS.
+    assert_eq!(run.server_failed, None, "the server reads what the client sends; {}", what());
     // The failure the stream below was told of, and nothing else, ends a
     // run whose stream failed before the outcome.
     if let (Some(fault), Some(error)) = (run.below_failed, run.failed)
@@ -524,8 +533,22 @@ pub fn check(scenario: &Scenario, settings: &Settings, seed: u64) -> Run {
     if run.agreed.is_some() && run.failed.is_none() && run.below_failed.is_none() {
         assert!(run.notified, "close_notify sent: {:?}; {}", run.closed_while, what());
     }
-    if run.finished && run.notified {
-        assert_eq!(run.served, scenario.request, "a request finished is all read; {}", what());
+    if run.sent && run.notified {
+        assert_eq!(run.served, scenario.request, "a request sent and closed is all read; {}", what());
+    }
+    // Left alone, a run comes to the end its server makes: the side above
+    // reads to it, and no neighbour is held up for ever.
+    if settings.close.is_none() && settings.failure.is_none() {
+        match scenario.ending {
+            Ending::CloseNotify => assert!(run.ended.is_some(), "the end; {}", what()),
+            Ending::Truncate => assert_eq!(run.failed, Some(Error::Truncated), "{}", what()),
+            Ending::Corrupt => assert_eq!(run.failed, Some(Error::Decrypt), "{}", what()),
+            Ending::Silent => {}
+        }
+        // Unless the connection failed on what an eager server sent first.
+        if run.failed.is_none() || !scenario.eager {
+            assert!(run.sent, "the request is all sent; {}", what());
+        }
     }
     run
 }
@@ -591,11 +614,11 @@ impl World<'_> {
         }
     }
 
+    /// The stream ends. A read outstanding is never met, and stays
+    /// outstanding until the client withdraws it, as io keeps it (lib.md,
+    /// 7); its room may still be granted.
     fn end(&mut self) {
         self.below.life = Life::Ended;
-        if let Some((_, 0)) = self.below.demand {
-            self.below.demand = None;
-        }
         self.up(Up::End);
     }
 
@@ -741,7 +764,12 @@ impl World<'_> {
             Face::Idle => {
                 let reads = !self.above.reading_over && (left == 0 || self.rng.chance(500));
                 let read = if reads { self.draw_read() } else { Read::Nothing };
-                let room = if left > 0 && !self.above.finished {
+                // Now and then it reads before it writes on, from a server
+                // that answers at once and ends the stream: a patient one, or
+                // a silent one, would leave it waiting for ever.
+                let ends = self.scenario.eager && self.scenario.ending != Ending::Silent;
+                let writes = !reads || !ends || self.rng.chance(700);
+                let room = if left > 0 && !self.above.finished && writes {
                     let most = self.settings.limits.send.min(u32::try_from(left).expect("fits a u32"));
                     draw(&mut self.rng, 1, most)
                 } else {
@@ -761,6 +789,15 @@ impl World<'_> {
                 self.above.sent += len;
                 self.above.face = Face::Idle;
                 self.down(Request::Stream(Down::Send(piece.into())));
+            }
+            // A read that crossed the end stays outstanding, never met: the
+            // side above withdraws it to write on, or to finish.
+            Face::Demanded(_, 0)
+                if self.above.ended.is_some() && (left > 0 || self.settings.finish && !self.above.finished) =>
+            {
+                self.fell.withdrew_after_end = true;
+                self.above.face = Face::Idle;
+                self.down(Request::Stream(Down::Demand { read: Read::Nothing, room: 0 }));
             }
             Face::Demanded(..) | Face::Over => {}
         }
@@ -850,11 +887,9 @@ impl World<'_> {
             Event::Stream(Up::End) => {
                 assert!(above.ended.is_none() && above.stream_failed.is_none(), "End once, before any failure");
                 assert!(self.server.server.handshaking() || self.below.eof, "End once the server closed");
+                // A read outstanding stays so, never met, until withdrawn.
                 above.ended = Some(match above.face {
-                    Face::Demanded(read, room) => {
-                        above.face = if room > 0 { Face::Demanded(Read::Nothing, room) } else { Face::Idle };
-                        read
-                    }
+                    Face::Demanded(read, _) => read,
                     Face::Idle | Face::Granted(_) | Face::Over => Read::Nothing,
                 });
                 above.reading_over = true;
@@ -887,7 +922,10 @@ impl World<'_> {
         let below = &mut self.below;
         match request {
             Down::Demand { read: Read::Nothing, room: 0 } => {
-                assert!(closing, "a withdrawal only as the client closes");
+                assert!(
+                    closing || below.life == Life::Ended,
+                    "a withdrawal only as the client closes, or reads no more after the end"
+                );
                 let withdrawn = below.demand.take().expect("only a demand outstanding is withdrawn");
                 below.withdrawn = Some(withdrawn);
             }
@@ -962,6 +1000,7 @@ fn corrupt(records: &mut [u8], rng: &mut Rng) {
         bodies.push((at + 5, length));
         at += 5 + length;
     }
+    assert!(!bodies.is_empty(), "a response of a byte at least, to corrupt");
     let (start, length) = bodies[usize::try_from(rng.below(bodies.len() as u64)).expect("fits a usize")];
     let offset = start + usize::try_from(rng.below(length as u64)).expect("fits a usize");
     records[offset] ^= u8::try_from(rng.between(1, 255)).expect("a byte");
