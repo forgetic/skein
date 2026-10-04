@@ -13,7 +13,9 @@ use skein_http::{Header, MaxOut, Method, client as http, sse};
 use skein_lib::stream::{Down, Read, Up};
 use skein_lib::{Decimal, Env, List, Queue, Token, Writer, bytes};
 
-use crate::{Block, Call, Completion, Delta, Endpoint, Error, Failure, Provider, openai, translate};
+use crate::{
+    Block, Call, Completion, Delta, Endpoint, Error, Failure, Provider, anthropic, dialect, openai, translate,
+};
 
 /// Startup bounds, unchanged for a client's lifetime and reuse.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -127,7 +129,7 @@ pub struct Client {
     outcome: Outcome,
     http: http::Client,
     sse: sse::Reader,
-    decoder: Option<openai::StreamDecoder>,
+    decoder: Option<dialect::Decoder>,
     content: Option<List<Block>>,
     content_bytes: u64,
     call: Option<http::Call>,
@@ -135,7 +137,7 @@ pub struct Client {
     upload_offset: usize,
     http_events: Queue<http::Event>,
     sse_events: Queue<sse::Event>,
-    outputs: Queue<openai::Output>,
+    outputs: Queue<dialect::Output>,
     requests: Queue<http::Request>,
     sse_below: Queue<Down>,
     error: List<u8>,
@@ -154,15 +156,27 @@ impl Client {
         if worst_case(limits).is_none() {
             return Err(Error::Limit);
         }
-        let request = translate::request(input.prompt, input.endpoint.provider, &limits.dialect)?;
-        let length = match openai::measure_request(&request, &limits.dialect) {
-            Ok(length) => length,
-            Err(error) => return Err(admission(error)),
-        };
-        let headers = headers(&input.endpoint, &input.credential, limits, length)?;
-        let body = match openai::encode_request(&request, &limits.dialect) {
-            Ok(body) => body,
-            Err(error) => return Err(admission(error)),
+        let provider = input.endpoint.provider;
+        let (headers, body) = match provider {
+            Provider::OpenAiCodex => {
+                let request = translate::request(input.prompt, provider, &limits.dialect)?;
+                let length = match openai::measure_request(&request, &limits.dialect) {
+                    Ok(length) => length,
+                    Err(error) => return Err(admission(error)),
+                };
+                let headers = headers(&input.endpoint, &input.credential, limits, length)?;
+                let body = match openai::encode_request(&request, &limits.dialect) {
+                    Ok(body) => body,
+                    Err(error) => return Err(admission(error)),
+                };
+                (headers, body)
+            }
+            Provider::Anthropic => {
+                let length = anthropic::measure_request(&input.prompt, &limits.dialect)?;
+                let headers = headers(&input.endpoint, &input.credential, limits, length)?;
+                let body = anthropic::encode_request(&input.prompt, &limits.dialect)?;
+                (headers, body)
+            }
         };
         let call = http::Call {
             method: Method::Post,
@@ -180,7 +194,7 @@ impl Client {
             outcome: Outcome::Pending,
             http: http::Client::new(&limits.http),
             sse: sse::Reader::new(&limits.sse),
-            decoder: Some(openai::StreamDecoder::new(&limits.dialect)),
+            decoder: Some(dialect::Decoder::new(provider, &limits.dialect)),
             content: Some(List::with_capacity(limits.dialect.parts)),
             content_bytes: 0,
             call: Some(call),
@@ -188,7 +202,7 @@ impl Client {
             upload_offset: 0,
             http_events: Queue::with_capacity(HTTP_EVENTS),
             sse_events: Queue::with_capacity(SSE_EVENTS),
-            outputs: Queue::with_capacity(openai::MAX_OUT),
+            outputs: Queue::with_capacity(dialect::MAX_OUT),
             requests: Queue::with_capacity(REQUESTS),
             sse_below: Queue::with_capacity(1),
             error: List::with_capacity(limits.error_bytes),
@@ -358,7 +372,7 @@ pub fn resume(client: &mut Client, env: &Env<Limits>, above: &mut Queue<Event>, 
         } else if client.state == State::Streaming && client.asked {
             let decoder = client.decoder.as_mut().expect("a streaming client has its decoder");
             if decoder.has_ready() {
-                decoder.ready(&mut client.outputs);
+                decoder.ready(&env.limits.dialect, &mut client.outputs);
             } else if client.sse.waiting() == sse::Waiting::Next {
                 sse_down(client, env, sse::Request::Next);
             } else {
@@ -602,47 +616,23 @@ fn sse_event(
     }
     match event {
         sse::Event::Message(message) => {
-            let parsed = match openai::Json::from_bytes(&message.data, &env.limits.dialect) {
-                Ok(json) => openai::decode_event(&json, &env.limits.dialect),
-                Err(error) => Err(error),
-            };
-            match parsed {
-                Ok(event) => match event {
-                    openai::Event::Failed { error } => {
-                        let failure =
-                            translate::failure(openai::classify(client.status, Some(&error), client.rate, env.wall));
-                        fail(client, failure, error.message, above);
-                        closing(client, env, above, below);
+            let decoder = client.decoder.as_mut().expect("the streaming state has its decoder");
+            let parsed =
+                decoder.event(&message, &env.limits.dialect, env.wall, client.status, client.rate, &mut client.outputs);
+            if let Err(error) = parsed {
+                let failure = match error {
+                    openai::DecodeError::TooLarge => Failure::Limit,
+                    openai::DecodeError::Malformed | openai::DecodeError::Missing | openai::DecodeError::WrongType => {
+                        Failure::Protocol
                     }
-                    event @ (openai::Event::Created { .. }
-                    | openai::Event::InProgress { .. }
-                    | openai::Event::Added { .. }
-                    | openai::Event::Done { .. }
-                    | openai::Event::TextDelta { .. }
-                    | openai::Event::ArgumentsDelta { .. }
-                    | openai::Event::ReasoningDelta { .. }
-                    | openai::Event::Completed { .. }
-                    | openai::Event::Progress
-                    | openai::Event::Unknown) => {
-                        let decoder = client.decoder.as_mut().expect("the streaming state has its decoder");
-                        decoder.event(event, &env.limits.dialect, env.wall, &mut client.outputs);
-                    }
-                },
-                Err(error) => {
-                    let failure = match error {
-                        openai::DecodeError::TooLarge => Failure::Limit,
-                        openai::DecodeError::Malformed
-                        | openai::DecodeError::Missing
-                        | openai::DecodeError::WrongType => Failure::Protocol,
-                    };
-                    fail(client, failure, bytes::copy_of(b"malformed provider event"), above);
-                    closing(client, env, above, below);
-                }
+                };
+                fail(client, failure, bytes::copy_of(b"malformed provider event"), above);
+                closing(client, env, above, below);
             }
         }
         sse::Event::Ended => {
             let decoder = client.decoder.as_mut().expect("the streaming state has its decoder");
-            decoder.end(&mut client.outputs);
+            decoder.end(&env.limits.dialect, &mut client.outputs);
         }
         sse::Event::Failed(error) => {
             let failure = match error {
@@ -658,7 +648,7 @@ fn sse_event(
 
 fn output(
     client: &mut Client,
-    event: openai::Output,
+    event: dialect::Output,
     env: &Env<Limits>,
     above: &mut Queue<Event>,
     below: &mut Queue<Down>,
@@ -667,7 +657,7 @@ fn output(
         return;
     }
     match event {
-        openai::Output::Part(part) => match translate::part(part, &env.limits.dialect) {
+        dialect::Output::Part(part) => match part {
             Ok(block) => {
                 let size = block_size(&block);
                 let next = client.content_bytes.checked_add(size);
@@ -697,40 +687,36 @@ fn output(
                 closing(client, env, above, below);
             }
         },
-        openai::Output::TextDelta { index, content_index, text } => {
+        dialect::Output::TextDelta { index, content_index, text } => {
             client.asked = false;
             above.push(Event::Delta { owner: client.owner, delta: Delta::Text { index, content_index, text } });
         }
-        openai::Output::ArgumentsDelta { index, delta } => {
+        dialect::Output::ArgumentsDelta { index, delta } => {
             client.asked = false;
             above.push(Event::Delta { owner: client.owner, delta: Delta::ToolArguments { index, delta } });
         }
-        openai::Output::ReasoningDelta { index, summary_index, text } => {
+        dialect::Output::ReasoningDelta { index, summary_index, text } => {
             client.asked = false;
             above.push(Event::Delta { owner: client.owner, delta: Delta::Reasoning { index, summary_index, text } });
         }
-        openai::Output::Completed { stop, usage } => {
+        dialect::Output::Completed { stop, usage } => {
             let content = client.content.take().expect("a pending call holds its completion");
             client.outcome = Outcome::Terminal;
             client.asked = false;
             above.push(Event::Completed {
                 owner: client.owner,
-                completion: Completion {
-                    content: content.into_boxed(),
-                    stop: translate::stop(stop),
-                    usage: translate::usage(usage),
-                },
+                completion: Completion { content: content.into_boxed(), stop, usage },
             });
             client.state = State::Draining;
             close_sse(client, env);
             clear_requests(client);
             client.requests.push(http::Request::Discard);
         }
-        openai::Output::Failed { failure, detail } => {
-            fail(client, translate::failure(failure), detail, above);
+        dialect::Output::Failed { failure, detail } => {
+            fail(client, failure, detail, above);
             closing(client, env, above, below);
         }
-        openai::Output::Progress => {}
+        dialect::Output::Progress => {}
     }
 }
 
@@ -852,7 +838,7 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(replay_storage)?
         .checked_add(http::worst_case(&limits.http)?)?
         .checked_add(sse::worst_case(&limits.sse)?)?
-        .checked_add(openai::worst_case(&limits.dialect)?)?
+        .checked_add(openai::worst_case(&limits.dialect)?.max(anthropic::worst_case(&limits.dialect)?))?
         .checked_add(List::<Block>::worst_case(limits.dialect.parts)?.checked_mul(3)?)?
         .checked_add(u64::from(limits.dialect.answer_bytes).checked_mul(4)?)?
         .checked_add(u64::from(limits.dialect.request_bytes).checked_mul(4)?)?
@@ -861,7 +847,9 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(u64::from(limits.error_bytes).checked_mul(4)?)?
         .checked_add(Queue::<http::Event>::worst_case(HTTP_EVENTS)?)?
         .checked_add(Queue::<sse::Event>::worst_case(SSE_EVENTS)?)?
+        .checked_add(Queue::<dialect::Output>::worst_case(dialect::MAX_OUT)?)?
         .checked_add(Queue::<openai::Output>::worst_case(openai::MAX_OUT)?)?
+        .checked_add(Queue::<anthropic::Output>::worst_case(anthropic::MAX_OUT)?)?
         .checked_add(Queue::<http::Request>::worst_case(REQUESTS)?)?
         .checked_add(Queue::<Down>::worst_case(1)?)
 }
@@ -883,7 +871,6 @@ fn headers(
 ) -> Result<Box<[Header]>, Error> {
     if endpoint.authority.is_empty()
         || credential.access_token.is_empty()
-        || credential.account_id.is_empty()
         || !header_value(&credential.access_token)
         || !header_value(&credential.account_id)
         || !valid_authority(&endpoint.authority)
@@ -891,6 +878,13 @@ fn headers(
     {
         return Err(Error::Invalid);
     }
+    match endpoint.provider {
+        Provider::OpenAiCodex if credential.account_id.is_empty() => return Err(Error::Invalid),
+        Provider::Anthropic if !credential.account_id.is_empty() => return Err(Error::Invalid),
+        Provider::OpenAiCodex | Provider::Anthropic => {}
+    }
+    let fields = provider_headers(endpoint, credential);
+    let mut fixed_count: usize = 5;
     for &byte in &endpoint.target {
         if !(0x21..=0x7e).contains(&byte) || byte == b'#' {
             return Err(Error::Invalid);
@@ -924,17 +918,26 @@ fn headers(
         b"Content-Type: application/json\r\n",
         b"Accept: text/event-stream\r\n",
         b"Accept-Encoding: identity\r\n",
-        b"chatgpt-account-id: \r\n",
         b"Authorization: Bearer \r\n",
         b"Content-Length: \r\n",
         b"\r\n",
     ] {
         total = total.checked_add(fixed.len()).ok_or(Error::Limit)?;
     }
+    for (name, value) in fields.iter().flatten() {
+        fixed_count = fixed_count.checked_add(1).ok_or(Error::Limit)?;
+        total = total.checked_add(name.len()).ok_or(Error::Limit)?;
+        // Codex account bytes were counted with the credential above.
+        if !name.eq_ignore_ascii_case(b"chatgpt-account-id") {
+            total = total.checked_add(value.len()).ok_or(Error::Limit)?;
+        }
+        total = total.checked_add(4).ok_or(Error::Limit)?;
+    }
     let length = Decimal::of(u64::from(body_length));
     total = total.checked_add(length.as_bytes().len()).ok_or(Error::Limit)?;
     if total > usize::try_from(limits.http.request).expect("u32 fits usize")
-        || endpoint.headers.len().saturating_add(6) > usize::try_from(limits.http.headers).expect("u32 fits usize")
+        || endpoint.headers.len().saturating_add(fixed_count)
+            > usize::try_from(limits.http.headers).expect("u32 fits usize")
     {
         return Err(Error::Limit);
     }
@@ -944,11 +947,15 @@ fn headers(
         (b"Content-Type".as_slice(), b"application/json".as_slice()),
         (b"Accept".as_slice(), b"text/event-stream".as_slice()),
         (b"Accept-Encoding".as_slice(), b"identity".as_slice()),
-        (b"chatgpt-account-id".as_slice(), credential.account_id.as_ref()),
     ] {
         headers
             .push(Header { name: bytes::copy_of(name), value: bytes::copy_of(value) })
             .expect("fixed headers fit the checked cap");
+    }
+    for (name, value) in fields.iter().flatten() {
+        headers
+            .push(Header { name: bytes::copy_of(name), value: bytes::copy_of(value) })
+            .expect("provider headers fit the checked cap");
     }
     let len = credential.access_token.len().checked_add(7).ok_or(Error::Limit)?;
     let mut bearer = Writer::new(len);
@@ -961,6 +968,31 @@ fn headers(
         headers.push(header.clone()).expect("extra headers fit the checked cap");
     }
     Ok(headers.into_boxed())
+}
+
+fn provider_headers<'a>(
+    endpoint: &Endpoint,
+    credential: &'a crate::Credential,
+) -> [Option<(&'static [u8], &'a [u8])>; 2] {
+    match endpoint.provider {
+        Provider::OpenAiCodex => [Some((b"chatgpt-account-id", &credential.account_id)), None],
+        Provider::Anthropic => [
+            default_header(endpoint, b"anthropic-version", b"2023-06-01"),
+            default_header(endpoint, b"anthropic-beta", b"oauth-2025-04-20"),
+        ],
+    }
+}
+fn default_header(
+    endpoint: &Endpoint,
+    name: &'static [u8],
+    value: &'static [u8],
+) -> Option<(&'static [u8], &'static [u8])> {
+    for header in &endpoint.headers {
+        if header.is(name) {
+            return None;
+        }
+    }
+    Some((name, value))
 }
 
 fn valid_authority(value: &[u8]) -> bool {
@@ -998,6 +1030,7 @@ fn reserved(name: &[u8]) -> bool {
         b"host".as_slice(),
         b"authorization",
         b"chatgpt-account-id",
+        b"x-api-key",
         b"content-type",
         b"accept",
         b"accept-encoding",

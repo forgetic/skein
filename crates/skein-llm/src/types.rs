@@ -9,6 +9,8 @@ use skein_lib::{Duration, Token, bytes};
 pub enum Provider {
     /// OAuth subscription access through the `ChatGPT` Codex Responses route.
     OpenAiCodex,
+    /// OAuth bearer access to Anthropic's Messages subscription dialect.
+    Anthropic,
 }
 /// The conversation participant; instructions live separately in [`Prompt`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -77,6 +79,9 @@ pub struct Prompt {
     pub reasoning_effort: Option<Box<[u8]>>,
     /// Optional provider prompt-cache affinity key; it does not enable storage.
     pub cache_key: Option<Box<[u8]>>,
+    /// Anthropic's `max_tokens`; `None` uses 4096. Codex subscription calls
+    /// require `None` because that route does not support token caps.
+    pub max_output_tokens: Option<u32>,
 }
 /// Why a successfully decoded response finished.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -158,6 +163,16 @@ pub struct Endpoint {
     pub headers: Box<[Header]>,
 }
 impl Endpoint {
+    /// Anthropic Messages with subscription OAuth bearer authentication.
+    #[must_use]
+    pub fn anthropic() -> Endpoint {
+        Endpoint {
+            provider: Provider::Anthropic,
+            authority: bytes::copy_of(b"api.anthropic.com"),
+            target: bytes::copy_of(b"/v1/messages"),
+            headers: Box::new([]),
+        }
+    }
     /// The subscription Responses route. Caller headers identify the actual client.
     #[must_use]
     pub fn codex() -> Endpoint {
@@ -174,8 +189,16 @@ impl Endpoint {
 pub struct Credential {
     /// OAuth bearer access token; acquisition and renewal belong to the caller.
     pub access_token: Box<[u8]>,
-    /// Subscription account identifier sent in `chatgpt-account-id`.
+    /// Codex account identifier sent in `chatgpt-account-id`. Must be empty
+    /// for Anthropic, which authenticates using only the bearer token.
     pub account_id: Box<[u8]>,
+}
+impl Credential {
+    /// Uses a caller-obtained Anthropic OAuth access token.
+    #[must_use]
+    pub fn anthropic(access_token: Box<[u8]>) -> Credential {
+        Credential { access_token, account_id: Box::new([]) }
+    }
 }
 /// One owner-correlated request. Admission consumes it whether accepted or rejected.
 #[expect(missing_debug_implementations, reason = "a call owns credentials that must not enter debug traces")]

@@ -1,4 +1,4 @@
-//! The only bridge between the provider-neutral vocabulary and Codex documents.
+//! Bridge between the provider-neutral vocabulary and Codex documents.
 use crate::{Block, Error, Failure, Prompt, Provider, Replay, Role, Stop, Usage, openai};
 use alloc::boxed::Box;
 use skein_json::{Token, writer};
@@ -7,6 +7,9 @@ use skein_lib::{List, Writer, bytes};
 const TOOL_ERROR: &[u8] = b"Error: ";
 
 pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limits) -> Result<openai::Request, Error> {
+    if provider != Provider::OpenAiCodex || prompt.max_output_tokens.is_some() {
+        return Err(Error::Unsupported);
+    }
     validate(&prompt, provider, limits)?;
     let mut tools = List::with_capacity(limits.parts);
     for tool in &prompt.tools {
@@ -430,6 +433,7 @@ mod tests {
             messages: Box::new([Message { role, content: Box::new([block]) }]),
             reasoning_effort: None,
             cache_key: None,
+            max_output_tokens: None,
         }
     }
     #[test]

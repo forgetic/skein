@@ -48,6 +48,7 @@ pub fn call(owner: u64) -> Call {
             }]),
             reasoning_effort: None,
             cache_key: Some(b"cache-world".to_vec().into()),
+            max_output_tokens: None,
         },
     }
 }

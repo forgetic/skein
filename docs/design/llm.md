@@ -6,20 +6,27 @@ nothing of a service's domain, sockets, credentials store or tools. This is
 a composition crate, rather than a primitive protocol machine: the lib-only
 rule for the individual machines remains in force.
 
-The first provider is OpenAI's ChatGPT/Codex subscription Responses route.
-The caller obtains and renews an OAuth access token and supplies its account
-ID. The default endpoint is `chatgpt.com/backend-api/codex/responses`.
+Providers are OpenAI's ChatGPT/Codex subscription Responses route and Anthropic's
+OAuth subscription Messages route.
+For Codex, the caller obtains and renews an OAuth access token and supplies its
+account ID. The default endpoint is `chatgpt.com/backend-api/codex/responses`.
 Transport connects to that authority and provides a secured plaintext
 stream. Endpoint overrides support fakes and explicitly chosen deployment
 routes; the caller must bind the stream to the endpoint it supplied.
 Historical client identity strings are optional data, not silently installed
 as defaults. Sign-in and refresh are outside this crate.
+Anthropic uses `api.anthropic.com/v1/messages`, a bearer token with no account
+header, an API version and the OAuth beta flag. Version/beta overrides are
+explicit endpoint headers; reserved credential/framing headers are rejected.
+Its archived Claude Code identity profile is opt-in, including its system
+instruction. The caller selects the model and any required compatibility headers.
 
 ## Vocabulary and ownership
 
 A `Prompt` holds instructions, a model, conversation messages, tool schemas,
-reasoning effort and an optional cache key. A message holds ordered text,
-refusals, tool calls, tool results and reasoning blocks. Provider-owned
+reasoning effort, an optional cache key and optional output-token cap. A
+message holds ordered text, refusals, tool calls, tool results and reasoning
+blocks. Provider-owned
 `Replay` metadata travels with the block it belongs to and is tagged with
 its provider. A replay value for a different provider is refused. Generic
 tool calls retain raw JSON argument text; the application validates and
@@ -90,10 +97,17 @@ owner to check.
 `worst_case` adds the child machines, bounded routing queues, temporary
 JSON/request storage and held completion; no size computation may wrap.
 
-Requests are measured JSON, `store:false`, `stream:true`, full context in
+Codex requests are measured JSON, `store:false`, `stream:true`, full context in
 `input`, client-side function tools and encrypted reasoning included for
 replay. The subscription route does not receive `max_output_tokens` or
-sampling fields. Bodies are uploaded in bounded pieces using HTTP room.
+sampling fields, and admission rejects an explicit output-token cap on Codex.
+Anthropic sends `stream:true`, native `messages`, tool `input_schema`, and
+`max_tokens` (4096 by default). Adaptive thinking maps explicit effort values;
+its cache-affinity key is unsupported. Signed/redacted thinking is preserved
+as native opaque replay, tool names/IDs remain unchanged, and tool results
+retain their native `is_error`. The bounded decoder verifies message/block
+ordering, delta types, cumulative usage patches and completion at `message_stop`.
+Bodies are uploaded in bounded pieces using HTTP room.
 Responses must be identity-encoded SSE on success; non-success responses
 are parsed as bounded JSON errors. Provider-defined retry hints are data
 in structured failures, never automatic retries.

@@ -302,3 +302,127 @@ fn thirty_two_reasoning_arrays_exercise_the_token_wrapper_bound() {
     drop(tiny_values);
     assert_eq!(meter.held(), 0);
 }
+
+#[test]
+fn anthropic_signed_thinking_tool_input_and_replay_fit_the_declared_bound() {
+    // Synthetic Messages documents exercise accumulation into signed replay
+    // and tool arguments; they are not captured subscription traffic.
+    for chunked in [false, true] {
+        for fragment in [1, 251] {
+            let mut bounds = limits();
+            bounds.dialect.parts = 4;
+            bounds.dialect.opaque_bytes = 4096;
+            let bound = client::worst_case(&bounds).unwrap();
+            let input = memory_anthropic_call(1);
+            let span = Span::start();
+            let prepared = client::Client::prepare(input, &bounds).ok().unwrap();
+            let grown = span.end();
+            assert!(grown.peak <= i64::try_from(bound).unwrap(), "Anthropic preparation exceeds {bound}");
+            drop(prepared);
+
+            let meter = Meter::new();
+            let thinking = format!(
+                r#"{{"type":"content_block_delta","index":0,"delta":{{"type":"thinking_delta","thinking":"{}"}}}}"#,
+                "r".repeat(1500)
+            );
+            let signature = format!(
+                r#"{{"type":"content_block_delta","index":0,"delta":{{"type":"signature_delta","signature":"{}"}}}}"#,
+                "s".repeat(1500)
+            );
+            let tool_input = format!(
+                r#"{{"type":"content_block_delta","index":1,"delta":{{"type":"input_json_delta","partial_json":"{{\"value\":\"{}\"}}"}}}}"#,
+                "a".repeat(1800)
+            );
+            let text = format!(
+                r#"{{"type":"content_block_delta","index":2,"delta":{{"type":"text_delta","text":"{}"}}}}"#,
+                "t".repeat(1500)
+            );
+            let documents = [
+                r#"{"type":"message_start","message":{"type":"message","role":"assistant","content":[],"usage":{"input_tokens":7,"output_tokens":1}}}"#,
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+                &thinking,
+                &signature,
+                r#"{"type":"content_block_stop","index":0}"#,
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_1","name":"read","input":{}}}"#,
+                &tool_input,
+                r#"{"type":"content_block_stop","index":1}"#,
+                r#"{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}"#,
+                &text,
+                r#"{"type":"content_block_stop","index":2}"#,
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":100}}"#,
+                r#"{"type":"message_stop"}"#,
+            ];
+            let wire = skein_llm_world::response(
+                200,
+                "Content-Type: text/event-stream\r\n",
+                &skein_llm_world::events(&documents),
+                chunked,
+            );
+            let input = memory_anthropic_call(1);
+            let mut world = World::new(input, bounds, wire, 37);
+            world.fragmentation(fragment, 5);
+            world.request(client::Request::Start);
+            drive_anthropic_memory(&mut world, &meter, bound);
+            world.assert_once();
+            assert!(
+                !world.seen.iter().any(|event| matches!(event, client::Event::Failed { .. })),
+                "{:?}",
+                world.seen.iter().find(|event| matches!(event, client::Event::Failed { .. }))
+            );
+            let completed =
+                world
+                    .seen
+                    .iter()
+                    .find_map(|event| {
+                        if let client::Event::Completed { completion, .. } = event { Some(completion) } else { None }
+                    })
+                    .unwrap();
+            assert_eq!(completed.content.len(), 3);
+            assert!(matches!(&completed.content[0], skein_llm::Block::Reasoning { .. }));
+            assert!(
+                matches!(&completed.content[1], skein_llm::Block::ToolCall { arguments, .. } if arguments.len() > 1800)
+            );
+            let content = completed.content.clone();
+            world.request(client::Request::Close);
+            world.settle();
+            drop(world);
+
+            let mut replay = memory_anthropic_call(2);
+            replay.prompt.messages = Box::new([skein_llm::Message { role: skein_llm::Role::Assistant, content }]);
+            let span = Span::start();
+            let prepared = client::Client::prepare(replay, &bounds).ok().unwrap();
+            let grown = span.end();
+            assert!(grown.peak <= i64::try_from(bound).unwrap(), "signed replay preparation exceeds {bound}");
+            assert!(meter.held() <= bound, "replay and fixture storage stays within {bound}");
+            drop(prepared);
+            drop(thinking);
+            drop(signature);
+            drop(tool_input);
+            drop(text);
+            assert_eq!(meter.held(), 0, "Anthropic storage released after settlement and replay");
+        }
+    }
+}
+
+fn drive_anthropic_memory(world: &mut World, meter: &Meter, bound: u64) {
+    for _ in 0..100_000 {
+        meter.start();
+        let progress = world.tick(true);
+        let measured = meter.end();
+        assert!(measured.peak() <= bound, "Anthropic total peak {} exceeds {bound}", measured.peak());
+        assert!(meter.held() <= bound, "Anthropic live storage exceeds {bound}");
+        if !progress {
+            return;
+        }
+    }
+    panic!("bounded Anthropic memory world stalled");
+}
+
+fn memory_anthropic_call(owner: u64) -> skein_llm::Call {
+    let mut input = call(owner);
+    input.endpoint = skein_llm::Endpoint::anthropic();
+    input.credential = skein_llm::Credential::anthropic(b"synthetic-oauth-token".to_vec().into());
+    input.prompt.cache_key = None;
+    input.prompt.max_output_tokens = Some(1024);
+    input
+}

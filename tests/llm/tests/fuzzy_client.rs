@@ -63,3 +63,57 @@ fn reset_between_every_routing_turn_preserves_one_terminal() {
         world.assert_once();
     }
 }
+
+#[test]
+fn anthropic_seeded_fragmentation_and_grants_preserve_completion() {
+    // Handwritten synthetic Messages stream, including split UTF-8 and signed
+    // thinking replay, independent of the product request/event encoders.
+    let documents = [
+        r#"{"type":"message_start","message":{"type":"message","role":"assistant","content":[],"usage":{"input_tokens":7,"output_tokens":1}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Plan 🌍"}}"#,
+        r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signed-opaque"}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+        r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hello 🌍"}}"#,
+        r#"{"type":"content_block_stop","index":1}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}"#,
+        r#"{"type":"message_stop"}"#,
+    ];
+    for seed in 1..=128 {
+        let mut input = call(seed);
+        input.endpoint = skein_llm::Endpoint::anthropic();
+        input.credential = skein_llm::Credential::anthropic(b"synthetic-oauth-token".to_vec().into());
+        input.prompt.cache_key = None;
+        input.prompt.max_output_tokens = Some(1024);
+        let wire = skein_llm_world::response(
+            200,
+            "Content-Type: text/event-stream\r\n",
+            &skein_llm_world::events(&documents),
+            seed % 2 == 0,
+        );
+        let mut world = World::new(input, limits(), wire, seed);
+        world.fragmentation(u32::try_from(seed % 73 + 1).unwrap(), u32::try_from(seed % 7).unwrap());
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        let answer = world
+            .seen
+            .iter()
+            .find_map(
+                |event| {
+                    if let client::Event::Completed { completion, .. } = event { Some(completion) } else { None }
+                },
+            )
+            .unwrap();
+        assert_eq!(answer.stop, skein_llm::Stop::EndTurn, "seed {seed}");
+        assert_eq!(answer.usage.input_tokens, 7);
+        assert_eq!(answer.usage.output_tokens, 9);
+        assert_eq!(answer.content.len(), 2);
+        assert!(matches!(&answer.content[0], skein_llm::Block::Reasoning { .. }));
+        assert!(
+            matches!(&answer.content[1], skein_llm::Block::Text { text, .. } if text.as_ref() == "Hello 🌍".as_bytes())
+        );
+        assert_eq!(world.machine.waiting(), client::Waiting::Idle);
+    }
+}

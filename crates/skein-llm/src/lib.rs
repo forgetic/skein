@@ -1,6 +1,6 @@
 //! Provider-neutral LLM calls over an externally owned plaintext stream.
 //!
-//! The initial dialect is `ChatGPT`'s Codex Responses subscription route.
+//! Supports `ChatGPT`'s Codex Responses and Anthropic Messages subscription routes.
 //! Socket/TLS ownership, OAuth sign-in and renewal, deadlines and retry
 //! policy belong to the caller. See `docs/design/llm.md` for the contract.
 #![cfg_attr(not(test), no_std)]
@@ -8,7 +8,9 @@
 
 extern crate alloc;
 
+pub mod anthropic;
 pub mod client;
+mod dialect;
 pub mod openai;
 mod translate;
 mod types;
