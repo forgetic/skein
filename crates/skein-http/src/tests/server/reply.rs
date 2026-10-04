@@ -7,6 +7,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use skein_lib::Wall;
 use skein_lib::stream::{Down, Read, Up};
 
 use super::{Drive, LIMITS, Machine, Served, When, boxed, get, header, response, serve};
@@ -44,9 +45,43 @@ fn a_response_is_its_status_line_its_fields_and_the_server_s_own() {
     };
     let served = served(get(), response, b"{}");
     let expected =
-        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nx-request-id: r1\r\nContent-Length: 2\r\n\r\n{}";
+        b"HTTP/1.1 200 OK\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Type: application/json\r\nx-request-id: r1\r\nContent-Length: 2\r\n\r\n{}";
     assert_eq!(served.sent, expected);
     assert_eq!(served.outcome, Some(Event::Done(Reuse::Keep)));
+}
+
+#[test]
+fn every_head_and_answer_is_dated_by_the_wall_as_an_imf_fixdate() {
+    // The epoch, leap days of a year in four and of a year in four hundred,
+    // RFC 9110's own example, a year in a hundred that has none, and the
+    // last second a wall counts.
+    let dates: [(u64, &[u8]); 6] = [
+        (0, b"Thu, 01 Jan 1970 00:00:00 GMT"),
+        (68_169_600, b"Tue, 29 Feb 1972 00:00:00 GMT"),
+        (784_111_777, b"Sun, 06 Nov 1994 08:49:37 GMT"),
+        (951_782_400, b"Tue, 29 Feb 2000 00:00:00 GMT"),
+        (4_107_542_400, b"Mon, 01 Mar 2100 00:00:00 GMT"),
+        (18_446_744_073, b"Sun, 21 Jul 2554 23:34:33 GMT"),
+    ];
+    for (seconds, date) in dates {
+        let mut field = Vec::from(&b"\r\nDate: "[..]);
+        field.extend_from_slice(date);
+        field.extend_from_slice(b"\r\n");
+        // The second's last nanosecond: a date counts whole seconds.
+        let wall = Wall::from_nanos(seconds.saturating_mul(1_000_000_000).saturating_add(999_999_999));
+        let mut machine = Machine::new(LIMITS);
+        machine.env.wall = wall;
+        machine.call(get());
+        let (_, requests) = machine.down(Request::Respond(response(204, Body::None)));
+        let [Down::Send(head)] = &requests[..] else { panic!("the head: {requests:?}") };
+        assert!(head.starts_with(b"HTTP/1.1 204 No Content"), "{}", head.escape_ascii());
+        assert_eq!(&head[23..62], &field[..], "the Date after the status line");
+        let mut machine = Machine::new(LIMITS);
+        machine.env.wall = wall;
+        let (_, requests) = machine.head(b"GET / HTTP/3.0\r\n");
+        let [Down::Send(answer)] = &requests[..] else { panic!("the answer: {requests:?}") };
+        assert_eq!(&answer[39..78], &field[..], "the answer's Date: {}", answer.escape_ascii());
+    }
 }
 
 #[test]
@@ -68,7 +103,10 @@ fn a_status_has_the_standard_s_reason_or_none() {
 #[test]
 fn no_body_is_said_by_a_length_of_zero_but_in_a_204_or_a_304() {
     let served_none = served(get(), Response { headers: Box::new([]), ..response(200, Body::None) }, b"");
-    assert_eq!(served_none.sent, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    assert_eq!(
+        served_none.sent,
+        b"HTTP/1.1 200 OK\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 0\r\n\r\n"
+    );
     for status in [204, 304] {
         let served = served(get(), Response { headers: Box::new([]), ..response(status, Body::None) }, b"");
         assert_eq!(skein_lib::bytes::find(&served.sent, b"Content-Length:"), None, "{status}");
@@ -111,7 +149,7 @@ fn a_chunked_body_goes_down_a_chunk_a_send_and_ends_with_the_last_chunk() {
         }
     }
     let served = served(get(), response(200, Body::Chunked), &body);
-    let mut expected = Vec::from(&b"HTTP/1.1 200 OK\r\nServer: skein\r\nTransfer-Encoding: chunked\r\n\r\n"[..]);
+    let mut expected = Vec::from(&b"HTTP/1.1 200 OK\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nServer: skein\r\nTransfer-Encoding: chunked\r\n\r\n"[..]);
     for piece in body.chunks(16) {
         expected.extend_from_slice(if piece.len() == 16 { b"10\r\n" } else { b"4\r\n" });
         expected.extend_from_slice(piece);
@@ -151,7 +189,10 @@ fn room_for_a_chunk_is_its_size_line_and_its_endings_and_an_empty_piece_is_no_ch
 #[test]
 fn a_chunked_body_goes_to_an_http_one_zero_client_to_the_end_of_the_stream() {
     let served = served(b"GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n", response(200, Body::Chunked), b"hello");
-    assert_eq!(served.sent, b"HTTP/1.1 200 OK\r\nServer: skein\r\nConnection: close\r\n\r\nhello");
+    assert_eq!(
+        served.sent,
+        b"HTTP/1.1 200 OK\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nServer: skein\r\nConnection: close\r\n\r\nhello"
+    );
     assert_eq!(served.outcome, Some(Event::Done(Reuse::Close)));
 }
 
@@ -165,7 +206,7 @@ fn what_the_side_above_gets_wrong_is_refused_in_order() {
     assert_eq!(refused(with(Box::new([header(b"Bad Name", b"v")])), LIMITS), Refusal::Name);
     assert_eq!(refused(with(Box::new([header(b"X", b"a\r\nInjected: yes")])), LIMITS), Refusal::Value);
     assert_eq!(refused(with(Box::new([header(b"X", b"\0")])), LIMITS), Refusal::Value);
-    for name in [&b"Content-Length"[..], b"transfer-encoding", b"CONNECTION"] {
+    for name in [&b"Content-Length"[..], b"transfer-encoding", b"CONNECTION", b"Date"] {
         assert_eq!(refused(with(Box::new([header(name, b"5")])), LIMITS), Refusal::Reserved);
     }
     assert_eq!(refused(response(204, Body::Length(1)), LIMITS), Refusal::Body);
@@ -185,9 +226,10 @@ fn a_head_at_the_limit_goes_and_one_past_it_is_refused() {
         value.resize(len, b'v');
         Response { headers: Box::new([header(b"X", &value)]), ..response(200, Body::None) }
     };
-    // `HTTP/1.1 200 OK\r\n`, `X: ` and the value and `\r\n`,
-    // `Content-Length: 0\r\n`, `\r\n`: 17 + 5 + 19 + 2 bytes and the value.
-    let fits = usize::try_from(LIMITS.response).unwrap() - 43;
+    // `HTTP/1.1 200 OK\r\n`, the `Date`, `X: ` and the value and `\r\n`,
+    // `Content-Length: 0\r\n`, `\r\n`: 17 + 37 + 5 + 19 + 2 bytes and the
+    // value.
+    let fits = usize::try_from(LIMITS.response).unwrap() - 80;
     let served = served(get(), head_of(fits), b"");
     assert_eq!(served.sent.len(), usize::try_from(LIMITS.response).unwrap());
     assert_eq!(refused(head_of(fits + 1), LIMITS), Refusal::TooLong);

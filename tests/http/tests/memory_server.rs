@@ -288,10 +288,13 @@ fn full_response(limits: &Limits, body: Body) -> Response {
     response
 }
 
+/// A `Date` field: every head the server writes has one, of this length.
+const DATE: &str = "Date: Thu, 01 Jan 1970 00:00:00 GMT\r\n";
+
 /// The length of the head the server writes for `response`, on a
 /// connection that closes after it.
 fn head_len(response: &Response) -> usize {
-    let mut len = "HTTP/1.1 200 OK\r\n".len() + 2 + "Connection: close\r\n".len();
+    let mut len = "HTTP/1.1 200 OK\r\n".len() + DATE.len() + 2 + "Connection: close\r\n".len();
     for header in &response.headers {
         len += header.name.len() + 2 + header.value.len() + 2;
     }

@@ -1,11 +1,12 @@
 //! The response (http.md, 5.4): what the side above asks for, checked,
 //! then measured and written into a box of exactly its length
-//! (programming-model.md, 8); the fixed answers the server writes itself,
-//! a 100 (Continue) and each rejection; and the framing of a chunked body.
+//! (programming-model.md, 8), with the `Date` it was written at; the fixed
+//! answers the server writes itself, a 100 (Continue) and each rejection;
+//! and the framing of a chunked body.
 
 use alloc::boxed::Box;
 
-use skein_lib::{Decimal, Writer};
+use skein_lib::{Decimal, Wall, Writer};
 
 use super::{Body, Limits, Rejection, Response};
 use crate::header::{is_field_byte, is_tchar};
@@ -24,7 +25,7 @@ pub enum Refusal {
     /// an LF or a NUL among them.
     Value,
     /// A field the server writes itself: `Content-Length`,
-    /// `Transfer-Encoding` or `Connection`.
+    /// `Transfer-Encoding`, `Connection` or `Date`.
     Reserved,
     /// A body for a 204 or a 304, which have none (RFC 9110, 15.3.5 and
     /// 15.4.5).
@@ -62,6 +63,15 @@ const CLOSE: &[u8] = b"Connection: close\r\n";
 const KEEP_ALIVE: &[u8] = b"Connection: keep-alive\r\n";
 const CRLF: &[u8] = b"\r\n";
 
+/// What ends each of the server's own answers, after its status line and
+/// its `Date`.
+const ANSWER_END: &[u8] = b"Content-Length: 0\r\nConnection: close\r\n\r\n";
+
+/// How long the `Date` field is, in every head the server writes but a 100
+/// (Continue): `Date: `, an IMF-fixdate (RFC 9110, 5.6.7), always 29 bytes
+/// as a [`Wall`] ends in 2554, and a line ending.
+const DATE_LEN: usize = 37;
+
 /// How the response's body is framed, for a request of `method` in
 /// `version`.
 pub(super) fn framing(response: &Response, method: Method, version: Version) -> Framing {
@@ -85,16 +95,18 @@ pub(super) fn framing(response: &Response, method: Method, version: Version) -> 
 /// length.
 ///
 /// The server writes the status line, `HTTP/1.1` whatever the request's
-/// version (RFC 9110, 2.5), and its reason; the side above's fields in
-/// order; then its own: the body's framing, as the response says it even
-/// to `HEAD` (RFC 9110, 9.3.2), `Content-Length: 0` for no body but in a
-/// 204 or a 304; and `Connection: close` for a connection that does not
-/// persist, `keep-alive` for an HTTP/1.0 one that does.
+/// version (RFC 9110, 2.5), and its reason; the `Date`, `wall`'s (RFC
+/// 9110, 6.6.1); the side above's fields in order; then its own: the
+/// body's framing, as the response says it even to `HEAD` (RFC 9110,
+/// 9.3.2), `Content-Length: 0` for no body but in a 204 or a 304; and
+/// `Connection: close` for a connection that does not persist,
+/// `keep-alive` for an HTTP/1.0 one that does.
 pub(super) fn write(
     response: &Response,
     version: Version,
     persist: bool,
     limits: &Limits,
+    wall: Wall,
 ) -> Result<Box<[u8]>, Refusal> {
     check(response)?;
     let status = Decimal::of(u64::from(response.status));
@@ -116,6 +128,7 @@ pub(super) fn write(
     len.add(1);
     len.add(reason.len());
     len.add(CRLF.len());
+    len.add(DATE_LEN);
     for header in &response.headers {
         len.add(header.name.len());
         len.add(2);
@@ -144,6 +157,7 @@ pub(super) fn write(
     put(&mut head, b" ");
     put(&mut head, reason);
     put(&mut head, CRLF);
+    put_date(&mut head, wall);
     for header in &response.headers {
         put(&mut head, &header.name);
         put(&mut head, b": ");
@@ -184,7 +198,11 @@ fn check(response: &Response) -> Result<(), Refusal> {
                 return Err(Refusal::Value);
             }
         }
-        if header.is(b"content-length") || header.is(b"transfer-encoding") || header.is(b"connection") {
+        if header.is(b"content-length")
+            || header.is(b"transfer-encoding")
+            || header.is(b"connection")
+            || header.is(b"date")
+        {
             return Err(Refusal::Reserved);
         }
     }
@@ -195,24 +213,127 @@ fn check(response: &Response) -> Result<(), Refusal> {
 }
 
 /// The answer the server writes for a request it rejects at the entrance
-/// (programming-model.md, 8): small and fixed, with no body, on a
-/// connection it closes.
-pub(super) fn answer(rejection: Rejection) -> &'static [u8] {
+/// (programming-model.md, 8), at `wall`: small and of a fixed length, its
+/// status line, its `Date`, `Content-Length: 0` and `Connection: close`,
+/// with no body, on a connection it closes.
+pub(super) fn answer(rejection: Rejection, wall: Wall) -> Box<[u8]> {
+    let line = status_line(rejection);
+    let mut answer = Writer::new(answer_len(line));
+    put(&mut answer, line);
+    put_date(&mut answer, wall);
+    put(&mut answer, ANSWER_END);
+    answer.finish()
+}
+
+/// The status line of a rejection's answer.
+fn status_line(rejection: Rejection) -> &'static [u8] {
     match rejection {
         Rejection::RequestLine | Rejection::Header | Rejection::Host | Rejection::Framing => {
-            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            b"HTTP/1.1 400 Bad Request\r\n"
         }
-        Rejection::BodyTooLong => b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        Rejection::TargetTooLong => b"HTTP/1.1 414 URI Too Long\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        Rejection::HeadTooLong | Rejection::TooManyHeaders => {
-            b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        }
-        Rejection::Method | Rejection::Coding => {
-            b"HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        }
-        Rejection::Version => {
-            b"HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        }
+        Rejection::BodyTooLong => b"HTTP/1.1 413 Content Too Large\r\n",
+        Rejection::TargetTooLong => b"HTTP/1.1 414 URI Too Long\r\n",
+        Rejection::HeadTooLong | Rejection::TooManyHeaders => b"HTTP/1.1 431 Request Header Fields Too Large\r\n",
+        Rejection::Method | Rejection::Coding => b"HTTP/1.1 501 Not Implemented\r\n",
+        Rejection::Version => b"HTTP/1.1 505 HTTP Version Not Supported\r\n",
+    }
+}
+
+/// How long an answer with status line `line` is.
+fn answer_len(line: &[u8]) -> usize {
+    line.len().saturating_add(DATE_LEN).saturating_add(ANSWER_END.len())
+}
+
+/// The `Date` field for `wall`, as an IMF-fixdate (RFC 9110, 5.6.7): the
+/// day of the week, the date and the time of day, in GMT. The date comes
+/// from the days since the epoch by whole 400-year cycles of the Gregorian
+/// calendar, each counted from a March 1, so that a leap day ends its
+/// year (Howard Hinnant's `civil_from_days`). Nothing saturates: a `Wall`
+/// counts at most some 214,000 days.
+fn put_date(head: &mut Writer, wall: Wall) {
+    let seconds = wall.as_secs();
+    let days = seconds / 86_400;
+    let time = seconds % 86_400;
+    // 1970-01-01 is 719,468 days after 0000-03-01, which starts a cycle.
+    let shifted = days.saturating_add(719_468);
+    let cycle = shifted / 146_097;
+    let of_cycle = shifted % 146_097;
+    // The year of the cycle, less the leap days before it: a cycle's
+    // years have 365 days, one in four one more but one in a hundred, and
+    // one in four hundred one more again.
+    let year_of_cycle =
+        of_cycle.saturating_sub(of_cycle / 1_460).saturating_add(of_cycle / 36_524).saturating_sub(of_cycle / 146_096)
+            / 365;
+    let day_of_year = of_cycle.saturating_sub(
+        year_of_cycle.saturating_mul(365).saturating_add(year_of_cycle / 4).saturating_sub(year_of_cycle / 100),
+    );
+    // The month from March, 0 to 11: five months of 153 days.
+    let month = day_of_year.saturating_mul(5).saturating_add(2) / 153;
+    let day = day_of_year.saturating_sub(month.saturating_mul(153).saturating_add(2) / 5).saturating_add(1);
+    // January and February are the next year's.
+    let january = u64::from(month >= 10);
+    let year = cycle.saturating_mul(400).saturating_add(year_of_cycle).saturating_add(january);
+    put(head, b"Date: ");
+    put(head, weekday(days.saturating_add(4) % 7));
+    put(head, b", ");
+    put_digits(head, day, 2);
+    put(head, b" ");
+    put(head, month_name(month));
+    put(head, b" ");
+    put_digits(head, year, 4);
+    put(head, b" ");
+    put_digits(head, time / 3_600, 2);
+    put(head, b":");
+    put_digits(head, time / 60 % 60, 2);
+    put(head, b":");
+    put_digits(head, time % 60, 2);
+    put(head, b" GMT\r\n");
+}
+
+/// The day of the week, from Sunday, 0.
+fn weekday(day: u64) -> &'static [u8] {
+    match day {
+        0 => b"Sun",
+        1 => b"Mon",
+        2 => b"Tue",
+        3 => b"Wed",
+        4 => b"Thu",
+        5 => b"Fri",
+        6 => b"Sat",
+        _ => unreachable!("a day of the week is below 7"),
+    }
+}
+
+/// The month, from March, 0.
+fn month_name(month: u64) -> &'static [u8] {
+    match month {
+        0 => b"Mar",
+        1 => b"Apr",
+        2 => b"May",
+        3 => b"Jun",
+        4 => b"Jul",
+        5 => b"Aug",
+        6 => b"Sep",
+        7 => b"Oct",
+        8 => b"Nov",
+        9 => b"Dec",
+        10 => b"Jan",
+        11 => b"Feb",
+        _ => unreachable!("a month is below 12"),
+    }
+}
+
+/// `n`'s last `places` decimal digits, with leading zeros.
+fn put_digits(head: &mut Writer, n: u64, places: u32) {
+    let mut place = 1_u64;
+    for _ in 1..places {
+        place = place.saturating_mul(10);
+    }
+    // The digits, most significant first, a place at a time.
+    for _ in 0..places {
+        let digit = u8::try_from(n.checked_div(place).expect("a place is at least 1") % 10).expect("a digit");
+        put(head, core::slice::from_ref(&b'0'.saturating_add(digit)));
+        place /= 10;
     }
 }
 
@@ -235,7 +356,7 @@ pub(super) fn longest_answer() -> u32 {
     ];
     let mut longest = CONTINUE.len();
     for rejection in rejections {
-        longest = longest.max(answer(rejection).len());
+        longest = longest.max(answer_len(status_line(rejection)));
     }
     u32::try_from(longest).expect("a fixed answer fits a u32")
 }

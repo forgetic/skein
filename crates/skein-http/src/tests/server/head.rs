@@ -56,8 +56,8 @@ fn limits_that_cannot_be_honoured_have_no_worst_case() {
     assert_eq!(crate::server::worst_case(&Limits { head: 1, ..LIMITS }), None);
     assert_eq!(crate::server::worst_case(&Limits { read: 0, ..LIMITS }), None, "a read of nothing");
     assert_eq!(crate::server::worst_case(&Limits { send: 0, ..LIMITS }), None, "room for nothing of a body");
-    assert_eq!(crate::server::worst_case(&Limits { response: 80, ..LIMITS }), None, "no room for a 431's answer");
-    assert!(crate::server::worst_case(&Limits { response: 87, ..LIMITS }).is_some(), "room for every answer");
+    assert_eq!(crate::server::worst_case(&Limits { response: 122, ..LIMITS }), None, "no room for a 431's answer");
+    assert!(crate::server::worst_case(&Limits { response: 123, ..LIMITS }).is_some(), "room for every answer");
     assert_eq!(crate::server::worst_case(&Limits { send: u32::MAX, ..LIMITS }), None, "a chunk's room past a u32");
     let largest = Limits { head: u32::MAX, read: u32::MAX, response: u32::MAX, send: u32::MAX - 12, ..LIMITS };
     assert!(crate::server::worst_case(&largest).is_some(), "the largest limits fit a u64");
@@ -107,7 +107,7 @@ fn every_method_the_server_knows_is_read_and_another_is_not_implemented() {
     }
     let (rejection, answer) = read(b"PROPFIND / HTTP/1.1\r\nHost: h\r\n\r\n", LIMITS).unwrap_err();
     assert_eq!(rejection, Rejection::Method);
-    assert_eq!(answer, b"HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    assert_eq!(answer, b"HTTP/1.1 501 Not Implemented\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     assert_eq!(rejected(b"get / HTTP/1.1\r\n"), Rejection::Method, "methods are compared with regard to case");
 }
 
@@ -134,14 +134,14 @@ fn a_request_line_that_is_not_one_is_a_bad_request() {
         assert_eq!(rejected(line), Rejection::RequestLine, "{}", line.escape_ascii());
     }
     let (_, answer) = read(b"GET\r\n", LIMITS).unwrap_err();
-    assert_eq!(answer, b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    assert_eq!(answer, b"HTTP/1.1 400 Bad Request\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
 }
 
 #[test]
 fn another_major_version_is_not_supported_and_a_later_minor_is_read_as_one_one() {
     let (rejection, answer) = read(b"GET / HTTP/2.0\r\n", LIMITS).unwrap_err();
     assert_eq!(rejection, Rejection::Version);
-    assert_eq!(answer, b"HTTP/1.1 505 HTTP Version Not Supported\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    assert_eq!(answer, b"HTTP/1.1 505 HTTP Version Not Supported\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     assert_eq!(rejected(b"GET / HTTP/0.9\r\n"), Rejection::Version);
     assert_eq!(rejected(b"PROPFIND / HTTP/2.0\r\n"), Rejection::Version, "the version before the method");
     assert_eq!(rejected(b"G@T / HTTP/2.0\r\n"), Rejection::RequestLine, "the line's form before the version");
@@ -157,7 +157,7 @@ fn a_request_line_that_does_not_fit_is_a_target_too_long_and_a_field_a_head_too_
     long.extend_from_slice(b" HTTP/1.1\r\n");
     let (rejection, answer) = read(&long, limits).unwrap_err();
     assert_eq!(rejection, Rejection::TargetTooLong);
-    assert_eq!(answer, b"HTTP/1.1 414 URI Too Long\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    assert_eq!(answer, b"HTTP/1.1 414 URI Too Long\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     // The line at the limit, its blank line still due.
     let mut at = Vec::from(&b"GET /"[..]);
     at.extend_from_slice(&[b'a'; 16]);
@@ -169,7 +169,7 @@ fn a_request_line_that_does_not_fit_is_a_target_too_long_and_a_field_a_head_too_
     assert_eq!(rejection, Rejection::HeadTooLong);
     assert_eq!(
         answer,
-        b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        b"HTTP/1.1 431 Request Header Fields Too Large\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
     // A head that ends exactly at the limit.
     let exact = b"GET / HTTP/1.1\r\nHost: abcdefgh\r\n\r\n";
@@ -266,7 +266,7 @@ fn the_framing_each_head_decides() {
     }
     assert_eq!(framed(&head("Content-Length: 1024\r\n")), Body::Length(1024), "a body at the limit");
     let (_, answer) = read(&head("Content-Length: 1025\r\n"), LIMITS).unwrap_err();
-    assert_eq!(answer, b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    assert_eq!(answer, b"HTTP/1.1 413 Content Too Large\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     assert_eq!(rejected(b"POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n"), Rejection::Framing);
     assert_eq!(rejected(b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"), Rejection::Host, "Host first");
 }
@@ -311,8 +311,13 @@ fn every_rejection_s_answer_fits_the_room_set_aside_and_names_its_status() {
             u16::from(answer[9] - b'0') * 100 + u16::from(answer[10] - b'0') * 10 + u16::from(answer[11] - b'0'),
             rejection.status()
         );
-        assert!(answer.ends_with(b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"), "{rejection:?}");
-        assert!(answer.len() <= 87, "{rejection:?}: within the least room set aside");
+        assert!(
+            answer.ends_with(
+                b"\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            ),
+            "{rejection:?}: dated as any head the server writes"
+        );
+        assert!(answer.len() <= 123, "{rejection:?}: within the least room set aside");
     }
 }
 

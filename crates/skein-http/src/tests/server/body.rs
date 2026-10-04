@@ -13,7 +13,7 @@ use crate::server::{Body, Error, Event, Request, Reuse, Waiting};
 
 const LINE: Read = Read::Scan { until: Delimiter::LF, max: 16 };
 const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
-const NO_CONTENT: &[u8] = b"HTTP/1.1 204 No Content\r\nServer: skein\r\n\r\n";
+const NO_CONTENT: &[u8] = b"HTTP/1.1 204 No Content\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nServer: skein\r\n\r\n";
 
 /// `head` and the body after it.
 fn request(head: &[u8], body: &[u8]) -> Vec<u8> {
@@ -96,7 +96,7 @@ fn chunk_framing_that_is_not_one_fails_the_exchange_and_its_stream() {
     }
 }
 
-const TOO_LARGE: &[u8] = b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+const TOO_LARGE: &[u8] = b"HTTP/1.1 413 Content Too Large\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 /// A chunked body of `sizes`, each chunk's data `a`s, its size line with
 /// an extension of `extension` bytes, and its last chunk.

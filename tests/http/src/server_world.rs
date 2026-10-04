@@ -87,10 +87,16 @@ pub struct Settings {
     /// When the stream fails, if it does: once, at the first iteration from
     /// this one on, with this fault.
     pub failure: Option<(u64, Fault)>,
+    /// Whether the stream fails, once, the first time the server waits for
+    /// this, with this fault: a moment a failure at an iteration seldom
+    /// lands on, as some are brief.
+    pub fail_while: Option<(Waiting, Fault)>,
     /// When the side above closes, if it does whatever the server is doing.
     pub close: Option<u64>,
     /// When the side above stops acting, and for how many iterations.
     pub stall: Option<(u64, u64)>,
+    /// The wall clock the server dates its heads by.
+    pub wall: Wall,
 }
 
 /// How the side above reads a body.
@@ -125,8 +131,10 @@ impl Settings {
             patience: rng.between(8, 400),
             cut: None,
             failure: None,
+            fail_while: None,
             close: None,
             stall: None,
+            wall: Wall::from_nanos(rng.below(u64::MAX)),
         }
     }
 
@@ -148,6 +156,12 @@ impl Settings {
         }
         if rng.chance(150) {
             settings.failure = Some((rng.below(span), fault(rng)));
+        }
+        if rng.chance(100) {
+            let waiting =
+                [Waiting::Next, Waiting::Room, Waiting::Request, Waiting::Body, Waiting::Above, Waiting::Close];
+            let at = usize::try_from(rng.below(waiting.len() as u64)).expect("fits a usize");
+            settings.fail_while = Some((waiting[at], fault(rng)));
         }
         if rng.chance(150) {
             settings.close = Some(rng.below(span));
@@ -178,7 +192,7 @@ pub fn limits(rng: &mut Rng) -> Limits {
             headers: draw(rng, 0, 6),
             body: rng.below(200),
             read: draw(rng, 1, 16),
-            response: draw(rng, 87, 400),
+            response: draw(rng, 123, 400),
             send: draw(rng, 1, 16),
         };
     }
@@ -362,7 +376,7 @@ pub fn run(client: &[u8], plans: &[Plan], settings: &Settings, seed: u64) -> Run
     let mut world = World {
         rng: Rng::new(seed),
         settings,
-        env: Env { now: Time::ZERO, wall: Wall::EPOCH, limits },
+        env: Env { now: Time::ZERO, wall: settings.wall, limits },
         server: Server::new(&limits),
         events: Queue::with_capacity(8),
         requests: Queue::with_capacity(8),
@@ -467,7 +481,8 @@ pub fn check(client: &[u8], plans: &[Plan], settings: &Settings, seed: u64) -> R
                     "the reference's rejection; {}",
                     what()
                 );
-                assert_eq!(seen.sent, requests::answer(rejection.status()), "the server's own answer; {}", what());
+                let answer = requests::answer(rejection.status(), settings.wall);
+                assert_eq!(seen.sent, answer, "the server's own answer; {}", what());
             }
             Some(Outcome::Failed(Error::Stream(fault))) => assert_eq!(run.failed, Some(fault), "{}", what()),
             Some(Outcome::Failed(Error::Truncated)) => {
@@ -480,7 +495,7 @@ pub fn check(client: &[u8], plans: &[Plan], settings: &Settings, seed: u64) -> R
             Some(Outcome::Failed(error @ (Error::ChunkSize | Error::Chunk | Error::Trailer | Error::Extensions))) => {
                 assert_eq!(expected.ending, RequestEnding::Failed(error), "the reference's framing error; {}", what());
             }
-            Some(Outcome::Failed(Error::BodyTooLong)) => too_long(seen, &expected, &what()),
+            Some(Outcome::Failed(Error::BodyTooLong)) => too_long(seen, &expected, settings.wall, &what()),
             Some(Outcome::Done(reuse)) => {
                 let Some((_, persist)) = &seen.response else { panic!("done with a response; {}", what()) };
                 let keep = *persist && !seen.below_over;
@@ -498,7 +513,7 @@ pub fn check(client: &[u8], plans: &[Plan], settings: &Settings, seed: u64) -> R
                 assert!(expected.expects, "a 100 (Continue) only for a client that waits for it; {}", what());
                 written.extend_from_slice(CONTINUE);
             }
-            written.extend_from_slice(&requests::head(response, call.version, *persist));
+            written.extend_from_slice(&requests::head(response, call.version, *persist, settings.wall));
             let until_end = requests::sends_body(call.method, response)
                 && response.body == Body::Chunked
                 && call.version == Version::Http10;
@@ -536,11 +551,11 @@ const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
 /// A chunked body past the limit, as the reference reads it: a 413 in the
 /// room set aside, if no response took it and no 100 (Continue) did;
 /// nothing otherwise, or the 100 alone.
-fn too_long(seen: &Seen, expected: &reference::Request, what: &str) {
+fn too_long(seen: &Seen, expected: &reference::Request, wall: Wall, what: &str) {
     assert_eq!(expected.ending, RequestEnding::Failed(Error::BodyTooLong), "past the limit; {what}");
     let answered = seen.response.is_none() && !expected.expects;
     if answered {
-        assert_eq!(seen.sent, requests::answer(413), "the server's own answer; {what}");
+        assert_eq!(seen.sent, requests::answer(413, wall), "the server's own answer; {what}");
     } else {
         assert!(seen.sent.is_empty() || seen.sent == CONTINUE, "closed unanswered; {what}");
     }
@@ -860,6 +875,13 @@ impl World<'_> {
         }
         if let Some((at, fault)) = self.settings.failure
             && self.iteration >= at
+            && self.below.failed.is_none()
+        {
+            self.fail(fault);
+            return;
+        }
+        if let Some((waiting, fault)) = self.settings.fail_while
+            && self.server.waiting() == waiting
             && self.below.failed.is_none()
         {
             self.fail(fault);

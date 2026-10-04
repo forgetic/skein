@@ -6,7 +6,7 @@
 
 use skein_http::server::{Body, Limits, Refusal, Response};
 use skein_http::{Header, Method, Version};
-use skein_lib::Rng;
+use skein_lib::{Rng, Wall};
 
 use crate::generate::{chunks, draw, find, pick, shuffle, text};
 
@@ -318,7 +318,7 @@ fn flaw(rng: &mut Rng, response: &mut Response) {
             headers.push(header(b"X-Value", value));
         }
         3 => {
-            let name = *pick(rng, &[&b"Content-Length"[..], b"transfer-encoding", b"CONNECTION"]);
+            let name = *pick(rng, &[&b"Content-Length"[..], b"transfer-encoding", b"CONNECTION", b"date"]);
             headers.push(header(name, b"5"));
         }
         4 => {
@@ -340,6 +340,8 @@ fn header(name: &[u8], value: &[u8]) -> Header {
 /// of the server's checks.
 #[must_use]
 pub fn refusal(response: &Response, version: Version, persist: bool, limits: &Limits) -> Option<Refusal> {
+    // A head's length does not depend on its date.
+    let wall = Wall::EPOCH;
     if !(200..=599).contains(&response.status) {
         return Some(Refusal::Status);
     }
@@ -352,27 +354,27 @@ pub fn refusal(response: &Response, version: Version, persist: bool, limits: &Li
             return Some(Refusal::Value);
         }
         let name = header.name.to_ascii_lowercase();
-        if [&b"content-length"[..], b"transfer-encoding", b"connection"].contains(&&name[..]) {
+        if [&b"content-length"[..], b"transfer-encoding", b"connection", b"date"].contains(&&name[..]) {
             return Some(Refusal::Reserved);
         }
     }
     if (response.status == 204 || response.status == 304) && response.body != Body::None {
         return Some(Refusal::Body);
     }
-    if head(response, version, persist).len() > usize::try_from(limits.response).expect("fits a usize") {
+    if head(response, version, persist, wall).len() > usize::try_from(limits.response).expect("fits a usize") {
         return Some(Refusal::TooLong);
     }
     None
 }
 
 /// The head the server must write for `response` to a request in
-/// `version`, on a connection that persists after it or not: a writer of
-/// the test's own.
+/// `version`, on a connection that persists after it or not, at `wall`: a
+/// writer of the test's own.
 #[must_use]
-pub fn head(response: &Response, version: Version, persist: bool) -> Vec<u8> {
+pub fn head(response: &Response, version: Version, persist: bool, wall: Wall) -> Vec<u8> {
     let mut out = format!("HTTP/1.1 {} ", response.status).into_bytes();
     out.extend_from_slice(reason(response.status).as_bytes());
-    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(format!("\r\nDate: {}\r\n", date(wall)).as_bytes());
     for header in &response.headers {
         out.extend_from_slice(&header.name);
         out.extend_from_slice(b": ");
@@ -450,8 +452,49 @@ fn reason(status: u16) -> &'static str {
 /// The answer the server writes for a request it rejects: its status, and
 /// nothing else but that the connection closes.
 #[must_use]
-pub fn answer(status: u16) -> Vec<u8> {
-    format!("HTTP/1.1 {status} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", reason(status)).into_bytes()
+pub fn answer(status: u16, wall: Wall) -> Vec<u8> {
+    let reason = reason(status);
+    let date = date(wall);
+    format!("HTTP/1.1 {status} {reason}\r\nDate: {date}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
+}
+
+/// `wall` as an IMF-fixdate (RFC 9110, 5.6.7), counted out a year and a
+/// month at a time from the epoch, a Thursday: a reckoning of the test's
+/// own.
+#[must_use]
+pub fn date(wall: Wall) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    let seconds = wall.as_secs();
+    let days = seconds / 86_400;
+    let mut left = days;
+    let mut year = 1970;
+    loop {
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        let length = if leap { 366 } else { 365 };
+        if left < length {
+            break;
+        }
+        left -= length;
+        year += 1;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let lengths = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 0;
+    while left >= lengths[month] {
+        left -= lengths[month];
+        month += 1;
+    }
+    let time = seconds % 86_400;
+    format!(
+        "{}, {:02} {} {year} {:02}:{:02}:{:02} GMT",
+        DAYS[usize::try_from(days % 7).expect("fits a usize")],
+        left + 1,
+        MONTHS[month],
+        time / 3600,
+        time / 60 % 60,
+        time % 60
+    )
 }
 
 /// `piece` as the chunk the server sends it in.

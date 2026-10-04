@@ -598,10 +598,11 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
   bytes, then the room for one more field; at the request line, its
   form, then its version, then its method; at the blank line, the
   `Host`, the framing, then the length.
-- **Each rejection** has a small, fixed answer (programming-model.md, 8):
-  the status line, `Content-Length: 0` and `Connection: close`. It goes
-  down within the room set aside, `Failed(Rejected(_))` answers the
-  `Next`, and the connection ends.
+- **Each rejection** has a small answer of a fixed length
+  (programming-model.md, 8): the status line, the `Date` (5.4),
+  `Content-Length: 0` and `Connection: close`. It goes down within the
+  room set aside, `Failed(Rejected(_))` answers the `Next`, and the
+  connection ends.
 
   | Rejection | What | Answer |
   |---|---|---|
@@ -660,12 +661,15 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
   the server writes no interim response but its own 100, and switches no
   protocols); each field, a name that is not a token (`Name`), a value
   with a control character but a tab (`Value`), a field the server
-  writes itself, `Content-Length`, `Transfer-Encoding` or `Connection`
-  (`Reserved`); a body for a 204 or a 304 (`Body`); then a head past
-  `Limits::response` (`TooLong`).
+  writes itself, `Content-Length`, `Transfer-Encoding`, `Connection` or
+  `Date` (`Reserved`); a body for a 204 or a 304 (`Body`); then a head
+  past `Limits::response` (`TooLong`).
 - **Written sized:** `HTTP/1.1` whatever the request's version (RFC 9110,
   2.5), the status and the standard's reason phrase for it, or none; the
-  side above's fields in order; the framing as the response says it,
+  `Date`, `env.wall` as the step that writes the head sees it, as an
+  IMF-fixdate (RFC 9110, 5.6.7 and 6.6.1): 37 bytes, `Date: ` and 29 of
+  the date, a `Wall` ending in 2554, and a line ending; the side above's
+  fields in order; the framing as the response says it,
   even to `HEAD` (RFC 9110, 9.3.2), `Content-Length` for a length, `0`
   for no body but in a 204 or a 304, `Transfer-Encoding: chunked` for
   chunks; and `Connection: close` for a connection that does not persist,
@@ -1142,9 +1146,16 @@ pub struct Limits {
 - **A chunked response to HTTP/1.0 goes to the end of the stream,** as
   RFC 9112, 6.1 forbids `Transfer-Encoding` to it, rather than being
   refused: the side above writes the same reply to either.
-- **The server writes no `Date`.** RFC 9110, 6.6.1 asks one of a server
-  with a clock; the side above has `env.wall` and gives it as a field if
-  it wants one. Reason phrases are the standard's, or none.
+- **The server writes the `Date`,** from `env.wall`, on every head it
+  writes, its own answers included, as RFC 9110, 6.6.1 asks of a server
+  with a clock, and refuses one from the side above as a field it writes
+  itself: no service forgets it, and none writes it twice. Its length is
+  fixed, so the answers stay of a fixed length and the longest of them,
+  and the least `Limits::response`, grows by its 37 bytes. The date is
+  reckoned with integers alone, by whole 400-year cycles of the
+  Gregorian calendar (Howard Hinnant's `civil_from_days`), as no `std`
+  is at hand. A 100 (Continue) carries none, as 6.6.1 allows of a 1xx.
+  Reason phrases are the standard's, or none.
 - **Each event or comment the writer writes is a block of its own,**
   ended by a blank line, so a reader's count starts over at each, and
   every event written is one a reader dispatches: a block that sets only
@@ -1179,8 +1190,8 @@ Also not built: chunked uploads; content codings (`gzip`), which the
 client refuses and the server answers with a 501; trailer fields, which
 are read and dropped; reconnecting an event stream, for which the reader
 keeps the reconnection time and the last event ID; HTTP/2 and upgrades,
-until a peer requires them; a `Date` field of the server's own; reading a
-request's body while answering it; the heap metered in the protocol
+until a peer requires them; reading a request's body while answering
+it; the heap metered in the protocol
 worlds, which join two stacks in one thread and so meet testing.md, 9's
 open question on heap handed between them, while each machine's worst
 case is checked in its memory tests; and the **fuzz targets** (`fuzz/`,

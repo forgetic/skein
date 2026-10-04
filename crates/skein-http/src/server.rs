@@ -59,7 +59,7 @@ use core::mem;
 use alloc::boxed::Box;
 
 use skein_lib::stream::{Delimiter, Down, Fault, Read, Up};
-use skein_lib::{Env, Intake, List, Queue, bytes};
+use skein_lib::{Env, Intake, List, Queue, Wall, bytes};
 
 use crate::body::{self, Allowance, Face, Incoming, Pumped, Rest};
 use crate::{Header, MaxOut, Method, Version};
@@ -96,7 +96,8 @@ pub struct Limits {
     /// The longest response head the server writes, its blank line
     /// included: a longer response is refused with [`Refusal::TooLong`].
     /// Also the room the server sets aside before it reads each request, so
-    /// at least the longest of its own answers.
+    /// at least the longest of its own answers, 123 bytes, a `Date` among
+    /// them.
     pub response: u32,
     /// The most room the side above demands at once for the response body.
     /// At least 1: with none, no body could be sent.
@@ -297,9 +298,9 @@ pub enum Body {
 pub struct Response {
     /// The status code, from 200 to 599.
     pub status: u16,
-    /// The fields the response carries, written in this order: none the
-    /// server writes itself, `Content-Length`, `Transfer-Encoding` and
-    /// `Connection`.
+    /// The fields the response carries, written in this order after the
+    /// `Date`: none the server writes itself, `Content-Length`,
+    /// `Transfer-Encoding`, `Connection` and `Date`.
     pub headers: Box<[Header]>,
     /// How its body is framed: written as said, even to `HEAD`, but sent
     /// only for a request that is not `HEAD`, and never for a 204 or a 304,
@@ -463,8 +464,8 @@ pub fn up(server: &mut Server, env: &Env<Limits>, ev: Up, above: &mut Queue<Even
     let state = mem::replace(&mut server.state, State::Closed);
     server.state = match state {
         State::Idle(line) => State::Idle(idle(line, ev)),
-        State::Reading(reading) => reading_up(reading, limits, ev, above, below),
-        State::Exchange(exchange) => exchange_up(exchange, &mut server.intake, limits, ev, above, below),
+        State::Reading(reading) => reading_up(reading, limits, env.wall, ev, above, below),
+        State::Exchange(exchange) => exchange_up(exchange, &mut server.intake, env, ev, above, below),
         // An answer to a demand withdrawn, on its way (lib.md, 7); an end or
         // a failure, which changes nothing now.
         State::Spent => State::Spent,
@@ -486,7 +487,7 @@ pub fn down(server: &mut Server, env: &Env<Limits>, rq: Request, above: &mut Que
             State::Closed => unreachable!("a Next after Closed"),
         },
         Request::Respond(response) => match state {
-            State::Exchange(exchange) => respond(exchange, response, intake, limits, above, below),
+            State::Exchange(exchange) => respond(exchange, response, intake, env, above, below),
             // After the exchange failed, a request on its way is dropped.
             State::Spent => State::Spent,
             State::Idle(_) | State::Reading(_) => unreachable!("a Respond with no call in progress"),
@@ -695,6 +696,7 @@ fn next(line: Line, limits: &Limits, above: &mut Queue<Event>, below: &mut Queue
 fn reading_up(
     mut reading: Reading,
     limits: &Limits,
+    wall: Wall,
     ev: Up,
     above: &mut Queue<Event>,
     below: &mut Queue<Down>,
@@ -715,9 +717,9 @@ fn reading_up(
                 }
                 Ok(Parsed::Complete) => match reading.head.request(limits) {
                     Ok(request) => called(request, limits, above),
-                    Err(rejection) => reject(rejection, above, below),
+                    Err(rejection) => reject(rejection, wall, above, below),
                 },
-                Err(rejection) => reject(rejection, above, below),
+                Err(rejection) => reject(rejection, wall, above, below),
             }
         }
         Up::End => {
@@ -748,10 +750,10 @@ fn line(head: &Head) -> Read {
     Read::Scan { until: Delimiter::LF, max: budget }
 }
 
-/// A request rejected at the entrance: its answer goes down within the room
-/// set aside for it, and the connection ends.
-fn reject(rejection: Rejection, above: &mut Queue<Event>, below: &mut Queue<Down>) -> State {
-    below.push(Down::Send(bytes::copy_of(response::answer(rejection))));
+/// A request rejected at the entrance: its answer, dated `wall`, goes down
+/// within the room set aside for it, and the connection ends.
+fn reject(rejection: Rejection, wall: Wall, above: &mut Queue<Event>, below: &mut Queue<Down>) -> State {
+    below.push(Down::Send(response::answer(rejection, wall)));
     above.push(Event::Failed(Error::Rejected(rejection)));
     State::Spent
 }
@@ -782,11 +784,12 @@ fn called(request: head::Request, limits: &Limits, above: &mut Queue<Event>) -> 
 fn exchange_up(
     mut exchange: Exchange,
     intake: &mut Intake,
-    limits: &Limits,
+    env: &Env<Limits>,
     ev: Up,
     above: &mut Queue<Event>,
     below: &mut Queue<Down>,
 ) -> State {
+    let limits = &env.limits;
     match ev {
         Up::Bytes(bytes) => {
             match exchange.below {
@@ -809,7 +812,7 @@ fn exchange_up(
                 Err(bad) => {
                     let error = framing_error(bad);
                     if error == Error::BodyTooLong {
-                        too_long(&mut exchange, below);
+                        too_long(&mut exchange, env.wall, below);
                     }
                     fail(exchange, error, intake, above, below)
                 }
@@ -892,10 +895,11 @@ fn respond(
     mut exchange: Exchange,
     response: Response,
     intake: &mut Intake,
-    limits: &Limits,
+    env: &Env<Limits>,
     above: &mut Queue<Event>,
     below: &mut Queue<Down>,
 ) -> State {
+    let limits = &env.limits;
     match exchange.response {
         Responding::Awaited => {}
         Responding::Head { .. } | Responding::Sending { .. } => unreachable!("one response per call"),
@@ -909,7 +913,7 @@ fn respond(
     // end before the head goes: the side above discards it.
     let persist =
         exchange.keep && !response.close && framing != Framing::UntilEnd && (discarding || body_over_below(&exchange));
-    let head = match response::write(&response, exchange.version, persist, limits) {
+    let head = match response::write(&response, exchange.version, persist, limits, env.wall) {
         Ok(head) => head,
         Err(refusal) => {
             above.push(Event::Refused(refusal));
@@ -1363,13 +1367,13 @@ fn framing_error(bad: body::Bad) -> Error {
 /// Large) within the room set aside, as a body by length past it is at its
 /// head, if that room is still held and no response was given; otherwise
 /// the connection closes unanswered, as for bad framing.
-fn too_long(exchange: &mut Exchange, below: &mut Queue<Down>) {
+fn too_long(exchange: &mut Exchange, wall: Wall, below: &mut Queue<Down>) {
     let answered = match exchange.response {
         Responding::Awaited => exchange.aside == Aside::Held,
         Responding::Head { .. } | Responding::Sending { .. } => false,
     };
     if answered {
         exchange.aside = Aside::Spent;
-        below.push(Down::Send(bytes::copy_of(response::answer(Rejection::BodyTooLong))));
+        below.push(Down::Send(response::answer(Rejection::BodyTooLong, wall)));
     }
 }
