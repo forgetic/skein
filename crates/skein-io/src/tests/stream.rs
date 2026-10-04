@@ -610,3 +610,12 @@ fn requests_after_a_close_are_dropped_and_an_abort_escalates_it() {
     assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner: owner(1) }]);
     rig.empty();
 }
+
+#[test]
+#[should_panic(expected = "a demand is stated once the last is answered")]
+fn a_demand_in_place_of_one_outstanding_is_the_owner_s_bug() {
+    let mut rig = Rig::new(limits());
+    let (socket, _recv) = connected(&mut rig, owner(1), FD);
+    let _ask = ask(&mut rig, socket, Read::Fill(2), 0);
+    let _again = ask(&mut rig, socket, Read::Fill(1), 0);
+}

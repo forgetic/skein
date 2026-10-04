@@ -88,7 +88,6 @@ impl Proc {
             self.within(mark, MAX_OUT_FIRE, "fire");
         }
         // The owner's stage.
-        self.owner.begin();
         while let Some(event) = self.events.pop() {
             self.ledger.event(&event);
             self.log.push(format!("{} {event:?}", now.as_nanos()));

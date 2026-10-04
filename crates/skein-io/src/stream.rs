@@ -876,17 +876,32 @@ fn deliver(
     };
 }
 
-/// A `Demand`, met, if it can be, from the ready list.
+/// A `Demand`: stated once the last is answered, never in place of it, or
+/// withdrawing it (lib.md, 7); met, if it can be, from the ready list.
 fn demand(open: &mut Open, read: Read, room: u32, id: Id<Entity>, env: &Env<Limits>, tables: &mut Tables) {
     let cap = env.limits.intake;
-    match read {
-        Read::Nothing => {}
-        Read::Fill(n) => assert!(n <= cap, "a fill past the intake's cap could never be met (Limits::largest_read)"),
-        Read::Scan { until, max } => assert!(
-            max <= cap && index(max) >= until.as_bytes().len(),
-            "a scan within the intake's cap and long enough for its delimiter (Limits::largest_read)"
-        ),
-    }
+    let withdrawal = match read {
+        Read::Nothing => room == 0,
+        Read::Fill(n) => {
+            assert!(n <= cap, "a fill past the intake's cap could never be met (Limits::largest_read)");
+            false
+        }
+        Read::Scan { until, max } => {
+            assert!(
+                max <= cap && index(max) >= until.as_bytes().len(),
+                "a scan within the intake's cap and long enough for its delimiter (Limits::largest_read)"
+            );
+            false
+        }
+    };
+    let outstanding = match open.demand.read {
+        Read::Nothing => open.demand.room > 0,
+        Read::Fill(_) | Read::Scan { .. } => true,
+    };
+    assert!(
+        withdrawal || !outstanding,
+        "a demand is stated once the last is answered, never in place of it, or it withdraws it (lib.md, 7)"
+    );
     assert!(room <= env.limits.output, "room past the output cap could never be granted (Limits::largest_room)");
     assert!(room == 0 || open.writer.takes_sends(), "no room is demanded after Finish");
     open.demand = Demand { read, room };

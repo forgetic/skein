@@ -162,15 +162,10 @@ pub struct Conn {
     /// Why its connect failed, if it did.
     pub error: Option<Error>,
     pub finished: bool,
-    /// The demand it last asked io for: a read, and room.
+    /// Its demand outstanding: a read, and room; nothing once answered. It
+    /// states the next only then (lib.md, 7), and keeps it across `End`,
+    /// which `Room` may still answer.
     pub asked: (Read, u32),
-    /// The demand io held when this stage began: what an answer told in this
-    /// stage answers, `Room` granting its room. A demand made in this stage
-    /// reaches io only in the down pass, after every answer of this one
-    /// (io.md, 3.3).
-    held: (Read, u32),
-    /// The next read it will demand, drawn when it is first demanded.
-    pub next: Option<Read>,
     pub closed_at: Option<Time>,
 }
 
@@ -211,8 +206,6 @@ impl Conn {
             error: None,
             finished: false,
             asked: (Read::Nothing, 0),
-            held: (Read::Nothing, 0),
-            next: None,
             closed_at: None,
         }
     }
@@ -223,13 +216,9 @@ impl Conn {
         self.failed.is_some() || self.error.is_some()
     }
 
-    /// io answered the demand it held, which ends it, read and room (lib.md,
-    /// 7); unless the connection has asked for another since, io holds none.
-    fn answered(&mut self) {
-        if self.asked == self.held {
-            self.asked = (Read::Nothing, 0);
-        }
-        self.held = (Read::Nothing, 0);
+    /// Whether a demand is outstanding.
+    fn waits(&self) -> bool {
+        self.asked != (Read::Nothing, 0)
     }
 
     /// How many bytes it has yet to receive, if it knows; a framed one, its
@@ -357,13 +346,6 @@ impl Owner {
         next
     }
 
-    /// Its stage begins: io holds what it asked for by the end of the last.
-    pub fn begin(&mut self) {
-        for conn in self.conns.values_mut() {
-            conn.held = conn.asked;
-        }
-    }
-
     /// Its first requests: a listen for each listener.
     pub fn start(&mut self, requests: &mut VecDeque<Request>) {
         for (owner, listener) in &self.listeners {
@@ -476,19 +458,28 @@ impl Owner {
     fn stream(&mut self, owner: Token, up: Up, requests: &mut VecDeque<Request>) {
         let conn = self.conns.get_mut(&owner).expect("a connection of this owner");
         let socket = conn.socket.expect("a stream told is bound or connected");
+        // An answer on its way when it closed, which withdrew its demand:
+        // dropped, as the side above drops it (lib.md, 7).
+        let answering = match up {
+            Up::Bytes(_) | Up::Room => true,
+            Up::End | Up::Failed(_) => false,
+        };
+        if answering && conn.phase != Phase::Open {
+            return;
+        }
         match up {
             Up::Bytes(bytes) => {
-                conn.answered();
-                conn.next = None;
+                assert!(conn.asked.0 != Read::Nothing, "Bytes answer a read outstanding");
+                conn.asked = (Read::Nothing, 0);
                 conn.received.extend_from_slice(&bytes);
                 if conn.plan.echo {
                     conn.echo.extend(bytes.iter());
                 }
             }
             Up::Room => {
-                // Granted for the room io held, not for one asked since.
-                let room = conn.held.1;
-                conn.answered();
+                let room = conn.asked.1;
+                assert!(room > 0, "Room answers room outstanding");
+                conn.asked = (Read::Nothing, 0);
                 let bytes: Box<[u8]> = if conn.sent < conn.plan.send.len() {
                     let end = conn.plan.send.len().min(conn.sent + len(room));
                     let chunk = Box::from(&conn.plan.send[conn.sent..end]);
@@ -539,18 +530,19 @@ impl Owner {
                 return;
             }
         }
-        let read = if !conn.reading(now) {
-            Read::Nothing
-        } else if let Some(read) = conn.next {
-            read
-        } else {
-            let read = match conn.left() {
+        // The next demand only once the last is answered, never in place of
+        // it (lib.md, 7).
+        if conn.waits() {
+            return;
+        }
+        let read = if conn.reading(now) {
+            match conn.left() {
                 Some(0) => Read::Fill(1),
                 Some(left) => draw(&mut self.rng, conn.plan.reads, left),
                 None => draw(&mut self.rng, conn.plan.reads, usize::MAX),
-            };
-            conn.next = Some(read);
-            read
+            }
+        } else {
+            Read::Nothing
         };
         let room = if !conn.finished && conn.has_to_send() && conn.received.len() >= len(conn.plan.wait) {
             let left =
@@ -559,7 +551,8 @@ impl Owner {
         } else {
             0
         };
-        if (read, room) != conn.asked {
+        // A state that wants nothing more states nothing.
+        if (read, room) != (Read::Nothing, 0) {
             conn.asked = (read, room);
             requests.push_back(Request::Stream { stream: socket, down: Down::Demand { read, room } });
         }

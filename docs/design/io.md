@@ -304,26 +304,29 @@ it, and by `resume` after a request in the down pass
    never be met, or none is and the intake is empty;
 3. a `Recv`, if none is in flight and the intake has room again.
 
-- **A demand is answered at most once,** by `Bytes` or by `Room`,
-  whichever io can give first, against the demand it holds when it
-  answers; nothing is outstanding then until the next. A `Demand` of
-  nothing with no room withdraws the one outstanding. io holds no answer
-  made for an earlier demand, but an answer told in the up pass reaches
-  the layer above in that same pass, before any demand the layer makes
-  there reaches io, in the down pass. So an answer the layer reads after
-  it changed its demand in that pass, on an event told before it, answers
-  the demand before: a `Room` grants the room io held when the pass
-  began, not room asked for since. Dropping such an answer, or sending
-  only within that room, is the layer above's (the worlds' owner does the
-  latter).
-- **`End` comes once nothing held can meet a demand.** A read demand
-  that crosses it, or comes after it, is accepted and never answered with
-  bytes, and what the intake still holds is dropped with the stream. A
-  read past the end is never met, so a reader that must take every byte
-  caps its demands by what it expects, as a protocol's framing does.
-  Room is still granted after `End`: the stream may still send, to a peer
-  that only half-closed, and a `Failed` after `End` says only that it
-  can no longer.
+io keeps the contract of a stream (lib.md, 7) as the side below:
+
+- **A demand is answered at most once:** by `Bytes`, exactly what its
+  read asks for, or by `Room`, whichever io can give first; either answer
+  ends it, and nothing is outstanding until the side above states its
+  next. The side above states its next demand only after an answer, never
+  in place of one outstanding, which io asserts.
+- **`Read::Nothing` with no room withdraws** the outstanding demand, and
+  only when the side above will read no more (it is closing). An answer
+  already on its way may still arrive, and the side above drops it. No
+  other `Bytes` or `Room` come without a demand.
+- **`End` comes once nothing io holds can meet a demand:** with one
+  outstanding, when it can never be met; with none, only when nothing is
+  held. It comes once, and ends reading only: a read that crosses it is
+  never met, but room may still be granted after it, as the stream can
+  still send to a peer that only half-closed. A read larger than what is
+  left before the end is never met; a side above that must see every
+  byte reads by its framing.
+- **`Failed` may come at any time,** a demand outstanding or not, and
+  nothing follows it but `Closed`. After `End` it says only that the
+  stream can no longer send: what was read stands.
+- **A scan that meets no delimiter within its maximum delivers exactly
+  the maximum,** and the side above decides what that means.
 - **Room grants one more `Send`** of up to that many bytes, and the
   output counts a `Send` in flight until all of it is sent. A `Send` past
   the output cap or `Limits::sends`, or after `Finish`, is the layer

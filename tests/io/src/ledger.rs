@@ -8,6 +8,9 @@
 //! - Each demand answered once, by `Bytes` exactly what it reads, or by
 //!   `Room` if it asks for room; no `Bytes` after `End`: no buffer past its
 //!   cap.
+//! - The side above's half (lib.md, 7): a demand only once the last is
+//!   answered, never in place of it; a withdrawal only when it reads no
+//!   more, so only a close after it.
 //! - Every socket announced is answered once.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,6 +43,8 @@ struct Told {
     /// The demand io holds: a read, and room.
     read: Read,
     room: u32,
+    /// The side above withdrew its demand: it reads no more.
+    withdrawn: bool,
 }
 
 /// io's contract, kept for one process.
@@ -64,6 +69,7 @@ impl Told {
             socket: None,
             read: Read::Nothing,
             room: 0,
+            withdrawn: false,
         }
     }
 }
@@ -86,12 +92,28 @@ impl Ledger {
             Request::Stream { stream, down } => {
                 let owner = self.sockets.get(stream).expect("a stream request names a socket io told");
                 let told = self.owners.get_mut(owner).expect("a socket's owner");
+                // The side above's half of the contract (lib.md, 7): a demand
+                // only once the last is answered, never in place of it; a
+                // withdrawal only when it will read no more, so nothing but a
+                // close after it.
+                assert!(!told.withdrawn, "nothing but a close after a withdrawal: {down:?}");
                 match down {
-                    Down::Demand { read, room } if !told.closing && !told.closed => {
-                        told.read = *read;
-                        told.room = *room;
+                    Down::Demand { read, room } => {
+                        let withdrawal = *read == Read::Nothing && *room == 0;
+                        let outstanding = told.read != Read::Nothing || told.room > 0;
+                        assert!(
+                            withdrawal || !outstanding,
+                            "a demand only once the last is answered: {:?} in place of {:?}",
+                            (read, room),
+                            (told.read, told.room)
+                        );
+                        told.withdrawn = withdrawal;
+                        if !told.closing && !told.closed {
+                            told.read = *read;
+                            told.room = *room;
+                        }
                     }
-                    Down::Demand { .. } | Down::Send(_) | Down::Finish => {}
+                    Down::Send(_) | Down::Finish => {}
                 }
             }
             Request::Close { entity } | Request::Abort { entity } => {
