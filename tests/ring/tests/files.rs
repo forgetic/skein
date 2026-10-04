@@ -9,6 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use skein_io::kernel::{Done, Entry, Error, Fd, Kind, LONGEST_NAME, Op, OpenHow};
@@ -165,5 +166,28 @@ fn an_error_of_a_file_names_what_the_contract_says() {
     let out = world.run(Op::Open { root: dir, path: Box::from(&b"../escape"[..]), how: OpenHow::Read });
     assert_eq!(out.result, Err(Error::Escape), "EXDEV, from RESOLVE_BENEATH");
     world.close(dir);
+    world.settle();
+}
+
+/// A `Rename` from one filesystem to another: `EXDEV`, which on a `Rename`
+/// is no escape but `Other` (kernel.md, 6.1). Needs `/dev/shm` on a mount
+/// apart from the temporary directory's; without one, there is nothing to
+/// rename across, and the test says so by passing having checked nothing.
+#[test]
+fn a_rename_across_filesystems_is_other_not_an_escape() {
+    let shm = Path::new("/dev/shm");
+    let here = Scratch::new("ring");
+    let Ok(there_meta) = fs::metadata(shm) else { return };
+    if there_meta.dev() == fs::metadata(here.path()).unwrap().dev() {
+        return;
+    }
+    let there = Scratch::new_in(shm, "ring");
+    fs::write(here.path().join("a"), b"a").unwrap();
+    let mut world = World::new(4);
+    let (from, to) = (root(here.path()), root(there.path()));
+    let rename = Op::Rename { from_dir: from, from: Box::from(&b"a"[..]), to_dir: to, to: Box::from(&b"b"[..]) };
+    assert_eq!(world.run(rename).result, Err(Error::Other(libc::EXDEV)));
+    world.close(from);
+    world.close(to);
     world.settle();
 }

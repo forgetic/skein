@@ -28,6 +28,11 @@ fn too_long() -> Vec<u8> {
     vec![b'n'; 256]
 }
 
+/// A name of 300 bytes, well past the longest.
+fn far_too_long() -> Vec<u8> {
+    vec![b'm'; 300]
+}
+
 /// The bytes of a file, from a `Read` of all of it.
 #[expect(clippy::unnecessary_wraps, reason = "an answer expected, of the shape a read gives")]
 fn file(bytes: &[u8]) -> Result<Vec<u8>, Error> {
@@ -181,6 +186,9 @@ pub struct Renames {
     pub over_itself: Result<Done, Error>,
     pub over_itself_read: Result<Vec<u8>, Error>,
     pub too_long: Result<Done, Error>,
+    /// A source that does not exist to a name too long: the source is
+    /// looked up first.
+    pub missing_to_too_long: Result<Done, Error>,
     /// The idiom: the new file's `Sync`, its `Rename` over the old, the
     /// directory's `Sync`; what the name then holds, and the temporary's
     /// name.
@@ -220,6 +228,7 @@ pub fn rename<B: Backend>(backend: &mut B) -> Renames {
     let over_itself = run.rename(process, (root, b"target"), (root, b"target"));
     let over_itself_read = run.contents(process, root, b"target");
     let too_long = run.rename(process, (root, &too_long()), (root, b"y"));
+    let missing_to_too_long = run.rename(process, (root, b"missing"), (root, &far_too_long()));
 
     let tmp = run.open(process, root, b"tmp", OpenHow::Create).expect("a temporary");
     run.write_all(process, tmp, 0, b"fresh").expect("the temporary written");
@@ -246,6 +255,7 @@ pub fn rename<B: Backend>(backend: &mut B) -> Renames {
         over_itself,
         over_itself_read,
         too_long,
+        missing_to_too_long,
         replaced: [synced, renamed, directory_synced],
         replaced_read,
     }
@@ -280,6 +290,8 @@ impl Check for Renames {
         assert_eq!(self.over_itself, NOTHING, "the contract: an entry renamed over itself is left as it is");
         assert_eq!(self.over_itself_read, file(b"stale"), "the contract: left as it is");
         assert_eq!(self.too_long, Err(Error::NameTooLong), "the contract: a name longer than 255 bytes");
+        let first = "the contract: Rename looks its source up before its target";
+        assert_eq!(self.missing_to_too_long, Err(Error::NotFound), "{first}");
         assert_eq!(self.replaced, [NOTHING, NOTHING, NOTHING], "the contract: the idiom that replaces a file whole");
         let replaced = [file(b"fresh"), Err(Error::NotFound)];
         assert_eq!(self.replaced_read, replaced, "the contract: Rename is atomic, and replaces what `to` named");
@@ -384,6 +396,11 @@ pub struct MakeDirectories {
     /// `Open` to create beneath it, and a `List` of it.
     pub removed: Result<Done, Error>,
     pub in_removed: [Result<Done, Error>; 3],
+    /// Beneath the directory removed: an `Open` of a name too long, which it
+    /// does not hold however long; an `Open` to create a path ending in
+    /// `/`, refused for the `/` first.
+    pub removed_long: Result<(), Error>,
+    pub removed_slash: Result<(), Error>,
 }
 
 #[must_use]
@@ -415,10 +432,22 @@ pub fn make_directory<B: Backend>(backend: &mut B) -> MakeDirectories {
         Err(error) => Err(error),
     };
     let in_removed = [run.make_directory(process, gone, b"x"), create, listed];
+    let removed_long = opens(&mut run, process, gone, &far_too_long(), OpenHow::Read);
+    let removed_slash = opens(&mut run, process, gone, b"x/", OpenHow::Create);
     run.close(process, gone);
     run.close(process, root);
     run.finish();
-    MakeDirectories { made, made_listed, over_a_file, in_a_file, too_long, removed, in_removed }
+    MakeDirectories {
+        made,
+        made_listed,
+        over_a_file,
+        in_a_file,
+        too_long,
+        removed,
+        in_removed,
+        removed_long,
+        removed_slash,
+    }
 }
 
 impl Check for MakeDirectories {
@@ -432,6 +461,10 @@ impl Check for MakeDirectories {
         for answer in &self.in_removed {
             assert_eq!(*answer, Err(Error::NotFound), "the contract: a directory removed while open is empty for good");
         }
+        let empty = "the contract: a directory removed holds no name, however long";
+        assert_eq!(self.removed_long, Err(Error::NotFound), "{empty}");
+        let slash = "the contract: Create of a path ending in `/` is refused for it first";
+        assert_eq!(self.removed_slash, Err(Error::IsADirectory), "{slash}");
     }
 }
 
@@ -583,6 +616,10 @@ fn escape_cases() -> Vec<(Vec<u8>, OpenHow, Outcome)> {
     let a = || Outcome::File(b"a".to_vec());
     let long_name = [b"sub/".as_slice(), &too_long()].concat();
     let long_path = b"sub/".repeat(1025);
+    let longest_name = vec![b'l'; 255];
+    // 4095 bytes, the longest a path may be.
+    let longest_path = [b"./".repeat(2045).as_slice(), b"a.txt"].concat();
+    let slashed = [far_too_long().as_slice(), b"/"].concat();
     vec![
         (b"..".to_vec(), OpenHow::Read, refused(Error::Escape)),
         (b"../a.txt".to_vec(), OpenHow::Read, refused(Error::Escape)),
@@ -618,6 +655,12 @@ fn escape_cases() -> Vec<(Vec<u8>, OpenHow, Outcome)> {
         (Vec::new(), OpenHow::Read, refused(Error::NotFound)),
         (long_name, OpenHow::Read, refused(Error::NameTooLong)),
         (long_path, OpenHow::Read, refused(Error::NameTooLong)),
+        (longest_name, OpenHow::Create, Outcome::Opened),
+        (longest_path, OpenHow::Read, a()),
+        (slashed, OpenHow::Create, refused(Error::IsADirectory)),
+        // `..` steps from where a link led, not back along the path.
+        (b"deep/../x".to_vec(), OpenHow::Read, Outcome::File(b"x".to_vec())),
+        (b"deep/../../a.txt".to_vec(), OpenHow::Read, a()),
     ]
 }
 
@@ -643,6 +686,9 @@ pub fn escapes<B: Backend>(backend: &mut B) -> Escapes {
         Item::link(b"loop1", b"loop2"),
         Item::link(b"loop2", b"loop1"),
         Item::link(b"dangle", b"missing"),
+        Item::directory(b"sub/deeper"),
+        Item::link(b"deep", b"sub/deeper"),
+        Item::file(b"sub/x", b"x"),
     ];
     // A chain of links, `l41` to `l1` and on to `a.txt`.
     let mut tree = tree.to_vec();
@@ -698,6 +744,14 @@ pub struct Permissions {
     /// In the directory that may not be written: an `Open` to create, a
     /// `Remove`, a `MakeDirectory`, a `Rename` out of it.
     pub unwritable: [Result<Done, Error>; 4],
+    /// In the directory that may not be written, names looked up before
+    /// it is written: a `Remove` of a name it lacks, a `MakeDirectory` of
+    /// one it holds.
+    pub unwritable_but_looked_up: [Result<Done, Error>; 2],
+    /// A `Rename` of a source that does not exist into the directory that may
+    /// not be searched: both directories are walked to before the source is
+    /// looked up.
+    pub missing_into_unsearchable: Result<Done, Error>,
     /// What may still be done there: read a file, list it.
     pub readable: Result<Vec<u8>, Error>,
     pub listed: Result<Vec<(Vec<u8>, Kind)>, Error>,
@@ -730,18 +784,31 @@ pub fn permissions<B: Backend>(backend: &mut B) -> Permissions {
         run.make_directory(process, ro, b"m"),
         run.rename(process, (ro, b"keep"), (root, b"moved")),
     ];
+    let unwritable_but_looked_up =
+        [run.remove(process, ro, b"missing", false), run.make_directory(process, ro, b"keep")];
     let listed = run.list(process, ro, 4, NAMES);
     let readable = run.contents(process, root, b"ro/keep");
     run.close(process, ro);
     let across = opens(&mut run, process, root, b"closed/inside", OpenHow::Read);
     let closed = run.open(process, root, b"closed", OpenHow::Directory).expect("a directory that may be read");
     let beneath = opens(&mut run, process, closed, b"inside", OpenHow::Read);
+    let missing_into_unsearchable = run.rename(process, (root, b"missing"), (closed, b"x"));
     let listable = run.list_all(process, closed, 4).map(|(all, _)| all);
     let stat = run.stat(process, closed).map(|stat| stat.kind);
     run.close(process, closed);
     run.close(process, root);
     run.finish();
-    Permissions { unreadable, unwritable, readable, listed, unsearchable: [across, beneath], listable, stat }
+    Permissions {
+        unreadable,
+        unwritable,
+        unwritable_but_looked_up,
+        missing_into_unsearchable,
+        readable,
+        listed,
+        unsearchable: [across, beneath],
+        listable,
+        stat,
+    }
 }
 
 impl Check for Permissions {
@@ -751,6 +818,11 @@ impl Check for Permissions {
             let rule = "the contract: an entry made, removed or moved in a directory not writable";
             assert_eq!(*answer, Err(Error::Permission), "{rule}");
         }
+        let looked_up = [Err(Error::NotFound), Err(Error::Exists)];
+        let first = "the contract: a name is looked up before its directory is written";
+        assert_eq!(self.unwritable_but_looked_up, looked_up, "{first}");
+        let walked = "the contract: Rename walks to both directories before it looks its source up";
+        assert_eq!(self.missing_into_unsearchable, Err(Error::Permission), "{walked}");
         assert_eq!(self.readable, file(b"keep"), "a directory not writable is still searched");
         assert_eq!(self.listed, Ok(vec![(b"keep".to_vec(), Kind::File)]), "and listed");
         for answer in &self.unsearchable {

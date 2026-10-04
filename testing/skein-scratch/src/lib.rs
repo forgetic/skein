@@ -29,7 +29,13 @@ impl Scratch {
     /// system's temporary directory, `n` the first not taken.
     #[must_use]
     pub fn new(label: &str) -> Scratch {
-        let base = std::env::temp_dir();
+        Scratch::new_in(&std::env::temp_dir(), label)
+    }
+
+    /// A new, empty directory, as [`Scratch::new`] makes, beneath `base`:
+    /// on another filesystem, say.
+    #[must_use]
+    pub fn new_in(base: &Path, label: &str) -> Scratch {
         let pid = std::process::id();
         for n in 0..TRIES {
             let path = base.join(format!("skein-{label}-{pid}-{n}"));

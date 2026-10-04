@@ -304,16 +304,22 @@ for its backend.
   replaces a file whole; removals of files, directories, a link and a file
   open; new directories, and one removed while open; listings whole, one
   entry at a time, and cut short by long names; a root beneath a root;
-  thirty-four paths that leave their root or stay beneath it; and what the
+  thirty-nine paths that leave their root or stay beneath it; and what the
   owner may not do. Each names every error its operations can be made to
-  answer on a healthy scratch directory. The driver checks that every
+  answer on a healthy scratch directory, and, where two could answer, the
+  one Linux checks first: a removed directory before a name's length, a
+  final `/` before the last name on a create, both directories of a
+  `Rename` before its source, its source before its target, a name
+  looked up before its directory is written. The driver checks that every
   path, name and buffer comes back in its `Box`, written only where the
   count says.
 - **What only the simulator shows:** a disk beyond a healthy one (no
   space, a filesystem gone read-only, an I/O error) is the simulator's
   own tests' (simulator.md, 6), and an `Open` past the descriptor limit a
   scenario on the simulator only. `EMLINK` (`TooManyLinks` on a `Rename`
-  or a `MakeDirectory`) neither backend provokes. Short reads and writes
+  or a `MakeDirectory`) neither backend provokes. A `Rename` across
+  filesystems (`Other(EXDEV)`) is the ring's own test, between the
+  temporary directory and `/dev/shm` where they are two mounts. Short reads and writes
   are an outcome the simulator draws and the ring never gives on a
   regular file: the fuzzy suite asserts both counts appear over its
   seeds, and a calm world counts every byte, as the ring does.

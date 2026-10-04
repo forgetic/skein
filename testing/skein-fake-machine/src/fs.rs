@@ -255,7 +255,7 @@ impl Machine {
         let root = self.handle(root).node;
         let node = match how {
             How::Read | How::Directory => {
-                let found = self.resolve(root, path, true)?;
+                let found = self.resolve(root, path, false)?;
                 let node = found.node.ok_or(Refusal::NotFound)?;
                 if (found.slash || how == How::Directory) && !self.is_directory(node) {
                     return Err(Refusal::NotADirectory);
@@ -266,15 +266,12 @@ impl Machine {
                 node
             }
             How::Create => {
-                let found = self.resolve(root, path, false)?;
+                let found = self.resolve(root, path, true)?;
                 // A path that ends at a directory of no name of its own
                 // (`.`, `a/..`) is taken: O_EXCL answers before O_CREAT.
                 let Some(name) = found.name else {
                     return Err(Refusal::Exists);
                 };
-                if found.slash {
-                    return Err(Refusal::IsADirectory);
-                }
                 if found.node.is_some() {
                     return Err(Refusal::Exists);
                 }
@@ -335,10 +332,12 @@ impl Machine {
     /// Linux checks (`renameat2`).
     pub fn rename(&mut self, from_dir: Opened, from: &[u8], to_dir: Opened, to: &[u8]) -> Result<(), Refusal> {
         let (from_dir, to_dir) = (self.handle(from_dir).node, self.handle(to_dir).node);
-        self.directory_to_look_in(from_dir, from)?;
-        self.directory_to_look_in(to_dir, to)?;
-        let source = self.lookup(from_dir, from).ok_or(Refusal::NotFound)?;
-        let target = self.lookup(to_dir, to);
+        // Both directories are walked to (`filename_parentat`), then the
+        // source is looked up, then the target.
+        self.searchable(from_dir)?;
+        self.searchable(to_dir)?;
+        let source = self.look_up(from_dir, from)?.ok_or(Refusal::NotFound)?;
+        let target = self.look_up(to_dir, to)?;
         if self.is_directory(source) && self.within(to_dir, source) {
             return Err(Refusal::Beneath);
         }
@@ -384,8 +383,8 @@ impl Machine {
     /// directory with `directory`, anything else without (`unlinkat`).
     pub fn remove(&mut self, dir: Opened, name: &[u8], directory: bool) -> Result<(), Refusal> {
         let dir = self.handle(dir).node;
-        self.directory_to_look_in(dir, name)?;
-        let node = self.lookup(dir, name).ok_or(Refusal::NotFound)?;
+        self.searchable(dir)?;
+        let node = self.look_up(dir, name)?.ok_or(Refusal::NotFound)?;
         if !self.may(dir, WRITE) {
             return Err(Refusal::Permission);
         }
@@ -404,8 +403,8 @@ impl Machine {
     /// Makes the directory `name` in the one `dir` has open (`mkdirat`).
     pub fn make_directory(&mut self, dir: Opened, name: &[u8]) -> Result<(), Refusal> {
         let dir = self.handle(dir).node;
-        self.directory_to_look_in(dir, name)?;
-        if self.lookup(dir, name).is_some() {
+        self.searchable(dir)?;
+        if self.look_up(dir, name)?.is_some() {
             return Err(Refusal::Exists);
         }
         if !self.may(dir, WRITE) {
@@ -468,9 +467,10 @@ impl Machine {
     /// Where `path` leads beneath the directory `root`, as `openat2` with
     /// `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS` resolves it: each
     /// directory on the way searched, `..` never above `root`, no absolute
-    /// path or link, links followed (a final one only with `follow`), and
-    /// no more than 40 of them.
-    fn resolve(&self, root: NodeId, path: &[u8], follow: bool) -> Result<Found, Refusal> {
+    /// path or link, links followed, and no more than 40 of them. To
+    /// `create` follows no final link, and refuses a final `/` before it
+    /// looks the last name up, as `O_CREAT` does.
+    fn resolve(&self, root: NodeId, path: &[u8], create: bool) -> Result<Found, Refusal> {
         if path.is_empty() {
             return Err(Refusal::NotFound);
         }
@@ -502,11 +502,15 @@ impl Machine {
                 dir = self.node(dir).parent.expect("a directory beneath a root has a parent");
                 continue;
             }
-            if name.len() > LONGEST_NAME {
-                return Err(Refusal::NameTooLong);
+            if last && create && slash {
+                return Err(Refusal::IsADirectory);
             }
+            // A removed directory holds no name, however long.
             if self.removed(dir) {
                 return Err(Refusal::NotFound);
+            }
+            if name.len() > LONGEST_NAME {
+                return Err(Refusal::NameTooLong);
             }
             let Some(node) = self.lookup(dir, &name) else {
                 return if last {
@@ -516,7 +520,7 @@ impl Machine {
                 };
             };
             match &self.node(node).body {
-                Body::Link(target) if !last || follow => {
+                Body::Link(target) if !last || !create => {
                     links = links.checked_add(1).expect("fewer than 2^32 links");
                     if links > MOST_LINKS {
                         return Err(Refusal::Loop);
@@ -544,22 +548,28 @@ impl Machine {
         Ok(Found { parent: dir, name: None, node: Some(dir), slash })
     }
 
-    /// Whether a lookup of `name` in `dir` may go ahead: `dir` a directory,
-    /// searched, not removed, and `name` no longer than a name may be.
-    fn directory_to_look_in(&self, dir: NodeId, name: &[u8]) -> Result<(), Refusal> {
+    /// Whether a name may be looked up in `dir`: a directory, searched.
+    fn searchable(&self, dir: NodeId) -> Result<(), Refusal> {
         if !self.is_directory(dir) {
             return Err(Refusal::NotADirectory);
         }
         if !self.may(dir, SEARCH) {
             return Err(Refusal::Permission);
         }
+        Ok(())
+    }
+
+    /// What `name` names in the searchable `dir`: nothing in a removed
+    /// directory, however long the name, and no name longer than a name may
+    /// be.
+    fn look_up(&self, dir: NodeId, name: &[u8]) -> Result<Option<NodeId>, Refusal> {
         if self.removed(dir) {
             return Err(Refusal::NotFound);
         }
         if name.len() > LONGEST_NAME {
             return Err(Refusal::NameTooLong);
         }
-        Ok(())
+        Ok(self.lookup(dir, name))
     }
 
     /// Whether `node` is `dir` or lies beneath it.
