@@ -477,9 +477,10 @@ pub fn check(client: &[u8], plans: &[Plan], settings: &Settings, seed: u64) -> R
                     what()
                 );
             }
-            Some(Outcome::Failed(error @ (Error::ChunkSize | Error::Chunk | Error::Trailer))) => {
+            Some(Outcome::Failed(error @ (Error::ChunkSize | Error::Chunk | Error::Trailer | Error::Extensions))) => {
                 assert_eq!(expected.ending, RequestEnding::Failed(error), "the reference's framing error; {}", what());
             }
+            Some(Outcome::Failed(Error::BodyTooLong)) => too_long(seen, &expected, &what()),
             Some(Outcome::Done(reuse)) => {
                 let Some((_, persist)) = &seen.response else { panic!("done with a response; {}", what()) };
                 let keep = *persist && !seen.below_over;
@@ -531,6 +532,19 @@ pub fn check(client: &[u8], plans: &[Plan], settings: &Settings, seed: u64) -> R
 }
 
 const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
+
+/// A chunked body past the limit, as the reference reads it: a 413 in the
+/// room set aside, if no response took it and no 100 (Continue) did;
+/// nothing otherwise, or the 100 alone.
+fn too_long(seen: &Seen, expected: &reference::Request, what: &str) {
+    assert_eq!(expected.ending, RequestEnding::Failed(Error::BodyTooLong), "past the limit; {what}");
+    let answered = seen.response.is_none() && !expected.expects;
+    if answered {
+        assert_eq!(seen.sent, requests::answer(413), "the server's own answer; {what}");
+    } else {
+        assert!(seen.sent.is_empty() || seen.sent == CONTINUE, "closed unanswered; {what}");
+    }
+}
 
 /// Each request in `client`, as the reference reads them one after
 /// another: where it begins, where its head ends, where it ends, and

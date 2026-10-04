@@ -96,6 +96,88 @@ fn chunk_framing_that_is_not_one_fails_the_exchange_and_its_stream() {
     }
 }
 
+const TOO_LARGE: &[u8] = b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+/// A chunked body of `sizes`, each chunk's data `a`s, its size line with
+/// an extension of `extension` bytes, and its last chunk.
+fn chunks(sizes: &[usize], extension: usize) -> Vec<u8> {
+    let mut body = Vec::new();
+    for &size in sizes {
+        let mut digits = Vec::new();
+        let mut left = size;
+        loop {
+            digits.push(b"0123456789abcdef"[left % 16]);
+            left /= 16;
+            if left == 0 {
+                break;
+            }
+        }
+        digits.reverse();
+        body.extend_from_slice(&digits);
+        if extension > 0 {
+            body.push(b';');
+            body.resize(body.len().saturating_add(extension.saturating_sub(1)), b'e');
+        }
+        body.extend_from_slice(b"\r\n");
+        body.resize(body.len().saturating_add(size), b'a');
+        if size > 0 {
+            body.extend_from_slice(b"\r\n");
+        }
+    }
+    body.extend_from_slice(b"\r\n");
+    body
+}
+
+#[test]
+fn a_chunked_body_holds_up_to_the_limit_and_fails_at_the_size_line_that_takes_it_past() {
+    // The limit is 1024 bytes of data.
+    let served = read_by(&request(CHUNKED, &chunks(&[1000, 24, 0], 0)), Read::Fill(16));
+    assert_eq!(served.outcome, Some(Event::Done(Reuse::Keep)), "a body at the limit");
+    assert_eq!(served.body.len(), 1024);
+    // The size line is enough: no data of the chunk past the limit is read.
+    let bodies: [(&[u8], usize); 3] =
+        [(b"401\r\n", 0), (&chunks(&[1000, 25, 0], 0), 1000), (b"7fffffffffffffff;e\r\n", 0)];
+    for (body, seen) in bodies {
+        let served = read_by(&request(CHUNKED, body), Read::Fill(8));
+        assert_eq!(served.outcome, Some(Event::Failed(Error::BodyTooLong)), "{}", body.escape_ascii());
+        assert_eq!(served.body.len(), seen, "what went up before the chunk past the limit");
+        assert_eq!(served.body_failed, Some(Fault::Invalid));
+        assert_eq!(served.sent, TOO_LARGE, "a 413 in the room set aside");
+    }
+}
+
+#[test]
+fn a_chunked_body_past_the_limit_after_a_continue_or_a_response_closes_unanswered() {
+    let expect = b"POST / HTTP/1.1\r\nHost: h\r\nExpect: 100-continue\r\nTransfer-Encoding: chunked\r\n\r\n";
+    let served = read_by(&request(expect, &chunks(&[1025, 0], 0)), Read::Fill(16));
+    assert_eq!(served.outcome, Some(Event::Failed(Error::BodyTooLong)));
+    assert_eq!(served.sent, CONTINUE, "the room set aside went to the 100");
+    // A discard reads to the same limit, and its response, waiting for the
+    // body's end, never goes.
+    let drive = Drive { read: Read::Fill(16), when: When::Discarding, reply: b"" };
+    let served = serve(
+        &mut Machine::new(LIMITS),
+        &request(CHUNKED, &chunks(&[1000, 25, 0], 0)),
+        response(204, Body::None),
+        drive,
+    );
+    assert_eq!(served.outcome, Some(Event::Failed(Error::BodyTooLong)));
+    assert_eq!(served.body_failed, None, "a stream the side above reads no more is told nothing");
+    assert!(served.sent.is_empty(), "the response waited for the body's end: {}", served.sent.escape_ascii());
+}
+
+#[test]
+fn a_chunked_body_s_extensions_hold_up_to_the_head_s_limit_in_all() {
+    // The limit is 256 bytes, the extensions of every size line together.
+    let served = read_by(&request(CHUNKED, &chunks(&[1, 1, 1, 0], 64)), Read::Fill(16));
+    assert_eq!(served.outcome, Some(Event::Done(Reuse::Keep)), "256 bytes of extensions");
+    let served = read_by(&request(CHUNKED, &chunks(&[1, 1, 1, 1, 0], 52)), Read::Fill(1));
+    assert_eq!(served.outcome, Some(Event::Failed(Error::Extensions)), "260 bytes of them");
+    assert_eq!(served.body, b"aaaa", "the chunks before the last line");
+    assert_eq!(served.body_failed, Some(Fault::Invalid));
+    assert!(served.sent.is_empty(), "closed unanswered, as for bad framing");
+}
+
 #[test]
 fn a_discard_on_a_connection_kept_reads_the_body_to_its_end_and_drops_it() {
     let mut machine = Machine::new(LIMITS);

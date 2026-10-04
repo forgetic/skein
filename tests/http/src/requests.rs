@@ -149,8 +149,9 @@ fn trim_end(value: &[u8]) -> &[u8] {
 /// does not know, an obsolete fold, whitespace before a colon, both
 /// framing headers, a coding not undone, two lengths, a chunk size past a
 /// `u64`, no `Host`, a field past the head, too many fields, a request line
-/// past the head, a body past the limit, a length with a sign, a trailer
-/// section that never ends, or HTTP/2's preface.
+/// past the head, a body past the limit, by length or in chunks, a length
+/// with a sign, a trailer section that never ends, chunk extensions past
+/// the head in all, or HTTP/2's preface.
 #[must_use]
 pub fn corrupt(rng: &mut Rng, client: &[u8]) -> Vec<u8> {
     let mut out = client.to_vec();
@@ -158,7 +159,7 @@ pub fn corrupt(rng: &mut Rng, client: &[u8]) -> Vec<u8> {
     let insert = |out: &mut Vec<u8>, bytes: &[u8]| {
         out.splice(after_line..after_line, bytes.iter().copied());
     };
-    match rng.below(16) {
+    match rng.below(18) {
         0 => {
             if let Some(at) = find(&out, b" HTTP/1.") {
                 out[at + 6] = b'2';
@@ -239,9 +240,38 @@ pub fn corrupt(rng: &mut Rng, client: &[u8]) -> Vec<u8> {
                 out.splice(end..end, body);
             }
         }
+        // A chunk whose size takes the body past the largest limit: its
+        // size line is enough, and no data need follow it.
+        15 => before_last_chunk(&mut out, after_line, b"100001\r\n"),
+        16 => {
+            // Chunks whose extensions, each line within the head, pass it in
+            // all.
+            let mut chunks = Vec::new();
+            for _ in 0..24 {
+                chunks.extend_from_slice(b"1;e=");
+                chunks.resize(chunks.len() + 200, b'v');
+                chunks.extend_from_slice(b"\r\nx\r\n");
+            }
+            before_last_chunk(&mut out, after_line, &chunks);
+        }
         _ => out = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec(),
     }
     out
+}
+
+/// `chunks` put before the last chunk of `out`'s chunked body, or, if it
+/// has none, as one after a `Transfer-Encoding: chunked` put after its
+/// request line, which ends at `after_line`.
+fn before_last_chunk(out: &mut Vec<u8>, after_line: usize, chunks: &[u8]) {
+    if let Some(at) = find(out, b"\r\n0\r\n") {
+        out.splice(at + 2..at + 2, chunks.iter().copied());
+    } else {
+        out.splice(after_line..after_line, b"Transfer-Encoding: chunked\r\n".iter().copied());
+        let end = find(out, b"\r\n\r\n").map_or(out.len(), |at| at + 4);
+        let mut body = chunks.to_vec();
+        body.extend_from_slice(b"0\r\n\r\n");
+        out.splice(end..end, body);
+    }
 }
 
 /// The response a service gives a call of `method`, and the body it

@@ -51,6 +51,10 @@ impl Seen {
             if seen.body_failed.is_some() {
                 self.note(format!("the body failed with {:?}", seen.body_failed));
             }
+            if seen.outcome == Some(Outcome::Failed(Error::BodyTooLong)) {
+                let answered = seen.sent.starts_with(b"HTTP/1.1 413");
+                self.note(format!("a chunked body past the limit, answered: {answered}"));
+            }
         }
         self.note(format!("closed while waiting for {:?}", run.closed_while));
         let fell = run.fell;
@@ -127,6 +131,10 @@ fn generated_mutated_and_corrupted_requests_are_served_as_the_reference_reads_th
         "Failed(ChunkSize)",
         "Failed(Chunk)",
         "Failed(Trailer)",
+        "Failed(Extensions)",
+        "Failed(BodyTooLong)",
+        "a chunked body past the limit, answered: true",
+        "a chunked body past the limit, answered: false",
         "failed Stream",
         "closed before the outcome",
         "refused Status",

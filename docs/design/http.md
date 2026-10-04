@@ -26,7 +26,9 @@ model's shape. All four are built (section 9).
   cannot tell it from a socket.
 - **Refuse at the entrance.** What is wrong with a request's head the
   server answers itself, small and fixed: 400, 413, 414, 431, 501 or 505,
-  and the connection ends. Bad framing in a body closes, unanswered.
+  and the connection ends. Bad framing in a body closes, unanswered; a
+  chunked body past the limit is a 413 if the room set aside is still
+  held.
 - **Server-sent events** are a machine over a body stream each way. The
   reader reads lines, fields, and an event at each blank line, each
   under a maximum; an event's data goes up whole, and `sse::Data` reads
@@ -534,7 +536,7 @@ pub enum Event {                           // to the side above
 pub struct Call { method: Method, target: Box<[u8]>, version: Version, headers: Box<[Header]>, body: Body }
 pub struct Response { status: u16, headers: Box<[Header]>, body: Body, close: bool }
 pub enum Body { None, Length(u64), Chunked }
-pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk, Trailer }
+pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk, Trailer, Extensions, BodyTooLong }
 ```
 
 - **`Next` asks for the next request,** while no exchange is in
@@ -631,6 +633,17 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
 - **Bad framing** (`ChunkSize`, `Chunk`, `Trailer`) fails the exchange,
   and the body's stream hears `Failed(Fault::Invalid)`: nothing is
   answered, and the connection ends.
+- **A chunked body is bounded as one by length is** (RFC 9112, 7.1.1):
+  its chunks' data, in all, by `Limits::body`, and its size lines'
+  extensions, in all, by `Limits::head`, the budget of a head, as each
+  size line and the trailer section are. Each size line takes its share
+  of both as it is read, before its chunk's data, a discard's reading
+  too. Past the data's, the exchange fails with `BodyTooLong`: a 413
+  goes down in the room set aside if it is still held, no response given
+  and no 100 (Continue) sent in it, and the connection otherwise closes
+  unanswered, as for bad framing. Past the extensions', it fails with
+  `Extensions`, unanswered, as bad framing. The body's stream hears
+  `Failed(Fault::Invalid)` either way.
 - **A 100 (Continue)** (RFC 9110, 10.1.1): for an HTTP/1.1 request with a
   body whose `Expect` lists `100-continue`, the server writes `HTTP/1.1
   100 Continue` before the body's first read below, for a demand of the
@@ -706,7 +719,8 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
 
   A stream of the side above's that is still open hears its end first,
   `Failed` with the stream's own fault, `Other` for an end that cut the
-  request short, and `Invalid` for bad framing.
+  request short, and `Invalid` for bad framing or a body past its
+  limits.
 - **What it waits for**, `waiting()`, a function of its state, so the
   connection can arm deadlines: `Next` (idle), `Room` (the client is not
   reading: the room set aside, a head after a 100, the reply's room or
@@ -720,9 +734,11 @@ pub enum Error { Rejected(Rejection), Truncated, Stream(Fault), ChunkSize, Chunk
 ```rust
 pub struct Limits {
     pub head: u32,      // a request's head: past it 431, or 414 for a request line that does not fit;
-                        // also the longest chunk size line, and the longest trailer section
+                        // also the longest chunk size line, the most chunk extensions of a body
+                        // in all, and the longest trailer section
     pub headers: u32,   // fields in a head: past it 431
-    pub body: u64,      // the longest body by length: past it 413; a chunked one is not bounded here
+    pub body: u64,      // the longest body: by length, past it 413 at the head; in chunks,
+                        // Failed(BodyTooLong) at the size line that passes it
     pub read: u32,      // the most the side above demands of the request body at once: the intake's cap
     pub response: u32,  // the longest response head: past it Refused(TooLong); also the room set aside
                         // before each request, at least the longest of the server's own answers
@@ -1092,8 +1108,18 @@ pub struct Limits {
   `chunked`, or give it twice, are faulty framing, a 400 (RFC 9112,
   6.3).
 - **A body by length past `Limits::body` is refused at the entrance**
-  (413); a chunked body is not bounded by the server, which cannot know
-  its length there: the side above stops reading when it has had enough.
+  (413), and a chunked body at the size line that takes it past, before
+  that chunk's data is read: the server refuses whatever the service
+  limits, so a side above that discards, or reads slowly, is not made
+  to read an upload without end. Its answer is the same fixed 413 while
+  the room set aside is still held, which it is unless a response was
+  given or a 100 (Continue) took it; then the connection closes
+  unanswered, as for bad framing, since a response given waits for the
+  body's end and cannot go. The extensions of a body's size lines are
+  bounded in all by the head's limit, the budget the server already
+  gives each line of framing, rather than by a limit of their own: they
+  are dropped unread, and a client that sends more than a head's worth
+  of them is not one an API serves.
 - **A response given before the body is all read gives up the rest,** on
   a connection not used again, rather than read the rest to keep it: a
   client may stop its upload when a response comes first, as skein's

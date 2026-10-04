@@ -1,0 +1,11 @@
+# Hostile: chunks whose sizes take the body past the server's limit, here
+# 16 bytes: it fails at the size line that passes it, before that chunk's
+# data is read (http.md, 5.3). Drafted by the reference reader, then checked
+# by hand.
+limits body 16
+request POST /upload HTTP/1.1
+header Host "localhost:8080"
+header Transfer-Encoding "chunked"
+framing chunked
+body "0123456789"
+failed body-too-long

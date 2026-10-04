@@ -45,11 +45,11 @@
 //! # Bounds
 //!
 //! A request head is at most [`Limits::head`], with at most
-//! [`Limits::headers`] fields; a chunk's size line and the trailer
-//! section, at most [`Limits::head`] each; a body by length at most
-//! [`Limits::body`]. A chunked body is not bounded: it is a stream, and
-//! the side above stops reading it when it has had enough. A response head
-//! is at most [`Limits::response`]. Each entry point emits at most
+//! [`Limits::headers`] fields; a chunk's size line, the extensions of a
+//! body's size lines in all, and the trailer section, at most
+//! [`Limits::head`] each; a body at most [`Limits::body`], refused at its
+//! head if its length says more, failed at the chunk whose size would take
+//! it past. A response head is at most [`Limits::response`]. Each entry point emits at most
 //! [`UP_MAX_OUT`] or [`DOWN_MAX_OUT`]; [`worst_case`] is what a server
 //! holds; [`largest_read`] and [`largest_room`] are what whoever stacks it
 //! checks against the caps of the stream below at startup.
@@ -61,7 +61,7 @@ use alloc::boxed::Box;
 use skein_lib::stream::{Delimiter, Down, Fault, Read, Up};
 use skein_lib::{Env, Intake, List, Queue, bytes};
 
-use crate::body::{self, Face, Incoming, Pumped, Rest};
+use crate::body::{self, Allowance, Face, Incoming, Pumped, Rest};
 use crate::{Header, MaxOut, Method, Version};
 
 mod head;
@@ -78,14 +78,16 @@ pub struct Limits {
     /// The most bytes of a request head, its request line, fields, line
     /// endings and blank line: past it, [`Rejection::HeadTooLong`], or
     /// [`Rejection::TargetTooLong`] for a request line that does not fit.
-    /// Also the longest chunk size line, and the longest trailer section.
-    /// At least 2, a blank line.
+    /// Also the longest chunk size line, the most bytes of chunk extensions
+    /// a body's size lines hold in all, and the longest trailer section. At
+    /// least 2, a blank line.
     pub head: u32,
     /// The most fields a request head holds: past it,
     /// [`Rejection::TooManyHeaders`].
     pub headers: u32,
-    /// The longest request body announced by length: past it,
-    /// [`Rejection::BodyTooLong`]. A chunked body is not bounded here.
+    /// The longest request body: one announced by length past it,
+    /// [`Rejection::BodyTooLong`] at its head; a chunked one,
+    /// [`Error::BodyTooLong`] at the chunk whose size takes it past.
     pub body: u64,
     /// The most the side above demands of the request body at once, a
     /// fill's count or a scan's maximum: the cap of the intake that holds
@@ -377,6 +379,14 @@ pub enum Error {
     Chunk,
     /// The trailer section is longer than [`Limits::head`].
     Trailer,
+    /// The chunk extensions of the body's size lines, in all, are longer
+    /// than [`Limits::head`] (RFC 9112, 7.1.1).
+    Extensions,
+    /// A chunk's size takes the body past [`Limits::body`]: the exchange
+    /// fails at its size line. Answered with a 413 (Content Too Large) in
+    /// the room set aside if no response was given and no 100 (Continue)
+    /// took that room, closed unanswered otherwise.
+    BodyTooLong,
 }
 
 /// What the server is waiting for. Machines keep no timers
@@ -704,7 +714,7 @@ fn reading_up(
                     State::Reading(reading)
                 }
                 Ok(Parsed::Complete) => match reading.head.request(limits) {
-                    Ok(request) => called(request, above),
+                    Ok(request) => called(request, limits, above),
                     Err(rejection) => reject(rejection, above, below),
                 },
                 Err(rejection) => reject(rejection, above, below),
@@ -748,18 +758,18 @@ fn reject(rejection: Rejection, above: &mut Queue<Event>, below: &mut Queue<Down
 
 /// A request's head, whole and sound: up it goes, and the exchange begins,
 /// demanding nothing until the side above reads, discards or responds.
-fn called(request: head::Request, above: &mut Queue<Event>) -> State {
-    let rest = match request.call.body {
-        Body::None | Body::Length(0) => Rest::Over,
-        Body::Length(length) => Rest::Length(length),
-        Body::Chunked => Rest::ChunkSize,
+fn called(request: head::Request, limits: &Limits, above: &mut Queue<Event>) -> State {
+    let (rest, allowance) = match request.call.body {
+        Body::None | Body::Length(0) => (Rest::Over, None),
+        Body::Length(length) => (Rest::Length(length), None),
+        Body::Chunked => (Rest::ChunkSize, Some(Allowance { data: limits.body, extensions: limits.head })),
     };
     let exchange = Exchange {
         method: request.call.method,
         version: request.call.version,
         keep: request.persist,
         aside: if request.expects { Aside::Continue } else { Aside::Held },
-        body: Some(Incoming { rest, face: Face::Idle }),
+        body: Some(Incoming { rest, face: Face::Idle, allowance }),
         response: Responding::Awaited,
         below: None,
         withdrawn: false,
@@ -796,7 +806,13 @@ fn exchange_up(
                     }
                     settle(exchange, intake, limits, above, below)
                 }
-                Err(bad) => fail(exchange, framing_error(bad), intake, above, below),
+                Err(bad) => {
+                    let error = framing_error(bad);
+                    if error == Error::BodyTooLong {
+                        too_long(&mut exchange, below);
+                    }
+                    fail(exchange, error, intake, above, below)
+                }
             }
         }
         Up::Room => {
@@ -1299,7 +1315,12 @@ fn fail(
     let fault = match error {
         Error::Stream(fault) => fault,
         Error::Truncated => Fault::Other,
-        Error::Rejected(_) | Error::ChunkSize | Error::Chunk | Error::Trailer => Fault::Invalid,
+        Error::Rejected(_)
+        | Error::ChunkSize
+        | Error::Chunk
+        | Error::Trailer
+        | Error::Extensions
+        | Error::BodyTooLong => Fault::Invalid,
     };
     match exchange.response {
         Responding::Head { reply, .. } | Responding::Sending { reply, .. } => match reply {
@@ -1326,11 +1347,29 @@ fn fail(
     State::Spent
 }
 
-/// The error a chunked body's bad framing fails the exchange with.
+/// The error a chunked body's bad framing, or what it holds past its
+/// allowance, fails the exchange with.
 fn framing_error(bad: body::Bad) -> Error {
     match bad {
         body::Bad::ChunkSize => Error::ChunkSize,
         body::Bad::Chunk => Error::Chunk,
         body::Bad::Trailer => Error::Trailer,
+        body::Bad::Extensions => Error::Extensions,
+        body::Bad::TooLong => Error::BodyTooLong,
+    }
+}
+
+/// A chunked body past [`Limits::body`]: answered with a 413 (Content Too
+/// Large) within the room set aside, as a body by length past it is at its
+/// head, if that room is still held and no response was given; otherwise
+/// the connection closes unanswered, as for bad framing.
+fn too_long(exchange: &mut Exchange, below: &mut Queue<Down>) {
+    let answered = match exchange.response {
+        Responding::Awaited => exchange.aside == Aside::Held,
+        Responding::Head { .. } | Responding::Sending { .. } => false,
+    };
+    if answered {
+        exchange.aside = Aside::Spent;
+        below.push(Down::Send(bytes::copy_of(response::answer(Rejection::BodyTooLong))));
     }
 }

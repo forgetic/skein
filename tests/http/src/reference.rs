@@ -73,7 +73,10 @@ pub fn response(bytes: &[u8], method: Method, close: bool, limits: &Limits) -> R
     let result = match framing {
         Framing::Empty => Ok(()),
         Framing::Length(length) => reader.take(length, &mut out.body),
-        Framing::Chunked => chunked(&mut reader, limits.head, &mut out.body),
+        Framing::Chunked => chunked(&mut reader, limits.head, None, &mut out.body).map_err(|short| match short {
+            Short::Error(error) => error,
+            Short::Extensions | Short::TooLong => unreachable!("a response's body has no allowance"),
+        }),
         Framing::UntilEnd => {
             out.body.extend_from_slice(&bytes[reader.at..]);
             reader.at = bytes.len();
@@ -290,14 +293,44 @@ fn persistent(head: &Head) -> bool {
     }
 }
 
-/// A chunked body, its size lines and its trailer section within `head`.
-fn chunked(reader: &mut Lines<'_>, head: u32, body: &mut Vec<u8>) -> Result<(), Error> {
+/// Why a chunked body was not read whole: the client's error, or, for a
+/// request's, more than its allowance.
+enum Short {
+    Error(Error),
+    /// More chunk extensions, in all, than the allowance holds.
+    Extensions,
+    /// More data than the allowance holds.
+    TooLong,
+}
+
+impl From<Error> for Short {
+    fn from(error: Error) -> Short {
+        Short::Error(error)
+    }
+}
+
+/// A chunked body, its size lines and its trailer section within `head`,
+/// and, for a request's, its data and its size lines' extensions within an
+/// allowance of each, in all.
+fn chunked(reader: &mut Lines<'_>, head: u32, allowance: Option<(u64, u32)>, body: &mut Vec<u8>) -> Result<(), Short> {
+    let mut data = 0_u64;
+    let mut extensions = 0_u32;
     loop {
-        let size = match reader.line(head) {
+        let (size, extension) = match reader.line(head) {
             Line::Whole(content, _) => chunk_size(content).ok_or(Error::ChunkSize)?,
-            Line::Long => return Err(Error::ChunkSize),
-            Line::Short => return Err(Error::Truncated { answered: true }),
+            Line::Long => return Err(Error::ChunkSize.into()),
+            Line::Short => return Err(Error::Truncated { answered: true }.into()),
         };
+        if let Some((most_data, most_extensions)) = allowance {
+            extensions += extension;
+            if extensions > most_extensions {
+                return Err(Short::Extensions);
+            }
+            data = data.saturating_add(size);
+            if data > most_data {
+                return Err(Short::TooLong);
+            }
+        }
         if size == 0 {
             let mut budget = head;
             loop {
@@ -306,11 +339,11 @@ fn chunked(reader: &mut Lines<'_>, head: u32, body: &mut Vec<u8>) -> Result<(), 
                     Line::Whole(_, len) => {
                         budget -= u32::try_from(len).expect("fits a u32");
                         if budget == 0 {
-                            return Err(Error::Trailer);
+                            return Err(Error::Trailer.into());
                         }
                     }
-                    Line::Long => return Err(Error::Trailer),
-                    Line::Short => return Err(Error::Truncated { answered: true }),
+                    Line::Long => return Err(Error::Trailer.into()),
+                    Line::Short => return Err(Error::Truncated { answered: true }.into()),
                 }
             }
         }
@@ -320,13 +353,14 @@ fn chunked(reader: &mut Lines<'_>, head: u32, body: &mut Vec<u8>) -> Result<(), 
         match rest {
             [b'\n', ..] => reader.at += 1,
             [b'\r', b'\n', ..] => reader.at += 2,
-            [_, _, ..] => return Err(Error::Chunk),
-            [_] | [] => return Err(Error::Truncated { answered: true }),
+            [_, _, ..] => return Err(Error::Chunk.into()),
+            [_] | [] => return Err(Error::Truncated { answered: true }.into()),
         }
     }
 }
 
-fn chunk_size(line: &[u8]) -> Option<u64> {
+/// A chunk's size, and how long its extensions are.
+fn chunk_size(line: &[u8]) -> Option<(u64, u32)> {
     let digits = line.iter().take_while(|byte| byte.is_ascii_hexdigit()).count();
     if digits == 0 {
         return None;
@@ -337,8 +371,10 @@ fn chunk_size(line: &[u8]) -> Option<u64> {
     }
     let rest = trim(&line[digits..]);
     match rest.first() {
-        None => Some(size),
-        Some(b';') if rest.iter().all(|&byte| is_field_byte(byte)) => Some(size),
+        None => Some((size, 0)),
+        Some(b';') if rest.iter().all(|&byte| is_field_byte(byte)) => {
+            Some((size, u32::try_from(rest.len()).expect("fits a u32")))
+        }
         Some(_) => None,
     }
 }
@@ -427,18 +463,20 @@ pub fn request(bytes: &[u8], limits: &server::Limits) -> Request {
     out.head_end = reader.at;
     let result = match head.body {
         server::Body::None => Ok(()),
-        server::Body::Length(length) => reader.take(length, &mut out.body),
-        server::Body::Chunked => chunked(&mut reader, limits.head, &mut out.body),
+        server::Body::Length(length) => reader.take(length, &mut out.body).map_err(Short::Error),
+        server::Body::Chunked => chunked(&mut reader, limits.head, Some((limits.body, limits.head)), &mut out.body),
     };
     out.head = Some(head);
     out.used = reader.at;
     out.ending = match result {
         Ok(()) => RequestEnding::Whole,
-        Err(Error::Truncated { .. }) => RequestEnding::Failed(server::Error::Truncated),
-        Err(Error::ChunkSize) => RequestEnding::Failed(server::Error::ChunkSize),
-        Err(Error::Chunk) => RequestEnding::Failed(server::Error::Chunk),
-        Err(Error::Trailer) => RequestEnding::Failed(server::Error::Trailer),
-        Err(other) => unreachable!("a body's framing fails no other way: {other:?}"),
+        Err(Short::Error(Error::Truncated { .. })) => RequestEnding::Failed(server::Error::Truncated),
+        Err(Short::Error(Error::ChunkSize)) => RequestEnding::Failed(server::Error::ChunkSize),
+        Err(Short::Error(Error::Chunk)) => RequestEnding::Failed(server::Error::Chunk),
+        Err(Short::Error(Error::Trailer)) => RequestEnding::Failed(server::Error::Trailer),
+        Err(Short::Extensions) => RequestEnding::Failed(server::Error::Extensions),
+        Err(Short::TooLong) => RequestEnding::Failed(server::Error::BodyTooLong),
+        Err(Short::Error(other)) => unreachable!("a body's framing fails no other way: {other:?}"),
     };
     out
 }

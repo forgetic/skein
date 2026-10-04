@@ -763,7 +763,8 @@ fn final_head(
         }
         Upload::None | Upload::Finished | Upload::Stopped => {}
     }
-    exchange.response = Receiving::Body(Download { body: Incoming { rest, face: Face::Idle }, persist });
+    exchange.response =
+        Receiving::Body(Download { body: Incoming { rest, face: Face::Idle, allowance: None }, persist });
     settle(exchange, intake, limits, above, below)
 }
 
@@ -1042,5 +1043,6 @@ fn framing_error(bad: body::Bad) -> Error {
         body::Bad::ChunkSize => Error::ChunkSize,
         body::Bad::Chunk => Error::Chunk,
         body::Bad::Trailer => Error::Trailer,
+        body::Bad::TooLong | body::Bad::Extensions => unreachable!("a response's body has no allowance"),
     }
 }

@@ -22,12 +22,25 @@ use skein_lib::{Intake, bytes};
 
 use crate::header::{content, is_field_byte, trim};
 
-/// A body coming up: what is left of it below, and the side above's side
-/// of its stream.
+/// A body coming up: what is left of it below, the side above's side of
+/// its stream, and, for a chunked request body, what is left of what it may
+/// hold.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct Incoming {
     pub(crate) rest: Rest,
     pub(crate) face: Face,
+    /// `None` for a response's body, which the client reads as a stream,
+    /// and for a body by length, bounded by its head.
+    pub(crate) allowance: Option<Allowance>,
+}
+
+/// What is left of what a chunked body may hold, in all: its chunks' data,
+/// and the extensions of their size lines (RFC 9112, 7.1.1). A size line
+/// takes its share of both, before its chunk's data is read.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct Allowance {
+    pub(crate) data: u64,
+    pub(crate) extensions: u32,
 }
 
 /// What is left of a body below, by its framing.
@@ -94,6 +107,10 @@ pub(crate) enum Bad {
     Chunk,
     /// The trailer section is longer than the head's limit.
     Trailer,
+    /// A chunk's size takes the body's data past its allowance.
+    TooLong,
+    /// A chunk's extensions take the body's past their allowance.
+    Extensions,
 }
 
 /// Meets the side above's demand from the intake, if it can, with what goes
@@ -210,11 +227,19 @@ pub(crate) fn delivered(
             b"\n" | b"\r\n" => Rest::ChunkSize,
             _ => return Err(Bad::Chunk),
         },
-        Rest::ChunkSize => match chunk_size(&bytes) {
-            Some(0) => Rest::Trailer(head),
-            Some(size) => Rest::Chunk(size),
-            None => return Err(Bad::ChunkSize),
-        },
+        Rest::ChunkSize => {
+            let Some((size, extensions)) = chunk_size(&bytes) else { return Err(Bad::ChunkSize) };
+            if let Some(allowance) = &mut incoming.allowance {
+                let Some(left) = allowance.extensions.checked_sub(extensions) else { return Err(Bad::Extensions) };
+                allowance.extensions = left;
+                let Some(left) = allowance.data.checked_sub(size) else { return Err(Bad::TooLong) };
+                allowance.data = left;
+            }
+            match size {
+                0 => Rest::Trailer(head),
+                size => Rest::Chunk(size),
+            }
+        }
         Rest::Trailer(left) => {
             let left = left.checked_sub(len(&bytes)).expect("a scan within what is left of the trailer section");
             match content(&bytes) {
@@ -270,10 +295,10 @@ fn answers(read: Read, bytes: &[u8]) -> bool {
 }
 
 /// A chunk's size line (RFC 9112, 7.1): hexadecimal digits, then, past
-/// whitespace, nothing or an extension, which is ignored. `None` for a
-/// line that is not one, has no LF within the head's limit, or whose size
-/// does not fit a `u64`.
-fn chunk_size(bytes: &[u8]) -> Option<u64> {
+/// whitespace, nothing or extensions, which are ignored, and how long they
+/// are. `None` for a line that is not one, has no LF within the head's
+/// limit, or whose size does not fit a `u64`.
+fn chunk_size(bytes: &[u8]) -> Option<(u64, u32)> {
     let line = content(bytes)?;
     let mut size = 0_u64;
     let mut digits = 0_usize;
@@ -287,14 +312,14 @@ fn chunk_size(bytes: &[u8]) -> Option<u64> {
     }
     let rest = trim(line.get(digits..)?);
     match rest.first() {
-        None => Some(size),
+        None => Some((size, 0)),
         Some(b';') => {
             for &byte in rest {
                 if !is_field_byte(byte) {
                     return None;
                 }
             }
-            Some(size)
+            Some((size, len(rest)))
         }
         Some(_) => None,
     }

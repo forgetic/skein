@@ -286,11 +286,13 @@ fn rejection_name(rejection: Rejection) -> &'static str {
     REJECTIONS.iter().find(|(known, _)| *known == rejection).map_or("other", |(_, name)| name)
 }
 
-const ERRORS: [(Error, &str); 4] = [
+const ERRORS: [(Error, &str); 6] = [
     (Error::Truncated, "truncated"),
     (Error::ChunkSize, "chunk-size"),
     (Error::Chunk, "chunk"),
     (Error::Trailer, "trailer"),
+    (Error::Extensions, "extensions"),
+    (Error::BodyTooLong, "body-too-long"),
 ];
 
 fn error(name: &[u8]) -> Option<Error> {
