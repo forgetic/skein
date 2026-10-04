@@ -12,7 +12,7 @@
 //!   up whole, and [`sse::Data`] reads it to a machine stacked above, a
 //!   JSON tokenizer.
 //!
-//! The server and the event writer are not built yet (http.md, 8).
+//! The server and the event writer are not built yet (http.md, 9).
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]

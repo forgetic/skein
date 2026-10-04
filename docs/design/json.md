@@ -364,4 +364,4 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   writes a document whole.
 - **Several documents in one stream,** concatenated or as JSON lines.
 - **Protocol worlds,** once the tokenizer is stacked under a service's
-  decoder and over HTTP or server-sent events (http.md, 5).
+  decoder and over HTTP or server-sent events (http.md, 9).
