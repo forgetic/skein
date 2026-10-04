@@ -2,7 +2,9 @@
 //! connection routes between them, against a rustls server in memory that
 //! answers one HTTP response: the handshake, then the call once `Ready`
 //! came, its body uploaded through TLS's room, the response read through
-//! TLS's plaintext stream, and both closed, `close_notify` last.
+//! TLS's plaintext stream, and both closed, `close_notify` last; and a
+//! response read to the end of the stream, which only the server's
+//! `close_notify` makes whole.
 //!
 //! The stream below is prompt (`drive::Wire`): what is checked here is the
 //! routing and what goes through it, not the neighbours' faults, which the
@@ -12,7 +14,7 @@ use std::collections::VecDeque;
 
 use skein_http::Header;
 use skein_http::client::{self as http, Body, Call, Framing, Method, Reuse};
-use skein_lib::stream::{Down, Read, Up};
+use skein_lib::stream::{Down, Fault, Read, Up};
 use skein_lib::{Env, Queue, Rng, Time};
 use skein_tls::Name;
 use skein_tls::client::{self as tls, Agreed, Client, Version};
@@ -32,6 +34,17 @@ enum Hop {
     Below(Down),
 }
 
+/// How the server ends the stream once it answered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ending {
+    /// It keeps it open.
+    Open,
+    /// It sends `close_notify`, then ends it.
+    CloseNotify,
+    /// It ends it without `close_notify`: a truncation.
+    Cut,
+}
+
 /// A connection: the TLS client and the HTTP client stacked on it, and a
 /// user of the HTTP client that makes one call.
 struct Connection {
@@ -47,7 +60,11 @@ struct Connection {
     agreed: Option<Agreed>,
     status: Option<(u16, Framing)>,
     body: Vec<u8>,
+    /// The end or the failure the response's body heard.
+    body_over: Option<Up>,
     done: Option<Reuse>,
+    http_failed: Option<http::Error>,
+    tls_failed: Option<tls::Error>,
     http_closed: bool,
     tls_closed: bool,
     /// Whether the server wrote its response: once.
@@ -76,7 +93,10 @@ impl Connection {
             agreed: None,
             status: None,
             body: Vec::new(),
+            body_over: None,
             done: None,
+            http_failed: None,
+            tls_failed: None,
             http_closed: false,
             tls_closed: false,
             responded: false,
@@ -84,8 +104,9 @@ impl Connection {
     }
 
     /// Runs the connection until both machines are closed, the server
-    /// answering `response` once it has the whole request.
-    fn run(&mut self, response: &[u8]) {
+    /// answering `response` once it has the whole request, then ending the
+    /// stream as `ending` says.
+    fn run(&mut self, response: &[u8], ending: Ending) {
         let events = self.tls.down(tls::Request::Handshake);
         self.hops.extend(events.into_iter().map(Hop::Tls));
         for _ in 0..100_000 {
@@ -96,7 +117,11 @@ impl Connection {
             let server = &mut self.tls.wire.server;
             if !self.responded && whole(&server.received) {
                 server.write(response);
+                if ending == Ending::CloseNotify {
+                    server.close_notify();
+                }
                 self.tls.wire.pull();
+                self.tls.wire.eof = ending != Ending::Open;
                 self.responded = true;
             }
             let events = self.tls.settle();
@@ -120,7 +145,7 @@ impl Connection {
                     http::up(&mut self.http, &self.env, up, &mut self.events, &mut self.requests);
                     self.emitted();
                 }
-                Hop::Tls(tls::Event::Failed(error)) => panic!("the connection failed: {error:?}"),
+                Hop::Tls(tls::Event::Failed(error)) => self.tls_failed = Some(error),
                 Hop::Tls(tls::Event::Closed) => self.tls_closed = true,
                 Hop::Below(down) => {
                     let events = self.tls.down(tls::Request::Stream(down));
@@ -166,13 +191,16 @@ impl Connection {
                 self.body.extend_from_slice(&bytes);
                 self.demand_body();
             }
-            http::Event::Body(Up::End) => {}
-            http::Event::Body(other) => panic!("the body: {other:?}"),
+            http::Event::Body(over @ (Up::End | Up::Failed(_))) => self.body_over = Some(over),
+            http::Event::Body(Up::Room) => panic!("room for a body read"),
             http::Event::Done(reuse) => {
                 self.done = Some(reuse);
                 self.http_down(http::Request::Close);
             }
-            http::Event::Failed(error) => panic!("the call failed: {error:?}"),
+            http::Event::Failed(error) => {
+                self.http_failed = Some(error);
+                self.http_down(http::Request::Close);
+            }
             http::Event::Closed => {
                 self.http_closed = true;
                 let events = self.tls.down(tls::Request::Close);
@@ -240,7 +268,7 @@ fn a_get_reads_a_response_by_length_over_tls() {
         close: false,
     };
     let mut connection = Connection::new(call, Vec::new());
-    connection.run(&response);
+    connection.run(&response, Ending::Open);
     assert_eq!(connection.agreed, Some(Agreed { version: Version::Tls13, alpn: Some(b"http/1.1"[..].into()) }));
     assert_eq!(connection.status, Some((200, Framing::Length(u64::try_from(body.len()).expect("fits")))));
     assert_eq!(connection.body, body);
@@ -271,7 +299,7 @@ fn a_post_uploads_records_of_its_body_and_reads_a_chunked_response() {
         close: false,
     };
     let mut connection = Connection::new(call, upload.clone());
-    connection.run(&response);
+    connection.run(&response, Ending::Open);
     assert_eq!(connection.status, Some((200, Framing::Chunked)));
     assert_eq!(connection.body, body);
     assert_eq!(connection.done, Some(Reuse::Keep));
@@ -280,4 +308,51 @@ fn a_post_uploads_records_of_its_body_and_reads_a_chunked_response() {
     assert_eq!(&server.received[..head.len()], head);
     assert_eq!(&server.received[head.len()..], upload, "the body, through TLS's records");
     assert!(server.closed);
+}
+
+/// A response whose body runs to the end of the stream (RFC 9112, 6.3),
+/// and the call that asks for it.
+fn until_end(body: &[u8]) -> (Vec<u8>, Call) {
+    let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n".to_vec();
+    response.extend_from_slice(body);
+    let call = Call {
+        method: Method::Get,
+        target: b"/v1/log"[..].into(),
+        headers: vec![header("Host", "skein.test")].into(),
+        body: Body::None,
+        close: false,
+    };
+    (response, call)
+}
+
+#[test]
+fn a_body_read_to_the_end_is_whole_once_close_notify_ends_it() {
+    let body = world::text(&mut Rng::new(2), 3_000);
+    let (response, call) = until_end(&body);
+    let mut connection = Connection::new(call, Vec::new());
+    connection.run(&response, Ending::CloseNotify);
+    assert_eq!(connection.status, Some((200, Framing::UntilEnd)));
+    assert_eq!(connection.body, body);
+    assert_eq!(connection.body_over, Some(Up::End));
+    assert_eq!(connection.done, Some(Reuse::Close));
+    assert_eq!((connection.http_failed, connection.tls_failed), (None, None));
+    assert!(connection.http_closed && connection.tls_closed);
+}
+
+#[test]
+fn a_body_read_to_the_end_cut_without_close_notify_fails_as_invalid() {
+    let body = world::text(&mut Rng::new(3), 3_000);
+    let (response, call) = until_end(&body);
+    let mut connection = Connection::new(call, Vec::new());
+    connection.run(&response, Ending::Cut);
+    assert_eq!(connection.status, Some((200, Framing::UntilEnd)));
+    // Every byte deciphered is delivered, and still the body is not whole:
+    // a truncation is never taken for its end.
+    assert_eq!(connection.body, body);
+    assert_eq!(connection.body_over, Some(Up::Failed(Fault::Invalid)));
+    assert_eq!(connection.done, None);
+    assert_eq!(connection.http_failed, Some(http::Error::Stream(Fault::Invalid)));
+    assert_eq!(connection.tls_failed, Some(tls::Error::Truncated));
+    assert!(connection.http_closed && connection.tls_closed);
+    assert!(!connection.tls.wire.server.closed, "nothing sent after the failure");
 }

@@ -279,8 +279,10 @@ wall time each test chooses.
   does not depend on it.
 - **The machines stacked** (`tests/tls/tests/stack.rs`): the HTTP client
   over the TLS client, as a connection routes between them, a call made
-  on `Ready`, a body uploaded in records and a response read by length
-  and by chunks.
+  on `Ready`, a body uploaded in records, a response read by length and
+  by chunks, and one read to the end of the stream: whole once
+  `close_notify` ends it, failed `Stream(Invalid)` when the stream is cut
+  without it.
 - **Memory** (`tests/tls/tests/memory.rs`, with the counting allocator):
   every call of an entry point a step of the meter. The server runs on
   the same thread, between the client's steps; its heap and the
