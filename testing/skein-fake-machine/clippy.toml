@@ -5,6 +5,12 @@
 # handles that close on drop. It keeps the shape of a step machine: its state,
 # a call in, an answer out (testing-strategy.md, 4).
 
+# Its own tests may assert by panicking.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+
 disallowed-types = [
     { path = "std::time::Instant", reason = "the simulator owns time" },
     { path = "std::time::SystemTime", reason = "the simulator owns time" },

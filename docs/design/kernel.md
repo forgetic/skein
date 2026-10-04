@@ -304,7 +304,7 @@ for its backend.
   replaces a file whole; removals of files, directories, a link and a file
   open; new directories, and one removed while open; listings whole, one
   entry at a time, and cut short by long names; a root beneath a root;
-  thirty-two paths that leave their root or stay beneath it; and what the
+  thirty-four paths that leave their root or stay beneath it; and what the
   owner may not do. Each names every error its operations can be made to
   answer on a healthy scratch directory. The driver checks that every
   path, name and buffer comes back in its `Box`, written only where the

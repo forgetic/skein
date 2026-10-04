@@ -144,7 +144,7 @@ impl Item {
 type NodeId = u64;
 
 #[derive(Debug)]
-struct Node {
+pub(crate) struct Node {
     body: Body,
     /// The owner's permission bits.
     mode: u32,
@@ -185,7 +185,7 @@ struct Found {
 /// The fake filesystem. See the crate documentation.
 #[derive(Debug)]
 pub struct Machine {
-    nodes: BTreeMap<NodeId, Node>,
+    pub(crate) nodes: BTreeMap<NodeId, Node>,
     next_node: NodeId,
     handles: BTreeMap<u64, Handle>,
     next_handle: u64,

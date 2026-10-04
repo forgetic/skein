@@ -399,6 +399,13 @@ what the containers report (programming-model.md, 6.3).
 
   Each is one request with one terminal event. Beneath it, io runs the
   open, the reads or writes, and the close.
+- **What the records allow** (kernel.md, 6.1). Only an `Open` resolves a
+  path beneath a root, so io opens the directory a name lies in, beneath
+  the root, before it renames or removes that name or makes a directory
+  there, and it stats what it has opened: a stat needs the file readable,
+  until an open for a path only is pulled. Reads and writes may be short,
+  and io continues them; a listing comes an entry count at a time, and
+  io's stated count is a limit it checks as the entries come.
 - **File streams come later,** when a user needs to read a file by demand
   because it is too large to hold.
 

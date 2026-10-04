@@ -597,6 +597,8 @@ fn escape_cases() -> Vec<(Vec<u8>, OpenHow, Outcome)> {
         (b"sub/../a.txt".to_vec(), OpenHow::Read, a()),
         (b"sub//../a.txt".to_vec(), OpenHow::Read, a()),
         (b"loop1".to_vec(), OpenHow::Read, refused(Error::TooManyLinks)),
+        (b"l40".to_vec(), OpenHow::Read, a()),
+        (b"l41".to_vec(), OpenHow::Read, refused(Error::TooManyLinks)),
         (b"dangle".to_vec(), OpenHow::Read, refused(Error::NotFound)),
         (b"dangle".to_vec(), OpenHow::Create, refused(Error::Exists)),
         (b"in".to_vec(), OpenHow::Create, refused(Error::Exists)),
@@ -620,8 +622,8 @@ fn escape_cases() -> Vec<(Vec<u8>, OpenHow, Outcome)> {
 }
 
 /// Paths that leave their root, and paths that stay: `..`, absolute paths,
-/// symbolic links out and in, a loop, a dangling link, a final `/`, names
-/// and paths too long.
+/// symbolic links out and in, a loop, forty links and one more, a dangling
+/// link, a final `/`, names and paths too long.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Escapes {
     pub outcomes: Vec<(Vec<u8>, OpenHow, Outcome)>,
@@ -642,6 +644,13 @@ pub fn escapes<B: Backend>(backend: &mut B) -> Escapes {
         Item::link(b"loop2", b"loop1"),
         Item::link(b"dangle", b"missing"),
     ];
+    // A chain of links, `l41` to `l1` and on to `a.txt`.
+    let mut tree = tree.to_vec();
+    tree.push(Item::link(b"l1", b"a.txt"));
+    for n in 1..41_u32 {
+        let next = n.checked_add(1).expect("a small number");
+        tree.push(Item::link(format!("l{next}").as_bytes(), format!("l{n}").as_bytes()));
+    }
     let mut run = Run::new(backend);
     let process = run.process();
     let root = run.root(process, &tree);

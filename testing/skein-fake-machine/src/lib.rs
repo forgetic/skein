@@ -28,6 +28,8 @@ extern crate alloc;
 
 mod face;
 mod fs;
+#[cfg(test)]
+mod tests;
 
 pub use face::{serve, step};
 pub use fs::{Facts, How, Is, Item, Listed, Machine, Made, Opened, Refusal};
