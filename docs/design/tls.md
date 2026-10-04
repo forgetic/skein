@@ -266,7 +266,8 @@ wall time each test chooses.
   outcome each: every version, a retry, ALPN, an alert, every split of
   the ciphertext a byte at a time, a slow reader that fills the stream
   below, closes in every state, a read that crosses the end held until
-  withdrawn, and a renegotiation request, sealed with the server's keys
+  withdrawn, a corrupted record read after `close_notify` went, and a
+  renegotiation request, sealed with the server's keys
   taken out, refused alone or in front of the side above's data.
 - **Not replayed:** what rustls draws from the kernel changes a record's
   length, and with it where the pieces fall. The worlds assert only what
@@ -332,10 +333,15 @@ wall time each test chooses.
 - **A truncation fails the stream as invalid,** never ends it, once what
   was deciphered is delivered; a peer's fatal alert is a reset.
 - **No session resumed,** and no alert sent after a failure.
-- **rustls is built in tests as it ships,** without its debug assertions
-  (the workspace's `Cargo.toml`): one holds any alert after `close_notify`
-  to be a bug, which a half-closed connection reading a corrupted record
-  reaches; release builds compile it out.
+- **rustls is built as it ships in every dev build,** not only the
+  tests', without its debug assertions (`[profile.dev.package.rustls]` in
+  the workspace's `Cargo.toml`): one holds any alert after `close_notify`
+  to be a bug, and aborts a half-closed connection that reads a corrupted
+  record (section 8 drafts the issue); release builds compile it out.
+  Cargo honours profiles only in the root manifest, so a workspace that
+  depends on skein-tls copies the override into its own: until it does,
+  its debug builds abort on a peer's error after the client's
+  `close_notify`, temper's among them.
 
 ## 7. Open questions
 
@@ -359,3 +365,29 @@ wall time each test chooses.
   8).
 - **The fuzz target** (`fuzz/`, fed records under every demand), which
   waits for a nightly toolchain; the fuzzy suite stands in for it.
+- **An issue for rustls,** drafted against 0.23.41 and not filed, so that
+  the override of section 6 can go:
+
+  > **`send_fatal_alert` panics in debug builds after `send_close_notify`**
+  >
+  > `CommonState::send_close_notify` sets `sent_fatal_alert`, so that no
+  > alert follows `close_notify`; `send_fatal_alert` begins with
+  > `debug_assert!(!self.sent_fatal_alert)` (common_state.rs:567). A
+  > client that sends `close_notify` and reads on, as a half-closed
+  > connection lets it (RFC 8446, 6.1: each side closes its own
+  > direction), reaches it on the first fatal error in what it reads: a
+  > record that fails to decrypt (conn.rs:1133, `BadRecordMac`), a message
+  > that does not decode, one that comes out of turn. A debug build
+  > panics; a release build queues a fatal alert behind the
+  > `close_notify`.
+  >
+  > To reproduce with `UnbufferedClientConnection`: complete a handshake,
+  > `queue_close_notify` and send it, then hand `process_tls_records` the
+  > server's next application-data record with a byte of it changed.
+  > Expected: `Error::DecryptError`. With debug assertions: a panic at
+  > common_state.rs:567.
+  >
+  > Suggested fix: once `close_notify` was sent, `send_fatal_alert` sends
+  > no alert and returns the error, as `send_close_notify` sends nothing
+  > after a fatal alert; the assertion then guards only against a second
+  > fatal alert.

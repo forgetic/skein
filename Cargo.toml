@@ -67,9 +67,11 @@ overflow-checks = true
 panic = "abort"
 overflow-checks = true
 
-# rustls is built in tests as it ships: its debug assertions hold an alert
-# after close_notify to be a bug, which a half-closed connection reading a
-# corrupted record reaches (tls.md, 6).
+# rustls is built as it ships in every dev build, not only the tests': its
+# debug assertions hold an alert after close_notify to be a bug, and abort a
+# half-closed connection that reads a corrupted record (tls.md, 6). Cargo
+# reads profiles only from the root manifest: a workspace that depends on
+# skein-tls copies this into its own.
 [profile.dev.package.rustls]
 debug-assertions = false
 

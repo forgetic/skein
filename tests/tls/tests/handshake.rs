@@ -297,6 +297,27 @@ fn room_held_for_a_demand_withdrawn_is_handed_on_or_asked_for_again() {
 }
 
 #[test]
+fn a_corrupted_record_read_after_close_notify_went_fails_as_invalid() {
+    // rustls's debug assertions hold an alert after close_notify to be a
+    // bug, and abort here; the workspace builds rustls without them, as it
+    // ships (tls.md, 6).
+    let mut pair = pair(&pki::Server::plain(), "skein.test", pki::VALID, &pki::client(&[]), LIMITS);
+    assert_eq!(handshake(&mut pair), ready(Version::Tls13, None));
+    assert_eq!(pair.down(Request::Stream(Down::Finish)), vec![]);
+    assert_eq!(pair.settle(), vec![]);
+    assert!(pair.wire.finished && pair.wire.server.closed, "close_notify went, then the stream was finished");
+    // The server writes on to a client that half-closed; a byte of its
+    // record is changed on the way.
+    pair.wire.server.write(b"after");
+    let mut record = pair.wire.server.transmit();
+    *record.last_mut().unwrap() ^= 1;
+    pair.wire.bytes.extend(record);
+    let mut events = pair.down(Request::Stream(Down::Demand { read: Read::Fill(5), room: 0 }));
+    events.extend(pair.settle());
+    assert_eq!(events, failed(Error::Decrypt));
+}
+
+#[test]
 fn keys_at_their_limit_are_updated_in_front_of_the_next_records() {
     // TLS 1.3 keys good for three records: rustls asks for new ones before
     // the fourth, in front of its data and within the room granted for it;
