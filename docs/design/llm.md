@@ -37,6 +37,21 @@ translates it into its own tool types before execution. Replay admission
 requires a valid JSON object for arguments. Schemas are bounded JSON
 values, independent of the application's tool vocabulary.
 
+Every emitted replay also fits the complete serialized raw opaque cap, including
+synthesized text/refusal item IDs, phase fields and tool item IDs. An oversized
+native metadata value produces actual Client Failure::Limit before a completed
+block or Completed terminal, with lower settlement still owed. An admitted value
+at that exact cap fits its exported durable envelope without dropping metadata.
+JSON admission measures the complete escaped metadata under the smaller document
+and opaque cap, without allocating a serialized buffer just to count it. Actual
+Client controls cover exact/one-over escaped text, refusal and tool metadata.
+
+`Json`, `DocumentLimits` and `DocumentError` expose bounded document admission
+without naming a wire dialect. `document_error` retains receiving overflow as
+`Error::Limit` and malformed grammar, missing fields or wrong types as
+`Error::Invalid`. It reuses the Client's classification; it starts no call,
+emits no terminal and supplies no retry policy.
+
 `Client::prepare` validates and measures the whole request before allocating
 its exact body. Admission is fallible and does not touch the stream. An
 accepted client has one call, named by the caller's opaque token. Every

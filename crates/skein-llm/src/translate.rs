@@ -364,12 +364,23 @@ fn push(tokens: &mut List<Token>, token: Token) -> Result<(), Error> {
     }
 }
 fn replay(tokens: &[Token], limits: &openai::Limits) -> Result<Replay, Error> {
-    match openai::Json::from_tokens(tokens, limits) {
+    // Synthesized text/refusal/tool metadata must obey the same raw replay
+    // cap as native opaque blocks. Json admission measures escaped bytes
+    // before emission, without another serialized buffer just to count them.
+    let mut bounded = *limits;
+    bounded.document_bytes = bounded.document_bytes.min(bounded.opaque_bytes);
+    match openai::Json::from_tokens(tokens, &bounded) {
         Ok(value) => Ok(Replay { provider: Provider::OpenAiCodex, value }),
         Err(error) => Err(decode(error)),
     }
 }
-pub(crate) const fn decode(error: openai::DecodeError) -> Error {
+
+/// Classifies a bounded document refusal without starting or driving a call.
+/// Callers retain `TooLarge` as `Error::Limit`; malformed grammar, missing
+/// fields and wrong types become `Error::Invalid`. This does not emit a Client
+/// terminal or add retry policy. See `docs/design/llm.md`, Vocabulary and ownership.
+#[must_use]
+pub const fn decode(error: crate::DocumentError) -> Error {
     match error {
         openai::DecodeError::TooLarge => Error::Limit,
         openai::DecodeError::Malformed | openai::DecodeError::Missing | openai::DecodeError::WrongType => {
@@ -377,6 +388,7 @@ pub(crate) const fn decode(error: openai::DecodeError) -> Error {
         }
     }
 }
+
 pub(crate) const fn stop(value: openai::Stop) -> Stop {
     match value {
         openai::Stop::EndTurn => Stop::EndTurn,
