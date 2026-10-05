@@ -12,10 +12,12 @@ pub mod anthropic;
 pub mod client;
 mod dialect;
 pub mod openai;
+mod replay;
 mod translate;
 mod types;
 
-pub use openai::Json;
+pub use openai::{Json, Limits as DocumentLimits};
+pub use replay::{REPLAY_HEADER_BYTES, replay_bytes, replay_worst_case};
 pub use types::{
     Block, Call, Completion, Credential, Delta, Endpoint, Error, Failure, Message, Prompt, Provider, Replay, Role,
     Stop, Tool, Usage,

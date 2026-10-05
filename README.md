@@ -29,13 +29,14 @@ starts from.
 | io | `skein-io` | sockets, pipes, files, processes, signals to the service | [io.md](docs/design/io.md) |
 | the shell kit | `skein-shell` | the io_uring backend, the clock, the seed, startup | [shell.md](docs/design/shell.md) |
 | the simulator | `skein-sim` | the simulated kernel and its faults; beside it, the conformance suite (`skein-conformance`) | [simulator.md](docs/design/simulator.md) |
+| the fake LLM | `skein-fake-llm-domain`, `skein-fake-llm-protocol` | shared bounded scripts and independent byte peers; application worlds supply tools and policy | [fake-llm.md](docs/design/fake-llm.md) |
 | the fake checkout | `skein-fake-checkout` | for tests: deterministic files, scripted commands and local git mechanics; worlds own policy and delivery | [fake-checkout.md](docs/design/fake-checkout.md) |
 | the counting allocator | `skein-heap` | for tests: the heap counted, and each step checked against its worst case | [testing.md](docs/design/testing.md) |
 | the world harness | `skein-world` | for tests: each process's `iterate` in one loop, over the simulator or the ring, with a referee | [examples.md](docs/design/examples.md) |
 | HTTP | `skein-http` | HTTP/1.1 client and server, server-sent events | [http.md](docs/design/http.md) |
 | JSON | `skein-json` | a bounded tokenizer, a sized writer | [json.md](docs/design/json.md) |
 | TLS | `skein-tls` | the TLS client, a stream over rustls's unbuffered connection, with ring | [tls.md](docs/design/tls.md) |
-| LLM | `skein-llm` | provider-neutral calls, streaming deltas and completions; ChatGPT/Codex subscription access | [llm.md](docs/design/llm.md) |
+| LLM | `skein-llm` | provider-neutral calls, streaming deltas, concrete replay and completions; subscription wire dialects | [llm.md](docs/design/llm.md) |
 | the browser kit | `skein-browser` | for tests: a headless Chromium driven over the DevTools protocol on a pipe, by role and name, from the loop; designed, not built | [browser.md](docs/design/browser.md) |
 
 ```

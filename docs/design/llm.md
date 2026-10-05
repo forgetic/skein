@@ -28,7 +28,10 @@ reasoning effort, an optional cache key and optional output-token cap. A
 message holds ordered text, refusals, tool calls, tool results and reasoning
 blocks. Provider-owned
 `Replay` metadata travels with the block it belongs to and is tagged with
-its provider. A replay value for a different provider is refused. Generic
+its provider. `Replay` can be retained as a bounded durable envelope without
+exposing provider fields to a domain. The exported seven-byte header is
+additional to the raw opaque cap; `replay_bytes` and `replay_worst_case`
+state complete receiver/transit bounds. A replay value for a different provider is refused. Generic
 tool calls retain raw JSON argument text; the application validates and
 translates it into its own tool types before execution. Replay admission
 requires a valid JSON object for arguments. Schemas are bounded JSON
@@ -103,7 +106,8 @@ replay. The subscription route does not receive `max_output_tokens` or
 sampling fields, and admission rejects an explicit output-token cap on Codex.
 Anthropic sends `stream:true`, native `messages`, tool `input_schema`, and
 `max_tokens` (4096 by default). Adaptive thinking maps explicit effort values;
-its cache-affinity key is unsupported. Signed/redacted thinking is preserved
+its cache-affinity key is unsupported. `Prompt::output_ceiling` configures the
+dialect-supported option while preserving local output bounds for Codex. Signed/redacted thinking is preserved
 as native opaque replay, tool names/IDs remain unchanged, and tool results
 retain their native `is_error`. The bounded decoder verifies message/block
 ordering, delta types, cumulative usage patches and completion at `message_stop`.
@@ -123,3 +127,10 @@ water with `worst_case`. Fuzzy cases live in the separate nextest profile.
 Archived Temper/Tongs transcripts retain their provenance; synthetic cases
 are labelled as such. Live subscription admission is not implied by offline
 tests and requires a caller-provided current credential.
+
+The [shared scripted peer](fake-llm.md) composes an independent lib-only
+script domain with native bounded byte codecs. Applications supply schemas,
+body menus, invalid inputs and scripts. Signed/redacted replay preserves all
+bounded provider extension fields; known fields are validated without dropping
+unknown opaque data. Historical Anthropic captures retain provenance and
+flow through the actual Client independently of synthetic scripts.

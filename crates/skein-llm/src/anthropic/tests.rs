@@ -285,7 +285,6 @@ fn unsigned_thinking_and_invalid_redacted_metadata_reject() {
     for wire in [
         br#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":""}}"#.as_slice(),
         br#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"one","data":"two"}}"#.as_slice(),
-        br#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"one","extra":1}}"#.as_slice(),
         br#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one","text":"two"}}"#.as_slice(),
     ] {
         match event(wire, &LIMITS) {
@@ -334,4 +333,173 @@ fn provider_error_classification_and_detail_truncation() {
         out.pop(),
         Some(Output::Failed { failure: Failure::Overloaded, detail: bytes::copy_of("é".as_bytes()) })
     );
+}
+
+#[test]
+fn signed_thinking_extension_head_survives_fragments_and_terminal() {
+    let mut decoder = StreamDecoder::new(&LIMITS);
+    let mut out = Queue::with_capacity(MAX_OUT);
+    progress(&mut decoder, START, &LIMITS, &mut out);
+    progress(&mut decoder, br#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":"","provider_hint":{"signed":true}}}"#, &LIMITS, &mut out);
+    progress(
+        &mut decoder,
+        br#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"proof"}}"#,
+        &LIMITS,
+        &mut out,
+    );
+    feed(&mut decoder, TEXT_STOP, &LIMITS, &mut out);
+    assert_eq!(
+        out.pop(),
+        Some(Output::Part(Part::Opaque {
+            bytes: bytes::copy_of(
+                br#"{"type":"thinking","provider_hint":{"signed":true},"thinking":"","signature":"proof"}"#
+            )
+        }))
+    );
+    progress(&mut decoder, END, &LIMITS, &mut out);
+    feed(&mut decoder, STOP, &LIMITS, &mut out);
+    match out.pop() {
+        Some(Output::Completed { .. }) => {}
+        Some(
+            Output::Part(_)
+            | Output::TextDelta { .. }
+            | Output::ArgumentsDelta { .. }
+            | Output::ReasoningDelta { .. }
+            | Output::Failed { .. }
+            | Output::Progress,
+        )
+        | None => unreachable!("actual message stop completes"),
+    }
+    assert!(decoder.is_complete(), "actual message stop terminates");
+}
+
+#[test]
+fn synthetic_thinking_heads_are_admitted_before_corrupted_controls() {
+    for wire in [
+        br#"{"type":"thinking","thinking":"visible","signature":"proof","extension":{"signed":true}}"#.as_slice(),
+        br#"{"type":"thinking","thinking":"visible","extension":[null,true]}"#,
+    ] {
+        let head = Json::from_bytes(wire, &LIMITS).expect("complete positive head");
+        let signature = if bytes::find(wire, b"\"signature\"").is_some() { b"proof".as_slice() } else { b"" };
+        let event = Event::Added {
+            index: 0,
+            block: super::BlockStart::Thinking {
+                text: bytes::copy_of(b"visible"),
+                signature: bytes::copy_of(signature),
+                head,
+            },
+        };
+        let encoded = super::encode_event(&event, &LIMITS).expect("positive synthetic entrance");
+        let decoded = super::decode_event(&Json::from_bytes(&encoded, &LIMITS).expect("whole wire"), &LIMITS)
+            .expect("actual native parser");
+        let Event::Added { block: super::BlockStart::Thinking { head, text, signature: actual }, .. } = decoded else {
+            panic!("thinking native event");
+        };
+        assert_eq!(text.as_ref(), b"visible");
+        assert_eq!(actual.as_ref(), signature);
+        assert!(bytes::find(&head.to_bytes(&LIMITS).expect("whole head"), b"\"extension\"").is_some());
+    }
+    for head in [
+        b"[1]".as_slice(),
+        b"null",
+        br#"{"thinking":"visible"}"#,
+        br#"{"type":"text","thinking":"visible"}"#,
+        br#"{"type":"thinking"}"#,
+        br#"{"type":"thinking","thinking":1}"#,
+        br#"{"type":"thinking","thinking":"different"}"#,
+        br#"{"type":"thinking","thinking":"visible","signature":"different"}"#,
+        br#"{"type":"thinking","thinking":"visible","signature":false}"#,
+    ] {
+        let event = Event::Added {
+            index: 0,
+            block: super::BlockStart::Thinking {
+                text: bytes::copy_of(b"visible"),
+                signature: Box::new([]),
+                head: Json::from_bytes(head, &LIMITS).expect("syntactically valid negative head"),
+            },
+        };
+        assert!(super::encode_event(&event, &LIMITS).is_err(), "malformed head rejected before encoder traversal");
+    }
+}
+
+#[test]
+fn unknown_opaque_native_head_keeps_nested_proof_before_kind_cap_and_delta_negatives() {
+    let raw = br#"{"type":"future_block","proof":{"a":[1,2]},"data":"opaque"}"#;
+    let head = Json::from_bytes(raw, &LIMITS).expect("whole positive head");
+    let event = Event::Added { index: 0, block: super::BlockStart::Opaque { value: head.clone() } };
+    let encoded = super::encode_event(&event, &LIMITS).expect("positive opaque entrance");
+    let parsed = super::decode_event(&Json::from_bytes(&encoded, &LIMITS).expect("whole event"), &LIMITS)
+        .expect("actual opaque native parser");
+    assert_eq!(parsed, event);
+    let mut decoder = StreamDecoder::new(&LIMITS);
+    let mut out = Queue::with_capacity(MAX_OUT);
+    progress(&mut decoder, START, &LIMITS, &mut out);
+    decoder.event(parsed, &LIMITS, Wall::EPOCH, &mut out);
+    assert_eq!(out.pop(), Some(Output::Progress));
+    feed(&mut decoder, TEXT_STOP, &LIMITS, &mut out);
+    assert_eq!(out.pop(), Some(Output::Part(Part::Opaque { bytes: bytes::copy_of(raw) })));
+    let tight = Limits { opaque_bytes: u32::try_from(raw.len()).expect("bounded head") - 1, ..LIMITS };
+    assert_eq!(super::encode_event(&event, &tight), Err(DecodeError::TooLarge));
+    for raw in [
+        b"[1]".as_slice(),
+        br#"{"type":""}"#,
+        br#"{"type":"text","text":"not opaque"}"#,
+        br#"{"type":"tool_use","id":"a","name":"tool","input":{}}"#,
+        br#"{"type":"tool_result","tool_use_id":"a","content":"x"}"#,
+        br#"{"type":"thinking","thinking":"x","signature":"s"}"#,
+    ] {
+        let event = Event::Added {
+            index: 0,
+            block: super::BlockStart::Opaque { value: Json::from_bytes(raw, &LIMITS).expect("negative syntax") },
+        };
+        assert!(
+            super::encode_event(&event, &LIMITS).is_err(),
+            "known/empty/nonobject kind cannot disguise its semantics"
+        );
+    }
+    let mut decoder = StreamDecoder::new(&LIMITS);
+    progress(&mut decoder, START, &LIMITS, &mut out);
+    decoder.event(event, &LIMITS, Wall::EPOCH, &mut out);
+    assert_eq!(out.pop(), Some(Output::Progress));
+    decoder.event(
+        Event::Delta { index: 0, delta: super::Delta::Text { text: bytes::copy_of(b"rewrite") } },
+        &LIMITS,
+        Wall::EPOCH,
+        &mut out,
+    );
+    failure(&mut out, Failure::Protocol);
+}
+
+#[test]
+fn native_array_text_is_exactly_measured_for_system_and_tool_results() {
+    let template = r#"{"model":"model","stream":true,"max_tokens":32,"system":ARRAY,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":ARRAY}]}]}"#;
+    for (array, expected) in [
+        ("[]", b"".as_slice()),
+        (r#"[{"type":"text","text":""}]"#, b"".as_slice()),
+        (r#"[{"type":"text","text":""},{"type":"text","text":""}]"#, b"\n".as_slice()),
+        (r#"[{"type":"text","text":"a"}]"#, b"a".as_slice()),
+        (r#"[{"type":"text","text":"aaaaa"},{"type":"text","text":"bbbbbb"}]"#, b"aaaaa\nbbbbbb".as_slice()),
+    ] {
+        let wire = template.replace("ARRAY", array);
+        let value = Json::from_bytes(wire.as_bytes(), &LIMITS).expect("whole native positive");
+        let exact = Limits { string_bytes: 12, ..LIMITS };
+        let request = super::decode_request(&value, &exact).expect("tiny/empty/exact-cap arrays admitted");
+        assert_eq!(request.instructions.as_ref(), expected);
+        let [crate::Block::ToolResult { text, .. }] = &*request.messages[0].content else {
+            unreachable!("literal result-array test");
+        };
+        assert_eq!(text.as_ref(), expected);
+    }
+    for array in
+        [r#"[{"type":"future","text":"a"}]"#, r#"[{"type":"text","text":"aaaaaa"},{"type":"text","text":"bbbbbb"}]"#]
+    {
+        for wire in [
+            template.replace("\"content\":ARRAY", "\"content\":[]").replace("ARRAY", array),
+            template.replace("\"system\":ARRAY,", "").replace("ARRAY", array),
+        ] {
+            let value = Json::from_bytes(wire.as_bytes(), &LIMITS).expect("whole negative array syntax");
+            let exact = Limits { string_bytes: 12, ..LIMITS };
+            assert!(super::decode_request(&value, &exact).is_err(), "wrong kind/one-over joining bytes rejected");
+        }
+    }
 }

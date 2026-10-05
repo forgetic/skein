@@ -115,3 +115,11 @@ with only the `claude-code-20250219,oauth-2025-04-20` betas; the full archived
 set includes long-context access that some subscriptions reject.
 Codex's successful subscription responses can omit `Content-Type`; the client
 accepts that omission for Codex while validating any explicitly supplied type.
+
+Applications can retain `Replay::to_bytes` envelopes without owning provider
+codecs. Configure the receiving cap with `replay_bytes`: its seven-byte header
+is additional to `DocumentLimits::opaque_bytes`. `replay_worst_case` covers
+temporary JSON and raw/envelope copies. `Prompt::output_ceiling` handles the
+configured dialect's supported wire option, while local output limits remain
+caller-owned. Shared independent scripts and HTTP/SSE peers are described in
+[fake-llm.md](../../docs/design/fake-llm.md).

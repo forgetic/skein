@@ -22,7 +22,7 @@ use crate::{
 pub struct Limits {
     pub http: http::Limits,
     pub sse: sse::Limits,
-    pub dialect: openai::Limits,
+    pub dialect: crate::DocumentLimits,
     /// A non-success response body. At its cap the connection is closed.
     pub error_bytes: u32,
 }

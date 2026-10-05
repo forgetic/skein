@@ -101,6 +101,10 @@ impl Json {
         Ok(write.finish())
     }
 
+    pub(crate) fn into_tokens(self) -> Box<[Token]> {
+        self.tokens
+    }
+
     pub(crate) fn write(&self, out: &mut writer::Encoder) {
         for token in &self.tokens {
             out.token(token);

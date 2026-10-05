@@ -47,7 +47,8 @@ pub enum Block {
     /// flag, so `is_error` prefixes the wire text with `Error: ` when true;
     /// successful text is sent unchanged.
     ToolResult { id: Box<[u8]>, text: Box<[u8]>, is_error: bool },
-    /// Provider-owned reasoning, including encrypted or signed replay data.
+    /// Provider-owned assistant replay, including encrypted/signed reasoning
+    /// and unknown bounded native content-block envelopes.
     /// The payload is opaque; visible reasoning summaries arrive as deltas.
     Reasoning { replay: Replay },
 }
@@ -83,6 +84,22 @@ pub struct Prompt {
     /// require `None` because that route does not support token caps.
     pub max_output_tokens: Option<u32>,
 }
+impl Prompt {
+    /// Applies an application's nonzero output ceiling using the configured
+    /// dialect. Anthropic sends the ceiling; Codex omits the unsupported wire
+    /// option. The caller must still bound received output locally on Codex.
+    pub fn output_ceiling(&mut self, provider: Provider, ceiling: u32) -> Result<(), Error> {
+        if ceiling == 0 {
+            return Err(Error::Invalid);
+        }
+        self.max_output_tokens = match provider {
+            Provider::OpenAiCodex => None,
+            Provider::Anthropic => Some(ceiling),
+        };
+        Ok(())
+    }
+}
+
 /// Why a successfully decoded response finished.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Stop {

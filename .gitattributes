@@ -1,0 +1,2 @@
+# Captured HTTP chunk frames retain CRLF and the terminating empty frame.
+crates/skein-llm/src/*/fixtures/**/response.sse -text -diff
