@@ -127,6 +127,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-browser-world"
+version = "0.0.0"
+dependencies = [
+ "skein-browser",
+ "skein-io",
+ "skein-lib",
+ "skein-shell",
+]
+
+[[package]]
 name = "skein-conformance"
 version = "0.0.0"
 dependencies = [

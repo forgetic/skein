@@ -199,7 +199,7 @@ fn a_late_cancel_never_lands_on_a_later_operation_with_its_target_token() {
     assert!(world.sim.advance(), "the cancel lands");
     let got = world.reap(server);
     assert_eq!(got.len(), 1, "only the cancel completes");
-    assert_eq!((got[0].op, got[0].result), (cancel, Err(Error::TooLate)), "its target is gone");
+    assert_eq!((got[0].op, &got[0].result), (cancel, &Err(Error::TooLate)), "its target is gone");
 }
 
 #[test]

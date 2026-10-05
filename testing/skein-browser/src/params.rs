@@ -11,6 +11,7 @@ pub(crate) enum Params<'a> {
     Context(&'a [u8]),
     Target { url: &'a [u8], context: &'a [u8] },
     TargetId(&'a [u8]),
+    AttachTarget(&'a [u8]),
     Url(&'a [u8]),
     Backend(u64),
     Query { root: u64, role: &'a [u8], name: &'a [u8] },
@@ -52,6 +53,10 @@ impl Params<'_> {
                 json.string(context);
             }
             Params::TargetId(target) => {
+                json.key(b"targetId");
+                json.string(target);
+            }
+            Params::AttachTarget(target) => {
                 json.key(b"targetId");
                 json.string(target);
                 json.key(b"flatten");

@@ -96,6 +96,8 @@ impl Driver {
                 Event::Listening { listener, .. } => self.listener = Some(listener),
                 other @ (Event::Connected { .. }
                 | Event::Stream { .. }
+                | Event::Spawned { .. }
+                | Event::Exited { .. }
                 | Event::Failed { .. }
                 | Event::Closed { .. }) => {
                     drop(other);
@@ -221,7 +223,12 @@ fn succeed(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         | Op::Rename { .. }
         | Op::Remove { .. }
         | Op::MakeDirectory { .. }
-        | Op::List { .. } => panic!("io submits no operation on files yet"),
+        | Op::List { .. }
+        | Op::Spawn { .. }
+        | Op::Wait { .. }
+        | Op::Signal { .. }
+        | Op::PipeRead { .. }
+        | Op::PipeWrite { .. } => panic!("this memory world exercises only socket operations"),
     }
 }
 
@@ -243,6 +250,11 @@ fn stopped(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         | Op::Remove { .. }
         | Op::MakeDirectory { .. }
         | Op::List { .. }
+        | Op::Spawn { .. }
+        | Op::Wait { .. }
+        | Op::Signal { .. }
+        | Op::PipeRead { .. }
+        | Op::PipeWrite { .. }
         | Op::Cancel { .. } => succeed(op, fd),
     }
 }

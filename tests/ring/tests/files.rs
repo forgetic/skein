@@ -35,7 +35,7 @@ fn list(world: &mut World, fd: Fd, entries: usize, names: usize) -> Vec<(Vec<u8>
     let op = Op::List { fd, entries: vec![Entry::BLANK; entries].into(), names: vec![0; names].into() };
     let listed = world.run(op);
     let (Ok(Done::Count(n)), Op::List { entries, names, .. }) = (listed.result, listed.kind) else {
-        panic!("a list: {:?}", listed.result)
+        panic!("a list completion has the expected result and operation")
     };
     let mut got = Vec::new();
     for entry in &entries[..usize::try_from(n).expect("a count fits a usize")] {

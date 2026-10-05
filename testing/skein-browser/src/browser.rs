@@ -4,12 +4,7 @@
     clippy::disallowed_types,
     reason = "bounded entity and command tables reuse Vec slots; capacities are fixed at construction"
 )]
-#![expect(
-    clippy::manual_find,
-    clippy::manual_map,
-    clippy::match_like_matches_macro,
-    reason = "the step subset excludes closure-based combinators and the matches macro"
-)]
+#![expect(clippy::manual_find, clippy::manual_map, reason = "the step subset excludes closure-based combinators")]
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -62,6 +57,7 @@ struct Page {
     root: Option<u64>,
     opening: bool,
     load: Option<Load>,
+    load_due: Option<Time>,
     closed: bool,
 }
 
@@ -88,10 +84,6 @@ enum OpKind {
     Key(Key),
     Snapshot,
     Screenshot,
-}
-
-fn matches_go(kind: &OpKind) -> bool {
-    if let OpKind::Go(_) = kind { true } else { false }
 }
 
 #[derive(Debug)]
@@ -165,6 +157,11 @@ impl Browser {
     #[must_use]
     pub fn new(owner: Token, limits: &Limits) -> Browser {
         assert!(limits.commands > 0 && limits.command > 0 && limits.message > 0, "the wire has positive limits");
+        assert!(
+            crate::limits::largest_read(limits).is_some() && crate::limits::largest_room(limits).is_some(),
+            "framing limits include a NUL byte"
+        );
+        assert!(limits.answer.as_nanos() > 0 && limits.poll.as_nanos() > 0, "deadlines advance time");
         Browser {
             owner,
             phase: Phase::Starting,
@@ -220,6 +217,14 @@ impl Browser {
                 });
             }
         }
+        for page in self.pages.iter().flatten() {
+            if let Some(at) = page.load_due {
+                next = Some(match next {
+                    Some(old) => old.min(at),
+                    None => at,
+                });
+            }
+        }
         next
     }
 
@@ -229,13 +234,18 @@ impl Browser {
     }
 
     pub fn reclaim(&mut self) {
-        for op in &mut self.ops {
-            let done_go = match op {
-                Some(op) => matches_go(&op.kind) && op.due == Some(Time::ZERO),
-                None => false,
-            };
-            if done_go {
-                *op = None;
+        for person in &mut self.persons {
+            if let Some(state) = person
+                && state.closed
+            {
+                *person = None;
+            }
+        }
+        for page in &mut self.pages {
+            if let Some(state) = page
+                && state.closed
+            {
+                *page = None;
             }
         }
     }
@@ -300,7 +310,10 @@ impl Browser {
     }
     fn insert_person(&mut self, person: Person, limit: u32) -> bool {
         for slot in &mut self.persons {
-            if slot.is_none() {
+            if match slot {
+                Some(state) => state.closed,
+                None => true,
+            } {
                 *slot = Some(person);
                 return true;
             }
@@ -313,7 +326,10 @@ impl Browser {
     }
     fn insert_page(&mut self, page: Page, limit: u32) -> bool {
         for slot in &mut self.pages {
-            if slot.is_none() {
+            if match slot {
+                Some(state) => state.closed,
+                None => true,
+            } {
                 *slot = Some(page);
                 return true;
             }
@@ -471,6 +487,7 @@ impl Browser {
                         root: None,
                         opening: true,
                         load: None,
+                        load_due: None,
                         closed: false,
                     },
                     env.limits.pages,
@@ -562,6 +579,16 @@ impl Browser {
             self.events.push_back(Event::Refused { op: token, why: Refusal::Gone });
             return false;
         }
+        if let OpKind::Go(_) = &kind {
+            for active in self.ops.iter().flatten() {
+                if active.page == page
+                    && let OpKind::Go(_) = active.kind
+                {
+                    self.events.push_back(Event::Refused { op: token, why: Refusal::Limit });
+                    return false;
+                }
+            }
+        }
         let accepted = self.insert_op(Operation { token, page, kind, due: None }, env.limits.ops);
         if !accepted {
             self.events.push_back(Event::Refused { op: token, why: Refusal::Limit });
@@ -582,7 +609,11 @@ impl Browser {
             page_state.root = None;
             if let Go::Address(_) | Go::Reload = to {
                 page_state.load = Some(Load::Go(op));
+                page_state.load_due = Some(env.now.saturating_add(env.limits.answer));
             }
+        }
+        if let Some(op_state) = self.op_mut(op) {
+            op_state.due = Some(env.now.saturating_add(env.limits.answer));
         }
         match to {
             Go::Address(url) => self.issue_step(env, op, b"Page.navigate", &Params::Url(&url), Step::Go),
@@ -645,7 +676,14 @@ impl Browser {
     }
 
     fn finish_refused(&mut self, op: Token, why: Refusal) {
-        if self.remove_op(op).is_some() {
+        if let Some(operation) = self.remove_op(op) {
+            if let Some(page) = self.page_mut(operation.page)
+                && let Some(Load::Go(waiting)) = page.load
+                && waiting == op
+            {
+                page.load = None;
+                page.load_due = None;
+            }
             self.events.push_back(Event::Refused { op, why });
         }
     }
@@ -667,6 +705,8 @@ impl Browser {
         }
         if let Some(page) = self.page_mut(token) {
             page.closed = true;
+            page.load = None;
+            page.load_due = None;
             self.events.push_back(Event::Closed { owner: token });
         }
     }
@@ -1007,10 +1047,41 @@ pub fn fire(browser: &mut Browser, env: &Env<Limits>, now: Time, above: &mut Que
             }
         }
         if let Some(op) = due {
+            let is_find = match browser.op(op) {
+                Some(Operation { kind: OpKind::Find { .. }, .. }) => true,
+                Some(Operation {
+                    kind:
+                        OpKind::Go(_)
+                        | OpKind::Press { .. }
+                        | OpKind::Type { .. }
+                        | OpKind::Key(_)
+                        | OpKind::Snapshot
+                        | OpKind::Screenshot,
+                    ..
+                })
+                | None => false,
+            };
             if let Some(op_state) = browser.op_mut(op) {
                 op_state.due = None;
             }
-            browser.start_find(env, op);
+            if is_find {
+                browser.start_find(env, op);
+            } else {
+                browser.finish_refused(op, Refusal::Timeout);
+            }
+        } else {
+            let mut page_due = None;
+            for page in browser.pages.iter().flatten() {
+                if let Some(at) = page.load_due
+                    && at <= now
+                {
+                    page_due = Some(page.token);
+                    break;
+                }
+            }
+            if let Some(page) = page_due {
+                browser.close_page_local(page);
+            }
         }
     }
     if below.room() >= 2 {
@@ -1048,7 +1119,11 @@ impl Browser {
                 }
             }
             let Some(at) = at else {
-                self.crash();
+                // A command that reached its deadline or whose operation
+                // closed may still answer later. Its id is never reused.
+                if id >= self.next_id {
+                    self.crash();
+                }
                 return;
             };
             let pending = self.pending.swap_remove(at);
@@ -1118,7 +1193,7 @@ impl Browser {
                         env,
                         b"Target.attachToTarget",
                         None,
-                        &Params::TargetId(&target),
+                        &Params::AttachTarget(&target),
                         PendingKind::Attach(page),
                     ) {
                         self.close_page_local(page);
@@ -1147,6 +1222,7 @@ impl Browser {
                 if let Some(url) = url {
                     if let Some(page_state) = self.page_mut(page) {
                         page_state.load = Some(Load::Opening);
+                        page_state.load_due = Some(env.now.saturating_add(env.limits.answer));
                     }
                     if !self.queue_page(env, page, b"Page.navigate", &Params::Url(&url), PendingKind::Navigate(page)) {
                         self.close_page_local(page);
@@ -1275,7 +1351,10 @@ impl Browser {
 
     fn loaded(&mut self, page: Token) {
         let load = match self.page_mut(page) {
-            Some(page) => page.load.take(),
+            Some(page) => {
+                page.load_due = None;
+                page.load.take()
+            }
             None => None,
         };
         match load {
@@ -1368,6 +1447,7 @@ impl Browser {
                         && let Some(page_state) = self.page_mut(page)
                     {
                         page_state.load = Some(Load::Go(token));
+                        page_state.load_due = Some(env.now.saturating_add(env.limits.answer));
                     }
                     self.issue_step(env, token, b"Page.navigateToHistoryEntry", &Params::HistoryEntry(id), Step::Go);
                 } else {

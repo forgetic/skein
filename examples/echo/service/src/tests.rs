@@ -151,7 +151,12 @@ impl Rig {
             | Op::Rename { .. }
             | Op::Remove { .. }
             | Op::MakeDirectory { .. }
-            | Op::List { .. } => panic!("the echo opens no file"),
+            | Op::List { .. }
+            | Op::Spawn { .. }
+            | Op::Wait { .. }
+            | Op::Signal { .. }
+            | Op::PipeRead { .. }
+            | Op::PipeWrite { .. } => panic!("the echo uses only socket operations"),
         };
         self.done.push(Complete { op, kind, result });
     }

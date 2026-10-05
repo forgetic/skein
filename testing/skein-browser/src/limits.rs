@@ -54,20 +54,30 @@ pub fn largest_room(limits: &Limits) -> Option<u32> {
     limits.command.checked_add(1)
 }
 
-/// An upper bound for the machine's owned memory, or `None` on overflow.
-/// The browser state adds its own slab sizes to this wire and boundary bound.
+/// A conservative upper bound for the machine's owned memory, or `None` on
+/// overflow. It includes every entity table, in-flight command, queued
+/// terminal, the largest simultaneous document and command encodings, and
+/// per-operation matches and reports. The estimate intentionally counts a
+/// screenshot and a snapshot for every operation and queued event at once.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
-    let page = u64::from(limits.pages).checked_mul(512)?;
-    let person = u64::from(limits.persons).checked_mul(256)?;
-    let op = u64::from(limits.ops).checked_mul(512)?;
-    let command_entry = u64::try_from(size_of::<(u64, u64, u64)>()).ok()?;
-    let commands = u64::from(limits.commands).checked_mul(command_entry.checked_add(u64::from(limits.command))?)?;
-    let matches = u64::from(limits.matches).checked_mul(96_u64.checked_add(u64::from(limits.text).checked_mul(3)?)?)?;
-    let bytes = u64::from(limits.message)
-        .checked_add(u64::from(limits.command))?
-        .checked_add(u64::from(limits.snapshot))?
-        .checked_add(u64::from(limits.screenshot))?
-        .checked_add(u64::from(limits.stderr))?;
-    page.checked_add(person)?.checked_add(op)?.checked_add(commands)?.checked_add(matches)?.checked_add(bytes)
+    let text = u64::from(limits.text);
+    let command = u64::from(limits.command).checked_add(1)?;
+    let message = u64::from(limits.message).checked_add(1)?;
+    let seen = u64::try_from(size_of::<crate::boundary::Seen>()).ok()?.checked_add(text.checked_mul(3)?)?;
+    let matches = u64::from(limits.matches).checked_mul(seen)?;
+    let report = matches.checked_add(u64::from(limits.snapshot))?.checked_add(u64::from(limits.screenshot))?;
+    let persons = u64::from(limits.persons).checked_mul(512_u64.checked_add(text)?)?;
+    let pages =
+        u64::from(limits.pages).checked_mul(1024_u64.checked_add(command)?.checked_add(text.checked_mul(2)?)?)?;
+    let ops = u64::from(limits.ops).checked_mul(1024_u64.checked_add(report)?.checked_add(command)?)?;
+    let commands = u64::from(limits.commands).checked_mul(512_u64.checked_add(command.checked_mul(2)?)?)?;
+    let events = u64::from(limits.persons)
+        .checked_add(u64::from(limits.pages))?
+        .checked_add(u64::from(limits.ops))?
+        .checked_add(4)?;
+    let events = events.checked_mul(u64::try_from(size_of::<crate::boundary::Event>()).ok()?.checked_add(report)?)?;
+    let transient =
+        message.checked_mul(4)?.checked_add(command.checked_mul(4)?)?.checked_add(u64::from(limits.stderr))?;
+    persons.checked_add(pages)?.checked_add(ops)?.checked_add(commands)?.checked_add(events)?.checked_add(transient)
 }

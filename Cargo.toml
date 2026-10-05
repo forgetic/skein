@@ -18,6 +18,7 @@ members = [
     "testing/skein-world",
     "tests/conformance/ring",
     "tests/conformance/sim",
+    "tests/browser",
     "tests/echo",
     "tests/heap",
     "tests/http",
@@ -57,6 +58,7 @@ skein-echo-domain = { path = "examples/echo/domain" }
 skein-echo-protocol = { path = "examples/echo/protocol" }
 skein-echo-service = { path = "examples/echo/service" }
 skein-echo-client = { path = "testing/skein-echo-client" }
+skein-browser-world = { path = "tests/browser" }
 skein-fake-machine = { path = "testing/skein-fake-machine" }
 skein-fake-checkout = { path = "testing/skein-fake-checkout" }
 skein-world = { path = "testing/skein-world" }
