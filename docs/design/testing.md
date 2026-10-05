@@ -62,8 +62,8 @@ in `tests/echo`, over the world harness, `skein-world` (examples.md, 6).
 ## 4. The minimal fake machine
 
 The simulator plays the kernel, not what a program does: that is the
-embedder's fake machine (simulator.md, 3). skein ships none, but its own
-io and simulated worlds need one:
+embedder's fake machine (simulator.md, 3). skein's own io and simulated
+worlds need a minimal one:
 
 - a few files beneath a root;
 - a program that echoes its input, one that exits with a given status,
@@ -85,6 +85,14 @@ simulator, to the real kernel in a scratch directory. It keeps a step
 machine's shape, a call in and an answer out, in a vocabulary of its own
 that a face translates to and from the simulator's. Its programs come
 with processes.
+
+A separate dependency-free kit, `skein-fake-checkout`, supplies generic
+byte-path files, scripted commands and local git mechanics for domain
+worlds (fake-checkout.md). It has no simulated-kernel adapter, inode or
+permission model. Services retain their policy, remote implementations,
+clock, cancellation and delivery ledgers; the kit answers synchronous
+mechanical operations only. Its focused leaf tests and small replay sweep
+stay beside the crate in `testing/skein-fake-checkout/tests`.
 
 ## 5. What skein supplies for a service's tiers
 

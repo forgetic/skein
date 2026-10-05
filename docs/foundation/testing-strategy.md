@@ -253,10 +253,12 @@ state machines, with a face for whichever layer sits just above it:
 | io | behind the simulator | the file and process operations the simulator passes on |
 | everything | none | the real kernel, in a sandbox |
 
-skein ships no fake machine. Its own tests use a minimal one: a few files
-beneath a root, a program that echoes its input, one that exits with a
-given status, and one that never exits. A service's fake machine is the
-service's.
+skein's own tests use a minimal fake machine: a few files beneath a root,
+a program that echoes its input, one that exits with a given status, and
+one that never exits. It also supplies shared generic file/git mechanics
+in `skein-fake-checkout` (fake-checkout.md). These kits know no service's
+policy or delivery lifecycle. A service's fake machine, its adapters and
+scenarios remain the service's.
 
 ### 4.4 TLS
 

@@ -1,0 +1,27 @@
+[package]
+name = "skein-fake-checkout"
+description = "Deterministic in-memory files, scripted commands and git mechanics for domain worlds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.
+# its clippy.toml bans what would make a run unrepeatable.
+[lints.rust]
+unsafe_code = "forbid"
+elided_lifetimes_in_paths = "deny"
+unused_must_use = "deny"
+missing_docs = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_panics_doc = "allow"          # the fake asserts how it is used by panicking
+missing_errors_doc = "allow"          # errors are enum values, documented on the enum
+wildcard_enum_match_arm = "deny"
+match_wildcard_for_single_variants = "deny"
+unwrap_used = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+disallowed_types = "deny"
+disallowed_methods = "deny"

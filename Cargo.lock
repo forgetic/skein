@@ -208,6 +208,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-fake-checkout"
+version = "0.0.0"
+
+[[package]]
 name = "skein-fake-machine"
 version = "0.0.0"
 dependencies = [
