@@ -197,6 +197,15 @@ impl Service {
         self.count
     }
 
+    /// Routes still owned by the Service, including retired slots until
+    /// iteration-end reclamation. This content-free count changes no state.
+    /// Contract: docs/design/fake-llm.md, sections 2–5;
+    /// programming-model.md, sections 5.1 and 6.3.
+    #[must_use]
+    pub const fn calls(&self) -> u32 {
+        self.calls.len()
+    }
+
     /// Routes one owned fake-domain terminal to its pending HTTP connection.
     /// Returns the terminal alongside its target, preserving its reply right for
     /// `down`; an unmatched or closed route returns the same owned terminal as `Err`.

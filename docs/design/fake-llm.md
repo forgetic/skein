@@ -155,6 +155,36 @@ The integrating parent's runtime checks and serial suite measurements are
 recorded in this increment's commit. The final rebased workspace gate precedes
 its merge; Smith's real consumer has a separate review and gate.
 
+`Exchange::observe(ObservationLimits)` opts a fresh, unstarted exchange into
+fixed observation counts and whole-record byte caps. Events, decoded queries,
+manual pending calls and both wire tapes reserve their exact wrapper capacity.
+Payload ownership is checked before cloning or appending, including public
+native replay token wrappers and their owning bytes. Drained records become
+caller ownership; a moved vector's replacement capacity is reserved at the next
+physical entrance. Existing worlds keep unconstrained observation behavior
+until `observe` is called.
+
+`extra_worst_case` prices the peer, script domain, routing service, queues,
+intakes, delivery scratch, credential/target and configured observations. It
+excludes the one actual Client: callers add the Client or adapter price once,
+plus their own retained inputs, metadata clones and drained records. Checked
+arithmetic refuses impossible products without allocating the proposed cap.
+The driver reclaims retired service routes after draining their actual outputs;
+`Service::calls()` reports allocated live and retired slots without content.
+
+Focused controls meter both native Clients and peers through construction,
+Start, every progress step, Close, actual Closed and drop with an 8,192-byte
+input. Caller-held terminal replay ownership is counted independently and
+returns to zero after its final drop. The existing independent HTTP reference
+reader checks complete chunked response consumption and the whole literal
+answer; its passive validation scratch is outside runtime entrance peaks and
+drops before progress resumes. Another control opens five actual connections
+through one four-slot service, observing reclamation after each settled call.
+Exact query capacity copies one whole actual query; one byte less refuses
+before cloning and still settles cancellation and physical close. These
+controls establish shared Client/peer ownership, not an application's combined
+root, schemas, copies or simultaneously retained physical bindings.
+
 ## 6. Copied-codec disposition
 
 This increment supplies shared client/peer machinery before Smith removes

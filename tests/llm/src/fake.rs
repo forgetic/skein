@@ -1,5 +1,12 @@
 //! Actual shared Client connected to the independently scripted HTTP/SSE peer.
 //! Transport queues enforce demand/room and never decode provider bytes.
+//! Keeps peer service/script state, grants, intakes and caller observations;
+//! knows neither application tool policy nor live IO. Preparation adopts one
+//! Client, `observe` selects optional fixed observation caps before progress,
+//! and start/tick/request/settle drive actual lower chronology. `extra_worst_case`
+//! prices peer/world ownership separately from that Client and caller inputs.
+//! Contract: docs/design/fake-llm.md, sections 2–5;
+//! programming-model.md, sections 4.4 and 6.3.
 
 use skein_fake_llm_domain::{self as fake, api};
 use skein_fake_llm_protocol::{documents, provider};
@@ -7,6 +14,208 @@ use skein_http::{server as http, sse::writer as sse};
 use skein_lib::stream::{Down, Read, Up};
 use skein_lib::{Env, Intake, Queue, Time, Token, Wall};
 use skein_llm::{Call, Credential, Endpoint, Provider, client};
+
+/// Caller-selected finite observation storage for an actual byte-peer story.
+/// Install before progress; callers may drain or `mem::take` records and price
+/// handed-off storage separately. Buffers remaining in Exchange retain their
+/// configured capacities; the next entry reserves a taken buffer again.
+/// Exhaustion asserts before a copy or append, without a fabricated terminal.
+/// Contract: docs/design/fake-llm.md,
+/// sections 2–5; programming-model.md, section 6.3.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ObservationLimits {
+    /// Maximum currently retained Client event wrappers, supplied by the caller.
+    /// Contract: docs/design/fake-llm.md, sections 2–5.
+    pub events: u32,
+
+    /// Maximum owned payload of each retained Client event, including replay
+    /// token arrays and bytes. Contract: docs/design/fake-llm.md, sections 2–5.
+    pub event_bytes: u64,
+
+    /// Maximum currently retained independently decoded query copies.
+    /// Contract: docs/design/fake-llm.md, sections 2–5.
+    pub queries: u32,
+
+    /// Maximum owned wrappers and bytes of each copied query, checked before
+    /// cloning. Contract: docs/design/fake-llm.md, sections 2–5.
+    pub query_bytes: u64,
+
+    /// Maximum currently retained manual call records; zero admits no manual
+    /// observation. Each query fits `query_bytes` before retention.
+    /// Contract: docs/design/fake-llm.md, sections 2–5.
+    pub pending: u32,
+
+    /// Maximum retained actual client-to-peer HTTP bytes, checked before append.
+    /// Contract: docs/design/fake-llm.md, sections 2–5.
+    pub request_bytes: u32,
+
+    /// Maximum retained actual peer-to-client HTTP bytes, checked before append.
+    /// Contract: docs/design/fake-llm.md, sections 2–5.
+    pub response_bytes: u32,
+}
+
+/// Checked peer/world heap beyond the caller's one actual Client. Includes the
+/// provider Service/Server, scripted Domain, fixed queues, intakes and delivery
+/// scratch, peer grant/target ownership and bounded observations. The Client,
+/// caller input/configuration copies and records drained to callers are priced
+/// by their owners. Endpoint fields other than target are not retained by this
+/// peer. Contract: docs/design/fake-llm.md, sections 2–5;
+/// programming-model.md, section 6.3.
+#[must_use]
+pub fn extra_worst_case(
+    bounds: &client::Limits,
+    observations: &ObservationLimits,
+    endpoint: &Endpoint,
+    credential: &Credential,
+) -> Option<u64> {
+    let peer = limits(bounds);
+    if bounds.http.request.max(bounds.http.send) > 32768 || bounds.http.head.max(bounds.http.read) > 32768 {
+        return None;
+    }
+    let queues = Queue::<client::Event>::worst_case(client::MAX_OUT.above)?
+        .checked_add(Queue::<Down>::worst_case(client::MAX_OUT.below)?)?
+        .checked_add(Queue::<provider::Event>::worst_case(provider::MAX_UP)?)?
+        .checked_add(Queue::<Down>::worst_case(provider::MAX_DOWN)?)?
+        .checked_add(Queue::<fake::Request>::worst_case(fake::MAX_OUT)?)?
+        .checked_add(u64::from(fake::MAX_OUT).checked_mul(u64::from(config().answer_bytes))?)?;
+    let traces = observation_worst_case(observations)?;
+    // The fixed intakes also bound a delivered box while it enters either
+    // receiver. Queue-owned wire sends can coexist with those deliveries.
+    let wire = Intake::worst_case(32768)?
+        .checked_mul(4)?
+        .checked_add(
+            u64::from(client::MAX_OUT.below).checked_mul(u64::from(bounds.http.request.max(bounds.http.send)))?,
+        )?
+        .checked_add(u64::from(provider::MAX_DOWN).checked_mul(u64::from(peer.http.response.max(peer.http.send)))?)?;
+    provider::worst_case(&peer)?
+        .checked_add(fake::worst_case(&config())?)?
+        .checked_add(queues)?
+        .checked_add(wire)?
+        .checked_add(traces)?
+        .checked_add(bytes(&endpoint.target)?)?
+        .checked_add(bytes(&credential.access_token)?)?
+        .checked_add(bytes(&credential.account_id)?)
+}
+
+fn observation_worst_case(observations: &ObservationLimits) -> Option<u64> {
+    cells::<client::Event>(observations.events)?
+        .checked_add(u64::from(observations.events).checked_mul(observations.event_bytes)?)?
+        .checked_add(cells::<api::Query>(observations.queries)?)?
+        .checked_add(u64::from(observations.queries).checked_mul(observations.query_bytes)?)?
+        .checked_add(cells::<fake::Event>(observations.pending)?)?
+        .checked_add(u64::from(observations.pending).checked_mul(observations.query_bytes)?)?
+        .checked_add(u64::from(observations.request_bytes))?
+        .checked_add(u64::from(observations.response_bytes))
+}
+
+fn cells<T>(count: u32) -> Option<u64> {
+    u64::from(count).checked_mul(u64::try_from(size_of::<T>()).ok()?)
+}
+
+fn bytes(value: &[u8]) -> Option<u64> {
+    u64::try_from(value.len()).ok()
+}
+
+fn index(count: u32) -> usize {
+    usize::try_from(count).expect("u32 fits usize")
+}
+
+fn reserve<T>(items: &mut Vec<T>, count: u32) {
+    let capacity = index(count);
+    assert!(items.len() <= capacity, "caller preserves observation lengths");
+    assert!(
+        items.capacity() == 0 || items.capacity() == capacity,
+        "caller drains without replacing observation capacity"
+    );
+    if items.capacity() == 0 {
+        items.reserve_exact(capacity);
+    }
+}
+
+fn query_bytes(query: &api::Query) -> Option<u64> {
+    let mut owned = bytes(&query.model)?
+        .checked_add(bytes(&query.system)?)?
+        .checked_add(cells::<api::ToolSpec>(u32::try_from(query.tools.len()).ok()?)?)?
+        .checked_add(cells::<api::Message>(u32::try_from(query.messages.len()).ok()?)?)?;
+    for tool in &query.tools {
+        owned = owned
+            .checked_add(bytes(&tool.name)?)?
+            .checked_add(bytes(&tool.description)?)?
+            .checked_add(bytes(&tool.parameters)?)?;
+    }
+    for message in &query.messages {
+        owned = owned.checked_add(cells::<api::Part>(u32::try_from(message.parts.len()).ok()?)?)?;
+        for part in &message.parts {
+            let payload = match part {
+                api::Part::Text { text } => bytes(text)?,
+                api::Part::Opaque { bytes: value } => bytes(value)?,
+                api::Part::ToolCall { id, name, arguments } => {
+                    bytes(id)?.checked_add(bytes(name)?)?.checked_add(bytes(arguments)?)?
+                }
+                api::Part::ToolOutput { id, output, is_error: _ } => bytes(id)?.checked_add(bytes(output)?)?,
+            };
+            owned = owned.checked_add(payload)?;
+        }
+    }
+    Some(owned)
+}
+
+fn replay_bytes(replay: Option<&skein_llm::Replay>) -> Option<u64> {
+    let Some(replay) = replay else { return Some(0) };
+    let tokens = replay.value.as_tokens();
+    let mut owned = cells::<skein_json::Token>(u32::try_from(tokens.len()).ok()?)?;
+    for token in tokens {
+        let payload = match token {
+            skein_json::Token::Key(value) | skein_json::Token::String(value) | skein_json::Token::Number(value) => {
+                bytes(value)?
+            }
+            skein_json::Token::ObjectStart
+            | skein_json::Token::ObjectEnd
+            | skein_json::Token::ArrayStart
+            | skein_json::Token::ArrayEnd
+            | skein_json::Token::True
+            | skein_json::Token::False
+            | skein_json::Token::Null => 0,
+        };
+        owned = owned.checked_add(payload)?;
+    }
+    Some(owned)
+}
+
+fn block_bytes(block: &skein_llm::Block) -> Option<u64> {
+    match block {
+        skein_llm::Block::Text { text, replay } | skein_llm::Block::Refusal { text, replay } => {
+            bytes(text)?.checked_add(replay_bytes(replay.as_ref())?)
+        }
+        skein_llm::Block::ToolCall { id, name, arguments, replay } => bytes(id)?
+            .checked_add(bytes(name)?)?
+            .checked_add(bytes(arguments)?)?
+            .checked_add(replay_bytes(replay.as_ref())?),
+        skein_llm::Block::ToolResult { id, text, is_error: _ } => bytes(id)?.checked_add(bytes(text)?),
+        skein_llm::Block::Reasoning { replay } => replay_bytes(Some(replay)),
+    }
+}
+
+fn event_bytes(event: &client::Event) -> Option<u64> {
+    match event {
+        client::Event::Completed { completion, .. } => {
+            let mut owned = cells::<skein_llm::Block>(u32::try_from(completion.content.len()).ok()?)?;
+            for block in &completion.content {
+                owned = owned.checked_add(block_bytes(block)?)?;
+            }
+            Some(owned)
+        }
+        client::Event::Block { block, .. } => block_bytes(block),
+        client::Event::Delta { delta, .. } => match delta {
+            skein_llm::Delta::Text { text, .. } | skein_llm::Delta::Reasoning { text, .. } => bytes(text),
+            skein_llm::Delta::ToolArguments { delta, .. } => bytes(delta),
+        },
+        client::Event::Failed { detail, .. } => bytes(detail),
+        client::Event::Cancelled { .. } | client::Event::Reusable | client::Event::Close | client::Event::Closed => {
+            Some(0)
+        }
+    }
+}
 
 /// Deterministic fragmenting actual-client exchange, with bounded byte intakes.
 #[expect(missing_debug_implementations, reason = "client and peer own credential-bearing HTTP state")]
@@ -38,6 +247,8 @@ pub struct Exchange {
     client_grant: u32,
     peer_grant: u32,
     ticks: u32,
+
+    observations: Option<ObservationLimits>,
 }
 
 /// Shared peer limits compatible with this world's small client limits.
@@ -143,6 +354,36 @@ impl Exchange {
             client_grant: 0,
             peer_grant: 0,
             ticks: 0,
+            observations: None,
+        }
+    }
+
+    /// Selects finite observation ownership before Start, without starting or
+    /// firing any component. The caller reserves these buffers once; draining
+    /// with `mem::take` is supported and the next entry reserves replacements.
+    /// Price `extra_worst_case` separately from the actual Client. Existing
+    /// constructors keep their unconstrained observation behaviour until this
+    /// entrance is called. Contract: docs/design/fake-llm.md, sections 2–5;
+    /// programming-model.md, section 6.3.
+    pub fn observe(&mut self, observations: ObservationLimits) {
+        assert_eq!(self.machine.waiting(), client::Waiting::Start, "observation ownership precedes Start");
+        assert_eq!(self.ticks, 0, "observation ownership precedes progress");
+        assert!(self.observations.is_none(), "observation limits are immutable");
+        assert!(self.seen.is_empty() && self.queries.is_empty() && self.pending.is_empty());
+        assert!(self.requests.is_empty() && self.responses.is_empty());
+        // Validate all container/payload products before reserving storage.
+        observation_worst_case(&observations).expect("finite configured peer observation ownership");
+        self.observations = Some(observations);
+        self.reserve_observations();
+    }
+
+    fn reserve_observations(&mut self) {
+        if let Some(observations) = self.observations {
+            reserve(&mut self.seen, observations.events);
+            reserve(&mut self.queries, observations.queries);
+            reserve(&mut self.pending, observations.pending);
+            reserve(&mut self.requests, observations.request_bytes);
+            reserve(&mut self.responses, observations.response_bytes);
         }
     }
 
@@ -164,6 +405,7 @@ impl Exchange {
     }
 
     pub fn start(&mut self) {
+        self.reserve_observations();
         provider::start(
             &mut self.server,
             &mut self.service,
@@ -183,11 +425,13 @@ impl Exchange {
     }
 
     pub fn request(&mut self, request: client::Request) {
+        self.reserve_observations();
         client::down(&mut self.machine, &self.env, request, &mut self.client_above, &mut self.client_below);
         self.take();
     }
 
     pub fn settle(&mut self) {
+        self.reserve_observations();
         provider::closed(
             &mut self.server,
             &mut self.service,
@@ -201,6 +445,7 @@ impl Exchange {
 
     /// Receives the actual owned terminal after caller routing through the shared service.
     pub fn reply(&mut self, reply: fake::Request) {
+        self.reserve_observations();
         provider::down(
             &mut self.server,
             &mut self.service,
@@ -214,14 +459,37 @@ impl Exchange {
     }
 
     fn take(&mut self) {
+        self.reserve_observations();
         while let Some(event) = self.client_above.pop() {
+            if let Some(observations) = self.observations {
+                assert!(self.seen.len() < index(observations.events), "Client event observation ceiling");
+                assert!(
+                    event_bytes(&event).is_some_and(|bytes| bytes <= observations.event_bytes),
+                    "Client event owned-byte ceiling"
+                );
+            }
             self.seen.push(event);
         }
         while let Some(event) = self.peer_above.pop() {
             match event {
                 provider::Event::Domain(event) => {
                     match &event {
-                        fake::Event::Call { query, .. } => self.queries.push(query.clone()),
+                        fake::Event::Call { query, .. } => {
+                            if let Some(observations) = self.observations {
+                                assert!(self.queries.len() < index(observations.queries), "query observation ceiling");
+                                assert!(
+                                    query_bytes(query).is_some_and(|bytes| bytes <= observations.query_bytes),
+                                    "query owned-byte ceiling before cloning"
+                                );
+                                if self.manual_replies {
+                                    assert!(
+                                        self.pending.len() < index(observations.pending),
+                                        "manual call observation ceiling"
+                                    );
+                                }
+                            }
+                            self.queries.push(query.clone());
+                        }
                     }
                     if self.manual_replies {
                         self.pending.push(event);
@@ -245,6 +513,15 @@ impl Exchange {
                         "client send follows sufficient room"
                     );
                     self.client_grant = 0;
+                    if let Some(observations) = self.observations {
+                        assert!(
+                            self.requests
+                                .len()
+                                .checked_add(data.len())
+                                .is_some_and(|length| length <= index(observations.request_bytes)),
+                            "request tape ceiling before append"
+                        );
+                    }
                     self.requests.extend_from_slice(&data);
                     self.to_peer.append(&data).expect("bounded client wire intake");
                 }
@@ -264,16 +541,27 @@ impl Exchange {
                         "peer send follows sufficient room"
                     );
                     self.peer_grant = 0;
+                    if let Some(observations) = self.observations {
+                        assert!(
+                            self.responses
+                                .len()
+                                .checked_add(data.len())
+                                .is_some_and(|length| length <= index(observations.response_bytes)),
+                            "response tape ceiling before append"
+                        );
+                    }
                     self.responses.extend_from_slice(&data);
                     self.to_client.append(&data).expect("bounded peer wire intake");
                 }
                 Down::Finish => panic!("peer response is framed without finishing the lower stream"),
             }
         }
+        self.service.reclaim();
     }
 
     /// One bounded local step or one actual room/read delivery. No provider parsing lives here.
     pub fn tick(&mut self, demand: bool) -> bool {
+        self.reserve_observations();
         self.ticks += 1;
         if self.machine.has_work() {
             client::resume(&mut self.machine, &self.env, &mut self.client_above, &mut self.client_below);

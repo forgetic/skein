@@ -16,6 +16,8 @@ skein-fake-llm-protocol.workspace = true
 
 [dev-dependencies]
 skein-heap.workspace = true
+# Decode observed fixture framing with the existing independent reference reader.
+skein-http-world = { path = "../http" }
 # Caller-owned, certificate-verified transport for the opt-in live suite.
 rustls = { workspace = true, features = ["std"] }
 

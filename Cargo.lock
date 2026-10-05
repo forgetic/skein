@@ -373,6 +373,7 @@ dependencies = [
  "skein-fake-llm-protocol",
  "skein-heap",
  "skein-http",
+ "skein-http-world",
  "skein-json",
  "skein-lib",
  "skein-llm",
