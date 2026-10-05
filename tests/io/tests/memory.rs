@@ -432,7 +432,9 @@ fn io_never_holds_more_than_its_worst_case_filled_to_its_limits() {
         },
     ] {
         let (most, bound) = fill_and_drain(limits);
-        assert!(most * 10 >= bound * 7, "{limits:?}: filled, io held {most} of its worst case of {bound}");
+        // The shared bound also reserves room for a child's pipe lists, which
+        // this socket-only workload does not allocate.
+        assert!(most * 10 >= bound * 6, "{limits:?}: filled, io held {most} of its worst case of {bound}");
         let (most, bound) = listen_accept_and_discard(limits);
         assert!(most <= bound, "{limits:?}: a listener's life held {most} of {bound}");
     }

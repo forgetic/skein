@@ -29,8 +29,10 @@ protocol layer.
 
 `skein-io` depends on lib. A service's protocol layer depends on it, and
 so do the backends, for the kernel records. io's limits are counted in
-its worst case like any layer's: the entities of each kind, the
-operations in flight, each stream's intake and queued output.
+its worst case like any layer's: the shared entity slots, the operations
+in flight, each stream's intake and queued output, and children's pipe
+lists. The command buffers supplied to `Spawn` belong to the caller's
+memory bound.
 
 ```rust
 // skein-io, the protocol side, for sockets
@@ -40,7 +42,9 @@ pub enum Request {
     Bind    { socket: Token, owner: Token },          // attach to an accepted socket
     Reject  { socket: Token },
     Stream  { stream: Token, down: stream::Down },    // sockets and pipes alike
-    // File { owner, root, op }, Spawn { owner, spawn }, Signal { child, signal }
+    Spawn   { owner: Token, spawn: Spawn },
+    Signal  { child: Token, signal: Signal },
+    // File { owner, root, op }
     Close   { entity: Token },                        // graceful (section 3); one Closed follows
     Abort   { entity: Token },
 }
@@ -51,8 +55,9 @@ pub enum Event {
     Connecting { owner: Token, socket: Token },
     Connected  { owner: Token },
     Stream     { owner: Token, up: stream::Up },
-    // File { owner, result }, Spawned { owner, child, pipes },
-    // Exited { owner, exit }, Shutdown { signal }
+    Spawned   { owner: Token, child: Token, pipes: Box<[Token]> },
+    Exited    { owner: Token, exit: Exit },
+    // File { owner, result }, Shutdown { signal }
     Failed     { owner: Token, error: Error },
     Closed     { owner: Token },                      // terminal
 }
@@ -104,11 +109,12 @@ kernel.
   at once, each would spin the loop for as long as the shortage lasts.
   The retry deadline sits in io's own table beside the close deadlines,
   one of each per entity.
-- **Listeners and streams share one slab of sockets,** whose capacity is
-  the admission limit: one namespace of tokens, so that `Close` and
-  `Abort` name either.
-- **A refusal is held until the next up pass.** A `Listen` or `Connect`
-  refused for want of a socket slot has no entity to hold its `Failed`
+- **Listeners, streams, children and pipes share one entity slab,** whose
+  capacity is `Limits::sockets`: one namespace of tokens, so that `Close`
+  and `Abort` name any of them. A spawn reserves one slot for its child
+  and one per requested pipe before it goes to the kernel.
+- **A refusal is held until the next up pass.** A `Listen`, `Connect` or
+  `Spawn` refused for want of entity slots has no entity to hold its `Failed`
   and `Closed`, so io holds the owner's token in a list of its own,
   bounded by `Limits::refusals`, and `resume` tells it. The loop hands io
   a request only while io can hold a refusal (`Io::takes`), as it
@@ -122,7 +128,7 @@ kernel.
 
 ## 3. Sockets and pipes
 
-- **The entities** are listeners, sockets, and a child's three pipes.
+- **The entities** are listeners, sockets, children and their chosen pipes.
   Sockets and pipes are both streams; above io, they differ only in how
   they were made.
 - **One receive is in flight** per stream while its intake has room,
@@ -359,15 +365,19 @@ io keeps the contract of a stream (lib.md, 7) as the side below:
 
 ### 3.4 Memory
 
-Per socket: the entity in its slab; an intake of `Limits::intake`; a
+Per entity: a slot in the slab; for each stream, an intake of `Limits::intake`; a
 receive buffer of at most `Limits::receive`; the output, at most
 `Limits::output` bytes in at most `Limits::sends` boxes; and a slot in the
 ready lists, and two in the deadlines. An entity has at most four
-operations in flight (a `Recv`, a `Send` and a cancel of each), so
-`operations(limits)` is four per socket, the ring's size (kernel.md, 5);
+operations in flight (a `Recv`, a `Send` and a cancel of each). A pipe
+has at most one read or write and its cancel; a child waits and may have
+one signal in flight. Thus `operations(limits)` is four per entity slot,
+the ring's size (kernel.md, 5);
 the operation table holds twice that, as an operation retired in an
 iteration keeps its slot until the reclaim point. `worst_case` adds up
-what the containers report (programming-model.md, 6.3).
+what the containers report (programming-model.md, 6.3), including a
+child's pipe IDs and the temporary arrays on spawn completion. The
+caller budgets the command buffers it supplies to `Spawn`.
 
 ## 4. Addresses and names
 
@@ -441,12 +451,15 @@ what the containers report (programming-model.md, 6.3).
     the start. Its file actions install requested pipes at chosen child
     descriptors and close everything else on exec. The kernel's own check
     then stops a reused PID from being signalled. `std::process` is not used.
-  - Containment (namespaces, `CLONE_INTO_CGROUP`) is a spawn option,
-    given as data.
+  - A requested pipe has a chosen child descriptor and direction. Its
+    parent end is a one-way stream token in the `Spawned` event, in request
+    order. Each pipe consumes one entity slot alongside the child.
 - **Exit** is a wait on the pidfd, through the ring (`waitid`).
 - **Signals** go through `pidfd_send_signal`.
 - **A child is *closed*** once it has exited and its pipes and pidfd are
   closed. It has one terminal event, which comes after all of those.
+  Closing a running child sends `Kill`; the exit and pipe closures still
+  settle before its `Closed` event.
 
 ## 7. Signals to the service
 
@@ -502,17 +515,21 @@ Built, for sockets:
   checked against `worst_case` with the counting allocator, at four sets
   of limits, one of them with receive buffers that dwarf the rest; and a
   listener's life, its sockets announced, rejected, bound and discarded.
+- **Processes and pipes:** step tests exercise spawn, wait, signal, the
+  one-way pipe streams and child closure after its pipes. A separate
+  counting-allocator test fills the entity slab with a child and its
+  pipes, checks the spawn completion and arms a read on every pipe
+  against `worst_case`.
 
-## 9. Not built yet
+## 9. Remaining work
 
-Sockets are built, with their io worlds. The order follows what temper
-pulls:
+Sockets and processes with pipes are built. Socket io worlds are built.
+The remaining order follows what temper pulls:
 
-1. processes, pipes and files, for the worker: io's whole-file operations
-   (section 5), over the kernel records for files, which are built, as
-   are the simulator's files, its machine seam and the minimal fake
-   machine's files (kernel.md, 6.1; simulator.md, 3.1; testing.md, 4);
-   then processes, with their records and the machine's programs;
+1. files for the worker: io's whole-file operations (section 5), over
+   the kernel records for files, which are built, as are the simulator's
+   files, its machine seam and the minimal fake machine's files
+   (kernel.md, 6.1; simulator.md, 3.1; testing.md, 4);
 2. signals to the service, with the shell's startup.
 
 File streams and datagram sockets come when a user needs them.

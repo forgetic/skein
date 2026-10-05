@@ -11,10 +11,11 @@ use crate::layer::{Entity, Flight, Timer};
 /// stream's bytes (programming-model.md, section 7).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Limits {
-    /// Sockets at once, listeners included: a `Listen` or `Connect` past it is
-    /// refused (`Error::Busy`), and a listener accepts only while one is free.
+    /// Entity slots shared by listeners, sockets, children and their pipes.
+    /// A `Listen`, `Connect` or `Spawn` without enough slots is refused
+    /// (`Error::Busy`), and a listener accepts only while one is free.
     pub sockets: u32,
-    /// Refused `Listen`s and `Connect`s held until the next up pass tells
+    /// Refused `Listen`s, `Connect`s and `Spawn`s held until the next up pass tells
     /// them (io.md, 2). The loop hands io a request only while it can hold one
     /// more (`Io::takes`).
     pub refusals: u32,
@@ -73,18 +74,19 @@ impl Limits {
     }
 }
 
-/// The most operations an entity has in flight at once: a `Recv`, a `Send`,
-/// and a `Cancel` of each (io.md, 3.4).
-const PER_SOCKET: u32 = 4;
+/// The most operations an entity has in flight at once: a socket's `Recv`,
+/// `Send`, and a `Cancel` of each. A pipe has at most one read or write and
+/// its cancel; a child has a wait and one signal (io.md, 3.4 and 6).
+const PER_ENTITY: u32 = 4;
 
 /// The most operations io has in flight at once, cancels included, under
 /// `limits`: the size of the ring (kernel.md, 5), or `None` past a `u32`.
 #[must_use]
 pub fn operations(limits: &Limits) -> Option<u32> {
-    limits.sockets.checked_mul(PER_SOCKET)
+    limits.sockets.checked_mul(PER_ENTITY)
 }
 
-/// The deadline table's room: a graceful close's and a retry's per socket.
+/// The deadline table's room: a graceful close's and a retry's per entity.
 pub(crate) fn timers(limits: &Limits) -> Option<u32> {
     limits.sockets.checked_mul(2)
 }
@@ -98,7 +100,11 @@ pub(crate) fn flights(limits: &Limits) -> Option<u32> {
 
 /// The most heap io holds under `limits`, or `None` past a `u64`
 /// (programming-model.md, 6.3): its tables as their containers report them,
-/// and per socket an intake, a receive buffer, and the output with its queue.
+/// per stream an intake, a receive buffer, and the output with its queue,
+/// plus the pipe lists held by children and made while a spawn completes.
+/// The caller's command buffers (`Spawn::program`, arguments, environment,
+/// directory and pipe specifications) are input moved through io, so their
+/// size belongs to the caller's bound.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
     let sockets = limits.sockets;
@@ -111,7 +117,19 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(u64::from(limits.receive))?
         .checked_add(u64::from(limits.output))?
         .checked_add(Queue::<Box<[u8]>>::worst_case(limits.sends)?)?;
-    tables.checked_add(stream.checked_mul(u64::from(sockets))?)
+    // All children together can own at most `sockets` pipes. On spawn
+    // completion, the child retains its IDs while a clone, the result's FDs,
+    // and the event's tokens coexist. List-to-box conversion can likewise
+    // momentarily hold two ID arrays.
+    let pipe = size_of::<Id<Entity>>()
+        .checked_mul(2)?
+        .checked_add(size_of::<crate::kernel::Fd>())?
+        .checked_add(size_of::<Token>())?;
+    let process = u64::try_from(pipe)
+        .ok()?
+        .checked_add(u64::try_from(size_of::<crate::kernel::Spawn>()).ok()?)?
+        .checked_mul(u64::from(sockets))?;
+    tables.checked_add(stream.checked_mul(u64::from(sockets))?)?.checked_add(process)
 }
 
 /// The most an entry point emits in one call: events into the queue up, and
@@ -139,5 +157,6 @@ pub const MAX_OUT_UP: MaxOut = MaxOut { events: 2, submissions: 2 };
 pub const MAX_OUT_FIRE: MaxOut = MaxOut { events: 2, submissions: 2 };
 
 /// `down`: a bound socket's receive and its listener's next accept; a close's
-/// discarding receive and half-close; an abort's two cancels.
+/// discarding receive and half-close; an abort's two cancels; or a child's
+/// spawn or signal.
 pub const MAX_OUT_DOWN: MaxOut = MaxOut { events: 0, submissions: 2 };
