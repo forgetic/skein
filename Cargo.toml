@@ -22,6 +22,7 @@ members = [
     "tests/http",
     "tests/io",
     "tests/json",
+    "tests/kv",
     "tests/lib",
     "tests/llm",
     "tests/protocol",
@@ -40,6 +41,7 @@ publish = false
 [workspace.dependencies]
 skein-lib = { path = "crates/skein-lib" }
 skein-io = { path = "crates/skein-io" }
+skein-kv = { path = "crates/skein-kv" }
 skein-http = { path = "crates/skein-http" }
 skein-json = { path = "crates/skein-json" }
 skein-llm = { path = "crates/skein-llm" }

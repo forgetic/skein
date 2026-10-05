@@ -5,6 +5,7 @@ use alloc::collections::BTreeMap;
 use alloc::collections::btree_map::{self, Entry};
 use core::borrow::Borrow;
 use core::mem::{align_of, size_of};
+use core::ops::RangeBounds;
 
 use crate::btree;
 
@@ -122,6 +123,16 @@ impl<K: Ord, V> Map<K, V> {
     /// The entries, in key order.
     pub fn iter(&self) -> btree_map::Iter<'_, K, V> {
         self.entries.iter()
+    }
+
+    /// The entries in a key range, in key order.
+    pub fn range<Q, R>(&self, range: R) -> btree_map::Range<'_, K, V>
+    where
+        K: Borrow<Q>,
+        Q: Ord + ?Sized,
+        R: RangeBounds<Q>,
+    {
+        self.entries.range(range)
     }
 }
 

@@ -30,9 +30,8 @@ pub fn step(machine: &mut Machine, call: Call, answers: &mut Queue<Answer>) {
             Ok(()) => Ok(Reply::Done),
             Err(refusal) => Err(error(refusal)),
         },
-        // Nothing is lost in a fake that never crashes.
         Ask::Sync { file } => {
-            let _how: How = machine.how(opened(file));
+            machine.sync(opened(file));
             Ok(Reply::Done)
         }
         Ask::Stat { file } => Ok(Reply::Stat(stat(machine.stat(opened(file))))),

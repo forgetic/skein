@@ -33,6 +33,7 @@ tested in its own tier is in that part's document.
 | real loop | the examples under the shell, on the real kernel | section 3 |
 | beside them | the conformance suite, against the simulator and the ring | kernel.md, 8 |
 | beside them | the simulator's own tests; the ring's own tests | simulator.md, 6; shell.md, 9 |
+| durable store | `skein-kv` step tests; `tests/kv` over the crashing fake disk and the real ring | kv.md, 9 |
 
 TLS is tested on its own (tls.md, 5), and the replaying tiers run in
 plaintext.

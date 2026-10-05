@@ -3,7 +3,7 @@
 //! the face translates (testing-strategy.md, 4).
 
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::vec::Vec;
 
@@ -176,7 +176,7 @@ impl Item {
 
 type NodeId = u64;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Node {
     body: Body,
     /// Its permission bits, of which the machine checks the owner's.
@@ -187,7 +187,7 @@ pub(crate) struct Node {
     named: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Body {
     File(Vec<u8>),
     Directory {
@@ -224,6 +224,9 @@ struct Found {
 #[derive(Debug)]
 pub struct Machine {
     pub(crate) nodes: BTreeMap<NodeId, Node>,
+    durable_nodes: BTreeMap<NodeId, Node>,
+    pending_writes: BTreeMap<NodeId, Vec<(u64, Vec<u8>)>>,
+    pending_dirs: BTreeSet<NodeId>,
     next_node: NodeId,
     handles: BTreeMap<u64, Handle>,
     next_handle: u64,
@@ -249,7 +252,10 @@ impl Machine {
             named: true,
         };
         Machine {
-            nodes: BTreeMap::from([(0, top)]),
+            nodes: BTreeMap::from([(0, top.clone())]),
+            durable_nodes: BTreeMap::from([(0, top)]),
+            pending_writes: BTreeMap::new(),
+            pending_dirs: BTreeSet::new(),
             next_node: 1,
             handles: BTreeMap::new(),
             next_handle: 1,
@@ -280,6 +286,10 @@ impl Machine {
             };
             self.make(parent, Box::from(last), body, item.mode);
         }
+        // The laid scenario is the disk's initial durable state.
+        self.durable_nodes = self.nodes.clone();
+        self.pending_dirs.clear();
+        self.pending_writes.clear();
         self.issue(root, How::Directory)
     }
 
@@ -358,7 +368,83 @@ impl Machine {
             contents.resize(end, 0);
         }
         contents.get_mut(start..end).expect("resized to hold it").copy_from_slice(bytes);
+        self.pending_writes.entry(node).or_default().push((at, bytes.to_vec()));
         Ok(())
+    }
+
+    /// Makes this file's bytes or this directory's entries durable.
+    pub fn sync(&mut self, file: Opened) {
+        let id = self.handle(file).node;
+        let node = self.node(id).clone();
+        match node.body {
+            Body::File(_) => {
+                self.pending_writes.remove(&id);
+            }
+            Body::Directory { .. } => {
+                self.pending_dirs.remove(&id);
+            }
+            Body::Link(_) | Body::Special(_) => fail("only a file or directory is synced"),
+        }
+        self.durable_nodes.insert(id, node);
+    }
+
+    /// Power loss: durable state survives; selected pending writes may land
+    /// in any order, with the last selected write torn. A directory's pending
+    /// namespace change is either whole or absent.
+    pub fn crash(&mut self, seed: u64) {
+        let mut rng = seed;
+        let mut surviving = self.durable_nodes.clone();
+        rng = draw(rng);
+        if rng & 1 != 0 {
+            for id in &self.pending_dirs {
+                if let Some(node) = self.nodes.get(id) {
+                    surviving.insert(*id, node.clone());
+                }
+            }
+        }
+        for (id, writes) in &self.pending_writes {
+            let Some(node) = surviving.get_mut(id) else {
+                continue;
+            };
+            let Body::File(contents) = &mut node.body else {
+                continue;
+            };
+            let mut chosen: Vec<&(u64, Vec<u8>)> = Vec::new();
+            for write in writes {
+                rng = draw(rng);
+                if rng & 1 != 0 {
+                    chosen.push(write);
+                }
+            }
+            rng = draw(rng);
+            if rng & 1 != 0 {
+                chosen.reverse();
+            }
+            let chosen_len = chosen.len();
+            for (index, (at, bytes)) in chosen.into_iter().enumerate() {
+                let mut len = bytes.len();
+                if index.checked_add(1) == Some(chosen_len) {
+                    rng = draw(rng);
+                    let within = u64::try_from(len).expect("write length fits").checked_add(1).expect("length fits");
+                    len = usize::try_from(rng.checked_rem(within).expect("positive write span"))
+                        .expect("torn length fits");
+                }
+                write_bytes(contents, *at, bytes.get(..len).expect("torn within write"));
+            }
+        }
+        self.nodes = surviving.clone();
+        self.durable_nodes = surviving;
+        self.pending_dirs.clear();
+        self.pending_writes.clear();
+        self.handles.clear();
+    }
+
+    /// Opens a laid root again after `crash`, by its zero-based index.
+    #[must_use]
+    pub fn reopen_root(&mut self, index: u32) -> Opened {
+        let name = format!("root-{index}");
+        let node = self.lookup(self.top, name.as_bytes()).expect("laid root survived the crash");
+        self.issue(node, How::Directory)
     }
 
     /// What `file` has open: its kind and size.
@@ -645,6 +731,14 @@ impl Machine {
             Body::Directory { .. } => Some(parent),
             Body::File(_) | Body::Link(_) | Body::Special(_) => None,
         };
+        let durable_body = match &body {
+            Body::File(_) => Body::File(Vec::new()),
+            Body::Directory { .. } => Body::Directory { entries: BTreeMap::new(), removed: false },
+            Body::Link(target) => Body::Link(target.clone()),
+            Body::Special(is) => Body::Special(*is),
+        };
+        self.durable_nodes
+            .insert(id, Node { body: durable_body, mode: mode & PERMISSIONS, parent: parent_of, named: true });
         self.nodes.insert(id, Node { body, mode: mode & PERMISSIONS, parent: parent_of, named: true });
         let previous = self.entries_mut(parent).insert(name, id);
         assert!(previous.is_none(), "a name is made only where none is");
@@ -699,6 +793,7 @@ impl Machine {
     }
 
     fn entries_mut(&mut self, dir: NodeId) -> &mut BTreeMap<Box<[u8]>, NodeId> {
+        self.pending_dirs.insert(dir);
         match &mut self.node_mut(dir).body {
             Body::Directory { entries, .. } => entries,
             Body::File(_) | Body::Link(_) | Body::Special(_) => fail("only a directory holds names"),
@@ -743,6 +838,22 @@ impl Machine {
     fn may(&self, node: NodeId, bits: u32) -> bool {
         (self.node(node).mode >> 6_u32) & bits == bits
     }
+}
+
+fn draw(mut state: u64) -> u64 {
+    state ^= state << 13_u32;
+    state ^= state >> 7_u32;
+    state ^= state << 17_u32;
+    state
+}
+
+fn write_bytes(contents: &mut Vec<u8>, at: u64, bytes: &[u8]) {
+    let start = usize::try_from(at).expect("a pending write's offset fits");
+    let end = start.checked_add(bytes.len()).expect("a pending write fits");
+    if contents.len() < end {
+        contents.resize(end, 0);
+    }
+    contents.get_mut(start..end).expect("resized for pending bytes").copy_from_slice(bytes);
 }
 
 /// The names of a path, empty ones (`a//b`, a final `/`) left out.

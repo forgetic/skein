@@ -28,6 +28,8 @@
 
 extern crate alloc;
 
+pub mod file;
+pub mod file_layer;
 pub mod kernel;
 mod layer;
 mod limits;

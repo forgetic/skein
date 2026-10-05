@@ -1,7 +1,7 @@
 # Implementing skein-kv
 
-Provisional, 2026-10-05. A plan for building `skein-kv`, the key-value
-store of [the kv draft](../design/draft/kv.md): every key and value held
+Implemented core, 2026-10-05. A plan for building `skein-kv`, the key-value
+store of [the kv design](../design/kv.md): every key and value held
 in memory, an append-only commit log, fuzzy snapshots, and, last,
 payload logs beside the store. Values on disk, with only keys in memory
 and compaction in place of snapshots, are a later version (section 9).

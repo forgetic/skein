@@ -1,0 +1,27 @@
+[package]
+name = "skein-kv-tests"
+description = "Store over file io, the simulated kernel, and the fake filesystem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-io.workspace = true
+skein-kv.workspace = true
+skein-sim.workspace = true
+skein-fake-machine.workspace = true
+skein-shell.workspace = true
+skein-scratch.workspace = true
+skein-heap.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+elided_lifetimes_in_paths = "deny"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"

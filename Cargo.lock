@@ -284,6 +284,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-kv"
+version = "0.0.0"
+dependencies = [
+ "skein-io",
+ "skein-lib",
+]
+
+[[package]]
+name = "skein-kv-tests"
+version = "0.0.0"
+dependencies = [
+ "skein-fake-machine",
+ "skein-heap",
+ "skein-io",
+ "skein-kv",
+ "skein-lib",
+ "skein-scratch",
+ "skein-shell",
+ "skein-sim",
+]
+
+[[package]]
 name = "skein-lib"
 version = "0.0.0"
 

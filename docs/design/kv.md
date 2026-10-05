@@ -1,15 +1,13 @@
 # A key-value store on Skein's loop
 
-Draft, 2026-10-05. A possible built-in store for a service whose durable
+Implemented core, 2026-10-05. A built-in store for a service whose durable
 dataset fits in memory: ordered keys and values held in memory, an
 append-only commit log, and snapshots, all as a Skein machine on Skein's
 file I/O. Large append-only payloads go beside it, in logs of their own
-whose committed lengths the store records (section 6). This is an
-exploration, not yet a contract; it is the alternative to
-[redb over Skein's loop](redb.md) when the data fits in memory. Read it with
-[the programming model](../../foundation/programming-model.md),
-[the testing strategy](../../foundation/testing-strategy.md), and
-[the file design](../io.md).
+whose committed lengths the store records (section 6, planned separately).
+Read it with [the programming model](../foundation/programming-model.md),
+[the testing strategy](../foundation/testing-strategy.md), and
+[the file design](io.md).
 
 ## 1. In one page
 
@@ -36,13 +34,19 @@ exploration, not yet a contract; it is the alternative to
 
 ## 2. Requests and events
 
-A sketch of the owner's vocabulary:
+The owner's vocabulary (`skein-kv::Request` and `Event`):
 
 | Request | Terminal event |
 |---|---|
 | `Commit { ops }`, each op a `Put { key, value }` or an `Erase { key }` | `Committed { number }`; `Refused` (too large, past the budget, too many queued); `Failed` (the store stopped; outcome uncertain) |
 | `Get { key }` | `Got { value }` |
-| `Load { range, max }` | `Loaded { rows, more }` |
+| `Load { range, max }` | `Loaded { rows, next }` |
+| `Open { root }` | `Opened { last }` or `OpenFailed` |
+| `Close` | `Closed` |
+
+After a fatal file failure, repair reports `Recovered { last }` or
+`RecoveryFailed` as a store state event. It does not answer the original
+`Open` request a second time.
 
 - **Numbers are contiguous,** from one, and survive restarts.
 - **A commit is applied to the map when its sync completes,** so a read
@@ -59,9 +63,11 @@ The store owns a directory, a root (io.md, section 5):
 - **`snapshot`:** the map in key order, with the commit number its replay
   starts from (section 5), in checksummed chunks and a trailer;
   replaced atomically.
-- **Log segments,** `log.<first number>`: frames appended in commit
-  order. A frame is a version, its commit number, its length, its ops and
-  a checksum over all of it.
+- **Log segments,** `log-<first number, 20 decimal digits>`: frames
+  appended in commit order. A frame is a version, its commit number,
+  its length, its ops and a CRC-32C checksum over all of it. New
+  segments are announced with a directory sync before any commit in
+  them is acknowledged.
 
 **Recovery** reads the snapshot, then applies the frames of the segments
 from the snapshot's start number, accepting the longest valid prefix: it
@@ -104,7 +110,7 @@ appended to, and is deleted with the others the next snapshot covers.
 - **A crash during a snapshot** leaves the previous snapshot and every
   segment since it, so recovery is unchanged.
 
-## 6. Payload logs beside the store
+## 6. Payload logs beside the store (planned)
 
 For values that are large, appended to, and read rarely (temper's
 transcripts), and so are not held in memory:
@@ -130,7 +136,9 @@ transcripts), and so are not held in memory:
   so.
 - **The worst case is declared** (programming-model.md) from the limits:
   key and value sizes, ops and bytes per commit, queued bytes, segment
-  size, chunk size, and the budget itself.
+  size, chunk size, and the budget itself. `budget` limits the map; the
+  `worst_case` declaration includes queue, recovery, snapshot and page
+  buffers in addition to the map.
 - **Loop latency** stays bounded: a commit applies its ops to the map, a
   load returns a page, a snapshot writes a chunk per step.
 
@@ -163,10 +171,11 @@ short writes, and failed syncs.
   model's.
 - **Snapshots under load:** commits racing a snapshot at every chunk,
   crashes at each phase of its replacement.
-- **Payload logs:** a crash between the data's sync and the commit leaves
+- **Payload logs, later:** a crash between the data's sync and the commit leaves
   the extent as it was, and the next append overwrites the tail.
-- **Over the real ring:** process kills around each phase, reopened
-  contents compared with acknowledged commits, loop latency measured.
+- **Over the real ring:** a scratch-directory integration test commits,
+  closes, reopens on the same root descriptor and verifies the value.
+  Power-loss behavior is checked in the simulator's crash model.
 
 ## 10. For temper
 
@@ -248,11 +257,15 @@ work, and the risk, is around it:
 - **memory accounting** close enough to the allocator's to make the
   budget mean something.
 
-## 12. Open
+## 12. Settled choices and later work
 
-- The checksum, the frame's layout, and versioning the format.
-- The snapshot's trigger, and the segment's size.
-- Whether a service may run several stores, and whether they share a
-  sync.
-- When the dataset outgrows memory: retention first, then redb.md's
-  approach or an on-disk index.
+- Frames and snapshot chunks use version 1 and CRC-32C. Snapshot files
+  have a checksummed trailer; recovery rejects one without it.
+- `Limits` supplies fixed segment and snapshot thresholds, and a timeout
+  for each file request. A hung kernel operation is cancelled; its owner
+  receives one terminal failure after the operation settles.
+- One store owns one directory and one file driver. Payload logs and
+  sharing a sync across stores remain later work, as in the implementation
+  plan's sections 6 and 9.
+- When the dataset outgrows memory, retention comes first, then an
+  on-disk index or the approach in redb.md.
