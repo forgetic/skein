@@ -146,6 +146,23 @@ impl Exchange {
         }
     }
 
+    /// Installs the caller's one iteration time in the actual Client, script
+    /// domain and byte peer before their entries run. Call before `start` or
+    /// the iteration's `request`, `tick`, `reply` and `settle` entries.
+    ///
+    /// The caller supplies nondecreasing monotonic `now`. `wall` may move
+    /// independently in either direction and never arms a deadline. This
+    /// replaces only time inputs: it does not start the exchange, fire timers,
+    /// deliver bytes or settle lower effects.
+    pub fn at(&mut self, now: Time, wall: Wall) {
+        self.env.now = now;
+        self.env.wall = wall;
+        self.fake_env.now = now;
+        self.fake_env.wall = wall;
+        self.peer_env.now = now;
+        self.peer_env.wall = wall;
+    }
+
     pub fn start(&mut self) {
         provider::start(
             &mut self.server,
@@ -353,5 +370,195 @@ impl Exchange {
             }
         }
         panic!("actual client/peer story exceeded its bounded steps");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Exchange;
+    use skein_fake_llm_domain::api;
+    use skein_lib::{Duration, Time, Token, Wall};
+    use skein_llm::{Block, Credential, Endpoint, Provider, client};
+
+    const START: Time = Time::from_nanos(10_000_000_000);
+    const DUE: Time = Time::from_nanos(11_000_000_000);
+
+    fn delayed(provider: Provider) -> Exchange {
+        let mut input = crate::call(19);
+        match provider {
+            Provider::OpenAiCodex => {}
+            Provider::Anthropic => {
+                input.endpoint = Endpoint::anthropic();
+                input.credential = Credential::anthropic(b"fake-token".as_slice().into());
+                input.prompt.cache_key = None;
+            }
+        }
+        input.prompt.output_ceiling(provider, 4096).expect("shared provider configuration");
+        input.prompt.instructions = b"clocked-script".as_slice().into();
+        let endpoint = input.endpoint.clone();
+        let credential = Credential {
+            access_token: input.credential.access_token.clone(),
+            account_id: input.credential.account_id.clone(),
+        };
+        let bounds = crate::limits();
+        let machine = client::Client::prepare(input, &bounds).expect("one actual adopted Client");
+        let scripts = Box::new([api::Script {
+            cue: b"clocked-script".as_slice().into(),
+            turns: Box::new([api::Turn {
+                lines: Box::new([api::Line::Text { text: b"clocked exact".as_slice().into() }]),
+                finish: api::Finish::Stop,
+                tokens: 1,
+            }]),
+        }]);
+        let mut world = Exchange::prepared(machine, endpoint, credential, bounds, scripts);
+        // Configure only latency at startup, before any step. The Domain's
+        // admitted capacities and owned-byte bounds remain unchanged.
+        world.fake_env.limits.latency_min = Duration::from_secs(1);
+        world.fake_env.limits.latency_max = Duration::from_secs(1);
+        world
+    }
+
+    fn quiesce(world: &mut Exchange) {
+        for _ in 0..100_000_u32 {
+            if !world.tick(true) {
+                return;
+            }
+        }
+        panic!("clocked exchange exceeded bounded steps");
+    }
+
+    fn terminals(world: &Exchange) -> usize {
+        world
+            .seen
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    client::Event::Completed { .. } | client::Event::Failed { .. } | client::Event::Cancelled { .. }
+                )
+            })
+            .count()
+    }
+
+    fn check_times(world: &Exchange, now: Time, wall: Wall) {
+        assert_eq!((world.env.now, world.env.wall), (now, wall));
+        assert_eq!((world.fake_env.now, world.fake_env.wall), (now, wall));
+        assert_eq!((world.peer_env.now, world.peer_env.wall), (now, wall));
+    }
+
+    fn awaiting_answer(world: &mut Exchange) {
+        world.at(START, Wall::from_nanos(50_000_000_000));
+        check_times(world, START, Wall::from_nanos(50_000_000_000));
+        assert_eq!(world.machine.waiting(), client::Waiting::Start);
+        assert!(!world.machine.has_work());
+        assert!(!world.server.has_work());
+        assert!(world.queries.is_empty());
+        assert!(world.requests.is_empty());
+        assert!(world.responses.is_empty());
+        assert!(world.seen.is_empty(), "installing time produces no events");
+        assert_eq!(world.fake.calls(), 0);
+        world.start();
+        quiesce(world);
+        assert_eq!(world.queries.len(), 1, "one actual request entered the script Domain");
+        assert_eq!(world.queries[0].system.as_ref(), b"clocked-script");
+        assert!(!world.requests.is_empty(), "the adopted Client sent real HTTP bytes");
+        assert_eq!(world.fake.calls(), 1);
+        assert_eq!(world.fake.next_deadline(), Some(DUE), "deadline uses the nonzero injected origin");
+        assert!(world.responses.is_empty());
+        assert_eq!(terminals(world), 0);
+    }
+
+    #[test]
+    fn shared_iteration_time_drives_delayed_actual_completion_and_lower_settlement() {
+        for provider in [Provider::OpenAiCodex, Provider::Anthropic] {
+            let mut world = delayed(provider);
+            awaiting_answer(&mut world);
+            let before = Time::from_nanos(10_999_999_999);
+            let forward = Wall::from_nanos(500_000_000_000);
+            world.at(before, forward);
+            check_times(&world, before, forward);
+            assert!(!world.tick(true), "wall jump cannot make the monotonic timer due");
+            assert!(world.responses.is_empty());
+            assert_eq!(terminals(&world), 0);
+            assert_eq!(world.fake.calls(), 1);
+
+            world.at(DUE, Wall::EPOCH);
+            check_times(&world, DUE, Wall::EPOCH);
+            assert_eq!(world.fake.calls(), 1, "installing due time does not fire the timer");
+            assert!(world.responses.is_empty());
+            assert_eq!(terminals(&world), 0);
+            world.run();
+            assert_eq!(terminals(&world), 1);
+            let completion = world.seen.iter().find_map(|event| match event {
+                client::Event::Completed { owner, completion } => {
+                    assert_eq!(*owner, Token::new(19));
+                    Some(completion)
+                }
+                client::Event::Delta { .. }
+                | client::Event::Block { .. }
+                | client::Event::Failed { .. }
+                | client::Event::Cancelled { .. }
+                | client::Event::Reusable
+                | client::Event::Close
+                | client::Event::Closed => None,
+            });
+            let completion = completion.expect("one actual successful terminal");
+            let [Block::Text { text, .. }] = completion.content.as_ref() else {
+                panic!("one actual scripted text block");
+            };
+            assert_eq!(text.as_ref(), b"clocked exact");
+            assert!(!world.responses.is_empty(), "actual byte peer encoded the delayed answer");
+            assert_eq!(world.seen.iter().filter(|event| matches!(event, client::Event::Reusable)).count(), 1);
+            assert_eq!(world.fake.calls(), 0, "actual delayed output was delivered and reclaimed");
+            assert_eq!(world.fake.next_deadline(), None);
+
+            world.request(client::Request::Close);
+            assert_eq!(world.seen.iter().filter(|event| matches!(event, client::Event::Close)).count(), 1);
+            assert_eq!(world.seen.iter().filter(|event| matches!(event, client::Event::Closed)).count(), 0);
+            world.settle();
+            assert_eq!(world.seen.iter().filter(|event| matches!(event, client::Event::Closed)).count(), 1);
+            let events = world.seen.len();
+            world.settle();
+            assert_eq!(world.seen.len(), events, "repeated lower settlement emits nothing");
+            assert_eq!(terminals(&world), 1);
+        }
+    }
+
+    #[test]
+    fn installing_due_time_leaves_cancel_before_tick_and_late_fake_completion_ordered() {
+        for provider in [Provider::OpenAiCodex, Provider::Anthropic] {
+            let mut world = delayed(provider);
+            awaiting_answer(&mut world);
+            world.at(DUE, Wall::EPOCH);
+            assert_eq!(world.fake.calls(), 1);
+            assert_eq!(world.fake.next_deadline(), Some(DUE));
+            assert!(world.responses.is_empty());
+            assert_eq!(terminals(&world), 0);
+            world.request(client::Request::Cancel);
+            assert_eq!(terminals(&world), 0, "Cancel waits for actual lower settlement");
+            assert_eq!(world.seen.iter().filter(|event| matches!(event, client::Event::Close)).count(), 1);
+            world.settle();
+            assert_eq!(terminals(&world), 1);
+            assert_eq!(
+                world
+                    .seen
+                    .iter()
+                    .filter(|event| matches!(event, client::Event::Cancelled { owner } if *owner == Token::new(19)))
+                    .count(),
+                1
+            );
+            assert_eq!(world.seen.iter().filter(|event| matches!(event, client::Event::Closed)).count(), 1);
+            assert_eq!(world.seen.iter().filter(|event| matches!(event, client::Event::Reusable)).count(), 0);
+            let events = world.seen.len();
+            let responses = world.responses.len();
+            assert_eq!(world.fake.calls(), 1, "lower settlement did not fire the independent fake");
+            quiesce(&mut world);
+            assert_eq!(world.fake.calls(), 0, "late actual fake terminal was fired and reclaimed");
+            assert_eq!(world.fake.next_deadline(), None);
+            assert_eq!(world.responses.len(), responses, "closed peer cannot encode a late answer");
+            assert_eq!(world.seen.len(), events, "late fake completion cannot emit another client terminal");
+            world.settle();
+            assert_eq!(world.seen.len(), events, "repeated settlement remains inert");
+        }
     }
 }

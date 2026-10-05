@@ -101,6 +101,21 @@ separate ownership, as are the caller's retained application declarations,
 decoded results and observation buffers. The temporary endpoint metadata is
 caller input and is released after configuring the peer.
 
+`Exchange::at(now, wall)` installs the caller's one iteration snapshot in
+the actual Client, independent script domain and byte peer before their
+entries run. The caller supplies nondecreasing monotonic `Time`; `Wall` may
+jump independently and never arms deadlines. Installing time neither starts
+the exchange nor fires timers, delivers bytes or settles effects; the caller
+still drives the existing entrances. Focused controls adopt one actual Client
+for each configured dialect, inject a nonzero origin and fixed fake latency,
+and observe no response before due despite a wall-clock jump. At due the
+actual fake, byte peer and Client produce the exact answer and unique
+completion/reuse, followed by real Close/Closed settlement. A second control
+cancels after installing due time but before ticking, then settles lower
+effects and fires/reclaims the late fake terminal without another Client
+terminal or wire response. This entrance adds no retained state or memory
+allowance.
+
 The four redacted Anthropic Tongs captures retain their provenance beside the
 shared codec. Actual Client tests check known completion text, calls, stop
 reason and all usage fields under fragmentation. Synthetic cases are separate
