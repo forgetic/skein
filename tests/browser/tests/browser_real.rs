@@ -1,11 +1,13 @@
-//! A real Chromium in the service loop: process pipes, CDP, and a person
-//! pressing a button whose page changes in response.
+//! Real Chromium in one service loop with a skein-http page server.
+
+#[path = "../src/serve.rs"]
+mod serve;
 
 use std::collections::VecDeque;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use skein_browser::boundary::{Below, Down, Event, Expect, Query, Request};
+use skein_browser::boundary::{Below, Down, Event, Expect, Key, Query, Refusal, Request, Trouble};
 use skein_browser::{self as browser, Browser};
 use skein_io::kernel::{self, Complete, Done, Op, Pipe, Spawn, Submit, Way};
 use skein_io::{self as io, Io};
@@ -20,9 +22,10 @@ const PAGE: Token = Token::new(13);
 const FIND: Token = Token::new(14);
 const PRESS: Token = Token::new(15);
 const EXPECT: Token = Token::new(16);
+const KEY: Token = Token::new(17);
+const IMAGE: Token = Token::new(18);
+const SNAPSHOT: Token = Token::new(19);
 const ROOT_CLOSE: Token = Token::new(u64::MAX);
-
-const HTML: &[u8] = br#"<!doctype html><html><body><button onclick="document.querySelector('h1').textContent='Done'">Press</button><h1>Before</h1></body></html>"#;
 
 #[derive(Debug)]
 struct Profile(PathBuf);
@@ -57,21 +60,6 @@ fn chromium() -> PathBuf {
         }
     }
     panic!("Chromium is required for the browser suite: set SKEIN_TEST_CHROMIUM or put chromium on PATH");
-}
-
-fn data_url() -> Box<[u8]> {
-    let mut url = b"data:text/html;charset=utf-8,".to_vec();
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    for byte in HTML {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(byte) {
-            url.push(*byte);
-        } else {
-            url.push(b'%');
-            url.push(HEX[usize::from(byte >> 4)]);
-            url.push(HEX[usize::from(byte & 15)]);
-        }
-    }
-    url.into_boxed_slice()
 }
 
 fn spawn(chromium: &Path, profile: &Path) -> (Spawn, kernel::Fd) {
@@ -127,13 +115,40 @@ enum Stage {
     Opening,
     Finding,
     Pressing,
+    Typing,
+    Keying,
     Expecting,
+    Capturing,
     Closing,
     Complete,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Scenario {
+    Button,
+    Form,
+    Covered,
+    Scroll,
+    Throw,
+    Csp,
+}
+
+impl Scenario {
+    fn path(self) -> &'static str {
+        match self {
+            Scenario::Button => "/button",
+            Scenario::Form => "/form",
+            Scenario::Covered => "/covered",
+            Scenario::Scroll => "/scroll",
+            Scenario::Throw => "/throw",
+            Scenario::Csp => "/csp",
+        }
+    }
+}
+
 struct Rig {
     browser: Browser,
+    pages: serve::Pages,
     io: Io,
     kernel: Kernel,
     clock: Clock,
@@ -152,12 +167,17 @@ struct Rig {
     exited: bool,
     child_closed: bool,
     stage: Stage,
+    scenario: Scenario,
+    context_ready: bool,
+    exception_seen: bool,
+    csp_log_seen: bool,
+    await_met: bool,
     version: Box<[u8]>,
     stderr: Vec<u8>,
 }
 
 impl Rig {
-    fn new(chromium: &Path, profile: &Path) -> Rig {
+    fn new(chromium: &Path, profile: &Path, scenario: Scenario) -> Rig {
         let browser_limits = browser::Limits::default();
         let limits = io_limits(&browser_limits);
         assert!(browser::largest_read(&browser_limits).expect("read size") <= limits.largest_read());
@@ -170,6 +190,7 @@ impl Rig {
         io_requests.push_back(io::Request::Spawn { owner: PROCESS, spawn });
         Rig {
             browser: Browser::new(BROWSER, &browser_limits),
+            pages: serve::Pages::new(Time::ZERO, Wall::EPOCH),
             io: Io::new(&limits),
             kernel,
             clock: Clock::new(),
@@ -188,6 +209,11 @@ impl Rig {
             exited: false,
             child_closed: false,
             stage: Stage::Starting,
+            scenario,
+            context_ready: false,
+            exception_seen: false,
+            csp_log_seen: false,
+            await_met: false,
             version: Box::default(),
             stderr: Vec::new(),
         }
@@ -208,6 +234,7 @@ impl Rig {
             self.browser_env.wall = now.wall;
             self.io_env.now = now.now;
             self.io_env.wall = now.wall;
+            self.pages.update_time(now.now, now.wall);
             while self.io.is_ready() {
                 io::resume(&mut self.io, &self.io_env, &mut self.io_events, &mut self.submits);
             }
@@ -230,11 +257,15 @@ impl Rig {
             }
             self.drain_browser_down();
             while self.io.takes() {
-                let Some(request) = self.io_requests.pop_front() else { break };
+                let Some(request) = self.io_requests.pop_front().or_else(|| self.pages.take()) else { break };
                 io::down(&mut self.io, &self.io_env, request, &mut self.submits);
             }
             self.io.reclaim();
-            if self.stage == Stage::Complete && self.child_closed && self.io.is_empty() && self.kernel.in_flight() == 0
+            if self.stage == Stage::Complete
+                && self.child_closed
+                && self.pages.is_closed()
+                && self.io.is_empty()
+                && self.kernel.in_flight() == 0
             {
                 return;
             }
@@ -244,6 +275,7 @@ impl Rig {
                 || !self.events.is_empty()
                 || !self.browser_down.is_empty()
                 || !self.io_requests.is_empty()
+                || self.pages.pending()
                 || self.browser.work_pending();
             let wait = if pending {
                 Wait::No
@@ -276,6 +308,15 @@ impl Rig {
     }
 
     fn io_event(&mut self, event: io::Event) {
+        if matches!(
+            &event,
+            io::Event::Listening { owner: serve::OWNER, .. } | io::Event::Accepted { owner: serve::OWNER, .. }
+        ) || matches!(&event, io::Event::Stream { owner, .. } | io::Event::Closed { owner } | io::Event::Failed { owner, .. } if self.pages.owns(*owner))
+        {
+            self.pages.event(event);
+            self.open_if_ready();
+            return;
+        }
         match event {
             io::Event::Spawned { owner: PROCESS, child, pipes } => {
                 let [commands, replies, errors] = pipes.as_ref() else {
@@ -316,8 +357,8 @@ impl Rig {
                 };
                 browser::up(&mut self.browser, &self.browser_env, from, &mut self.events, &mut self.browser_down);
                 if context_reply && self.stage == Stage::Context {
-                    self.stage = Stage::Opening;
-                    self.ask(Request::Page { person: PERSON, page: PAGE, url: data_url() });
+                    self.context_ready = true;
+                    self.open_if_ready();
                 }
             }
             io::Event::Exited { owner: PROCESS, exit } => {
@@ -344,6 +385,16 @@ impl Rig {
         }
     }
 
+    fn open_if_ready(&mut self) {
+        if self.stage != Stage::Context || !self.context_ready {
+            return;
+        }
+        let Some(addr) = self.pages.addr else { return };
+        self.stage = Stage::Opening;
+        let url = format!("http://{addr}{}", self.scenario.path());
+        self.ask(Request::Page { person: PERSON, page: PAGE, url: url.into_bytes().into_boxed_slice() });
+    }
+
     fn ask(&mut self, request: Request) {
         browser::down(&mut self.browser, &self.browser_env, request, &mut self.events, &mut self.browser_down);
     }
@@ -361,49 +412,155 @@ impl Rig {
                 assert_eq!(page, PAGE);
                 assert_eq!(self.stage, Stage::Opening);
                 self.stage = Stage::Finding;
-                self.ask(Request::Find { page: PAGE, op: FIND, query: query(b"button", b"Press") });
+                match self.scenario {
+                    Scenario::Button => {
+                        self.ask(Request::Find { page: PAGE, op: FIND, query: query(b"button", b"Press") })
+                    }
+                    Scenario::Form => {
+                        self.ask(Request::Find { page: PAGE, op: FIND, query: query(b"textbox", b"Name") })
+                    }
+                    Scenario::Covered => {
+                        self.ask(Request::Find { page: PAGE, op: FIND, query: query(b"button", b"Covered") })
+                    }
+                    Scenario::Scroll => {
+                        self.ask(Request::Find { page: PAGE, op: FIND, query: query(b"button", b"Far away") })
+                    }
+                    Scenario::Throw => {
+                        self.ask(Request::Find { page: PAGE, op: FIND, query: query(b"button", b"Throw") })
+                    }
+                    Scenario::Csp => {
+                        self.ask(Request::Find { page: PAGE, op: FIND, query: query(b"heading", b"CSP page") })
+                    }
+                }
             }
             Event::Found { op, seen, more } => {
                 assert_eq!(op, FIND);
                 assert_eq!(self.stage, Stage::Finding);
                 assert_eq!(more, 0);
-                assert_eq!(seen.len(), 1, "one accessible Press button");
-                self.stage = Stage::Pressing;
-                self.ask(Request::Press { page: PAGE, op: PRESS, node: seen.get(0).expect("button").node });
+                assert_eq!(seen.len(), 1, "one accessible target for {:?}", self.scenario);
+                let node = seen.get(0).expect("target").node;
+                match self.scenario {
+                    Scenario::Form => {
+                        self.stage = Stage::Typing;
+                        self.ask(Request::Type { page: PAGE, op: PRESS, node, text: Box::from(&b"Ada"[..]) });
+                    }
+                    Scenario::Csp => {
+                        self.stage = Stage::Expecting;
+                        self.ask(Request::Await {
+                            page: PAGE,
+                            op: EXPECT,
+                            query: query(b"heading", b"Wrong"),
+                            expect: Expect::Absent,
+                            within: Duration::from_millis(500),
+                        });
+                    }
+                    Scenario::Button | Scenario::Covered | Scenario::Scroll | Scenario::Throw => {
+                        self.stage = Stage::Pressing;
+                        self.ask(Request::Press { page: PAGE, op: PRESS, node });
+                    }
+                }
             }
-            Event::Done { op } => {
-                assert_eq!(op, PRESS);
-                assert_eq!(self.stage, Stage::Pressing);
-                self.stage = Stage::Expecting;
-                self.ask(Request::Await {
-                    page: PAGE,
-                    op: EXPECT,
-                    query: query(b"heading", b"Done"),
-                    expect: Expect::Present,
-                    within: Duration::from_secs(3),
-                });
-            }
+            Event::Done { op } => match self.stage {
+                Stage::Typing => {
+                    assert_eq!(op, PRESS);
+                    self.stage = Stage::Keying;
+                    self.ask(Request::Key { page: PAGE, op: KEY, key: Key::Enter });
+                }
+                Stage::Keying | Stage::Pressing => {
+                    assert_eq!(op, if self.stage == Stage::Keying { KEY } else { PRESS });
+                    self.stage = Stage::Expecting;
+                    let heading = match self.scenario {
+                        Scenario::Button => b"Done".as_slice(),
+                        Scenario::Form => b"Hello Ada".as_slice(),
+                        Scenario::Scroll => b"Scrolled".as_slice(),
+                        Scenario::Throw => b"Before".as_slice(),
+                        Scenario::Covered | Scenario::Csp => {
+                            panic!("no action should complete for {:?}", self.scenario)
+                        }
+                    };
+                    self.ask(Request::Await {
+                        page: PAGE,
+                        op: EXPECT,
+                        query: query(b"heading", heading),
+                        expect: Expect::Present,
+                        within: Duration::from_secs(3),
+                    });
+                }
+                _ => panic!("unexpected Done {op:?} at {:?}", self.stage),
+            },
             Event::Met { op, seen } => {
                 assert_eq!(op, EXPECT);
                 assert_eq!(self.stage, Stage::Expecting);
-                assert_eq!(seen.len(), 1, "the button changed the heading");
-                self.stage = Stage::Closing;
-                self.ask(Request::Close { entity: BROWSER });
+                assert_eq!(seen.len(), if matches!(self.scenario, Scenario::Csp) { 0 } else { 1 });
+                if matches!(self.scenario, Scenario::Throw | Scenario::Csp) {
+                    self.await_met = true;
+                    if (matches!(self.scenario, Scenario::Throw) && self.exception_seen)
+                        || (matches!(self.scenario, Scenario::Csp) && self.csp_log_seen)
+                    {
+                        self.close_browser();
+                    }
+                } else if matches!(self.scenario, Scenario::Button | Scenario::Form) {
+                    self.stage = Stage::Capturing;
+                    self.ask(if matches!(self.scenario, Scenario::Button) {
+                        Request::Screenshot { page: PAGE, op: IMAGE }
+                    } else {
+                        Request::Snapshot { page: PAGE, op: SNAPSHOT }
+                    });
+                } else {
+                    self.close_browser();
+                }
+            }
+            Event::Screenshot { op: IMAGE, png } => {
+                assert_eq!(self.stage, Stage::Capturing);
+                assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+                self.close_browser();
+            }
+            Event::Snapshot { op: SNAPSHOT, text } => {
+                assert_eq!(self.stage, Stage::Capturing);
+                assert!(text.windows(b"Hello Ada".len()).any(|part| part == b"Hello Ada"));
+                self.close_browser();
             }
             Event::Closed { owner: BROWSER } => {
                 assert_eq!(self.stage, Stage::Closing);
                 self.stage = Stage::Complete;
+                self.pages.stop();
             }
             Event::Closed { owner } if owner == PAGE || owner == PERSON => {}
+            Event::Trouble { trouble: Trouble::Log, .. } if matches!(self.scenario, Scenario::Csp) => {
+                self.csp_log_seen = true;
+                if self.await_met && self.stage == Stage::Expecting {
+                    self.close_browser();
+                }
+            }
+            Event::Trouble { trouble: Trouble::Exception, text, .. } if matches!(self.scenario, Scenario::Throw) => {
+                assert!(!text.is_empty(), "exception has a message");
+                self.exception_seen = true;
+                if self.await_met && self.stage == Stage::Expecting {
+                    self.close_browser();
+                }
+            }
             Event::Trouble { trouble, text, .. } => {
                 panic!("unexpected page trouble {trouble:?}: {}", String::from_utf8_lossy(&text))
             }
             Event::Refused { op, why } => {
+                if matches!(self.scenario, Scenario::Covered)
+                    && self.stage == Stage::Pressing
+                    && op == PRESS
+                    && why == Refusal::Covered
+                {
+                    self.close_browser();
+                    return;
+                }
                 panic!("browser refused operation {op:?}: {why:?}; stderr: {}", String::from_utf8_lossy(&self.stderr))
             }
             Event::Missed { op, seen, more } => panic!("expectation {op:?} missed; saw {seen:?}, {more} more"),
             other => panic!("unexpected browser event: {other:?}"),
         }
+    }
+
+    fn close_browser(&mut self) {
+        self.stage = Stage::Closing;
+        self.ask(Request::Close { entity: BROWSER });
     }
 
     fn drain_browser_down(&mut self) {
@@ -427,8 +584,43 @@ fn query(role: &[u8], name: &[u8]) -> Query {
 fn chromium_opens_finds_and_presses_a_button() {
     let chromium = chromium();
     let profile = Profile::fresh();
-    let mut rig = Rig::new(&chromium, &profile.0);
+    let mut rig = Rig::new(&chromium, &profile.0, Scenario::Button);
     rig.run();
     assert!(rig.root_closed && rig.exited && rig.child_closed);
     assert!(rig.version.starts_with(b"Chrome/"), "version: {}", String::from_utf8_lossy(&rig.version));
+}
+
+#[test]
+fn chromium_types_submits_and_snapshots_a_form() {
+    let chromium = chromium();
+    let profile = Profile::fresh();
+    Rig::new(&chromium, &profile.0, Scenario::Form).run();
+}
+
+#[test]
+fn chromium_rejects_a_covered_button() {
+    let chromium = chromium();
+    let profile = Profile::fresh();
+    Rig::new(&chromium, &profile.0, Scenario::Covered).run();
+}
+
+#[test]
+fn chromium_scrolls_to_a_far_button() {
+    let chromium = chromium();
+    let profile = Profile::fresh();
+    Rig::new(&chromium, &profile.0, Scenario::Scroll).run();
+}
+
+#[test]
+fn chromium_obeys_content_security_policy() {
+    let chromium = chromium();
+    let profile = Profile::fresh();
+    Rig::new(&chromium, &profile.0, Scenario::Csp).run();
+}
+
+#[test]
+fn chromium_reports_a_script_exception() {
+    let chromium = chromium();
+    let profile = Profile::fresh();
+    Rig::new(&chromium, &profile.0, Scenario::Throw).run();
 }

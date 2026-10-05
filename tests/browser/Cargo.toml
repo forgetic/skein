@@ -14,6 +14,7 @@ skein-lib.workspace = true
 skein-io.workspace = true
 skein-shell.workspace = true
 skein-heap.workspace = true
+skein-http.workspace = true
 
 [lints.rust]
 unsafe_code = "deny"
