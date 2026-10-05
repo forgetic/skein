@@ -58,9 +58,10 @@ fn validate(request: &Request, limits: &Limits) -> Result<(), DecodeError> {
     for input in &request.input {
         match input {
             Input::FunctionCall { arguments, .. } => {
-                let value = Json::from_bytes(arguments, limits)?;
-                if value.as_tokens().first() != Some(&Token::ObjectStart) {
-                    return Err(DecodeError::WrongType);
+                // Native history carries arguments as text, not an embedded
+                // document. The measured encoder validates UTF-8 and escaping.
+                if arguments.len() > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
+                    return Err(DecodeError::TooLarge);
                 }
             }
             Input::Opaque { value } => {

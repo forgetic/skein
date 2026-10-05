@@ -110,7 +110,7 @@ fn dechunk(input: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn measured_request_replays_all_input_kinds_and_rejects_bad_arguments() {
+fn measured_request_replays_all_input_kinds_and_bounded_raw_arguments() {
     let request = request();
     let body = encode_request(&request, &LIMITS).unwrap();
     let document = Json::from_bytes(&body, &LIMITS).unwrap();
@@ -121,14 +121,36 @@ fn measured_request_replays_all_input_kinds_and_rejects_bad_arguments() {
         encode_request(&request, &Limits { request_bytes: u32::try_from(body.len()).unwrap() - 1, ..LIMITS }),
         Err(DecodeError::TooLarge)
     );
+    for (arguments, encoded) in [
+        (b"[]".as_slice(), br#""arguments":"[]""#.as_slice()),
+        (b"{broken\n\"\\".as_slice(), br#""arguments":"{broken\n\"\\""#.as_slice()),
+    ] {
+        let mut raw = request.clone();
+        raw.tools = Box::new([]);
+        raw.input = Box::new([Input::FunctionCall {
+            call_id: owned(b"call"),
+            item_id: Some(owned(b"item")),
+            name: owned(b"read"),
+            arguments: owned(arguments),
+        }]);
+        let bounded = Limits { string_bytes: u32::try_from(arguments.len()).unwrap(), ..LIMITS };
+        let body = encode_request(&raw, &bounded).unwrap();
+        assert!(bytes::find(&body, encoded).is_some(), "exact native argument string, without inner parsing");
+        let document = Json::from_bytes(&body, &LIMITS).unwrap();
+        assert_eq!(decode_request(&document, &bounded).unwrap(), raw);
+        assert_eq!(
+            encode_request(&raw, &Limits { string_bytes: bounded.string_bytes - 1, ..LIMITS }),
+            Err(DecodeError::TooLarge)
+        );
+    }
     let mut invalid = request.clone();
     invalid.input = Box::new([Input::FunctionCall {
         call_id: owned(b"call"),
         item_id: Some(owned(b"item")),
         name: owned(b"read"),
-        arguments: owned(b"[]"),
+        arguments: owned(&[0xff]),
     }]);
-    assert_eq!(encode_request(&invalid, &LIMITS), Err(DecodeError::WrongType));
+    assert_eq!(encode_request(&invalid, &LIMITS), Err(DecodeError::Malformed));
     invalid = request;
     invalid.model = owned(&[0xff]);
     assert_eq!(encode_request(&invalid, &LIMITS), Err(DecodeError::Malformed));

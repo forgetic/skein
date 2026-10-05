@@ -41,7 +41,9 @@ pub enum Block {
     Refusal { text: Box<[u8]>, replay: Option<Replay> },
     /// A completed assistant tool call. `id` correlates the result; `arguments`
     /// are raw JSON bytes and can be malformed in received output. Inspect
-    /// them before executing a tool. Sending requires a valid JSON object.
+    /// them before executing a tool. Codex history preserves the exact bounded
+    /// UTF-8 argument string, including malformed JSON; Anthropic history
+    /// requires a representable JSON object for its native `tool_use.input`.
     ToolCall { id: Box<[u8]>, name: Box<[u8]>, arguments: Box<[u8]>, replay: Option<Replay> },
     /// A result for the tool call named by `id`. Codex lacks a native error
     /// flag, so `is_error` prefixes the wire text with `Error: ` when true;

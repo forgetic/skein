@@ -25,7 +25,7 @@ pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limit
     let mut input = List::with_capacity(limits.parts);
     for message in &prompt.messages {
         for block in &message.content {
-            let item = input_block(block, message.role, limits)?;
+            let item = input_block(block, message.role)?;
             if input.push(item).is_err() {
                 return Err(Error::Limit);
             }
@@ -226,7 +226,7 @@ fn metadata(replay: Option<&Replay>, first: &[u8], second: &[u8]) -> Result<(), 
     }
     Ok(())
 }
-fn input_block(block: &Block, role: Role, limits: &openai::Limits) -> Result<openai::Input, Error> {
+fn input_block(block: &Block, role: Role) -> Result<openai::Input, Error> {
     match block {
         Block::Text { text, replay } | Block::Refusal { text, replay } => {
             let id = replay_text(replay.as_ref(), b"id")?;
@@ -249,21 +249,12 @@ fn input_block(block: &Block, role: Role, limits: &openai::Limits) -> Result<ope
                 refusal,
             })
         }
-        Block::ToolCall { id, name, arguments, replay } => {
-            let value = match openai::Json::from_bytes(arguments, limits) {
-                Ok(value) => value,
-                Err(error) => return Err(decode(error)),
-            };
-            if value.as_tokens().first() != Some(&Token::ObjectStart) {
-                return Err(Error::Invalid);
-            }
-            Ok(openai::Input::FunctionCall {
-                call_id: id.clone(),
-                item_id: replay_text(replay.as_ref(), b"item_id")?,
-                name: name.clone(),
-                arguments: arguments.clone(),
-            })
-        }
+        Block::ToolCall { id, name, arguments, replay } => Ok(openai::Input::FunctionCall {
+            call_id: id.clone(),
+            item_id: replay_text(replay.as_ref(), b"item_id")?,
+            name: name.clone(),
+            arguments: arguments.clone(),
+        }),
         Block::ToolResult { id, text, is_error } => {
             let output = if *is_error {
                 let len = text.len().checked_add(TOOL_ERROR.len()).ok_or(Error::Limit)?;
@@ -529,7 +520,7 @@ mod tests {
         assert_eq!(request(prompt(Role::User, block), Provider::OpenAiCodex, &limits), Err(Error::Limit));
     }
     #[test]
-    fn malformed_tool_arguments_are_preserved_received_and_rejected_sent() {
+    fn malformed_tool_arguments_are_preserved_received_and_replayed_as_text() {
         let block = part(
             openai::Part::ToolCall {
                 call_id: bytes::copy_of(b"call"),
@@ -541,7 +532,12 @@ mod tests {
             &LIMITS,
         )
         .expect("received arguments need not be valid JSON");
-        assert_eq!(request(prompt(Role::Assistant, block), Provider::OpenAiCodex, &LIMITS), Err(Error::Invalid));
+        let request = request(prompt(Role::Assistant, block), Provider::OpenAiCodex, &LIMITS)
+            .expect("native arguments are an exact string, including malformed JSON");
+        match request.input.as_ref() {
+            [openai::Input::FunctionCall { arguments, .. }] => assert_eq!(arguments.as_ref(), b"broken"),
+            _ => panic!("one actual native function call"),
+        }
     }
     #[test]
     fn encrypted_reasoning_is_exactly_replayed() {

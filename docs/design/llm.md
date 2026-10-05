@@ -45,8 +45,12 @@ pairing. An independent observer rejects altered identity evidence. The controls
 reach both maximum ID payloads under the installed counting allocator.
 
 Generic tool calls retain raw JSON argument text; the application validates and
-translates it into its own tool types before execution. Replay admission
-requires a valid JSON object for arguments. Schemas are bounded JSON
+translates it into its own tool types before execution. Codex history carries
+the exact bounded UTF-8 argument string, including malformed JSON, so the
+application can send an error result and let the model correct its call. The
+Client does not interpret that feedback. Anthropic's native `tool_use.input`
+is an embedded JSON object: replay refuses malformed or non-object input
+rather than normalizing or discarding the original call. Schemas are bounded JSON
 values, independent of the application's tool vocabulary.
 
 Every emitted replay also fits the complete serialized raw opaque cap, including
