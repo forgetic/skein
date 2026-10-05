@@ -235,6 +235,7 @@ impl World {
             }
             b"DOM.getContentQuads" if self.hidden => r#"{"quads":[]}"#,
             b"DOM.getContentQuads" => r#"{"quads":[[10.25,10.25,110.75,10.25,110.75,40.75,10.25,40.75]]}"#,
+            b"Page.getLayoutMetrics" => r#"{"cssLayoutViewport":{"pageX":0,"pageY":0}}"#,
             b"DOM.getNodeForLocation" if self.covered => r#"{"backendNodeId":99}"#,
             b"DOM.getNodeForLocation" => r#"{"backendNodeId":7}"#,
             b"DOM.describeNode" => r#"{"node":{"backendNodeId":7,"children":[]}}"#,

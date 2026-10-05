@@ -117,6 +117,7 @@ enum Step {
     Scroll,
     Accessibility,
     Quads,
+    Metrics,
     Hit,
     Describe,
     MouseMove,
@@ -889,6 +890,14 @@ fn parse_rect(result: Value<'_>) -> Option<Rect> {
     })
 }
 
+fn viewport_offset(result: Value<'_>) -> Option<(i64, i64)> {
+    let viewport = match result.get(b"cssLayoutViewport") {
+        Some(viewport) => viewport,
+        None => result.get(b"layoutViewport")?,
+    };
+    Some((field_i64(viewport, b"pageX")?, field_i64(viewport, b"pageY")?))
+}
+
 fn subtree_has(root: Option<Value<'_>>, backend: u64) -> bool {
     let Some(root) = root else {
         return false;
@@ -1577,7 +1586,27 @@ impl Browser {
                 {
                     *at = Some((x, y));
                 }
-                self.issue_step(env, token, b"DOM.getNodeForLocation", &Params::Point { x, y }, Step::Hit);
+                self.issue_step(env, token, b"Page.getLayoutMetrics", &Params::Empty, Step::Metrics);
+            }
+            Step::Metrics => {
+                // Quads and mouse events use viewport coordinates; the DOM
+                // hit test uses document coordinates after a scroll.
+                let offset = viewport_offset(result);
+                let at = match self.op(token) {
+                    Some(Operation { kind: OpKind::Press { at, .. }, .. }) => *at,
+                    Some(_) | None => None,
+                };
+                if let (Some((x, y)), Some((page_x, page_y))) = (at, offset) {
+                    self.issue_step(
+                        env,
+                        token,
+                        b"DOM.getNodeForLocation",
+                        &Params::Point { x: x.saturating_add(page_x), y: y.saturating_add(page_y) },
+                        Step::Hit,
+                    );
+                } else {
+                    self.finish_refused(token, Refusal::Protocol);
+                }
             }
             Step::Hit => {
                 let hit = field_u64(result, b"backendNodeId");
@@ -1727,6 +1756,7 @@ impl Browser {
             | Step::Scroll
             | Step::Accessibility
             | Step::Quads
+            | Step::Metrics
             | Step::Hit
             | Step::Describe
             | Step::Focus

@@ -202,7 +202,7 @@ to the next command, never a closure waiting on a reply:
 | go | navigate, reload, or move through the history; `Done` once the navigation commits: the load event for a new document, the same-document event for one that stays |
 | find | the accessibility nodes matching the role and the name, under the scope or the document; their properties; their boxes, if asked |
 | await | a find, again every `Limits::poll`, until the expectation holds (`Met`) or `within` passes (`Missed`) |
-| press | the node scrolled into view; its box's centre; refused `Hidden` without a box, `Disabled` if its accessibility node says so, `Covered` if the hit test at that point finds something outside it; then the mouse moved, pressed and released there |
+| press | the node scrolled into view; its box's centre; layout metrics turn the viewport point into document coordinates for the hit test; refused `Hidden` without a box, `Disabled` if its accessibility node says so, `Covered` if the hit test at that point finds something outside it; then the mouse moved, pressed and released at the viewport point |
 | type | the node focused; the text inserted |
 | compose | the node focused; a composition set and left open, which a later `Type` commits |
 | key | the key down and up, with the text it makes |
