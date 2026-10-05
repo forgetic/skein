@@ -426,3 +426,120 @@ fn memory_anthropic_call(owner: u64) -> skein_llm::Call {
     input.prompt.max_output_tokens = Some(1024);
     input
 }
+
+#[test]
+fn opaque_envelope_and_extended_thinking_transit_fit_counted_bounds() {
+    for bytes in [32_u32, 2048] {
+        let mut bounds = limits();
+        bounds.dialect.opaque_bytes = bytes;
+        bounds.dialect.string_bytes = bytes.max(4096);
+        bounds.dialect.document_bytes = 8192;
+        let metadata = format!(
+            r#"{{"type":"thinking","thinking":"{}","signature":"s","extension":{{"signed":true}}}}"#,
+            "x".repeat(usize::try_from(bytes.saturating_sub(96)).expect("bounded payload"))
+        );
+        let replay = skein_llm::Replay {
+            provider: skein_llm::Provider::Anthropic,
+            value: skein_llm::Json::from_bytes(metadata.as_bytes(), &bounds.dialect)
+                .expect("bounded extended opaque value"),
+        };
+        let bound = skein_llm::replay_worst_case(&bounds.dialect).expect("checked replay transit bound");
+        let span = Span::start();
+        let encoded = replay.to_bytes(&bounds.dialect);
+        match encoded {
+            Ok(encoded) => {
+                let decoded =
+                    skein_llm::Replay::from_bytes(&encoded, &bounds.dialect).expect("complete envelope restores");
+                assert_eq!(decoded, replay, "counted transit preserves every extension");
+                let grown = span.end();
+                assert!(
+                    grown.peak <= i64::try_from(bound).expect("bounded signed comparison"),
+                    "replay transit peak {} exceeds {bound}",
+                    grown.peak
+                );
+                drop(decoded);
+                drop(encoded);
+            }
+            Err(skein_llm::Error::Limit) => {
+                let grown = span.end();
+                assert!(
+                    grown.peak <= i64::try_from(bound).expect("bounded signed comparison"),
+                    "refused envelope peak {} exceeds {bound}",
+                    grown.peak
+                );
+            }
+            Err(skein_llm::Error::Invalid | skein_llm::Error::Unsupported) => panic!("fixture metadata is valid"),
+        }
+    }
+}
+
+#[test]
+fn actual_scripted_byte_peer_and_client_fit_the_composed_heap_envelope() {
+    use skein_fake_llm_domain::api::{Finish, Line, Script, Turn};
+    let mut bounds = limits();
+    // A string at its 4096-byte cap is emitted inside a larger JSON event and
+    // a `data: ` line. Admit the entire document plus its six framing bytes.
+    bounds.sse.line = bounds.dialect.document_bytes.checked_add(6).expect("bounded data-line framing");
+    let peer = skein_llm_world::fake::limits(&bounds);
+    let config = skein_llm_world::fake::config();
+    let core = client::worst_case(&bounds)
+        .expect("client bound")
+        .checked_add(skein_fake_llm_protocol::provider::worst_case(&peer).expect("peer bound"))
+        .expect("composed peer bound")
+        .checked_add(skein_fake_llm_domain::worst_case(&config).expect("script domain bound"))
+        .expect("composed domain bound");
+    // The independent world owns two 32-KiB intakes, exact wire tapes and
+    // observation copies. They are separate from protocol-owned allocations.
+    let external = 4_u64 * 32768 + 8 * u64::from(bounds.dialect.document_bytes) + 64 * 1024;
+    let mut input = call(1);
+    input.prompt.instructions = b"maximum-script".as_slice().into();
+    let scripts = Box::new([Script {
+        cue: b"maximum-script".as_slice().into(),
+        turns: Box::new([Turn {
+            lines: Box::new([Line::Text {
+                text: vec![b'x'; usize::try_from(bounds.dialect.string_bytes).expect("bounded maximum answer")].into(),
+            }]),
+            finish: Finish::Stop,
+            tokens: 1000,
+        }]),
+    }]);
+    let span = Span::start();
+    let mut world = skein_llm_world::fake::Exchange::new(input, bounds, scripts);
+    world.start();
+    world.run();
+    let grown = span.end();
+    let bound = core.checked_add(external).expect("checked world-owned envelope");
+    assert!(
+        grown.peak <= i64::try_from(bound).expect("bounded comparison"),
+        "composed actual Client/peer peak {} exceeds {bound}",
+        grown.peak
+    );
+    assert_eq!(world.queries.len(), 1, "maximum payload reached actual peer");
+    assert!(
+        world.seen.iter().any(|event| matches!(event, client::Event::Completed { .. })),
+        "maximum payload reached actual Client terminal: {:?}",
+        world.seen
+    );
+    let actual: Vec<_> = world
+        .seen
+        .iter()
+        .filter_map(|event| match event {
+            client::Event::Completed { completion, .. } => Some(completion),
+            client::Event::Block { .. }
+            | client::Event::Delta { .. }
+            | client::Event::Failed { .. }
+            | client::Event::Cancelled { .. }
+            | client::Event::Reusable
+            | client::Event::Close
+            | client::Event::Closed => None,
+        })
+        .collect();
+    let [completion] = actual.as_slice() else {
+        panic!("exactly one maximum-payload completion");
+    };
+    let [skein_llm::Block::Text { text, .. }] = &*completion.content else {
+        panic!("whole maximum scripted text");
+    };
+    assert_eq!(text.len(), usize::try_from(bounds.dialect.string_bytes).expect("same maximum text cap"));
+    assert!(text.iter().all(|byte| *byte == b'x'), "whole maximum payload was conveyed");
+}

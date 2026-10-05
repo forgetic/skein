@@ -6,10 +6,36 @@ use skein_lib::{List, Queue, Wall, bytes};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum BlockStart {
-    Text { text: Box<[u8]> },
-    ToolCall { id: Box<[u8]>, name: Box<[u8]>, input: Box<[u8]> },
-    Thinking { text: Box<[u8]>, signature: Box<[u8]> },
-    Redacted { value: Json },
+    Text {
+        text: Box<[u8]>,
+    },
+    ToolCall {
+        id: Box<[u8]>,
+        name: Box<[u8]>,
+        input: Box<[u8]>,
+    },
+    /// Started signed thinking; the complete bounded provider head survives deltas.
+    Thinking {
+        /// Initial visible text, followed by subsequent thinking fragments.
+        text: Box<[u8]>,
+        /// Initial signature bytes, followed by signature fragments.
+        signature: Box<[u8]>,
+        /// Whole native object, including uninterpreted provider extension fields.
+        /// Its type is `thinking`, its required thinking text matches `text`, and
+        /// its optional signature matches `signature` (absence means empty).
+        /// The decoder replaces only thinking/signature values when the block closes.
+        head: Json,
+    },
+    Redacted {
+        value: Json,
+    },
+    /// Whole provider-owned object of an unknown nonempty assistant block kind.
+    /// Known text/tool/thinking kinds cannot masquerade as this opaque variant.
+    /// No deltas or effects are inferred for an unknown kind.
+    Opaque {
+        /// Complete bounded native object, including nested proof/extension data.
+        value: Json,
+    },
 }
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Delta {
@@ -60,8 +86,8 @@ pub const MAX_OUT: u32 = 3;
 enum Active {
     Text { text: List<u8> },
     ToolCall { id: Box<[u8]>, name: Box<[u8]>, input: List<u8>, fragmented: bool, too_large: bool },
-    Thinking { text: List<u8>, signature: List<u8> },
-    Redacted { bytes: Box<[u8]> },
+    Thinking { text: List<u8>, signature: List<u8>, head: Json },
+    Opaque { bytes: Box<[u8]> },
 }
 /// Messages emits one content block at a time, in increasing index order.
 /// Completed blocks are emitted immediately; signed and redacted thinking
@@ -241,13 +267,18 @@ impl StreamDecoder {
                 }
                 Ok(Active::ToolCall { id, name, input: value, fragmented: false, too_large })
             }
-            BlockStart::Thinking { text, signature } => {
-                self.reserve_received(text.len().saturating_add(signature.len()), limits)?;
+            BlockStart::Thinking { text, signature, head } => {
+                let head = thinking_head(&head, &text, &signature, limits)?;
+                let serialized = head.to_bytes(limits)?;
+                if serialized.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
+                    return Err(DecodeError::TooLarge);
+                }
+                self.reserve_received(serialized.len(), limits)?;
                 let mut value = List::with_capacity(limits.opaque_bytes);
                 let mut signed = List::with_capacity(limits.opaque_bytes);
                 append(&mut value, &text)?;
                 append(&mut signed, &signature)?;
-                Ok(Active::Thinking { text: value, signature: signed })
+                Ok(Active::Thinking { text: value, signature: signed, head })
             }
             BlockStart::Redacted { value } => {
                 validate_redacted(value.as_tokens())?;
@@ -256,7 +287,17 @@ impl StreamDecoder {
                     return Err(DecodeError::TooLarge);
                 }
                 self.reserve_received(data.len(), limits)?;
-                Ok(Active::Redacted { bytes: data })
+                Ok(Active::Opaque { bytes: data })
+            }
+            BlockStart::Opaque { value } => {
+                let value = Json::from_tokens(value.as_tokens(), limits)?;
+                validate_opaque(value.as_tokens())?;
+                let data = value.to_bytes(limits)?;
+                if data.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
+                    return Err(DecodeError::TooLarge);
+                }
+                self.reserve_received(data.len(), limits)?;
+                Ok(Active::Opaque { bytes: data })
             }
         }
     }
@@ -295,7 +336,7 @@ impl StreamDecoder {
             }
             (Active::Thinking { signature, .. }, Delta::Signature { text }) => append(signature, &text)?,
             (
-                Active::Text { .. } | Active::ToolCall { .. } | Active::Thinking { .. } | Active::Redacted { .. },
+                Active::Text { .. } | Active::ToolCall { .. } | Active::Thinking { .. } | Active::Opaque { .. },
                 Delta::Text { .. } | Delta::Arguments { .. } | Delta::Thinking { .. } | Delta::Signature { .. },
             ) => return Err(DecodeError::Malformed),
         }
@@ -317,6 +358,21 @@ impl StreamDecoder {
         out.push(Output::Failed { failure, detail: clip_detail(&detail, self.detail_bytes) });
     }
 }
+
+pub(super) fn thinking_head(head: &Json, text: &[u8], signature: &[u8], limits: &Limits) -> Result<Json, DecodeError> {
+    let head = Json::from_tokens(head.as_tokens(), limits)?;
+    let tokens = head.as_tokens();
+    if text_ref(tokens, b"type")? != b"thinking" {
+        return Err(DecodeError::WrongType);
+    }
+    if text_ref(tokens, b"thinking")? != text || optional_text(tokens, b"signature")?.as_ref() != signature {
+        return Err(DecodeError::Malformed);
+    }
+    if head.to_bytes(limits)?.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
+        return Err(DecodeError::TooLarge);
+    }
+    Ok(head)
+}
 fn append(out: &mut List<u8>, data: &[u8]) -> Result<(), DecodeError> {
     if data.len() > usize::try_from(out.room()).expect("u32 fits usize") {
         return Err(DecodeError::TooLarge);
@@ -332,30 +388,62 @@ fn finish(active: Active, limits: &Limits) -> Result<Part, DecodeError> {
         Active::ToolCall { id, name, input, too_large, .. } => {
             Ok(Part::ToolCall { id, name, input: input.into_boxed(), too_large })
         }
-        Active::Thinking { text, signature } => {
+        Active::Thinking { text, signature, head } => {
             if signature.is_empty() {
                 return Err(DecodeError::Malformed);
             }
-            let tokens = [
-                Token::ObjectStart,
-                Token::Key(bytes::copy_of(b"type")),
-                Token::String(bytes::copy_of(b"thinking")),
-                Token::Key(bytes::copy_of(b"thinking")),
-                Token::String(text.into_boxed()),
-                Token::Key(bytes::copy_of(b"signature")),
-                Token::String(signature.into_boxed()),
-                Token::ObjectEnd,
-            ];
-            let value = Json::from_tokens(&tokens, limits)?;
-            let data = value.to_bytes(limits)?;
-            if data.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                return Err(DecodeError::TooLarge);
-            }
-            Ok(Part::Opaque { bytes: data })
+            let bounded = skein_json::writer::Limits {
+                depth: limits.depth,
+                length: limits.opaque_bytes.min(limits.document_bytes),
+            };
+            let mut measure = skein_json::writer::Encoder::measure(&bounded);
+            write_thinking(&mut measure, &head, text.as_slice(), signature.as_slice());
+            let len = crate::openai::measured(measure)?;
+            let mut out = skein_json::writer::Encoder::write(len, &bounded);
+            write_thinking(&mut out, &head, text.as_slice(), signature.as_slice());
+            Ok(Part::Opaque { bytes: out.finish() })
         }
-        Active::Redacted { bytes } => Ok(Part::Opaque { bytes }),
+        Active::Opaque { bytes } => Ok(Part::Opaque { bytes }),
     }
 }
+pub(super) fn write_thinking(out: &mut skein_json::writer::Encoder, head: &Json, text: &[u8], signature: &[u8]) {
+    out.object_start();
+    let tokens = head.as_tokens();
+    let mut skip: usize = 1;
+    for (at, token) in tokens.iter().enumerate() {
+        if at < skip {
+            continue;
+        }
+        match token {
+            Token::Key(key) => {
+                let start = at.checked_add(1).expect("bounded token offset");
+                let end = json::span(tokens, start).expect("admitted provider envelope");
+                skip = end;
+                if key.as_ref() != b"thinking" && key.as_ref() != b"signature" {
+                    out.key(key);
+                    for token in tokens.get(start..end).expect("admitted value") {
+                        out.token(token);
+                    }
+                }
+            }
+            Token::ObjectEnd => break,
+            Token::ObjectStart
+            | Token::ArrayStart
+            | Token::ArrayEnd
+            | Token::String(_)
+            | Token::Number(_)
+            | Token::True
+            | Token::False
+            | Token::Null => unreachable!("object values already consumed"),
+        }
+    }
+    out.key(b"thinking");
+    out.string(text);
+    out.key(b"signature");
+    out.string(signature);
+    out.object_end();
+}
+
 fn merge_usage(usage: &mut Usage, patch: UsagePatch) {
     if let Some(value) = patch.input_tokens {
         usage.input_tokens = value;
@@ -405,12 +493,16 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
                 b"thinking" => BlockStart::Thinking {
                     text: text(block, b"thinking")?,
                     signature: optional_text(block, b"signature")?,
+                    head: Json::from_tokens(block, limits)?,
                 },
                 b"redacted_thinking" => {
                     validate_redacted(block)?;
                     BlockStart::Redacted { value: Json::from_tokens(block, limits)? }
                 }
-                _ => return Err(DecodeError::WrongType),
+                _ => {
+                    validate_opaque(block)?;
+                    BlockStart::Opaque { value: Json::from_tokens(block, limits)? }
+                }
             };
             Ok(Event::Added { index: index(tokens)?, block })
         }
@@ -446,21 +538,19 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
         _ => Ok(Event::Unknown),
     }
 }
-fn validate_redacted(tokens: &[Token]) -> Result<(), DecodeError> {
+pub(super) fn validate_redacted(tokens: &[Token]) -> Result<(), DecodeError> {
     if text_ref(tokens, b"type")? != b"redacted_thinking" || text_ref(tokens, b"data")?.is_empty() {
         return Err(DecodeError::Malformed);
     }
-    // Replay admission accepts precisely this schema, so no provider fields
-    // may be silently dropped between receipt and replay.
-    for token in tokens {
-        if let Token::Key(name) = token
-            && name.as_ref() != b"type"
-            && name.as_ref() != b"data"
-        {
-            return Err(DecodeError::WrongType);
-        }
-    }
     Ok(())
+}
+
+pub(super) fn validate_opaque(tokens: &[Token]) -> Result<(), DecodeError> {
+    match text_ref(tokens, b"type")? {
+        b"" => Err(DecodeError::Malformed),
+        b"text" | b"tool_use" | b"tool_result" | b"thinking" | b"redacted_thinking" => Err(DecodeError::WrongType),
+        _ => Ok(()),
+    }
 }
 pub fn decode_error(value: &Json, limits: &Limits) -> Result<ProviderError, DecodeError> {
     crate::openai::decode_error(value, limits)
@@ -505,5 +595,6 @@ pub fn decoder_worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(u64::from(limits.input_bytes))?
         .checked_add(u64::from(limits.opaque_bytes).checked_mul(4)?)?
         .checked_add(u64::from(limits.string_bytes).checked_mul(2)?)?
-        .checked_add(List::<Token>::worst_case(limits.tokens)?)
+        .checked_add(List::<Token>::worst_case(limits.tokens)?.checked_mul(2)?)?
+        .checked_add(u64::from(limits.document_bytes).checked_mul(2)?)
 }

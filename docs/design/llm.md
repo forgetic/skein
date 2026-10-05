@@ -28,11 +28,41 @@ reasoning effort, an optional cache key and optional output-token cap. A
 message holds ordered text, refusals, tool calls, tool results and reasoning
 blocks. Provider-owned
 `Replay` metadata travels with the block it belongs to and is tagged with
-its provider. A replay value for a different provider is refused. Generic
-tool calls retain raw JSON argument text; the application validates and
+its provider. `Replay` can be retained as a bounded durable envelope without
+exposing provider fields to a domain. The exported seven-byte header is
+additional to the raw opaque cap; `replay_bytes` and `replay_worst_case`
+state complete receiver/transit bounds. A replay value for a different provider
+is refused. Native tool calls keep the application call ID and provider item
+ID in separate owned fields. Both are bounded opaque strings: pipes, quotes and backslashes
+are admitted without imposing an additional identity grammar. The call ID
+pairs the exact result; the item ID moves into complete replay metadata and
+returns unchanged on a continued request. Neither field is joined or split.
+The native answer budget charges both ID payloads, name and input. Its slot
+bound uses the enlarged `Part`/`Opened` wrapper size, with active ID/kind bytes
+and admitted ready payloads priced simultaneously. Actual Client controls
+complete pipe/escaped IDs, restore durable metadata and observe exact continuation
+pairing. An independent observer rejects altered identity evidence. The controls
+reach both maximum ID payloads under the installed counting allocator.
+
+Generic tool calls retain raw JSON argument text; the application validates and
 translates it into its own tool types before execution. Replay admission
 requires a valid JSON object for arguments. Schemas are bounded JSON
 values, independent of the application's tool vocabulary.
+
+Every emitted replay also fits the complete serialized raw opaque cap, including
+synthesized text/refusal item IDs, phase fields and tool item IDs. An oversized
+native metadata value produces actual Client Failure::Limit before a completed
+block or Completed terminal, with lower settlement still owed. An admitted value
+at that exact cap fits its exported durable envelope without dropping metadata.
+JSON admission measures the complete escaped metadata under the smaller document
+and opaque cap, without allocating a serialized buffer just to count it. Actual
+Client controls cover exact/one-over escaped text, refusal and tool metadata.
+
+`Json`, `DocumentLimits` and `DocumentError` expose bounded document admission
+without naming a wire dialect. `document_error` retains receiving overflow as
+`Error::Limit` and malformed grammar, missing fields or wrong types as
+`Error::Invalid`. It reuses the Client's classification; it starts no call,
+emits no terminal and supplies no retry policy.
 
 `Client::prepare` validates and measures the whole request before allocating
 its exact body. Admission is fallible and does not touch the stream. An
@@ -103,7 +133,8 @@ replay. The subscription route does not receive `max_output_tokens` or
 sampling fields, and admission rejects an explicit output-token cap on Codex.
 Anthropic sends `stream:true`, native `messages`, tool `input_schema`, and
 `max_tokens` (4096 by default). Adaptive thinking maps explicit effort values;
-its cache-affinity key is unsupported. Signed/redacted thinking is preserved
+its cache-affinity key is unsupported. `Prompt::output_ceiling` configures the
+dialect-supported option while preserving local output bounds for Codex. Signed/redacted thinking is preserved
 as native opaque replay, tool names/IDs remain unchanged, and tool results
 retain their native `is_error`. The bounded decoder verifies message/block
 ordering, delta types, cumulative usage patches and completion at `message_stop`.
@@ -123,3 +154,10 @@ water with `worst_case`. Fuzzy cases live in the separate nextest profile.
 Archived Temper/Tongs transcripts retain their provenance; synthetic cases
 are labelled as such. Live subscription admission is not implied by offline
 tests and requires a caller-provided current credential.
+
+The [shared scripted peer](fake-llm.md) composes an independent lib-only
+script domain with native bounded byte codecs. Applications supply schemas,
+body menus, invalid inputs and scripts. Signed/redacted replay preserves all
+bounded provider extension fields; known fields are validated without dropping
+unknown opaque data. Historical Anthropic captures retain provenance and
+flow through the actual Client independently of synthetic scripts.

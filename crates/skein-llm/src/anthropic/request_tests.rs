@@ -124,16 +124,14 @@ fn effort_is_explicit_and_unsupported_fields_are_rejected() {
 }
 
 #[test]
-fn malformed_unsigned_unknown_and_duplicate_reasoning_cannot_replay() {
+fn malformed_unsigned_and_duplicate_reasoning_cannot_replay() {
     for value in [
         br#"{"type":"thinking","thinking":"a"}"#.as_slice(),
         br#"{"type":"thinking","thinking":"a","signature":""}"#,
-        br#"{"type":"thinking","thinking":"a","signature":"s","unknown":"discarded"}"#,
         br#"{"type":"thinking","thinking":"a","signature":"s","signature":"t"}"#,
         br#"{"type":"thinking","thinking":1,"signature":"s"}"#,
         br#"{"type":"redacted_thinking","data":""}"#,
-        br#"{"type":"redacted_thinking","data":"opaque","unknown":null}"#,
-        br#"{"type":"reasoning","encrypted_content":"other-provider"}"#,
+        br#"{"type":"text","text":"cannot masquerade as opaque"}"#,
     ] {
         assert_eq!(measure_request(&prompt(Role::Assistant, reasoning(value)), &LIMITS), Err(Error::Invalid));
     }
@@ -312,4 +310,50 @@ fn explicit_identity_blocks_remain_subject_to_instruction_and_wire_limits() {
     assert_eq!(measure_request(&request, &limits), Err(Error::Limit));
     request.instructions = super::identity::instructions(&[0xff]).expect("owned instructions");
     assert_eq!(measure_request(&request, &LIMITS), Err(Error::Invalid));
+}
+
+#[test]
+fn opaque_extension_fields_survive_native_replay_and_bound_admission() {
+    for value in [
+        br#"{"type":"thinking","thinking":"a","signature":"s","provider_hint":{"signed":true}}"#.as_slice(),
+        br#"{"type":"redacted_thinking","data":"opaque","provider_hint":[1,null]}"#,
+    ] {
+        let input = prompt(Role::Assistant, reasoning(value));
+        let wire = encode_request(&input, &LIMITS).expect("bounded replay with provider extension");
+        assert!(bytes::find(&wire, value).is_some(), "the complete opaque value survives");
+        let limits = openai::Limits { opaque_bytes: 1, ..LIMITS };
+        assert_eq!(measure_request(&input, &limits), Err(Error::Limit));
+    }
+}
+
+#[test]
+fn peer_request_admits_native_core_before_corrupted_controls() {
+    let good = r#"{"model":"model","stream":true,"max_tokens":32,"tools":[{"name":"tool","input_schema":{"type":"object","extension":[null,true]}}],"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"tool","input":{"whole":1}}]}],"unknown_deployment_option":{"untouched":true}}"#;
+    let value = Json::from_bytes(good.as_bytes(), &LIMITS).expect("positive native document");
+    let decoded = super::decode_request(&value, &LIMITS).expect("native core admitted");
+    assert_eq!(decoded.model.as_ref(), b"model");
+    assert_eq!(decoded.tools.len(), 1);
+    assert!(encode_request(&decoded, &LIMITS).is_ok(), "peer uses actual native core admission");
+    for (old, replacement) in [
+        ("\"stream\":true,", ""),
+        ("\"stream\":true", "\"stream\":false"),
+        ("\"model\":\"model\"", "\"model\":\"\""),
+        ("\"input_schema\":{\"type\":\"object\",\"extension\":[null,true]}", "\"input_schema\":[]"),
+        ("\"name\":\"tool\"", "\"name\":\"\""),
+        ("\"id\":\"call_1\"", "\"id\":\"\""),
+        (
+            "\"messages\":[{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"tool\",\"input\":{\"whole\":1}}]}]",
+            "\"messages\":[]",
+        ),
+        (
+            "\"content\":[{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"tool\",\"input\":{\"whole\":1}}]",
+            "\"content\":[]",
+        ),
+        ("\"max_tokens\":32", "\"max_tokens\":0"),
+    ] {
+        let wire = good.replace(old, replacement);
+        assert_ne!(wire.as_bytes(), good.as_bytes(), "negative actually changes native core");
+        let value = Json::from_bytes(wire.as_bytes(), &LIMITS).expect("corruption retains JSON syntax");
+        assert!(super::decode_request(&value, &LIMITS).is_err(), "native core corruption {old} rejected");
+    }
 }

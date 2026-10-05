@@ -61,11 +61,18 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(writer::worst_case(&limits.writer_limits())?)?
         .checked_add(crate::openai::response::decoder_worst_case(limits)?)
 }
+/// A bounded document entrance refused its grammar, shape or receiving limits.
+/// These errors can arise during local admission or an active response decode.
+/// See `docs/design/llm.md`, Vocabulary and ownership.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum DecodeError {
+    /// Tokens, bytes or required framing do not form the admitted grammar.
     Malformed,
+    /// A required field is absent from an otherwise bounded document.
     Missing,
+    /// A field or root value has a type the entrance cannot accept.
     WrongType,
+    /// Input, tokens, nesting or measured output exceed caller-supplied limits.
     TooLarge,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

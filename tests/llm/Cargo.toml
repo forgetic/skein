@@ -9,7 +9,10 @@ publish.workspace = true
 [dependencies]
 skein-lib.workspace = true
 skein-http.workspace = true
+skein-json.workspace = true
 skein-llm.workspace = true
+skein-fake-llm-domain.workspace = true
+skein-fake-llm-protocol.workspace = true
 
 [dev-dependencies]
 skein-heap.workspace = true

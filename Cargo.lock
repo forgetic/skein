@@ -230,6 +230,24 @@ name = "skein-fake-checkout"
 version = "0.0.0"
 
 [[package]]
+name = "skein-fake-llm-domain"
+version = "0.0.0"
+dependencies = [
+ "skein-lib",
+]
+
+[[package]]
+name = "skein-fake-llm-protocol"
+version = "0.0.0"
+dependencies = [
+ "skein-fake-llm-domain",
+ "skein-http",
+ "skein-json",
+ "skein-lib",
+ "skein-llm",
+]
+
+[[package]]
 name = "skein-fake-machine"
 version = "0.0.0"
 dependencies = [
@@ -349,8 +367,11 @@ name = "skein-llm-world"
 version = "0.0.0"
 dependencies = [
  "rustls",
+ "skein-fake-llm-domain",
+ "skein-fake-llm-protocol",
  "skein-heap",
  "skein-http",
+ "skein-json",
  "skein-lib",
  "skein-llm",
 ]

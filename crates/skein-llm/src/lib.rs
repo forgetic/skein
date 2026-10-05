@@ -12,10 +12,17 @@ pub mod anthropic;
 pub mod client;
 mod dialect;
 pub mod openai;
+mod replay;
 mod translate;
 mod types;
 
-pub use openai::Json;
+/// Bounded document admission errors, independent of the configured wire dialect.
+/// Callers use `document_error` to retain limit versus invalid-input refusal.
+/// See `docs/design/llm.md`, Vocabulary and ownership.
+pub use openai::DecodeError as DocumentError;
+pub use openai::{Json, Limits as DocumentLimits};
+pub use replay::{REPLAY_HEADER_BYTES, replay_bytes, replay_worst_case};
+pub use translate::decode as document_error;
 pub use types::{
     Block, Call, Completion, Credential, Delta, Endpoint, Error, Failure, Message, Prompt, Provider, Replay, Role,
     Stop, Tool, Usage,

@@ -4,7 +4,7 @@ use crate::openai::{
 use alloc::boxed::Box;
 use core::mem;
 use skein_json::{Token, writer::Encoder};
-use skein_lib::{List, Queue, Wall, Writer, bytes};
+use skein_lib::{List, Queue, Wall, bytes};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Item {
@@ -28,9 +28,31 @@ pub enum Event {
 }
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Part {
-    Text { id: Box<[u8]>, phase: Option<Box<[u8]>>, text: Box<[u8]>, refusal: bool },
-    Opaque { bytes: Box<[u8]> },
-    ToolCall { id: Box<[u8]>, name: Box<[u8]>, input: Box<[u8]>, too_large: bool },
+    Text {
+        id: Box<[u8]>,
+        phase: Option<Box<[u8]>>,
+        text: Box<[u8]>,
+        refusal: bool,
+    },
+    Opaque {
+        bytes: Box<[u8]>,
+    },
+    /// The native decoder delivers this complete function call in `Output::Part`.
+    /// The Client translates it before its eventual call terminal. IDs are
+    /// admitted JSON strings, never packed into a delimiter-separated string.
+    /// See `docs/design/llm.md`, Vocabulary and ownership.
+    ToolCall {
+        /// Exact identity paired with the application's result, under `Limits::string_bytes`.
+        call_id: Box<[u8]>,
+        /// Exact provider item identity retained for replay, under `Limits::string_bytes`.
+        item_id: Box<[u8]>,
+        /// Provider-written name under `Limits::string_bytes`; the caller checks its declaration.
+        name: Box<[u8]>,
+        /// Complete raw argument text under `Limits::input_bytes`, or empty when `too_large` is true.
+        input: Box<[u8]>,
+        /// Whether the raw argument text exceeded the receiving input cap.
+        too_large: bool,
+    },
 }
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Output {
@@ -318,7 +340,9 @@ fn part_size(part: &Part) -> usize {
             id.len().saturating_add(phase).saturating_add(text.len())
         }
         Part::Opaque { bytes } => bytes.len(),
-        Part::ToolCall { id, name, input, .. } => id.len().saturating_add(name.len()).saturating_add(input.len()),
+        Part::ToolCall { call_id, item_id, name, input, .. } => {
+            call_id.len().saturating_add(item_id.len()).saturating_add(name.len()).saturating_add(input.len())
+        }
     }
 }
 fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits) -> Result<Prepared, DecodeError> {
@@ -330,17 +354,20 @@ fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits
             Ok(Prepared { part: Part::Text { id, phase, text, refusal }, tool: false, refusal })
         }
         Item::FunctionCall { id, call_id, name, arguments } => {
-            if expected_id != id.as_ref()
-                || expected_kind != b"function_call"
-                || bytes::find(&call_id, b"|").is_some()
-                || bytes::find(&id, b"|").is_some()
-            {
+            let cap = usize::try_from(limits.string_bytes).expect("u32 fits usize");
+            if id.len() > cap || call_id.len() > cap || name.len() > cap {
+                return Err(DecodeError::TooLarge);
+            }
+            if expected_id != id.as_ref() || expected_kind != b"function_call" {
                 return Err(DecodeError::Malformed);
             }
-            let merged = joined_id(&call_id, &id)?;
             let too_large = arguments.len() > usize::try_from(limits.input_bytes).expect("u32 fits usize");
             let input = if too_large { bytes::copy_of(b"") } else { arguments };
-            Ok(Prepared { part: Part::ToolCall { id: merged, name, input, too_large }, tool: true, refusal: false })
+            Ok(Prepared {
+                part: Part::ToolCall { call_id, item_id: id, name, input, too_large },
+                tool: true,
+                refusal: false,
+            })
         }
         Item::Opaque { value } => {
             let tokens = value.as_tokens();
@@ -358,19 +385,6 @@ fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits
     }
 }
 
-fn joined_id(call_id: &[u8], item_id: &[u8]) -> Result<Box<[u8]>, DecodeError> {
-    let len = call_id
-        .len()
-        .checked_add(1)
-        .ok_or(DecodeError::TooLarge)?
-        .checked_add(item_id.len())
-        .ok_or(DecodeError::TooLarge)?;
-    let mut writer = Writer::new(len);
-    writer.put(call_id).expect("measured");
-    writer.put(b"|").expect("measured");
-    writer.put(item_id).expect("measured");
-    Ok(writer.finish())
-}
 pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError> {
     let tokens = value.as_tokens();
     let kind = json::text_ref(json::value_at(tokens, json::required(tokens, b"type")?)?)?;

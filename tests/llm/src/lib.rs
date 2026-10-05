@@ -282,3 +282,6 @@ impl World {
         );
     }
 }
+
+/// Shared actual-client/byte-peer world; applications supply only schemas and scripts.
+pub mod fake;

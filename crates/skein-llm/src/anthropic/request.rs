@@ -24,7 +24,7 @@ pub fn measure_request(prompt: &Prompt, limits: &openai::Limits) -> Result<u32, 
     measured(out)
 }
 
-fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), Error> {
+pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), Error> {
     let count = usize::try_from(limits.parts).expect("u32 fits usize");
     if prompt.model.is_empty() || prompt.messages.is_empty() || prompt.max_output_tokens == Some(0) {
         return Err(Error::Invalid);
@@ -144,35 +144,22 @@ fn identifier(value: &[u8], maximum: usize) -> Result<(), Error> {
 fn validate_reasoning(value: &Json) -> Result<(), Error> {
     let tokens = value.as_tokens();
     let kind = field_text(tokens, b"type")?;
-    let fields: &[&[u8]] = match kind {
+    match kind {
         b"thinking" => {
             let _thinking = field_text(tokens, b"thinking")?;
             if field_text(tokens, b"signature")?.is_empty() {
                 return Err(Error::Invalid);
             }
-            &[b"type", b"thinking", b"signature"]
         }
-        b"redacted_thinking" => {
-            if field_text(tokens, b"data")?.is_empty() {
-                return Err(Error::Invalid);
-            }
-            &[b"type", b"data"]
-        }
-        _ => return Err(Error::Invalid),
-    };
-    for token in tokens {
-        match token {
-            Token::Key(name) => {
-                if !fields.contains(&name.as_ref()) {
-                    return Err(Error::Invalid);
-                }
-            }
-            Token::ObjectStart | Token::ObjectEnd | Token::String(_) => {}
-            Token::ArrayStart | Token::ArrayEnd | Token::Number(_) | Token::True | Token::False | Token::Null => {
-                return Err(Error::Invalid);
-            }
-        }
+        b"redacted_thinking" if field_text(tokens, b"data")?.is_empty() => return Err(Error::Invalid),
+        b"" | b"text" | b"tool_use" | b"tool_result" => return Err(Error::Invalid),
+        _ => {}
     }
+    // Unknown provider-owned extension fields remain in the bounded JSON value.
+    // Field access checks the required known fields and rejects their duplicate
+    // names. Collector checks structure, UTF-8 and the supplied limits; unknown
+    // extension keys, including their duplicates, stay uninterpreted.
+
     Ok(())
 }
 

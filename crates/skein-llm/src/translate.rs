@@ -336,23 +336,16 @@ pub(crate) fn part(value: openai::Part, limits: &openai::Limits) -> Result<Block
             };
             Ok(Block::Reasoning { replay: Replay { provider: Provider::OpenAiCodex, value } })
         }
-        openai::Part::ToolCall { id, name, input, too_large } => {
+        openai::Part::ToolCall { call_id, item_id, name, input, too_large } => {
             if too_large {
                 return Err(Error::Limit);
             }
-            let (call_id, replay) = match bytes::find(&id, b"|") {
-                Some(at) => {
-                    let item_at = at.checked_add(1).ok_or(Error::Limit)?;
-                    let item_id = id.get(item_at..).ok_or(Error::Invalid)?;
-                    let mut tokens = List::with_capacity(4);
-                    push(&mut tokens, Token::ObjectStart)?;
-                    push(&mut tokens, Token::Key(bytes::copy_of(b"item_id")))?;
-                    push(&mut tokens, Token::String(bytes::copy_of(item_id)))?;
-                    push(&mut tokens, Token::ObjectEnd)?;
-                    (bytes::copy_of(id.get(..at).ok_or(Error::Invalid)?), Some(replay(tokens.as_slice(), limits)?))
-                }
-                None => (id, None),
-            };
+            let mut tokens = List::with_capacity(4);
+            push(&mut tokens, Token::ObjectStart)?;
+            push(&mut tokens, Token::Key(bytes::copy_of(b"item_id")))?;
+            push(&mut tokens, Token::String(item_id))?;
+            push(&mut tokens, Token::ObjectEnd)?;
+            let replay = Some(replay(tokens.as_slice(), limits)?);
             Ok(Block::ToolCall { id: call_id, name, arguments: input, replay })
         }
     }
@@ -364,12 +357,23 @@ fn push(tokens: &mut List<Token>, token: Token) -> Result<(), Error> {
     }
 }
 fn replay(tokens: &[Token], limits: &openai::Limits) -> Result<Replay, Error> {
-    match openai::Json::from_tokens(tokens, limits) {
+    // Synthesized text/refusal/tool metadata must obey the same raw replay
+    // cap as native opaque blocks. Json admission measures escaped bytes
+    // before emission, without another serialized buffer just to count them.
+    let mut bounded = *limits;
+    bounded.document_bytes = bounded.document_bytes.min(bounded.opaque_bytes);
+    match openai::Json::from_tokens(tokens, &bounded) {
         Ok(value) => Ok(Replay { provider: Provider::OpenAiCodex, value }),
         Err(error) => Err(decode(error)),
     }
 }
-pub(crate) const fn decode(error: openai::DecodeError) -> Error {
+
+/// Classifies a bounded document refusal without starting or driving a call.
+/// Callers retain `TooLarge` as `Error::Limit`; malformed grammar, missing
+/// fields and wrong types become `Error::Invalid`. This does not emit a Client
+/// terminal or add retry policy. See `docs/design/llm.md`, Vocabulary and ownership.
+#[must_use]
+pub const fn decode(error: crate::DocumentError) -> Error {
     match error {
         openai::DecodeError::TooLarge => Error::Limit,
         openai::DecodeError::Malformed | openai::DecodeError::Missing | openai::DecodeError::WrongType => {
@@ -377,6 +381,7 @@ pub(crate) const fn decode(error: openai::DecodeError) -> Error {
         }
     }
 }
+
 pub(crate) const fn stop(value: openai::Stop) -> Stop {
     match value {
         openai::Stop::EndTurn => Stop::EndTurn,
@@ -470,7 +475,8 @@ mod tests {
     fn tool_replay_separates_call_and_item_identity() {
         let block = part(
             openai::Part::ToolCall {
-                id: bytes::copy_of(b"call|item"),
+                call_id: bytes::copy_of(b"call"),
+                item_id: bytes::copy_of(b"item"),
                 name: bytes::copy_of(b"read"),
                 input: bytes::copy_of(br#"{"path":"a"}"#),
                 too_large: false,
@@ -526,7 +532,8 @@ mod tests {
     fn malformed_tool_arguments_are_preserved_received_and_rejected_sent() {
         let block = part(
             openai::Part::ToolCall {
-                id: bytes::copy_of(b"call|item"),
+                call_id: bytes::copy_of(b"call"),
+                item_id: bytes::copy_of(b"item"),
                 name: bytes::copy_of(b"read"),
                 input: bytes::copy_of(b"broken"),
                 too_large: false,
