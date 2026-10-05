@@ -2,8 +2,10 @@
 
 use std::mem::size_of;
 
-use skein_fake_llm_domain::api::{Error, Finish, InvalidInput, Line, Menu, Message, Part, Query, Role, Script, Turn};
-use skein_fake_llm_domain::{Domain, Event, MAX_OUT, Request, fire, step, worst_case};
+use skein_fake_llm_domain::api::{
+    Error, Finish, InvalidInput, Line, Menu, Message, Part, Query, Role, Script, ToolSpec, Turn,
+};
+use skein_fake_llm_domain::{Config, Domain, Event, MAX_OUT, Request, fire, step, worst_case};
 use skein_heap::{Counting, Meter};
 use skein_lib::{Duration, Env, Queue, ReplyTo, Time, Token, Wall};
 
@@ -114,4 +116,158 @@ fn exact_joint_menu_script_cap_and_all_delayed_slots_include_empty_part_wrappers
     fire(&mut domain, &env, &mut out);
     let Request::Reply { result, .. } = out.pop().expect("actual refusal terminal");
     assert_eq!(result, Err(Error::ContextTooLong), "empty wrappers count toward answer admission");
+}
+
+#[test]
+fn exact_query_cap_is_accepted_and_one_byte_less_returns_one_actual_refusal() {
+    for fits in [true, false] {
+        let config = caps();
+        let config = Config { query_bytes: config.query_bytes - u32::from(!fits), ..config };
+        let bound = worst_case(&config).expect("checked query-bound control");
+        let mut out = Queue::with_capacity(MAX_OUT);
+        let meter = Meter::new();
+        meter.start();
+        let mut domain = Domain::try_scripted(&config, 7, scripts()).expect("unchanged admitted script");
+        let measured = meter.end();
+        meter.check(measured, bound, &"query-cap control startup");
+        let mut env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: config };
+        meter.start();
+        step(&mut domain, &env, Event::Call { reply_to: ReplyTo::new(Token::new(17)), query: query() }, &mut out);
+        let measured = meter.end();
+        assert!(out.pop().is_none(), "query admission preserves actual delayed settlement");
+        meter.check(measured, bound, &"exact or one-byte-over query admission");
+        assert_eq!(domain.calls(), 1);
+        assert_eq!(domain.next_deadline(), Some(Time::from_nanos(1_000_000_000)));
+        env.now = Time::from_nanos(1_000_000_000);
+        meter.start();
+        fire(&mut domain, &env, &mut out);
+        let measured = meter.end();
+        let Request::Reply { to, result } = out.pop().expect("one actual query terminal");
+        assert_eq!(to.into_token(), Token::new(17));
+        if fits {
+            let answer = result.expect("exact query cap admits the same query");
+            assert_eq!(answer.finish, Finish::Stop);
+            assert_eq!(answer.parts.len(), ITEMS);
+            drop(answer);
+        } else {
+            assert_eq!(result, Err(Error::ContextTooLong), "only the query allowance changed");
+        }
+        assert!(out.pop().is_none(), "one terminal consumes the original reply right");
+        meter.check(measured, bound, &"actual query success or refusal terminal");
+        assert_eq!(domain.next_deadline(), None);
+        domain.reclaim();
+        assert_eq!(domain.calls(), 0);
+        drop(domain);
+        assert_eq!(meter.held(), 0, "query control leaves no retained or transferred ownership");
+    }
+}
+
+#[test]
+fn extreme_call_and_answer_configuration_has_no_representable_memory_bound() {
+    assert!(worst_case(&caps()).is_some(), "ordinary configuration is representable");
+    let config = Config { calls: u32::MAX, answer_bytes: u32::MAX, ..caps() };
+    assert!(worst_case(&config).is_none(), "container and payload accounting must not wrap");
+}
+
+fn tool_scripts() -> Box<[Script]> {
+    Box::new([Script {
+        cue: b"cue".as_slice().into(),
+        turns: Box::new([Turn {
+            lines: (0..2)
+                .map(|_| Line::Call {
+                    name: vec![b'n'; 64].into_boxed_slice(),
+                    arguments: vec![b'a'; 256].into_boxed_slice(),
+                })
+                .collect(),
+            finish: Finish::ToolCalls,
+            tokens: 500,
+        }]),
+    }])
+}
+
+fn tool_menu() -> Menu {
+    Menu { arguments: Box::new([vec![b'a'; 256].into_boxed_slice()]), invalid: Box::new([]) }
+}
+
+#[test]
+fn random_and_scripted_full_and_truncated_tool_scratch_stays_within_the_bound() {
+    for scripted in [false, true] {
+        let config = Config {
+            calls: 2,
+            query_bytes: 4096,
+            script_bytes: 4096,
+            answer_bytes: 2048,
+            tool_rounds: 1,
+            calls_per_answer: 2,
+            ..caps()
+        };
+        let bound = worst_case(&config).expect("checked tool scratch bound");
+        let mut out = Queue::with_capacity(MAX_OUT);
+        let meter = Meter::new();
+        meter.start();
+        let scripts = if scripted { tool_scripts() } else { Box::new([]) };
+        let mut domain = Domain::configured(&config, 7, scripts, tool_menu()).expect("bounded caller tool data");
+        let measured = meter.end();
+        meter.check(measured, bound, &"caller tool script and menu startup");
+        let mut env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: config };
+        for (token, max_tokens) in [(1, 1000), (2, 0)] {
+            meter.start();
+            let mut query = query();
+            query.tools = Box::new([ToolSpec {
+                name: vec![b'n'; 64].into_boxed_slice(),
+                description: Box::new([]),
+                parameters: Box::new([]),
+            }]);
+            query.max_tokens = max_tokens;
+            step(&mut domain, &env, Event::Call { reply_to: ReplyTo::new(Token::new(token)), query }, &mut out);
+            let measured = meter.end();
+            assert!(out.pop().is_none(), "full and truncated tools both await actual fire");
+            meter.check(measured, bound, &"full tool generation and simultaneous truncation scratch");
+        }
+        assert_eq!(domain.calls(), config.calls, "both delayed tool slots are held");
+        env.now = Time::from_nanos(1_000_000_000);
+        for token in 1..=2 {
+            meter.start();
+            fire(&mut domain, &env, &mut out);
+            let measured = meter.end();
+            let Request::Reply { to, result } = out.pop().expect("one actual tool terminal");
+            assert_eq!(to.into_token(), Token::new(token), "actual output preserves its reply right");
+            let answer = result.expect("both full and truncated caller tools are admitted");
+            if token == 1 {
+                assert_eq!(answer.finish, Finish::ToolCalls);
+                assert!((1..=2).contains(&answer.parts.len()));
+                if scripted {
+                    assert_eq!(answer.parts.len(), 2, "both complete scripted calls were generated");
+                }
+                assert!(answer.usage.completion_tokens > 0);
+            } else {
+                assert_eq!(answer.finish, Finish::Length);
+                assert_eq!(answer.parts.len(), 1, "the cut answer retains just its first call");
+                assert_eq!(answer.usage.completion_tokens, 0);
+            }
+            for part in &answer.parts {
+                let Part::ToolCall { id, name, arguments } = part else {
+                    panic!("actual tool-generation path must emit a tool call");
+                };
+                assert!(!id.is_empty(), "generated calls retain their actual identities");
+                assert_eq!(name.as_ref(), &[b'n'; 64]);
+                if token == 1 {
+                    assert_eq!(arguments.as_ref(), &[b'a'; 256], "whole caller bytes reach the full answer");
+                } else {
+                    assert_eq!(arguments.as_ref(), b"aaa", "the cut retains the literal caller prefix");
+                }
+            }
+            drop(answer);
+            assert!(out.pop().is_none(), "each fired call emits only one terminal");
+            meter.check(measured, bound, &"tool output ownership handed to its receiver");
+        }
+        assert_eq!(domain.next_deadline(), None);
+        meter.start();
+        domain.reclaim();
+        let measured = meter.end();
+        meter.check(measured, bound, &"tool slots reclaimed after actual outputs");
+        assert_eq!(domain.calls(), 0);
+        drop(domain);
+        assert_eq!(meter.held(), 0, "caller scripts, menus, scratch and transferred tools are all released");
+    }
 }
