@@ -29,7 +29,7 @@ impl Default for Limits {
             pages: 16,
             ops: 64,
             commands: 128,
-            message: 2_097_152,
+            message: 4_194_304,
             command: 65_536,
             matches: 128,
             text: 4096,

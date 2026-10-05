@@ -171,6 +171,23 @@ impl<'a> Value<'a> {
         signed(self.bytes)
     }
 
+    /// A decimal CSS coordinate with its fractional part dropped toward zero.
+    /// Chromium's coordinate fields are decimals rather than exponents.
+    #[must_use]
+    pub fn whole_pixels(self) -> Option<i64> {
+        let mut end = 0_usize;
+        for byte in self.bytes {
+            if *byte == b'.' {
+                break;
+            }
+            if *byte == b'e' || *byte == b'E' {
+                return None;
+            }
+            end = end.checked_add(1)?;
+        }
+        signed(self.bytes.get(..end)?)
+    }
+
     /// A JSON boolean.
     #[must_use]
     pub fn bool(self) -> Option<bool> {
@@ -497,5 +514,14 @@ mod tests {
         assert_eq!(Document::parse(br#"{"x":01}"#, 100), Err(DecodeError::Syntax));
         assert_eq!(Document::parse(br#"{"x":1}"#, 2), Err(DecodeError::TooLong));
         assert_eq!(Document::parse(br#"{"x":"\uD800"}"#, 100), Err(DecodeError::Syntax));
+    }
+
+    #[test]
+    fn fractional_css_pixels_drop_toward_zero() {
+        let doc = Document::parse(br"[67.4375,-12.75,-0.5]", 100).expect("valid numbers");
+        let mut values = doc.root().array().expect("an array");
+        assert_eq!(values.next().expect("first").whole_pixels(), Some(67));
+        assert_eq!(values.next().expect("second").whole_pixels(), Some(-12));
+        assert_eq!(values.next().expect("third").whole_pixels(), Some(0));
     }
 }
