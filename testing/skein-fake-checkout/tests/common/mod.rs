@@ -161,8 +161,8 @@ pub(super) fn merge_case(seed: u64) -> String {
     let base = [b"a\n".to_vec(), b"b\n".to_vec(), b"c\n".to_vec()];
     let left_index = usize::try_from(seed % 3).expect("three lines");
     let right_index = usize::try_from((seed / 3) % 3).expect("three lines");
-    let left_changed = seed % 4 != 0;
-    let right_changed = seed % 5 != 0;
+    let left_changed = !seed.is_multiple_of(4);
+    let right_changed = !seed.is_multiple_of(5);
     let mut left = base.clone();
     let mut right = base.clone();
     if left_changed {
@@ -176,10 +176,10 @@ pub(super) fn merge_case(seed: u64) -> String {
     let conflict = left_changed && right_changed && left_index == right_index;
     let mut expected = base;
     if left_changed {
-        expected[left_index] = left[left_index].clone();
+        expected[left_index].clone_from(&left[left_index]);
     }
     if right_changed {
-        expected[right_index] = right[right_index].clone();
+        expected[right_index].clone_from(&right[right_index]);
     }
     let (mut store, mut checkout, first) = cloned(&[(b"code", b"a\nb\nc\n")]);
     checkout.write(b"work/code", &left_bytes);
