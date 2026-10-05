@@ -35,6 +35,7 @@ fn limits() -> server::Limits {
 }
 
 struct Connection {
+    socket: Token,
     server: Server,
     reply: &'static [u8],
     sent: usize,
@@ -98,8 +99,8 @@ impl Pages {
         if let Some(listener) = self.listener {
             self.requests.push_back(Request::Close { entity: listener });
         }
-        for &owner in self.connections.keys() {
-            self.requests.push_back(Request::Close { entity: owner });
+        for connection in self.connections.values() {
+            self.requests.push_back(Request::Close { entity: connection.socket });
         }
     }
 
@@ -117,7 +118,7 @@ impl Pages {
                 let owner = Token::new(self.next_owner);
                 self.next_owner += 1;
                 self.connections
-                    .insert(owner, Connection { server: Server::new(&self.env.limits), reply: b"", sent: 0 });
+                    .insert(owner, Connection { socket, server: Server::new(&self.env.limits), reply: b"", sent: 0 });
                 self.requests.push_back(Request::Bind { socket, owner });
                 self.down(owner, server::Request::Next);
             }
@@ -144,8 +145,9 @@ impl Pages {
     }
 
     fn drain(&mut self, owner: Token) {
+        let socket = self.connections.get(&owner).expect("page connection").socket;
         while let Some(down) = self.below.pop() {
-            self.requests.push_back(Request::Stream { stream: owner, down });
+            self.requests.push_back(Request::Stream { stream: socket, down });
         }
         while let Some(event) = self.above.pop() {
             match event {
@@ -204,7 +206,7 @@ impl Pages {
                 }
                 server::Event::Done(Reuse::Close) | server::Event::Ended | server::Event::Failed(_) => {
                     self.down(owner, server::Request::Close);
-                    self.requests.push_back(Request::Close { entity: owner });
+                    self.requests.push_back(Request::Close { entity: socket });
                 }
                 server::Event::Closed | server::Event::Body(_) => {}
                 server::Event::Done(Reuse::Keep) => panic!("page responses close their socket"),

@@ -31,7 +31,7 @@ fn response(path: &str) -> Vec<u8> {
                 assert_eq!(bound, owner);
             }
             Request::Stream { stream, down } => {
-                assert_eq!(stream, owner);
+                assert_eq!(stream, Token::new(300));
                 match down {
                     stream::Down::Demand { read: Read::Nothing, room: 0 } => {}
                     stream::Down::Demand { room: 1.., .. } => {
@@ -44,7 +44,7 @@ fn response(path: &str) -> Vec<u8> {
                     stream::Down::Finish => panic!("HTTP server closes through io"),
                 }
             }
-            Request::Close { entity } if entity == owner => {
+            Request::Close { entity } if entity == Token::new(300) => {
                 pages.event(Event::Closed { owner });
                 break;
             }
