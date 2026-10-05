@@ -89,6 +89,18 @@ continuation through both wire configurations, then corrupt provider IDs.
 Cancellation has no terminal before actual lower settlement; repeated close
 settlement produces no second terminal.
 
+`Exchange::prepared` adopts an application's already prepared actual Client.
+The caller moves the exact endpoint, credential and unchanged receiving limits
+used at admission as independent peer metadata. It creates no second Client
+and performs no second preparation; `Exchange::new` prepares once and delegates
+to the same constructor. The direct adoption control drives both configured
+dialects through the real script domain and byte peer, checking the original
+callback owner, exact configured input and actual completion/reuse terminals.
+The Client is priced once. Peer credential bytes and the retained target are
+separate ownership, as are the caller's retained application declarations,
+decoded results and observation buffers. The temporary endpoint metadata is
+caller input and is released after configuring the peer.
+
 The four redacted Anthropic Tongs captures retain their provenance beside the
 shared codec. Actual Client tests check known completion text, calls, stop
 reason and all usage fields under fragmentation. Synthetic cases are separate

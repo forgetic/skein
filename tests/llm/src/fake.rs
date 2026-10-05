@@ -6,7 +6,7 @@ use skein_fake_llm_protocol::{documents, provider};
 use skein_http::{server as http, sse::writer as sse};
 use skein_lib::stream::{Down, Read, Up};
 use skein_lib::{Env, Intake, Queue, Time, Token, Wall};
-use skein_llm::{Call, Credential, Provider, client};
+use skein_llm::{Call, Credential, Endpoint, Provider, client};
 
 /// Deterministic fragmenting actual-client exchange, with bounded byte intakes.
 #[expect(missing_debug_implementations, reason = "client and peer own credential-bearing HTTP state")]
@@ -80,23 +80,44 @@ impl Exchange {
     /// Validates the actual Client and peer independently; scripts are caller data.
     #[must_use]
     pub fn new(input: Call, bounds: client::Limits, scripts: Box<[api::Script]>) -> Self {
+        let endpoint = input.endpoint.clone();
         let credential = Credential {
             access_token: input.credential.access_token.clone(),
             account_id: input.credential.account_id.clone(),
         };
-        let provider = match input.endpoint.provider {
+        let machine = client::Client::prepare(input, &bounds).expect("actual shared Client admission");
+        Self::prepared(machine, endpoint, credential, bounds, scripts)
+    }
+
+    /// Adopts the caller's one prepared Client without preparing another call.
+    /// The endpoint, credential and unchanged limits must be those used for
+    /// admission; they configure only the independent peer and its environment.
+    /// Caller scripts are admitted under the shared script-domain bounds.
+    ///
+    /// The caller moves the Client and peer metadata here. Price the Client
+    /// once, the peer's retained credential and service target separately,
+    /// and any caller-retained application translation or observation storage.
+    #[must_use]
+    pub fn prepared(
+        machine: client::Client,
+        endpoint: Endpoint,
+        credential: Credential,
+        bounds: client::Limits,
+        scripts: Box<[api::Script]>,
+    ) -> Self {
+        let provider = match endpoint.provider {
             Provider::OpenAiCodex => documents::Provider::OpenAi,
             Provider::Anthropic => documents::Provider::Anthropic,
         };
         let peer_limits = limits(&bounds);
         let service = provider::Service::new(
-            provider::Config { provider, path: input.endpoint.target.clone(), headers: Box::new([]) },
+            provider::Config { provider, path: endpoint.target, headers: Box::new([]) },
             &peer_limits,
         )
         .expect("bounded independent peer");
         let server = provider::Server::new(Token::new(2), &peer_limits).expect("bounded peer connection");
         Self {
-            machine: client::Client::prepare(input, &bounds).expect("actual shared Client admission"),
+            machine,
             seen: Vec::new(),
             queries: Vec::new(),
             requests: Vec::new(),

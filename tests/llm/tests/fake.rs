@@ -87,6 +87,53 @@ fn check_feedback(provider: skein_llm::Provider, text: &[u8], error: bool) {
 }
 
 #[test]
+fn prepared_client_is_adopted_and_drives_the_actual_scripted_peer() {
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        let input = input(provider, 17);
+        let endpoint = input.endpoint.clone();
+        let credential = skein_llm::Credential {
+            access_token: input.credential.access_token.clone(),
+            account_id: input.credential.account_id.clone(),
+        };
+        let machine = client::Client::prepare(input, &limits()).expect("caller prepares its one Client");
+        let mut world = Exchange::prepared(machine, endpoint, credential, limits(), scripts());
+        world.start();
+        world.run();
+        let [query] = world.queries.as_slice() else {
+            panic!("the adopted Client makes one actual peer request");
+        };
+        assert_eq!(query.system.as_ref(), b"caller-script");
+        let [tool] = query.tools.as_ref() else {
+            panic!("the prepared application tool survives adoption");
+        };
+        assert_eq!(tool.name.as_ref(), b"caller_tool");
+        let terminals: Vec<_> = world
+            .seen
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    client::Event::Completed { .. } | client::Event::Failed { .. } | client::Event::Cancelled { .. }
+                )
+            })
+            .collect();
+        let [client::Event::Completed { owner, completion }] = terminals.as_slice() else {
+            panic!("the adopted call has one actual successful terminal");
+        };
+        assert_eq!(*owner, skein_lib::Token::new(17), "adoption preserves the original callback owner");
+        let [Block::ToolCall { name, arguments, .. }] = completion.content.as_ref() else {
+            panic!("the real script domain returns the configured tool call");
+        };
+        assert_eq!(name.as_ref(), b"caller_tool");
+        assert_eq!(arguments.as_ref(), br#"{ "opaque" : "whole body" }"#);
+        assert!(
+            world.seen.iter().any(|event| matches!(event, client::Event::Reusable)),
+            "adopted actual HTTP drainage completes before reuse"
+        );
+    }
+}
+
+#[test]
 fn actual_client_and_independent_byte_peer_relay_whole_schema_call_and_feedback() {
     for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
         let mut world = Exchange::new(input(provider, 1), limits(), scripts());
