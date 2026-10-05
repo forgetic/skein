@@ -70,4 +70,7 @@ fn serves_button_and_csp_pages_through_http_machine() {
             .any(|window| window == b"Content-Security-Policy: default-src 'none'\r\n")
     );
     assert!(csp.windows(b"CSP page".len()).any(|window| window == b"CSP page"));
+    let favicon = response("/favicon.ico");
+    assert!(favicon.starts_with(b"HTTP/1.1 204 No Content\r\n"));
+    assert!(!favicon.windows(b"Content-Length:".len()).any(|window| window == b"Content-Length:"));
 }

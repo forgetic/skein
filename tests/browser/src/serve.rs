@@ -26,6 +26,7 @@ fn page(target: &[u8]) -> (u16, &'static [u8], bool) {
         b"/scroll" => (200, SCROLL, false),
         b"/throw" => (200, THROW, false),
         b"/csp" => (200, CSP, true),
+        b"/favicon.ico" => (204, b"", false),
         _ => (404, b"not found", false),
     }
 }
@@ -157,10 +158,14 @@ impl Pages {
                     conn.reply = body;
                     conn.sent = 0;
                     self.down(owner, server::Request::Discard);
-                    let mut headers = vec![Header {
-                        name: Box::from(&b"Content-Type"[..]),
-                        value: Box::from(&b"text/html; charset=utf-8"[..]),
-                    }];
+                    let mut headers = if status == 204 {
+                        Vec::new()
+                    } else {
+                        vec![Header {
+                            name: Box::from(&b"Content-Type"[..]),
+                            value: Box::from(&b"text/html; charset=utf-8"[..]),
+                        }]
+                    };
                     if csp {
                         headers.push(Header {
                             name: Box::from(&b"Content-Security-Policy"[..]),
@@ -172,7 +177,7 @@ impl Pages {
                         server::Request::Respond(Response {
                             status,
                             headers: headers.into_boxed_slice(),
-                            body: Body::Length(body.len() as u64),
+                            body: if status == 204 { Body::None } else { Body::Length(body.len() as u64) },
                             close: true,
                         }),
                     );
