@@ -104,7 +104,7 @@ stay beside the crate in `testing/skein-fake-checkout/tests`.
 | system worlds | several of its domains, or several services' domains | lib, the counting allocator |
 | protocol worlds | its protocol layer, over skein's machines | the machines, tested in skein's tiers; the counting allocator |
 | simulated worlds | every layer, `iterate` per process | the simulator, the world harness, the counting allocator, the examples as a template |
-| real loop | the service as it ships | the shell kit, the world harness's real loop |
+| real loop | the service as it ships | the shell kit, the world harness's real loop; for a service with a web, the browser kit (browser.md) |
 
 The service supplies its fakes, the fake machine that plugs into the
 simulator among them, and the scenarios its worlds run. A failure in a
@@ -151,6 +151,7 @@ testing/skein-scratch           a scratch directory beneath the system's tempora
 testing/skein-world             the world harness: processes' iterate over the simulator or the real ring, the referee, the trace, the heap
 testing/skein-echo-client       the fake echo client, a step machine
 testing/skein-fake-machine      the minimal fake machine: files beneath a root, and its face behind the simulator
+testing/skein-browser           the browser kit, a step machine: headless Chromium over the DevTools protocol on a pipe (browser.md)
 tests/heap                      the counting allocator's own tests, skein-heap-tests
 tests/echo                      the echo's simulated worlds and its real loop, skein-echo-world
 tests/io                        io worlds: io over the simulator, a scripted owner, a referee, skein-io-world
@@ -166,6 +167,7 @@ tests/http                      the HTTP client's and server's and the event str
 tests/http/transcripts          its transcripts, responses and, in requests/, requests, each with what it must decode to
 tests/protocol                  the protocol worlds: an LLM client's stack against a server's, joined by bytes cut at random, skein-protocol-world
 tests/llm                       skein-llm's subscription protocol worlds, fragmentation and fault sweeps, and bounds against the counting allocator, skein-llm-world
+tests/browser                   the browser kit's machine world against a fake browser, its tests against real Chromium, and its worst case against the counting allocator, skein-browser-world
 tests/tls                       the TLS client's machine worlds against a rustls server in memory, the HTTP client stacked on it, and its worst case against the counting allocator, skein-tls-world
 tests/tls/fixtures              its certificates and key, and the script that makes them
 tests/**/tests/*.rs             a crate's focused tests
@@ -427,6 +429,8 @@ By tier, in the order temper pulls the parts (README.md):
 - **TLS in the real loop,** a loopback exchange through the shell against
   a local rustls server (tls.md, 8). A TLS that replays is an open
   question (notes.md).
+- **The browser kit** (browser.md): its machine world first, its tests
+  against real Chromium once io's processes and the HTTP example exist.
 - **The HTTP examples' simulated worlds and real loop,** with skein-http.
   The echo's are built; the real loop's signals, child processes, scratch
   directory and TLS wait for the parts that pull them.

@@ -36,6 +36,7 @@ starts from.
 | JSON | `skein-json` | a bounded tokenizer, a sized writer | [json.md](docs/design/json.md) |
 | TLS | `skein-tls` | the TLS client, a stream over rustls's unbuffered connection, with ring | [tls.md](docs/design/tls.md) |
 | LLM | `skein-llm` | provider-neutral calls, streaming deltas and completions; ChatGPT/Codex subscription access | [llm.md](docs/design/llm.md) |
+| the browser kit | `skein-browser` | for tests: a headless Chromium driven over the DevTools protocol on a pipe, by role and name, from the loop; designed, not built | [browser.md](docs/design/browser.md) |
 
 ```
 crate          depends on
@@ -45,6 +46,7 @@ skein-http     lib
 skein-json     lib
 skein-tls      lib, rustls (and ring beneath it)
 skein-llm      lib, http, json
+skein-browser  lib, json
 skein-shell    lib, io, io-uring, libc
 skein-sim      lib, io
 ```
