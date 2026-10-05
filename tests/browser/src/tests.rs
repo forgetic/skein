@@ -4,7 +4,7 @@ use skein_browser::{down, fire, up};
 use skein_lib::stream;
 use skein_lib::{Time, Token};
 
-use crate::world::World;
+use crate::world::{Fault, World};
 
 #[test]
 fn lifecycle_find_and_press() {
@@ -223,4 +223,39 @@ fn unanswered_command_reaches_answer_deadline() {
         &mut world.below,
     );
     assert!(world.above.is_empty(), "a late reply cannot answer twice or close the browser");
+}
+
+#[test]
+fn node_disappearing_during_press_is_refused_before_mouse() {
+    let mut world = World::new();
+    world.start();
+    world.open();
+    world.fault(b"DOM.getContentQuads", Fault::Error);
+    world.ask(Request::Press { page: Token::new(3), op: Token::new(12), node: 7 });
+    assert!(matches!(world.above.pop(), Some(Event::Refused { op, why: Refusal::Gone }) if op == Token::new(12)));
+    assert!(!world.sent.iter().any(|command| {
+        command.windows(b"Input.dispatchMouseEvent".len()).any(|part| part == b"Input.dispatchMouseEvent")
+    }));
+    world.assert_commands_settled();
+}
+
+#[test]
+fn page_crash_mid_operation_reports_trouble_and_one_refusal() {
+    let mut world = World::new();
+    world.start();
+    world.open();
+    world.fault(b"Accessibility.getFullAXTree", Fault::PageCrash);
+    world.ask(Request::Snapshot { page: Token::new(3), op: Token::new(13) });
+    let mut trouble = 0;
+    let mut refused = 0;
+    while let Some(event) = world.above.pop() {
+        match event {
+            Event::Trouble { trouble: Trouble::Crash, .. } => trouble += 1,
+            Event::Refused { op, why: Refusal::Crashed } if op == Token::new(13) => refused += 1,
+            Event::Closed { .. } => {}
+            other => panic!("unexpected event after page crash: {other:?}"),
+        }
+    }
+    assert_eq!((trouble, refused), (1, 1));
+    world.assert_commands_settled();
 }

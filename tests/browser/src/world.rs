@@ -14,6 +14,7 @@ pub enum Fault {
     Error,
     Oversize,
     Crash,
+    PageCrash,
     Interleave,
 }
 
@@ -158,6 +159,9 @@ impl World {
                                 up(&mut self.browser, &self.env, Below::Replies(stream::Up::End), &mut self.above, &mut self.below);
                                 self.outstanding.clear();
                             }
+                            Some(Fault::PageCrash) => {
+                                replies.push_back(b"{\"method\":\"Inspector.targetCrashed\",\"sessionId\":\"s1\",\"params\":{}}\0".to_vec());
+                            }
                             Some(Fault::Interleave) => {
                                 replies.push_back(b"{\"method\":\"Runtime.exceptionThrown\",\"sessionId\":\"s1\",\"params\":{\"exceptionDetails\":{\"text\":\"injected\"}}}\0".to_vec());
                                 replies.push_back(reply);
@@ -188,6 +192,9 @@ impl World {
                 if reply.len() > usize::try_from(self.env.limits.message).expect("message fits usize") + 1 {
                     self.outstanding.clear();
                 }
+                if reply.windows(b"Inspector.targetCrashed".len()).any(|part| part == b"Inspector.targetCrashed") {
+                    self.outstanding.clear();
+                }
                 up(
                     &mut self.browser,
                     &self.env,
@@ -198,6 +205,10 @@ impl World {
                 if !self.outstanding.is_empty() && self.browser.next_deadline().is_none() {
                     self.outstanding.clear();
                 }
+                continue;
+            }
+            if self.browser.work_pending() {
+                fire(&mut self.browser, &self.env, self.env.now, &mut self.above, &mut self.below);
                 continue;
             }
             return;

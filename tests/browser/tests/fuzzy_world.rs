@@ -26,7 +26,7 @@ fn observe(world: &mut World, referee: &mut Referee) -> Vec<Event> {
 
 #[test]
 fn varied_pages_and_faults_hold_the_contract() {
-    let mut faults_seen = [false; 6];
+    let mut faults_seen = [false; 7];
     for case in 0..192_u64 {
         let mut seed = case + 0x9b3d_724a;
         let mut world = World::new();
@@ -72,10 +72,17 @@ fn varied_pages_and_faults_hold_the_contract() {
                 world.assert_commands_settled();
             }
             _ => {
-                let which = usize::try_from(next(&mut seed) % 6).expect("index");
+                let which = usize::try_from(next(&mut seed) % 7).expect("index");
                 faults_seen[which] = true;
-                let fault =
-                    [Fault::Drop, Fault::Delay, Fault::Error, Fault::Oversize, Fault::Crash, Fault::Interleave][which];
+                let fault = [
+                    Fault::Drop,
+                    Fault::Delay,
+                    Fault::Error,
+                    Fault::Oversize,
+                    Fault::Crash,
+                    Fault::PageCrash,
+                    Fault::Interleave,
+                ][which];
                 world.fault(b"Accessibility.getFullAXTree", fault);
                 world.ask(Request::Snapshot { page: Token::new(3), op });
                 if fault == Fault::Delay && next(&mut seed) & 1 == 0 {
