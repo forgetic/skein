@@ -131,6 +131,7 @@ name = "skein-browser-world"
 version = "0.0.0"
 dependencies = [
  "skein-browser",
+ "skein-heap",
  "skein-io",
  "skein-lib",
  "skein-shell",

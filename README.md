@@ -37,7 +37,7 @@ starts from.
 | JSON | `skein-json` | a bounded tokenizer, a sized writer | [json.md](docs/design/json.md) |
 | TLS | `skein-tls` | the TLS client, a stream over rustls's unbuffered connection, with ring | [tls.md](docs/design/tls.md) |
 | LLM | `skein-llm` | provider-neutral calls, streaming deltas, concrete replay and completions; subscription wire dialects | [llm.md](docs/design/llm.md) |
-| the browser kit | `skein-browser` | for tests: a headless Chromium driven over the DevTools protocol on a pipe, by role and name, from the loop; designed, not built | [browser.md](docs/design/browser.md) |
+| the browser kit | `skein-browser` | for tests: a headless Chromium driven over the DevTools protocol on a pipe, by role and name, from the loop | [browser.md](docs/design/browser.md) |
 
 ```
 crate          depends on

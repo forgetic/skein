@@ -412,16 +412,19 @@ tables (deadlines, ready lists), whose worst cases count a full table's
 nodes while a world arms a few timers. A focused test holds that world
 to at least half its worst case, so that it keeps reaching the limits.
 
+The browser kit (browser.md) now has a fake machine world, bounded memory
+and fuzzy suites, and a separate real Chromium suite over io's process
+pipes. Run the latter with `cargo nextest run --workspace --profile
+browser`.
+
 ## 8. Not built yet
 
 By tier, in the order temper pulls the parts (README.md):
 
-- **io worlds for files and processes,** with the minimal machine's files
-  and programs and the simulator's processes, when the worker pulls them.
-  Sockets are built, and so are the simulator's files, its machine seam
-  and the minimal machine's files.
-- **Conformance** for processes, when io pulls them; against the
-  readiness backend when it exists. Sockets and files are built.
+- **Broader io worlds for files and processes.** The simulator's process
+  model and minimal machine programs are built, as are process conformance
+  cases on the simulator and ring. More combined world scenarios remain.
+- **Conformance against the readiness backend,** if that backend is built.
 - **Fuzz targets** for every machine, JSON's, HTTP's and TLS's included,
   when a nightly toolchain is installed; and the heap metered in the
   protocol worlds, which meets the open question of heap handed between
@@ -429,8 +432,6 @@ By tier, in the order temper pulls the parts (README.md):
 - **TLS in the real loop,** a loopback exchange through the shell against
   a local rustls server (tls.md, 8). A TLS that replays is an open
   question (notes.md).
-- **The browser kit** (browser.md): its machine world first, its tests
-  against real Chromium once io's processes and the HTTP example exist.
 - **The HTTP examples' simulated worlds and real loop,** with skein-http.
   The echo's are built; the real loop's signals, child processes, scratch
   directory and TLS wait for the parts that pull them.
