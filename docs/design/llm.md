@@ -31,8 +31,20 @@ blocks. Provider-owned
 its provider. `Replay` can be retained as a bounded durable envelope without
 exposing provider fields to a domain. The exported seven-byte header is
 additional to the raw opaque cap; `replay_bytes` and `replay_worst_case`
-state complete receiver/transit bounds. A replay value for a different provider is refused. Generic
-tool calls retain raw JSON argument text; the application validates and
+state complete receiver/transit bounds. A replay value for a different provider
+is refused. Native tool calls keep the application call ID and provider item
+ID in separate owned fields. Both are bounded opaque strings: pipes, quotes and backslashes
+are admitted without imposing an additional identity grammar. The call ID
+pairs the exact result; the item ID moves into complete replay metadata and
+returns unchanged on a continued request. Neither field is joined or split.
+The native answer budget charges both ID payloads, name and input. Its slot
+bound uses the enlarged `Part`/`Opened` wrapper size, with active ID/kind bytes
+and admitted ready payloads priced simultaneously. Actual Client controls
+complete pipe/escaped IDs, restore durable metadata and observe exact continuation
+pairing. An independent observer rejects altered identity evidence. The controls
+reach both maximum ID payloads under the installed counting allocator.
+
+Generic tool calls retain raw JSON argument text; the application validates and
 translates it into its own tool types before execution. Replay admission
 requires a valid JSON object for arguments. Schemas are bounded JSON
 values, independent of the application's tool vocabulary.

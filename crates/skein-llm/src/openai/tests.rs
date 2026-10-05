@@ -208,11 +208,11 @@ fn synthetic_parallel_tools_reasoning_and_message_heads_keep_order() {
         &Part::Text { id: owned(b"m"), phase: Some(owned(b"commentary")), text: owned(b"hello"), refusal: false }
     );
     assert!(match parts[2] {
-        Part::ToolCall { id, .. } if id.as_ref() == b"c1|f1" => true,
+        Part::ToolCall { call_id, item_id, .. } if call_id.as_ref() == b"c1" && item_id.as_ref() == b"f1" => true,
         _ => false,
     });
     assert!(match parts[3] {
-        Part::ToolCall { id, .. } if id.as_ref() == b"c2|f2" => true,
+        Part::ToolCall { call_id, item_id, .. } if call_id.as_ref() == b"c2" && item_id.as_ref() == b"f2" => true,
         _ => false,
     });
     assert!(match trace.last() {
@@ -519,10 +519,11 @@ fn archived_real_provider_requests_and_answers_match_known_completions() {
         }
         if scenario == "tool-call" {
             assert!(trace.iter().any(|out| match out {
-                Output::Part(Part::ToolCall { name, input, id, too_large: false })
+                Output::Part(Part::ToolCall { name, input, call_id, item_id, too_large: false })
                     if name.as_ref() == b"get_weather"
                         && input.as_ref() == br#"{"city":"Paris"}"#
-                        && bytes::find(id, b"|").is_some() =>
+                        && !call_id.is_empty()
+                        && !item_id.is_empty() =>
                     true,
                 _ => false,
             }));
@@ -575,14 +576,14 @@ fn out_of_order_done_waits_for_order_and_terminal_waits_for_ready_parts() {
     drain(&mut out, &mut trace);
     assert!(decoder.is_complete());
     assert!(!decoder.has_ready());
-    let ids: Vec<Box<[u8]>> = trace
+    let ids: Vec<_> = trace
         .iter()
         .filter_map(|out| match out {
-            Output::Part(Part::ToolCall { id, .. }) => Some(id.clone()),
+            Output::Part(Part::ToolCall { call_id, item_id, .. }) => Some((call_id.clone(), item_id.clone())),
             _ => None,
         })
         .collect();
-    assert_eq!(ids, Vec::from([owned(b"x|a"), owned(b"y|b"), owned(b"z|c")]));
+    assert_eq!(ids, Vec::from([(owned(b"x"), owned(b"a")), (owned(b"y"), owned(b"b")), (owned(b"z"), owned(b"c"))]));
     assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO }));
 }
 
@@ -697,7 +698,7 @@ fn deltas_decode_roundtrip_and_forward_before_completed_blocks() {
         &Part::Text { id: owned(b"m"), phase: Some(owned(b"final_answer")), text: owned(b"hello"), refusal: false }
     );
     assert!(match parts[1] {
-        Part::ToolCall { id, .. } => id.as_ref() == b"c|f",
+        Part::ToolCall { call_id, item_id, .. } => call_id.as_ref() == b"c" && item_id.as_ref() == b"f",
         _ => false,
     });
     assert!(match parts[2] {
@@ -806,4 +807,67 @@ fn unknown_and_mixed_message_content_are_explicitly_refused() {
     }
     let message = value(br#"{"stream":true,"store":false,"model":"gpt-test","instructions":"","input":[{"role":"assistant","content":[{"type":"output_text","text":"hello"},{"type":"refusal","refusal":"no"}]}]}"#);
     assert_eq!(decode_request(&message, &LIMITS), Err(DecodeError::WrongType));
+}
+
+#[test]
+fn separate_opaque_tool_ids_each_obey_string_and_joint_answer_caps() {
+    let events = [
+        Event::Added { index: 0, id: owned(b"item|id"), kind: owned(b"function_call") },
+        Event::Done {
+            index: 0,
+            item: Item::FunctionCall {
+                id: owned(b"item|id"),
+                call_id: owned(b"call|id"),
+                name: owned(b"read"),
+                arguments: owned(b"{}"),
+            },
+        },
+        Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO },
+    ];
+    let exact = Limits { string_bytes: 13, answer_bytes: 20, ..LIMITS };
+    let trace = stream(&events, &exact);
+    assert_eq!(
+        trace[1],
+        Output::Part(Part::ToolCall {
+            call_id: owned(b"call|id"),
+            item_id: owned(b"item|id"),
+            name: owned(b"read"),
+            input: owned(b"{}"),
+            too_large: false,
+        })
+    );
+    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO }));
+    let trace = stream(&events, &Limits { answer_bytes: 19, ..exact });
+    assert!(match trace.last() {
+        Some(Output::Failed { failure: Failure::Limit, .. }) => true,
+        _ => false,
+    });
+    for item_long in [false, true] {
+        let events = [
+            Event::Added {
+                index: 0,
+                id: owned(if item_long { b"item|012345678" } else { b"item|id" }),
+                kind: owned(b"function_call"),
+            },
+            Event::Done {
+                index: 0,
+                item: Item::FunctionCall {
+                    id: owned(if item_long { b"item|012345678" } else { b"item|id" }),
+                    call_id: owned(if item_long { b"call|id" } else { b"call|012345678" }),
+                    name: owned(b"read"),
+                    arguments: owned(b"{}"),
+                },
+            },
+            Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO },
+        ];
+        assert_eq!(
+            stream(&events, &Limits { string_bytes: 14, answer_bytes: 27, ..exact }).last(),
+            Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO })
+        );
+        let trace = stream(&events, &Limits { string_bytes: 13, answer_bytes: 27, ..exact });
+        assert!(match trace.last() {
+            Some(Output::Failed { failure: Failure::Limit, .. }) => true,
+            _ => false,
+        });
+    }
 }
