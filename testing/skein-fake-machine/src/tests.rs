@@ -112,3 +112,110 @@ fn a_device_and_a_fifo_open_as_no_file() {
     machine.remove(root, b"null", false).unwrap();
     machine.close(root);
 }
+
+#[test]
+fn child_pipes_echo_at_chosen_descriptors_and_exit() {
+    use skein_io::kernel::{Complete, Done, Exit, Op, Pipe, Spawn, Submit, Way};
+    use skein_lib::{Queue, Token};
+    use skein_sim::{Config, Sim};
+
+    fn run(machine: &mut Machine, sim: &mut Sim, pid: skein_sim::Pid, number: u64, kind: Op) -> Complete {
+        let mut submissions = Queue::with_capacity(1);
+        submissions.push(Submit { op: Token::new(number), kind });
+        sim.submit(pid, &mut submissions);
+        crate::serve(machine, sim);
+        let mut completions = Queue::with_capacity(1);
+        sim.reap(pid, &mut completions);
+        completions.pop().expect("one completion")
+    }
+
+    let mut machine = Machine::new();
+    let laid = machine.lay(&[]);
+    let mut sim = Sim::new(1, Config::calm());
+    let pid = sim.spawn_process();
+    let root = sim.root(pid, skein_sim::Handle::new(laid.raw()));
+    let spawn = Spawn {
+        program: Box::from(&b"echo"[..]),
+        args: Box::new([]),
+        env: Box::new([]),
+        root,
+        dir: Box::from(&b"."[..]),
+        pipes: Box::new([Pipe { child: 7, way: Way::In }, Pipe { child: 9, way: Way::Out }]),
+    };
+    let Done::Spawned { pidfd, pipes } =
+        run(&mut machine, &mut sim, pid, 1, Op::Spawn { spawn: Box::new(spawn) }).result.unwrap()
+    else {
+        panic!("spawned child")
+    };
+    assert_eq!(pipes.len(), 2);
+    assert_eq!(
+        run(&mut machine, &mut sim, pid, 2, Op::PipeWrite { fd: pipes[0], bytes: Box::from(&b"hello"[..]), from: 0 })
+            .result,
+        Ok(Done::Count(5))
+    );
+    let read = run(&mut machine, &mut sim, pid, 3, Op::PipeRead { fd: pipes[1], buf: Box::new([0; 8]) });
+    assert_eq!(read.result, Ok(Done::Count(5)));
+    let Op::PipeRead { buf, .. } = read.kind else { panic!("pipe read") };
+    assert_eq!(&buf[..5], b"hello");
+    assert_eq!(run(&mut machine, &mut sim, pid, 4, Op::Close { fd: pipes[0] }).result, Ok(Done::Nothing));
+    assert_eq!(run(&mut machine, &mut sim, pid, 5, Op::Wait { pidfd }).result, Ok(Done::Exit(Exit::Code(0))));
+    assert_eq!(
+        run(&mut machine, &mut sim, pid, 6, Op::PipeRead { fd: pipes[1], buf: Box::new([0; 8]) }).result,
+        Ok(Done::Count(0))
+    );
+    run(&mut machine, &mut sim, pid, 7, Op::Close { fd: pipes[1] });
+    run(&mut machine, &mut sim, pid, 8, Op::Close { fd: pidfd });
+    run(&mut machine, &mut sim, pid, 9, Op::Close { fd: root });
+    sim.assert_quiescent(pid);
+    sim.assert_no_open_fds(pid);
+    assert_eq!(machine.open_handles(), 0);
+}
+
+#[test]
+fn never_child_waits_until_killed() {
+    use skein_io::kernel::{Done, Exit, Op, Signal, Spawn, Submit};
+    use skein_lib::{Queue, Token};
+    use skein_sim::{Config, Sim};
+    let mut machine = Machine::new();
+    let laid = machine.lay(&[]);
+    let mut sim = Sim::new(2, Config::calm());
+    let pid = sim.spawn_process();
+    let root = sim.root(pid, skein_sim::Handle::new(laid.raw()));
+    let mut q = Queue::with_capacity(2);
+    q.push(Submit {
+        op: Token::new(1),
+        kind: Op::Spawn {
+            spawn: Box::new(Spawn {
+                program: Box::from(&b"never"[..]),
+                args: Box::new([]),
+                env: Box::new([]),
+                root,
+                dir: Box::new([]),
+                pipes: Box::new([]),
+            }),
+        },
+    });
+    sim.submit(pid, &mut q);
+    crate::serve(&mut machine, &mut sim);
+    let mut out = Queue::with_capacity(1);
+    sim.reap(pid, &mut out);
+    let Done::Spawned { pidfd, .. } = out.pop().unwrap().result.unwrap() else { panic!("spawn") };
+    q.push(Submit { op: Token::new(2), kind: Op::Wait { pidfd } });
+    sim.submit(pid, &mut q);
+    assert_eq!(sim.ready(pid), 0);
+    q.push(Submit { op: Token::new(3), kind: Op::Signal { pidfd, signal: Signal::Kill } });
+    sim.submit(pid, &mut q);
+    let mut out = Queue::with_capacity(2);
+    sim.reap(pid, &mut out);
+    let completions = [out.pop().unwrap(), out.pop().unwrap()];
+    assert!(completions.iter().any(|done| done.op == Token::new(2) && done.result == Ok(Done::Exit(Exit::Signal(9)))));
+    assert!(completions.iter().any(|done| done.op == Token::new(3) && done.result == Ok(Done::Nothing)));
+    q.push(Submit { op: Token::new(4), kind: Op::Close { fd: pidfd } });
+    q.push(Submit { op: Token::new(5), kind: Op::Close { fd: root } });
+    sim.submit(pid, &mut q);
+    crate::serve(&mut machine, &mut sim);
+    sim.reap(pid, &mut out);
+    sim.assert_quiescent(pid);
+    sim.assert_no_open_fds(pid);
+    assert_eq!(machine.open_handles(), 0);
+}

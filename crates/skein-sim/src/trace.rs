@@ -4,20 +4,20 @@
 use alloc::string::String;
 use core::fmt::{self, Write};
 
-use skein_io::kernel::{Addr, Done, Error, Family, Fd, Op, OpenHow};
+use skein_io::kernel::{Addr, Done, Error, Family, Fd, Op, OpenHow, Signal};
 use skein_lib::{Time, Token};
 
 use crate::sim::Pid;
 
 /// One thing that crossed the boundary, when, and in which process.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Entry {
     pub at: Time,
     pub pid: Pid,
     pub event: Event,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Event {
     /// A record submitted.
     Submit { op: Token, kind: Summary },
@@ -70,6 +70,11 @@ pub enum Summary {
     Remove { dir: Fd, name: Text, directory: bool },
     MakeDirectory { dir: Fd, name: Text },
     List { fd: Fd, entries: usize, names: usize },
+    Spawn { root: Fd, program: Text, pipes: usize },
+    Wait { pidfd: Fd },
+    Signal { pidfd: Fd, signal: u32 },
+    PipeRead { fd: Fd, len: usize },
+    PipeWrite { fd: Fd, len: usize, from: u32 },
     Cancel { target: Token },
 }
 
@@ -132,6 +137,19 @@ impl Summary {
             }
             Op::MakeDirectory { dir, name } => Summary::MakeDirectory { dir: *dir, name: Text::of(name) },
             Op::List { fd, entries, names } => Summary::List { fd: *fd, entries: entries.len(), names: names.len() },
+            Op::Spawn { spawn } => {
+                Summary::Spawn { root: spawn.root, program: Text::of(&spawn.program), pipes: spawn.pipes.len() }
+            }
+            Op::Wait { pidfd } => Summary::Wait { pidfd: *pidfd },
+            Op::Signal { pidfd, signal } => Summary::Signal {
+                pidfd: *pidfd,
+                signal: match signal {
+                    Signal::Terminate => 15,
+                    Signal::Kill => 9,
+                },
+            },
+            Op::PipeRead { fd, buf } => Summary::PipeRead { fd: *fd, len: buf.len() },
+            Op::PipeWrite { fd, bytes, from } => Summary::PipeWrite { fd: *fd, len: bytes.len(), from: *from },
             Op::Cancel { target } => Summary::Cancel { target: *target },
         }
     }
@@ -157,7 +175,12 @@ impl Summary {
             | Summary::Remove { .. }
             | Summary::MakeDirectory { .. }
             | Summary::List { .. } => true,
-            Summary::Socket { .. }
+            Summary::Spawn { .. }
+            | Summary::Wait { .. }
+            | Summary::Signal { .. }
+            | Summary::PipeRead { .. }
+            | Summary::PipeWrite { .. }
+            | Summary::Socket { .. }
             | Summary::Bind { .. }
             | Summary::Listen { .. }
             | Summary::Accept { .. }
@@ -176,6 +199,8 @@ impl Summary {
     pub const fn cancellable(&self) -> bool {
         match self {
             Summary::Cancel { .. }
+            | Summary::Spawn { .. }
+            | Summary::Signal { .. }
             | Summary::Stat { .. }
             | Summary::Rename { .. }
             | Summary::Remove { .. }
@@ -193,7 +218,10 @@ impl Summary {
             | Summary::Open { .. }
             | Summary::Read { .. }
             | Summary::Write { .. }
-            | Summary::Sync { .. } => true,
+            | Summary::Sync { .. }
+            | Summary::Wait { .. }
+            | Summary::PipeRead { .. }
+            | Summary::PipeWrite { .. } => true,
         }
     }
 
@@ -217,7 +245,12 @@ impl Summary {
             | Summary::Stat { fd }
             | Summary::Remove { dir: fd, .. }
             | Summary::MakeDirectory { dir: fd, .. }
-            | Summary::List { fd, .. } => [Some(*fd), None],
+            | Summary::List { fd, .. }
+            | Summary::Spawn { root: fd, .. }
+            | Summary::Wait { pidfd: fd }
+            | Summary::Signal { pidfd: fd, .. }
+            | Summary::PipeRead { fd, .. }
+            | Summary::PipeWrite { fd, .. } => [Some(*fd), None],
             Summary::Rename { from_dir, to_dir, .. } => [Some(*from_dir), Some(*to_dir)],
             Summary::Socket { .. } | Summary::Cancel { .. } => [None, None],
         }

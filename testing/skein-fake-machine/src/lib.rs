@@ -1,8 +1,8 @@
 //! skein's minimal fake machine (testing.md, 4; testing-strategy.md, 4.3):
 //! a few files beneath a root, for skein's own worlds over the simulator,
 //! which plays the kernel and passes the operations on files to the
-//! machine the world owns (simulator.md, 3). Files only, for now: the
-//! programs come with processes.
+//! machine the world owns (simulator.md, 3). It also recognizes small
+//! process fixtures for the shared process conformance scenarios.
 //!
 //! - [`Machine`] is the filesystem, in its own vocabulary: directories,
 //!   files and symbolic links, each with its owner's permissions; handles

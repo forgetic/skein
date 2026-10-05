@@ -15,8 +15,8 @@ use skein_conformance::{
     Cancelling, Check, Pairing, Race, Shortness, address_in_use, backpressure, cancel_accept,
     cancel_accept_racing_a_connect, cancel_connect, cancel_connect_established_while_away, cancel_read, cancel_recv,
     cancel_recv_racing_bytes, closed_before_accept, escapes, file_lifecycle, full_accept_queue, graceful_close,
-    ipv6_only, lifecycle, list, listener_close_resets_waiting, make_directory, nested_roots, permissions, refused,
-    remove, rename, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
+    ipv6_only, lifecycle, list, listener_close_resets_waiting, make_directory, nested_roots, permissions, processes,
+    refused, remove, rename, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
     unread_close_meets_send, wrong_state,
 };
 use skein_conformance_ring::Ring;
@@ -25,6 +25,11 @@ use skein_io::kernel::Family;
 /// Runs `scenario` on a ring of its own and checks what it saw.
 fn on_the_ring<S: Check>(scenario: fn(&mut Ring) -> S) {
     scenario(&mut Ring::new()).check();
+}
+
+#[test]
+fn child_processes_and_pipes() {
+    processes(&mut Ring::new(), env!("CARGO_BIN_EXE_process_fixture").as_bytes()).check();
 }
 
 #[test]

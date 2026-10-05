@@ -9,6 +9,8 @@ use skein_lib::{Deadlines, Env, Id, Queue, Set, Slab, Time, Token};
 use crate::kernel::{self, Addr, Complete, Done, Family, Op, Submit};
 use crate::limits::{self, Limits};
 use crate::listener::{self, Listener};
+use crate::pipe::{self, Pipe};
+use crate::process::{self, Child};
 use crate::records::{Error, Event, Request};
 use crate::stream::{self, Stream};
 
@@ -24,6 +26,8 @@ pub struct Io {
 pub(crate) enum Entity {
     Listener(Listener),
     Stream(Stream),
+    Pipe(Pipe),
+    Child(Child),
 }
 
 /// What io keeps beside its entities, which the handlers of an entity touch
@@ -63,6 +67,11 @@ pub(crate) enum Purpose {
     Shutdown,
     Close,
     Discard,
+    Spawn,
+    Wait,
+    Signal,
+    PipeRead,
+    PipeWrite,
     Cancel(Id<Flight>),
 }
 
@@ -285,6 +294,8 @@ pub fn resume(io: &mut Io, env: &Env<Limits>, up: &mut Queue<Event>, subs: &mut 
     match io.entities.get_mut(id).expect("retiring an entity takes it off the ready list") {
         Entity::Listener(listener) => listener::resume(listener, id, room, env, &mut io.tables, subs),
         Entity::Stream(stream) => stream::resume(stream, id, env, &mut io.tables, up, subs),
+        Entity::Pipe(pipe) => pipe::resume(pipe, id, env, &mut io.tables, up, subs),
+        Entity::Child(_) => {}
     }
 }
 
@@ -299,12 +310,19 @@ pub fn up(io: &mut Io, env: &Env<Limits>, complete: Complete, up: &mut Queue<Eve
     let Flight { entity, purpose } = *io.tables.flights.get(flight).expect("a completion names an operation in flight");
     io.tables.flights.retire(flight);
     let landed = Landed { entity, flight, purpose, kind, result };
-    match io.entities.get_mut(entity).expect("an entity outlives its operations") {
-        Entity::Stream(stream) => stream::landed(stream, landed, env, &mut io.tables, up, subs),
-        // A listener's accept may make a socket, in the slab it is borrowed from.
+    match io.entities.get(entity).expect("an entity outlives its operations") {
+        Entity::Stream(_) => {
+            let Entity::Stream(stream) = io.entities.get_mut(entity).expect("live") else { unreachable!() };
+            stream::landed(stream, landed, env, &mut io.tables, up, subs);
+        }
         Entity::Listener(_) => listener::landed(io, env, landed, up, subs),
+        Entity::Pipe(_) => {
+            let Entity::Pipe(pipe) = io.entities.get_mut(entity).expect("live") else { unreachable!() };
+            pipe::landed(pipe, landed, env, &mut io.tables, up, subs);
+        }
+        Entity::Child(_) => process::landed(io, landed, up, subs),
     }
-    conclude(io, entity);
+    conclude(io, entity, subs);
 }
 
 /// Fires the earliest deadline due at `env.now`, if one is, emitting at most
@@ -324,8 +342,9 @@ pub fn fire(io: &mut Io, env: &Env<Limits>, up: &mut Queue<Event>, subs: &mut Qu
             Timer::Retry => listener::retried(listener, id, room, env, &mut io.tables, subs),
             Timer::Close => unreachable!("only a stream closes gracefully"),
         },
+        Entity::Pipe(_) | Entity::Child(_) => unreachable!("processes have no io deadline"),
     }
-    conclude(io, id);
+    conclude(io, id, subs);
 }
 
 /// Takes one request, emitting at most [`MAX_OUT_DOWN`](crate::MAX_OUT_DOWN).
@@ -341,6 +360,8 @@ pub fn down(io: &mut Io, env: &Env<Limits>, request: Request, subs: &mut Queue<S
         Request::Bind { socket, owner } => answer(io, env, socket, Some(owner), subs),
         Request::Reject { socket } => answer(io, env, socket, None, subs),
         Request::Stream { stream, down } => stream_request(io, env, stream, down, subs),
+        Request::Spawn { owner, spawn } => process::spawn(io, owner, spawn, subs),
+        Request::Signal { child, signal } => process::signal(io, child, signal, subs),
         Request::Close { entity } => close(io, env, entity, false, subs),
         Request::Abort { entity } => close(io, env, entity, true, subs),
     }
@@ -373,7 +394,9 @@ fn answer(io: &mut Io, env: &Env<Limits>, socket: Token, owner: Option<Token>, s
     };
     let stream = match entity {
         Entity::Stream(stream) => stream,
-        Entity::Listener(_) => unreachable!("an answer names a socket announced to its owner, not a listener"),
+        Entity::Listener(_) | Entity::Pipe(_) | Entity::Child(_) => {
+            unreachable!("an answer names a socket announced to its owner")
+        }
     };
     let listener = stream::answer(stream, id, owner, env, &mut io.tables, subs);
     let room = !io.entities.is_full();
@@ -381,7 +404,9 @@ fn answer(io: &mut Io, env: &Env<Limits>, socket: Token, owner: Option<Token>, s
         Some(Entity::Listener(listening)) => {
             listener::answered(listening, listener, id, room, env, &mut io.tables, subs);
         }
-        Some(Entity::Stream(_)) => unreachable!("a handle names the kind of entity it was made for"),
+        Some(Entity::Stream(_) | Entity::Pipe(_) | Entity::Child(_)) => {
+            unreachable!("a handle names the kind of entity it was made for")
+        }
         // Closed and reclaimed since it announced the socket.
         None => {}
     }
@@ -394,37 +419,53 @@ fn stream_request(io: &mut Io, env: &Env<Limits>, token: Token, down: Down, subs
     };
     match entity {
         Entity::Stream(stream) => stream::request(stream, id, down, env, &mut io.tables, subs),
-        Entity::Listener(_) => unreachable!("a stream request names a stream, not a listener"),
+        Entity::Pipe(pipe) => pipe::request(pipe, id, down, env, &mut io.tables, subs),
+        Entity::Listener(_) | Entity::Child(_) => unreachable!("a stream request names a stream"),
     }
 }
 
 fn close(io: &mut Io, env: &Env<Limits>, token: Token, abort: bool, subs: &mut Queue<Submit>) {
     let id = Id::<Entity>::from_token(token);
+    if let Some(Entity::Child(_)) = io.entities.get(id) {
+        process::close(io, id, subs);
+        return;
+    }
     let Some(entity) = io.entities.get_mut(id) else {
         return;
     };
     match entity {
         Entity::Listener(listener) => listener::close(listener, id, &mut io.tables, subs),
         Entity::Stream(stream) => stream::close(stream, id, abort, env, &mut io.tables, subs),
+        Entity::Pipe(pipe) => pipe::close(pipe, id, abort, &mut io.tables, subs),
+        Entity::Child(_) => unreachable!("handled above"),
     }
 }
 
 /// Retires `id` if its last transition closed it: it leaves every list, and
 /// the listeners starved for a slot try again.
-pub(crate) fn conclude(io: &mut Io, id: Id<Entity>) {
+pub(crate) fn conclude(io: &mut Io, id: Id<Entity>, subs: &mut Queue<Submit>) {
     let closed = match io.entities.get(id) {
         Some(Entity::Listener(listener)) => listener.is_closed(),
         Some(Entity::Stream(stream)) => stream.is_closed(),
+        Some(Entity::Pipe(pipe)) => pipe.is_closed(),
+        Some(Entity::Child(child)) => child.is_closed(),
         None => false,
     };
     if !closed {
         return;
     }
+    let child = match io.entities.get(id) {
+        Some(Entity::Pipe(pipe)) => pipe.child(),
+        _ => None,
+    };
     io.entities.retire(id);
     io.tables.ready.forget(id);
     io.tables.deadlines.cancel((id, Timer::Close));
     io.tables.deadlines.cancel((id, Timer::Retry));
     io.tables.ready.wake();
+    if let Some(child) = child {
+        process::release(io, child, subs);
+    }
 }
 
 /// Whether a cancel's answer says the backend did not submit it, so that its
@@ -433,7 +474,15 @@ pub(crate) fn unsubmitted(result: Result<Done, kernel::Error>) -> bool {
     match result {
         Ok(Done::Nothing) | Err(kernel::Error::TooLate) => false,
         Err(kernel::Error::InvalidArgument | kernel::Error::Other(_)) => true,
-        Ok(Done::Count(_) | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
+        Ok(
+            Done::Count(_)
+            | Done::Fd(_)
+            | Done::Accepted { .. }
+            | Done::Bound(_)
+            | Done::Stat(_)
+            | Done::Spawned { .. }
+            | Done::Exit(_),
+        ) => {
             unreachable!("a cancel answers with nothing")
         }
         Err(

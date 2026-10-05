@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::mem;
 
-use skein_io::kernel::{Addr, Complete, Done, Entry, Error, Family, Fd, Kind, Op, OpenHow, Stat, Submit};
+use skein_io::kernel::{Addr, Complete, Done, Entry, Error, Family, Fd, Kind, Op, OpenHow, Pipe, Stat, Submit};
 use skein_lib::{Duration, Queue, Time, Token};
 
 use crate::{Backend, Item};
@@ -67,6 +67,7 @@ struct Flight<P> {
     boxes: Vec<(usize, Box<[u8]>)>,
     /// A `List`'s entries: their address, and what they held.
     entries: Option<(usize, Box<[Entry]>)>,
+    pipes: Option<(usize, Box<[Pipe]>)>,
 }
 
 impl<'b, B: Backend> Run<'b, B> {
@@ -98,7 +99,33 @@ impl<'b, B: Backend> Run<'b, B> {
             boxes.push((held.as_ptr().addr(), Box::from(held)));
         }
         let entries = entries_of(&op).map(|held| (held.as_ptr().addr(), Box::from(held)));
-        self.flights.insert(token, Flight { process, summary: Summary::of(&op), boxes, entries });
+        let pipes = match &op {
+            Op::Spawn { spawn } => Some((spawn.pipes.as_ptr().addr(), spawn.pipes.clone())),
+            Op::Socket { .. }
+            | Op::Bind { .. }
+            | Op::Listen { .. }
+            | Op::Accept { .. }
+            | Op::Connect { .. }
+            | Op::Recv { .. }
+            | Op::Send { .. }
+            | Op::Shutdown { .. }
+            | Op::Close { .. }
+            | Op::Open { .. }
+            | Op::Read { .. }
+            | Op::Write { .. }
+            | Op::Sync { .. }
+            | Op::Stat { .. }
+            | Op::Rename { .. }
+            | Op::Remove { .. }
+            | Op::MakeDirectory { .. }
+            | Op::List { .. }
+            | Op::Wait { .. }
+            | Op::Signal { .. }
+            | Op::PipeRead { .. }
+            | Op::PipeWrite { .. }
+            | Op::Cancel { .. } => None,
+        };
+        self.flights.insert(token, Flight { process, summary: Summary::of(&op), boxes, entries, pipes });
         self.submissions.push(Submit { op: token, kind: op });
         self.backend.submit(process, &mut self.submissions);
         assert!(self.submissions.is_empty(), "the backend takes every record of a scenario");
@@ -171,8 +198,8 @@ impl<'b, B: Backend> Run<'b, B> {
         let mut cancel = cancel;
         for _ in 0..ATTEMPTS {
             let answer = self.wait(process, cancel).result;
-            answers.push(answer);
             let unsubmitted = matches!(answer, Err(Error::InvalidArgument | Error::Other(_)));
+            answers.push(answer);
             if !unsubmitted || self.arrived(target) {
                 let complete = self.wait(process, target);
                 return (answers, complete);
@@ -213,8 +240,9 @@ impl<'b, B: Backend> Run<'b, B> {
                 Retried::Shutdown(fd) => Op::Shutdown { fd },
             };
             let answer = self.call(process, op).result;
+            let failed = answer.is_err();
             answers.push(answer);
-            if answer.is_err() || self.backend.now() >= deadline {
+            if failed || self.backend.now() >= deadline {
                 return answers;
             }
             self.backend.pass(process, RETRY);
@@ -262,7 +290,14 @@ impl<'b, B: Backend> Run<'b, B> {
                 None
             }
             (_, Ok(Done::Fd(fd) | Done::Accepted { fd, .. })) => Some(*fd),
-            (_, Ok(Done::Nothing | Done::Count(_) | Done::Bound(_) | Done::Stat(_)) | Err(_)) => None,
+            (_, Ok(Done::Spawned { pidfd, pipes })) => {
+                assert!(self.open.insert((process, *pidfd)), "a new pidfd is not already open");
+                for &fd in pipes.as_ref() {
+                    assert!(self.open.insert((process, fd)), "a new pipe descriptor is not already open");
+                }
+                None
+            }
+            (_, Ok(Done::Nothing | Done::Count(_) | Done::Bound(_) | Done::Stat(_) | Done::Exit(_)) | Err(_)) => None,
         };
         if let Some(fd) = opened {
             assert!(self.open.insert((process, fd)), "a new descriptor is not one already open in its process");
@@ -647,6 +682,11 @@ enum Summary {
     Remove { dir: Fd, name: usize, directory: bool },
     MakeDirectory { dir: Fd, name: usize },
     List { fd: Fd, entries: usize, names: usize },
+    Spawn { root: Fd, program: usize, args: usize, env: usize, dir: usize, pipes: usize },
+    Wait { pidfd: Fd },
+    Signal { pidfd: Fd, signal: skein_io::kernel::Signal },
+    PipeRead { fd: Fd, len: usize },
+    PipeWrite { fd: Fd, len: usize, from: u32 },
     Cancel { target: Token },
 }
 
@@ -675,6 +715,18 @@ impl Summary {
             }
             Op::MakeDirectory { dir, name } => Summary::MakeDirectory { dir: *dir, name: name.len() },
             Op::List { fd, entries, names } => Summary::List { fd: *fd, entries: entries.len(), names: names.len() },
+            Op::Spawn { spawn } => Summary::Spawn {
+                root: spawn.root,
+                program: spawn.program.len(),
+                args: spawn.args.len(),
+                env: spawn.env.len(),
+                dir: spawn.dir.len(),
+                pipes: spawn.pipes.len(),
+            },
+            Op::Wait { pidfd } => Summary::Wait { pidfd: *pidfd },
+            Op::Signal { pidfd, signal } => Summary::Signal { pidfd: *pidfd, signal: *signal },
+            Op::PipeRead { fd, buf } => Summary::PipeRead { fd: *fd, len: buf.len() },
+            Op::PipeWrite { fd, bytes, from } => Summary::PipeWrite { fd: *fd, len: bytes.len(), from: *from },
             Op::Cancel { target } => Summary::Cancel { target: *target },
         }
     }
@@ -690,8 +742,18 @@ enum Retried {
 /// The boxes of bytes a record carries: a buffer, a path, names.
 fn boxes_of(op: &Op) -> Vec<&[u8]> {
     match op {
-        Op::Recv { buf, .. } | Op::Read { buf, .. } => vec![buf],
-        Op::Send { bytes, .. } | Op::Write { bytes, .. } => vec![bytes],
+        Op::Recv { buf, .. } | Op::Read { buf, .. } | Op::PipeRead { buf, .. } => vec![buf],
+        Op::Send { bytes, .. } | Op::Write { bytes, .. } | Op::PipeWrite { bytes, .. } => vec![bytes],
+        Op::Spawn { spawn } => {
+            let mut boxes = vec![&*spawn.program, &*spawn.dir];
+            for arg in &spawn.args {
+                boxes.push(arg);
+            }
+            for env in &spawn.env {
+                boxes.push(env);
+            }
+            boxes
+        }
         Op::Open { path, .. } => vec![path],
         Op::Rename { from, to, .. } => vec![from, to],
         Op::Remove { name, .. } | Op::MakeDirectory { name, .. } => vec![name],
@@ -705,6 +767,8 @@ fn boxes_of(op: &Op) -> Vec<&[u8]> {
         | Op::Close { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
+        | Op::Wait { .. }
+        | Op::Signal { .. }
         | Op::Cancel { .. } => Vec::new(),
     }
 }
@@ -730,6 +794,11 @@ fn entries_of(op: &Op) -> Option<&[Entry]> {
         | Op::Rename { .. }
         | Op::Remove { .. }
         | Op::MakeDirectory { .. }
+        | Op::Spawn { .. }
+        | Op::Wait { .. }
+        | Op::Signal { .. }
+        | Op::PipeRead { .. }
+        | Op::PipeWrite { .. }
         | Op::Cancel { .. } => None,
     }
 }
@@ -741,14 +810,23 @@ fn entries_of(op: &Op) -> Option<&[Entry]> {
 fn handed_back<P>(flight: &Flight<P>, complete: &Complete) {
     let count = match complete.result {
         Ok(Done::Count(n)) => Some(usize_of(n)),
-        Ok(Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) | Err(_) => None,
+        Ok(
+            Done::Nothing
+            | Done::Fd(_)
+            | Done::Accepted { .. }
+            | Done::Bound(_)
+            | Done::Stat(_)
+            | Done::Spawned { .. }
+            | Done::Exit(_),
+        )
+        | Err(_) => None,
     };
     let back = boxes_of(&complete.kind);
     assert_eq!(back.len(), flight.boxes.len(), "a record comes back with the boxes it went down with");
     for ((address, held), back) in flight.boxes.iter().zip(back) {
         assert!(back.as_ptr().addr() == *address, "a buffer comes back in the Box it went down in");
         let untouched = match (&complete.kind, count) {
-            (Op::Recv { .. } | Op::Read { .. }, Some(n)) => back.get(n..) == held.get(n..),
+            (Op::Recv { .. } | Op::Read { .. } | Op::PipeRead { .. }, Some(n)) => back.get(n..) == held.get(n..),
             (Op::List { entries, .. }, Some(n)) => names_untouched(held, back, entries.get(..n).unwrap_or_default()),
             _ => back == &**held,
         };
@@ -758,6 +836,10 @@ fn handed_back<P>(flight: &Flight<P>, complete: &Complete) {
         assert!(back.as_ptr().addr() == *address, "a List's entries come back in the Box they went down in");
         let n = count.unwrap_or(0);
         assert!(back.get(n..) == held.get(n..), "a List's entries past its count come back untouched");
+    }
+    if let (Some((address, held)), Op::Spawn { spawn }) = (&flight.pipes, &complete.kind) {
+        assert!(spawn.pipes.as_ptr().addr() == *address, "a Spawn's pipes come back in the Box they went down in");
+        assert_eq!(&spawn.pipes, held, "a Spawn's pipe specifications come back untouched");
     }
 }
 

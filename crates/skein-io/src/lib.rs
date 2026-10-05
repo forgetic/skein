@@ -4,8 +4,8 @@
 //! the mechanics in between: buffers in flight, short transfers, cancels and
 //! settling, graceful close, the accept batch.
 //!
-//! Built for sockets (io.md, 3); files, processes and signals come when a
-//! user pulls them (io.md, 9).
+//! Built for sockets (io.md, 3) and child processes with one-way pipe streams
+//! (io.md, 6). Files and service termination signals come later.
 //!
 //! # Driving it
 //!
@@ -34,6 +34,8 @@ pub mod kernel;
 mod layer;
 mod limits;
 mod listener;
+mod pipe;
+mod process;
 mod records;
 mod stream;
 #[cfg(test)]

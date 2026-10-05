@@ -9,6 +9,7 @@
 mod kernel;
 mod layer;
 mod listener;
+mod process;
 mod stream;
 
 use alloc::vec::Vec;
@@ -67,6 +68,11 @@ pub(crate) fn buffer(op: &Op) -> (&[u8], u32) {
         | Op::Remove { .. }
         | Op::MakeDirectory { .. }
         | Op::List { .. }
+        | Op::Spawn { .. }
+        | Op::Wait { .. }
+        | Op::Signal { .. }
+        | Op::PipeRead { .. }
+        | Op::PipeWrite { .. }
         | Op::Cancel { .. } => panic!("no buffer in {op:?}"),
     }
 }
@@ -84,6 +90,11 @@ pub(crate) enum Kind {
     Shutdown,
     Close,
     Cancel,
+    Spawn,
+    Wait,
+    Signal,
+    PipeRead,
+    PipeWrite,
 }
 
 pub(crate) const fn kind(op: &Op) -> Kind {
@@ -98,6 +109,11 @@ pub(crate) const fn kind(op: &Op) -> Kind {
         Op::Shutdown { .. } => Kind::Shutdown,
         Op::Close { .. } => Kind::Close,
         Op::Cancel { .. } => Kind::Cancel,
+        Op::Spawn { .. } => Kind::Spawn,
+        Op::Wait { .. } => Kind::Wait,
+        Op::Signal { .. } => Kind::Signal,
+        Op::PipeRead { .. } => Kind::PipeRead,
+        Op::PipeWrite { .. } => Kind::PipeWrite,
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }

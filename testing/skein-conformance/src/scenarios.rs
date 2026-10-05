@@ -76,7 +76,7 @@ fn settles(
     last: Result<Done, Error>,
 ) -> bool {
     match answers.split_last() {
-        Some((end, before)) => *end == last && before.iter().all(|answer| earlier(*answer)),
+        Some((end, before)) => *end == last && before.iter().all(|answer| earlier(answer.clone())),
         None => false,
     }
 }
@@ -86,7 +86,16 @@ fn settles(
 fn sent(answer: Result<Done, Error>) -> bool {
     match answer {
         Ok(Done::Count(_)) => true,
-        Ok(Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) | Err(_) => false,
+        Ok(
+            Done::Nothing
+            | Done::Fd(_)
+            | Done::Accepted { .. }
+            | Done::Bound(_)
+            | Done::Stat(_)
+            | Done::Spawned { .. }
+            | Done::Exit(_),
+        )
+        | Err(_) => false,
     }
 }
 
@@ -216,7 +225,7 @@ impl Check for GracefulClose {
     fn check(&self) {
         assert!(self.bytes_intact, "the contract: the bytes sent before a Close arrive");
         assert_eq!(self.end, END, "the contract: a Recv of zero bytes means the stream ended");
-        let first = self.shutdowns.first().copied();
+        let first = self.shutdowns.first().cloned();
         assert_eq!(first, Some(NOTHING), "the contract: Shutdown is Ok while the connection lasts");
         let closed = self.shutdowns.len() > 1 && settles(&self.shutdowns, shut, Err(Error::NotConnected));
         rule(closed, "a second Shutdown is NotConnected once the connection is closed", &self.shutdowns);
@@ -468,16 +477,20 @@ pub fn wrong_state<B: Backend>(backend: &mut B) -> WrongState {
 
 impl Check for WrongState {
     fn check(&self) {
-        let [recv, send, accept] = self.fresh;
-        assert_eq!(recv, Err(Error::NotConnected), "the contract: a Recv on a socket never connected");
-        assert_eq!(send, Err(Error::BrokenPipe), "the contract: a Send on a socket never connected");
-        assert_eq!(accept, Err(Error::InvalidArgument), "the contract: an Accept on a socket that does not listen");
+        let [recv, send, accept] = &self.fresh;
+        assert_eq!(recv, &Err(Error::NotConnected), "the contract: a Recv on a socket never connected");
+        assert_eq!(send, &Err(Error::BrokenPipe), "the contract: a Send on a socket never connected");
+        assert_eq!(accept, &Err(Error::InvalidArgument), "the contract: an Accept on a socket that does not listen");
         assert_eq!(self.bind_twice, Err(Error::InvalidArgument), "the contract: a second Bind");
-        let [recv, send] = self.listener;
-        assert_eq!(recv, Err(Error::NotConnected), "the contract: a Recv on a listener, never connected");
-        assert_eq!(send, Err(Error::BrokenPipe), "the contract: a Send on a listener, never connected");
-        for answer in self.connected {
-            assert_eq!(answer, Err(Error::InvalidArgument), "the contract: Bind, Listen, Accept on a connected socket");
+        let [recv, send] = &self.listener;
+        assert_eq!(recv, &Err(Error::NotConnected), "the contract: a Recv on a listener, never connected");
+        assert_eq!(send, &Err(Error::BrokenPipe), "the contract: a Send on a listener, never connected");
+        for answer in &self.connected {
+            assert_eq!(
+                answer,
+                &Err(Error::InvalidArgument),
+                "the contract: Bind, Listen, Accept on a connected socket"
+            );
         }
     }
 }
@@ -830,7 +843,7 @@ impl Cancelling {
     /// to the contract.
     #[must_use]
     pub fn pairing(&self) -> Pairing {
-        match (self.cancels.last(), self.target) {
+        match (self.cancels.last(), &self.target) {
             (Some(Ok(Done::Nothing)), _) => Pairing::Stopped,
             (Some(Err(Error::TooLate)), Err(Error::Cancelled)) => Pairing::Interrupted,
             (Some(Err(Error::TooLate)), _) => Pairing::Completed,
@@ -842,8 +855,8 @@ impl Cancelling {
     /// Whether the target completed with its own result: what its
     /// operation does when nothing stops it.
     fn own(&self) -> bool {
-        match (self.of, self.target) {
-            (Target::Recv | Target::Read, Ok(Done::Count(n))) => n > 0,
+        match (self.of, &self.target) {
+            (Target::Recv | Target::Read, Ok(Done::Count(n))) => *n > 0,
             (Target::Accept, Ok(Done::Accepted { .. })) | (Target::Connect, Ok(Done::Nothing)) => true,
             (Target::Recv | Target::Accept | Target::Connect | Target::Read, _) => false,
         }
@@ -916,7 +929,7 @@ fn finish_racing_recv<B: Backend>(
     race: Race,
 ) -> Cancelling {
     let (cancels, target) = run.settle_cancel(server, recv, cancel);
-    let result = target.result;
+    let result = target.result.clone();
     let mut got = received(target).unwrap_or_default();
     let left = sent.len().checked_sub(got.len()).expect("no more than was sent");
     got.extend(run.recv_exact(server, s, left));

@@ -106,6 +106,11 @@ impl Sim {
             | Op::Recv { .. }
             | Op::Send { .. }
             | Op::Shutdown { .. }
+            | Op::Spawn { .. }
+            | Op::Wait { .. }
+            | Op::Signal { .. }
+            | Op::PipeRead { .. }
+            | Op::PipeWrite { .. }
             | Op::Cancel { .. } => false,
         };
         // A hung operation asks the machine nothing: only a Cancel ends it.
@@ -144,6 +149,11 @@ impl Sim {
             | Op::Recv { .. }
             | Op::Send { .. }
             | Op::Shutdown { .. }
+            | Op::Spawn { .. }
+            | Op::Wait { .. }
+            | Op::Signal { .. }
+            | Op::PipeRead { .. }
+            | Op::PipeWrite { .. }
             | Op::Cancel { .. } => self.bug("only an operation on files can fail as a file's"),
         };
         let faults = self.config.faults;
@@ -213,6 +223,11 @@ impl Sim {
             | Op::Recv { .. }
             | Op::Send { .. }
             | Op::Shutdown { .. }
+            | Op::Spawn { .. }
+            | Op::Wait { .. }
+            | Op::Signal { .. }
+            | Op::PipeRead { .. }
+            | Op::PipeWrite { .. }
             | Op::Cancel { .. } => self.bug("only an operation on files is asked of the machine"),
         }
     }
@@ -220,6 +235,10 @@ impl Sim {
     /// The machine's answer, made into its operation's completion.
     fn answered(&mut self, answer: Answer) {
         let Answer { ticket, result } = answer;
+        if self.spawn_asked.contains_key(&ticket) {
+            self.answered_spawn(ticket, result);
+            return;
+        }
         let Some(Asked { pid, token, len }) = self.asked.remove(&ticket) else {
             self.machine(&format!("an answer to {ticket:?}, which is no call waiting"));
         };
@@ -302,7 +321,7 @@ impl Sim {
     }
 
     /// Fails the world on an answer the machine should not have given.
-    fn machine(&self, what: &str) -> ! {
+    pub(super) fn machine(&self, what: &str) -> ! {
         self.die(&format!("the machine broke the seam: {what}"));
     }
 }

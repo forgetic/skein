@@ -629,7 +629,15 @@ fn decode(landed: Landed) -> Happened {
     match purpose {
         Purpose::Socket => Happened::Socket(match result {
             Ok(Done::Fd(fd)) => Ok(fd),
-            Ok(Done::Nothing | Done::Count(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
+            Ok(
+                Done::Nothing
+                | Done::Count(_)
+                | Done::Accepted { .. }
+                | Done::Bound(_)
+                | Done::Stat(_)
+                | Done::Spawned { .. }
+                | Done::Exit(_),
+            ) => {
                 unreachable!("a socket answers with its descriptor")
             }
             Err(error) => Err(error),
@@ -654,6 +662,11 @@ fn decode(landed: Landed) -> Happened {
             | Op::Remove { .. }
             | Op::MakeDirectory { .. }
             | Op::List { .. }
+            | Op::Spawn { .. }
+            | Op::Wait { .. }
+            | Op::Signal { .. }
+            | Op::PipeRead { .. }
+            | Op::PipeWrite { .. }
             | Op::Cancel { .. } => unreachable!("a completion hands back its own operation"),
         },
         Purpose::Send => match kind {
@@ -675,13 +688,26 @@ fn decode(landed: Landed) -> Happened {
             | Op::Remove { .. }
             | Op::MakeDirectory { .. }
             | Op::List { .. }
+            | Op::Spawn { .. }
+            | Op::Wait { .. }
+            | Op::Signal { .. }
+            | Op::PipeRead { .. }
+            | Op::PipeWrite { .. }
             | Op::Cancel { .. } => unreachable!("a completion hands back its own operation"),
         },
         Purpose::Shutdown => Happened::Shut { flight, result: nothing(result) },
         // A descriptor is closed whatever its close answers.
         Purpose::Close => Happened::Released,
         Purpose::Cancel(target) => Happened::Cancelled { target, result },
-        Purpose::Bind | Purpose::Listen | Purpose::Accept | Purpose::Discard => {
+        Purpose::Bind
+        | Purpose::Listen
+        | Purpose::Accept
+        | Purpose::Discard
+        | Purpose::Spawn
+        | Purpose::Wait
+        | Purpose::Signal
+        | Purpose::PipeRead
+        | Purpose::PipeWrite => {
             unreachable!("a stream never binds, listens or accepts")
         }
     }
@@ -691,7 +717,15 @@ fn decode(landed: Landed) -> Happened {
 fn nothing(result: Result<Done, kernel::Error>) -> Result<(), kernel::Error> {
     match result {
         Ok(Done::Nothing) => Ok(()),
-        Ok(Done::Count(_) | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
+        Ok(
+            Done::Count(_)
+            | Done::Fd(_)
+            | Done::Accepted { .. }
+            | Done::Bound(_)
+            | Done::Stat(_)
+            | Done::Spawned { .. }
+            | Done::Exit(_),
+        ) => {
             unreachable!("a connect or a shutdown answers with nothing")
         }
         Err(error) => Err(error),
@@ -702,7 +736,15 @@ fn nothing(result: Result<Done, kernel::Error>) -> Result<(), kernel::Error> {
 fn counted(result: Result<Done, kernel::Error>) -> Result<u32, kernel::Error> {
     match result {
         Ok(Done::Count(n)) => Ok(n),
-        Ok(Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
+        Ok(
+            Done::Nothing
+            | Done::Fd(_)
+            | Done::Accepted { .. }
+            | Done::Bound(_)
+            | Done::Stat(_)
+            | Done::Spawned { .. }
+            | Done::Exit(_),
+        ) => {
             unreachable!("a receive or a send answers with a count")
         }
         Err(error) => Err(error),

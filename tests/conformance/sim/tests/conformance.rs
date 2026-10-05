@@ -6,7 +6,7 @@ use skein_conformance::{
     Check, Pairing, Shortness, accept_past_the_descriptor_limit, address_in_use, backpressure, cancel_accept,
     cancel_connect, cancel_connect_established_while_away, cancel_read, cancel_recv, closed_before_accept, escapes,
     file_lifecycle, full_accept_queue, graceful_close, ipv6_only, lifecycle, list, listener_close_resets_waiting,
-    make_directory, nested_roots, open_past_the_descriptor_limit, permissions, refused, remove, rename,
+    make_directory, nested_roots, open_past_the_descriptor_limit, permissions, processes, refused, remove, rename,
     reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv, unread_close_meets_send, wrong_state,
 };
 use skein_conformance_sim::{
@@ -20,6 +20,11 @@ use skein_sim::Config;
 fn calm_and_chaos<S: Check>(scenario: fn(&mut Simulated) -> S) {
     each_seed(Config::calm(), CALM, scenario);
     each_seed(loopback_chaos(), SMOKE, scenario);
+}
+
+#[test]
+fn child_processes_and_pipes() {
+    each_seed(Config::calm(), CALM, |world| processes(world, b"process_fixture"));
 }
 
 #[test]

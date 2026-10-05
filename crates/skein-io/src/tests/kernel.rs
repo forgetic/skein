@@ -67,10 +67,17 @@ fn documented(op: &Op) -> Done {
     match op {
         Op::Socket { .. } | Op::Open { .. } => Done::Fd(NEW),
         Op::Accept { .. } => Done::Accepted { fd: NEW, peer: v4() },
-        Op::Recv { .. } | Op::Send { .. } | Op::Read { .. } | Op::Write { .. } => Done::Count(1),
+        Op::Recv { .. }
+        | Op::Send { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::PipeRead { .. }
+        | Op::PipeWrite { .. } => Done::Count(1),
         Op::List { .. } => Done::Count(0),
         Op::Bind { .. } => Done::Bound(v4()),
         Op::Stat { .. } => Done::Stat(STAT),
+        Op::Spawn { .. } => Done::Spawned { pidfd: NEW, pipes: Box::default() },
+        Op::Wait { .. } => Done::Exit(crate::kernel::Exit::Code(0)),
         Op::Listen { .. }
         | Op::Connect { .. }
         | Op::Shutdown { .. }
@@ -79,6 +86,7 @@ fn documented(op: &Op) -> Done {
         | Op::Rename { .. }
         | Op::Remove { .. }
         | Op::MakeDirectory { .. }
+        | Op::Signal { .. }
         | Op::Cancel { .. } => Done::Nothing,
     }
 }
@@ -97,12 +105,12 @@ fn every_operation_succeeds_with_its_documented_shape_and_no_other() {
         assert!(op.is_valid(), "the examples are valid: {op:?}");
         let expected = documented(&op);
         assert_eq!(op.shape(), expected.shape());
-        let answer = complete(op, Ok(expected));
+        let answer = complete(op, Ok(expected.clone()));
         assert!(answer.is_valid(), "the documented success fits: {answer:?}");
         let mut kind = answer.kind;
-        for done in shapes {
+        for done in &shapes {
             if done.shape() != expected.shape() {
-                let answer = complete(kind, Ok(done));
+                let answer = complete(kind, Ok(done.clone()));
                 assert!(!answer.is_valid(), "only the documented shape fits: {answer:?}");
                 kind = answer.kind;
             }
@@ -303,6 +311,11 @@ fn named(op: &Op) -> &'static [Error] {
         | Op::Shutdown { .. }
         | Op::Close { .. }
         | Op::Stat { .. }
+        | Op::Spawn { .. }
+        | Op::Wait { .. }
+        | Op::Signal { .. }
+        | Op::PipeRead { .. }
+        | Op::PipeWrite { .. }
         | Op::Cancel { .. } => &[],
     }
 }
@@ -326,6 +339,8 @@ fn cancellable(op: &Op) -> bool {
         | Op::Remove { .. }
         | Op::MakeDirectory { .. }
         | Op::List { .. }
+        | Op::Spawn { .. }
+        | Op::Signal { .. }
         | Op::Cancel { .. } => false,
         Op::Open { .. }
         | Op::Read { .. }
@@ -339,7 +354,10 @@ fn cancellable(op: &Op) -> bool {
         | Op::Recv { .. }
         | Op::Send { .. }
         | Op::Shutdown { .. }
-        | Op::Close { .. } => true,
+        | Op::Close { .. }
+        | Op::Wait { .. }
+        | Op::PipeRead { .. }
+        | Op::PipeWrite { .. } => true,
     }
 }
 

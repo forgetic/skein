@@ -2,11 +2,12 @@
 //! 4.3): the seam's calls translated into the machine's own operations,
 //! and its answers and refusals back into the simulator's vocabulary.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use skein_io::kernel::{Error, Kind, OpenHow, Stat};
+use skein_io::kernel::{Error, Kind, OpenHow, Pipe, Stat, Way};
 use skein_lib::Queue;
-use skein_sim::{Answer, Ask, Call, Handle, Reply, Sim};
+use skein_sim::{Answer, Ask, Call, Handle, Program, Reply, Sim};
 
 use crate::fs::{Facts, How, Is, Machine, Opened, Refusal};
 
@@ -18,6 +19,18 @@ const ROOM: u32 = 64;
 pub fn step(machine: &mut Machine, call: Call, answers: &mut Queue<Answer>) {
     let Call { ticket, ask } = call;
     let result = match ask {
+        Ask::Spawn { root, program, args, env: _, dir, pipes } => {
+            if !dir.is_empty() && dir.as_ref() != b"." {
+                match machine.open(opened(root), &dir, How::Directory) {
+                    Ok(directory) => machine.close(directory),
+                    Err(refusal) => {
+                        answers.push(Answer { ticket, result: Err(error(refusal)) });
+                        return;
+                    }
+                }
+            }
+            program_of(&program, &args, &pipes).map(Reply::Program)
+        }
         Ask::Open { root, path, how } => match machine.open(opened(root), &path, how_of(how)) {
             Ok(file) => Ok(Reply::Opened(Handle::new(file.raw()))),
             Err(refusal) => Err(error(refusal)),
@@ -56,6 +69,35 @@ pub fn step(machine: &mut Machine, call: Call, answers: &mut Queue<Answer>) {
         }
     };
     answers.push(Answer { ticket, result });
+}
+
+fn program_of(program: &[u8], args: &[Box<[u8]>], pipes: &[Pipe]) -> Result<Program, Error> {
+    let name = program.rsplit(|&byte| byte == b'/').next().unwrap_or(program);
+    let (name, args) = if name == b"process_fixture" {
+        let Some((name, rest)) = args.split_first() else { return Err(Error::InvalidArgument) };
+        (name.as_ref(), rest)
+    } else {
+        (name, args)
+    };
+    match name {
+        b"echo" | b"skein-echo" => {
+            let input = pipes.iter().find(|pipe| pipe.way == Way::In).ok_or(Error::InvalidArgument)?;
+            let output = pipes.iter().find(|pipe| pipe.way == Way::Out).ok_or(Error::InvalidArgument)?;
+            Ok(Program::Echo { input: input.child, output: output.child })
+        }
+        b"exit" | b"skein-exit" => {
+            let code = match args.first() {
+                Some(value) => core::str::from_utf8(value)
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .ok_or(Error::InvalidArgument)?,
+                None => 0,
+            };
+            Ok(Program::Exit(code))
+        }
+        b"never" | b"skein-never" => Ok(Program::Never),
+        _ => Err(Error::NotFound),
+    }
 }
 
 /// What a world does once a process has submitted: every call the

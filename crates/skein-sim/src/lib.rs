@@ -28,6 +28,8 @@
 //!   [`Answer`]s back ([`Sim::answer`]), which completes the operations. A
 //!   root the shell would open at startup is the machine's [`Handle`] of a
 //!   directory, given to a process with [`Sim::root`].
+//! - A child spawn asks the machine which program it names; the simulator
+//!   keeps the child's pidfd, pipes, waiting and exit state.
 //! - [`Sim::assert_quiescent`] and [`Sim::assert_no_open_fds`] check a
 //!   process at the end; [`Sim::render_trace`] prints the run with its seed,
 //!   every fault drawn included.
@@ -111,6 +113,6 @@ mod sim;
 mod trace;
 
 pub use config::{Config, Faults};
-pub use machine::{Answer, Ask, Call, Handle, Reply, Ticket};
+pub use machine::{Answer, Ask, Call, Handle, Program, Reply, Ticket};
 pub use sim::{Pid, Sim};
 pub use trace::{Entry, Event, Fault, Summary, Text, render};

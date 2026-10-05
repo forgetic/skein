@@ -1,6 +1,6 @@
-//! The machine seam (simulator.md, 3): the operations on files a process
-//! submits, as the simulator passes them on to the embedder's fake
-//! machine, and the machine's answers. Both are data. The world owns the
+//! The machine seam (simulator.md, 3): operations on files and program
+//! selection passed to the embedder's fake machine, and its answers. Both
+//! are data. The world owns the
 //! simulator and the machine, takes the calls from [`Sim::calls`], hands
 //! each to its machine, and gives the answers back with [`Sim::answer`],
 //! as it moves records between its processes and the simulator: nothing
@@ -19,7 +19,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use skein_io::kernel::{Error, Kind, OpenHow, Stat};
+use skein_io::kernel::{Error, Kind, OpenHow, Pipe, Stat};
 
 /// The machine's name for a file or a directory it opened, which the
 /// simulator holds behind a process's descriptor. Only the machine gives
@@ -55,6 +55,16 @@ pub struct Call {
 /// operation may answer (`skein_io::kernel`'s table).
 #[derive(PartialEq, Eq, Debug)]
 pub enum Ask {
+    /// Identify a program beneath `root`, in `dir`, and start its modeled
+    /// behavior with exactly the requested child descriptors.
+    Spawn {
+        root: Handle,
+        program: Box<[u8]>,
+        args: Box<[Box<[u8]>]>,
+        env: Box<[Box<[u8]>]>,
+        dir: Box<[u8]>,
+        pipes: Box<[Pipe]>,
+    },
     /// `path`, resolved beneath the directory `root` names as `openat2`
     /// resolves with `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS`, opened as
     /// `how` says: [`Reply::Opened`], a handle never issued before.
@@ -92,10 +102,23 @@ pub struct Answer {
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum Reply {
+    Program(Program),
     Opened(Handle),
     Read(Box<[u8]>),
     Stat(Stat),
     /// Each entry's kind and name, in the order to hand them back.
     Listed(Vec<(Kind, Box<[u8]>)>),
     Done,
+}
+
+/// A fake program's behavior. The machine selects it; the simulator runs
+/// it against the child's pipes and keeps the process lifecycle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Program {
+    /// Copy bytes from one child descriptor to another until input ends.
+    Echo { input: u32, output: u32 },
+    /// Exit at startup with the given code.
+    Exit(u8),
+    /// Stay alive until signalled.
+    Never,
 }

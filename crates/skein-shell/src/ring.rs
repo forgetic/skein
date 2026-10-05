@@ -65,6 +65,8 @@
     reason = "the ring adapter is the one place in skein that hands memory to the kernel (shell.md, 3; programming-model.md, 2.1)"
 )]
 
+mod process;
+
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{CStr, CString};
@@ -78,7 +80,10 @@ use std::path::Path;
 use std::ptr;
 
 use io_uring::{EnterFlags, IoUring, Probe, opcode, squeue, types};
-use skein_io::kernel::{Addr, Complete, Done, Entry, Error, Family, Fd, Kind, Op, OpenHow, PERMISSIONS, Stat, Submit};
+use process::{signal_child, spawn};
+use skein_io::kernel::{
+    Addr, Complete, Done, Entry, Error, Exit, Family, Fd, Kind, Op, OpenHow, PERMISSIONS, Stat, Submit,
+};
 use skein_lib::{Queue, Time, Token};
 
 /// How large a [`Kernel`] is.
@@ -213,6 +218,8 @@ struct Flight {
     /// What a `Stat` reads back, which the kernel writes; in a cell, as the
     /// address is.
     statx: UnsafeCell<libc::statx>,
+    /// `WaitId` writes this while its ring entry is in flight.
+    siginfo: UnsafeCell<libc::siginfo_t>,
     /// How many times an `Open` was submitted again after `EAGAIN`.
     again: u32,
     /// The result, for an operation the adapter completed itself.
@@ -229,7 +236,7 @@ enum Prepared {
 
 /// The operations the ring adapter submits, which the kernel's ring must
 /// have: all of them at the floor, 6.12.
-const OPERATIONS: [(u8, &str); 18] = [
+const OPERATIONS: [(u8, &str); 19] = [
     (opcode::Socket::CODE, "IORING_OP_SOCKET"),
     (opcode::Bind::CODE, "IORING_OP_BIND"),
     (opcode::Listen::CODE, "IORING_OP_LISTEN"),
@@ -248,6 +255,7 @@ const OPERATIONS: [(u8, &str); 18] = [
     (opcode::UnlinkAt::CODE, "IORING_OP_UNLINKAT"),
     (opcode::MkDirAt::CODE, "IORING_OP_MKDIRAT"),
     (opcode::AsyncCancel::CODE, "IORING_OP_ASYNC_CANCEL"),
+    (opcode::WaitId::CODE, "IORING_OP_WAITID"),
 ];
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
@@ -305,6 +313,9 @@ impl Kernel {
             ring.params().sq_entries() >= operations && ring.params().cq_entries() >= operations,
             "the kernel sizes each ring at least as asked"
         );
+        if let Err(errno) = process::block_sigpipe() {
+            return Err(OpenError::Setup(errno));
+        }
         Ok(Kernel { ring, table: Table::new(operations), thread: PhantomData })
     }
 
@@ -558,6 +569,9 @@ impl Flight {
             to: Box::default(),
             open_how: UnsafeCell::new(types::OpenHow::new()),
             statx: UnsafeCell::new(zeroed_statx()),
+            // SAFETY: siginfo_t is an integer-bearing C output structure;
+            // waitid fills it before decode reads its fields.
+            siginfo: UnsafeCell::new(unsafe { mem::zeroed() }),
             again: 0,
             ready: None,
         }
@@ -570,13 +584,14 @@ impl Flight {
 /// `Bind`), `MSG_NOSIGNAL` on every send, the modes of new files and
 /// directories. A `Cancel` whose target is not in flight is too late,
 /// without asking the kernel; a `List` runs here, synchronously.
+#[expect(clippy::too_many_lines, reason = "one exhaustive operation table maps each record to its ring entry")]
 fn prepare(
     flight: &mut Flight,
     tokens: &BTreeMap<Token, u64>,
     cancelled: &mut BTreeSet<Token>,
     listing: &mut [u8],
 ) -> Prepared {
-    let Flight { kind, addr, addr_len, path, to: to_path, open_how, statx, .. } = flight;
+    let Flight { kind, addr, addr_len, path, to: to_path, open_how, statx, siginfo, .. } = flight;
     let entry = match kind {
         Op::Socket { family } => {
             let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
@@ -611,11 +626,21 @@ fn prepare(
             let len = u32::try_from(buf.len()).expect("a valid Recv buffer's length is a count");
             opcode::Recv::new(types::Fd(fd.raw()), buf.as_mut_ptr(), len).build()
         }
+        Op::PipeRead { fd, buf } => {
+            let len = u32::try_from(buf.len()).expect("a valid pipe read buffer's length is a count");
+            opcode::Read::new(types::Fd(fd.raw()), buf.as_mut_ptr(), len).offset(u64::MAX).build()
+        }
         Op::Send { fd, bytes, from } => {
             let from = usize::try_from(*from).expect("a u32 fits in a usize");
             let left = bytes.get(from..).expect("a valid Send has bytes left from its offset");
             let len = u32::try_from(left.len()).expect("a valid Send's length is a count");
             opcode::Send::new(types::Fd(fd.raw()), left.as_ptr(), len).flags(libc::MSG_NOSIGNAL).build()
+        }
+        Op::PipeWrite { fd, bytes, from } => {
+            let start = usize::try_from(*from).expect("a u32 fits in a usize");
+            let left = bytes.get(start..).expect("a valid pipe write has bytes left");
+            let len = u32::try_from(left.len()).expect("a valid pipe write's length is a count");
+            opcode::Write::new(types::Fd(fd.raw()), left.as_ptr(), len).offset(u64::MAX).build()
         }
         Op::Shutdown { fd } => opcode::Shutdown::new(types::Fd(fd.raw()), libc::SHUT_WR).build(),
         Op::Close { fd } => opcode::Close::new(types::Fd(fd.raw())).build(),
@@ -661,6 +686,13 @@ fn prepare(
                 Err(errno) => Err(error(kind, errno, false)),
             });
         }
+        Op::Spawn { spawn: command } => return Prepared::Done(spawn(command)),
+        Op::Signal { pidfd, signal } => return Prepared::Done(signal_child(*pidfd, *signal)),
+        Op::Wait { pidfd } => {
+            opcode::WaitId::new(libc::P_PIDFD, u32::try_from(pidfd.raw()).expect("a pidfd is positive"), libc::WEXITED)
+                .infop(siginfo.get().cast_const())
+                .build()
+        }
         Op::Cancel { target } => {
             let Some(target_data) = tokens.get(target) else {
                 return Prepared::Done(Err(Error::TooLate));
@@ -678,7 +710,7 @@ fn prepare(
 /// `IPV6_V6ONLY` on every IPv6 socket, before io can bind it. A `Bind` reads
 /// the address bound back with `getsockname`.
 fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error> {
-    let Flight { kind, addr, addr_len, statx, .. } = flight;
+    let Flight { kind, addr, addr_len, statx, siginfo, .. } = flight;
     let (addr, addr_len) = (addr.get_mut(), addr_len.get_mut());
     if res < 0 {
         return Err(error(kind, 0_i32.saturating_sub(res), cancelled));
@@ -718,11 +750,29 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
                 Err(errno) => Err(error(kind, errno, false)),
             }
         }
-        Op::Recv { .. } | Op::Send { .. } | Op::Read { .. } | Op::Write { .. } => {
-            Ok(Done::Count(u32::try_from(res).expect("a non-negative i32 fits in a u32")))
-        }
+        Op::Recv { .. }
+        | Op::Send { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::PipeRead { .. }
+        | Op::PipeWrite { .. } => Ok(Done::Count(u32::try_from(res).expect("a non-negative i32 fits in a u32"))),
         Op::Open { .. } => opened(res),
         Op::Stat { .. } => Ok(Done::Stat(stat(statx.get_mut()))),
+        Op::Wait { .. } => {
+            let info = siginfo.get_mut();
+            // SAFETY: a successful waitid filled `info`; si_status reads
+            // the status union selected by si_code.
+            let status = unsafe { info.si_status() };
+            match info.si_code {
+                libc::CLD_EXITED => {
+                    Ok(Done::Exit(Exit::Code(u8::try_from(status).expect("a child exit code fits in a byte"))))
+                }
+                libc::CLD_KILLED | libc::CLD_DUMPED => {
+                    Ok(Done::Exit(Exit::Signal(u32::try_from(status).expect("a signal is positive"))))
+                }
+                _ => Err(Error::Other(libc::ECHILD)),
+            }
+        }
         Op::Listen { .. }
         | Op::Connect { .. }
         | Op::Shutdown { .. }
@@ -732,7 +782,9 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
         | Op::Remove { .. }
         | Op::MakeDirectory { .. }
         | Op::Cancel { .. } => Ok(Done::Nothing),
-        Op::List { .. } => unreachable!("a List completes at its submit"),
+        Op::List { .. } | Op::Spawn { .. } | Op::Signal { .. } => {
+            unreachable!("a synchronous operation completes at its submit")
+        }
     }
 }
 
@@ -762,6 +814,13 @@ fn error(kind: &Op, errno: i32, cancelled: bool) -> Error {
             libc::EINVAL => Error::InvalidArgument,
             other => file_error(kind, other),
         },
+        Op::Spawn { .. } | Op::Signal { .. } => Error::Other(errno),
+        Op::Wait { .. } => match errno {
+            libc::ECANCELED | libc::EINTR if cancelled => Error::Cancelled,
+            libc::ENOBUFS | libc::ENOMEM => Error::NoBufferSpace,
+            libc::EINVAL => Error::InvalidArgument,
+            other => Error::Other(other),
+        },
         Op::Socket { .. }
         | Op::Bind { .. }
         | Op::Listen { .. }
@@ -769,6 +828,8 @@ fn error(kind: &Op, errno: i32, cancelled: bool) -> Error {
         | Op::Connect { .. }
         | Op::Recv { .. }
         | Op::Send { .. }
+        | Op::PipeRead { .. }
+        | Op::PipeWrite { .. }
         | Op::Shutdown { .. }
         | Op::Close { .. } => match errno {
             libc::ECANCELED => Error::Cancelled,
@@ -814,6 +875,10 @@ fn operation_error(kind: &Op, errno: i32) -> Error {
             libc::EPIPE => Some(Error::BrokenPipe),
             other => stream_error(other),
         },
+        Op::PipeRead { .. } | Op::PipeWrite { .. } => match errno {
+            libc::EPIPE => Some(Error::BrokenPipe),
+            _ => None,
+        },
         Op::Shutdown { .. } => match errno {
             libc::ENOTCONN => Some(Error::NotConnected),
             _ => None,
@@ -828,6 +893,9 @@ fn operation_error(kind: &Op, errno: i32) -> Error {
         | Op::Remove { .. }
         | Op::MakeDirectory { .. }
         | Op::List { .. }
+        | Op::Spawn { .. }
+        | Op::Wait { .. }
+        | Op::Signal { .. }
         | Op::Cancel { .. } => unreachable!("an operation on files' errors, and a Cancel's, are mapped apart"),
     };
     named.unwrap_or(Error::Other(errno))
@@ -917,6 +985,11 @@ fn file_error(kind: &Op, errno: i32) -> Error {
         | Op::Send { .. }
         | Op::Shutdown { .. }
         | Op::Close { .. }
+        | Op::PipeRead { .. }
+        | Op::PipeWrite { .. }
+        | Op::Spawn { .. }
+        | Op::Wait { .. }
+        | Op::Signal { .. }
         | Op::Cancel { .. } => unreachable!("only an operation on files' errors are mapped here"),
     };
     named.unwrap_or(Error::Other(errno))

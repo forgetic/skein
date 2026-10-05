@@ -529,7 +529,7 @@ fn answer(target: Result<Done, Kernel>) -> Result<Done, Kernel> {
 /// What a target and its cancel complete with, the cancel's answer the one
 /// the target's result implies.
 fn race(target: Result<Done, Kernel>) -> Race {
-    (target, answer(target))
+    (target.clone(), answer(target))
 }
 
 /// A cancel too late, whose target the kernel interrupted anyway: the target
@@ -582,7 +582,7 @@ fn an_abort_cancels_what_waits_and_settles_every_outcome_in_every_order() {
     let orders = [[0, 1, 2, 3], [2, 3, 0, 1], [0, 2, 1, 3], [3, 1, 2, 0]];
     for (recv, send) in outcomes {
         for order in orders {
-            abort_in_order(order, recv, send);
+            abort_in_order(order, recv.clone(), send.clone());
         }
     }
 }
@@ -613,7 +613,7 @@ fn a_close_while_connecting_cancels_the_connect_and_closes_what_it_made() {
         let connect = rig.complete(socket_op, Ok(Done::Fd(FD))).take(Kind::Connect);
         let cancel = rig.down(Request::Close { entity: socket }).take(Kind::Cancel);
         assert_eq!(cancel.kind, Op::Cancel { target: connect.op });
-        rig.complete(connect, connect_result).nothing();
+        rig.complete(connect, connect_result.clone()).nothing();
         let close = rig.complete(cancel, answer(connect_result)).take(Kind::Close);
         assert_eq!(close.kind, Op::Close { fd: FD }, "a stopped connect may have reached its peer: closed");
         assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner: owner(1) }]);

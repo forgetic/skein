@@ -437,9 +437,10 @@ what the containers report (programming-model.md, 6.3).
 - **Spawn** takes a program, its arguments, its environment, a working
   directory beneath a root, and which pipes to make. It answers with a
   child and its pipes.
-  - It is `clone3` with `CLONE_PIDFD`, so the child is a pidfd from the
-    start. The kernel's own check then stops a reused PID from being
-    signalled. `std::process` is not used.
+  - The ring adapter uses glibc's `pidfd_spawn`, so the child is a pidfd from
+    the start. Its file actions install requested pipes at chosen child
+    descriptors and close everything else on exec. The kernel's own check
+    then stops a reused PID from being signalled. `std::process` is not used.
   - Containment (namespaces, `CLONE_INTO_CGROUP`) is a spawn option,
     given as data.
 - **Exit** is a wait on the pidfd, through the ring (`waitid`).

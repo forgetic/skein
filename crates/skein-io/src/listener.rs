@@ -314,7 +314,9 @@ pub(crate) fn close(listener: &mut Listener, id: Id<Entity>, tables: &mut Tables
 fn borrow(entities: &mut Slab<Entity>, id: Id<Entity>) -> &mut Listener {
     match entities.get_mut(id).expect("an entity outlives its operations") {
         Entity::Listener(listener) => listener,
-        Entity::Stream(_) => unreachable!("a listener's operation is for a listener"),
+        Entity::Stream(_) | Entity::Pipe(_) | Entity::Child(_) => {
+            unreachable!("a listener's operation is for a listener")
+        }
     }
 }
 
@@ -326,21 +328,45 @@ fn decode(io: &mut Io, landed: Landed) -> Happened {
     match purpose {
         Purpose::Socket => Happened::Socket(match result {
             Ok(Done::Fd(fd)) => Ok(fd),
-            Ok(Done::Nothing | Done::Count(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
+            Ok(
+                Done::Nothing
+                | Done::Count(_)
+                | Done::Accepted { .. }
+                | Done::Bound(_)
+                | Done::Stat(_)
+                | Done::Spawned { .. }
+                | Done::Exit(_),
+            ) => {
                 unreachable!("a socket answers with its descriptor")
             }
             Err(error) => Err(error),
         }),
         Purpose::Bind => Happened::Bound(match result {
             Ok(Done::Bound(addr)) => Ok(addr),
-            Ok(Done::Nothing | Done::Count(_) | Done::Fd(_) | Done::Accepted { .. } | Done::Stat(_)) => {
+            Ok(
+                Done::Nothing
+                | Done::Count(_)
+                | Done::Fd(_)
+                | Done::Accepted { .. }
+                | Done::Stat(_)
+                | Done::Spawned { .. }
+                | Done::Exit(_),
+            ) => {
                 unreachable!("a bind answers with the address bound")
             }
             Err(error) => Err(error),
         }),
         Purpose::Listen => Happened::Listened(match result {
             Ok(Done::Nothing) => Ok(()),
-            Ok(Done::Count(_) | Done::Fd(_) | Done::Accepted { .. } | Done::Bound(_) | Done::Stat(_)) => {
+            Ok(
+                Done::Count(_)
+                | Done::Fd(_)
+                | Done::Accepted { .. }
+                | Done::Bound(_)
+                | Done::Stat(_)
+                | Done::Spawned { .. }
+                | Done::Exit(_),
+            ) => {
                 unreachable!("a listen answers with nothing")
             }
             Err(error) => Err(error),
@@ -350,7 +376,15 @@ fn decode(io: &mut Io, landed: Landed) -> Happened {
         Purpose::Discard => Happened::Discarded,
         Purpose::Close => Happened::Released,
         Purpose::Cancel(target) => Happened::Cancelled { target, result },
-        Purpose::Connect | Purpose::Recv | Purpose::Send | Purpose::Shutdown => {
+        Purpose::Connect
+        | Purpose::Recv
+        | Purpose::Send
+        | Purpose::Shutdown
+        | Purpose::Spawn
+        | Purpose::Wait
+        | Purpose::Signal
+        | Purpose::PipeRead
+        | Purpose::PipeWrite => {
             unreachable!("a listener never connects or streams")
         }
     }
@@ -361,7 +395,7 @@ fn decode(io: &mut Io, landed: Landed) -> Happened {
 fn outcome(io: &mut Io, listener: Id<Entity>, result: Result<Done, kernel::Error>) -> Outcome {
     let listening = match io.entities.get(listener).expect("an entity outlives its operations") {
         Entity::Listener(listener) => listener.is_listening(),
-        Entity::Stream(_) => unreachable!("an accept is a listener's"),
+        Entity::Stream(_) | Entity::Pipe(_) | Entity::Child(_) => unreachable!("an accept is a listener's"),
     };
     match result {
         Ok(Done::Accepted { fd, peer }) => {
@@ -373,7 +407,15 @@ fn outcome(io: &mut Io, listener: Id<Entity>, result: Result<Done, kernel::Error
                 Err(_refused) => Outcome::NoSlot(fd),
             }
         }
-        Ok(Done::Nothing | Done::Count(_) | Done::Fd(_) | Done::Bound(_) | Done::Stat(_)) => {
+        Ok(
+            Done::Nothing
+            | Done::Count(_)
+            | Done::Fd(_)
+            | Done::Bound(_)
+            | Done::Stat(_)
+            | Done::Spawned { .. }
+            | Done::Exit(_),
+        ) => {
             unreachable!("an accept answers with a socket and its peer")
         }
         Err(kernel::Error::TooManyOpenFiles) => Outcome::Starved,

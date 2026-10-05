@@ -2,10 +2,11 @@
 //! takes, the events it tells, and its errors, which are what the layer above
 //! can act on, not the kernel's.
 
+use alloc::boxed::Box;
 use skein_lib::Token;
 use skein_lib::stream::{self, Fault};
 
-use crate::kernel::{self, Addr};
+use crate::kernel::{self, Addr, Exit, Signal, Spawn};
 
 /// What the layer above asks of io. Each names an entity by a token: its
 /// owner's, for an entity it asks io to make, and io's (from `Listening`,
@@ -28,6 +29,10 @@ pub enum Request {
     /// The stream vocabulary (lib.md, 7), to a socket once it is connected or
     /// bound.
     Stream { stream: Token, down: stream::Down },
+    /// Start a child, returning its pidfd-backed token and pipe tokens.
+    Spawn { owner: Token, spawn: Spawn },
+    /// Send a signal to a child by its token.
+    Signal { child: Token, signal: Signal },
     // Files, processes and signals (io.md, 5 to 7) go here when a user pulls
     // them: File { owner, root, op }, Spawn { owner, spawn },
     // Signal { child, signal }.
@@ -46,28 +51,58 @@ pub enum Request {
 pub enum Event {
     /// The listener listens at `addr`, its port resolved when it asked for
     /// port 0; `listener` names it in `Close` and `Abort`.
-    Listening { owner: Token, listener: Token, addr: Addr },
+    Listening {
+        owner: Token,
+        listener: Token,
+        addr: Addr,
+    },
     /// The listener of `owner` accepted a socket from `peer`, which `owner`
     /// answers with `Bind` or `Reject`. The listener accepts no other until
     /// it does.
-    Accepted { owner: Token, socket: Token, peer: Addr },
+    Accepted {
+        owner: Token,
+        socket: Token,
+        peer: Addr,
+    },
     /// The connect has begun: `socket` names it in every request, so that its
     /// owner can close it before it connects.
-    Connecting { owner: Token, socket: Token },
+    Connecting {
+        owner: Token,
+        socket: Token,
+    },
     /// The connection is made, and its stream runs.
-    Connected { owner: Token },
+    Connected {
+        owner: Token,
+    },
     /// The stream vocabulary (lib.md, 7), once connected or bound.
-    Stream { owner: Token, up: stream::Up },
+    Stream {
+        owner: Token,
+        up: stream::Up,
+    },
+    Spawned {
+        owner: Token,
+        child: Token,
+        pipes: Box<[Token]>,
+    },
+    Exited {
+        owner: Token,
+        exit: Exit,
+    },
     // Files, processes and signals go here when a user pulls them:
     // File { owner, result }, Spawned { owner, child, pipes },
     // Exited { owner, exit }, Shutdown { signal }.
     /// Told once. A listen or a connect failed: io closes what it made, and
     /// `Closed` follows without a request. Or a listener can accept no more:
     /// it stays, and its owner closes it.
-    Failed { owner: Token, error: Error },
+    Failed {
+        owner: Token,
+        error: Error,
+    },
     /// The entity is gone, nothing of it in flight: the last event for
     /// `owner`.
-    Closed { owner: Token },
+    Closed {
+        owner: Token,
+    },
 }
 
 /// Why a listen or a connect failed, as far as the layer above can act on it

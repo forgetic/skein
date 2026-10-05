@@ -3,6 +3,7 @@
 //! and the trace.
 
 mod files;
+mod processes;
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
@@ -22,6 +23,7 @@ use crate::net::{
 };
 use crate::trace::{self, Entry, Event, Fault, Summary};
 use files::{Asked, File};
+use processes::{Child, PipeEnd};
 
 /// A simulated process: a plain handle, from [`Sim::spawn_process`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -59,9 +61,14 @@ struct Process {
     /// The open descriptors of files and directories, and what each is in
     /// the machine. They are counted with the sockets' against the limit.
     files: BTreeMap<Fd, File>,
+    pipe_fds: BTreeMap<Fd, PipeEnd>,
+    pidfds: BTreeMap<Fd, u64>,
+    children: BTreeMap<u64, Child>,
     /// `Open`s the machine has yet to answer: each holds a descriptor's
     /// place against the limit.
     opening: u32,
+    /// Descriptors promised to a Spawn whose machine call has yet to answer.
+    spawning: u32,
     /// Every operation submitted and not yet reaped.
     flights: BTreeMap<Token, Flight>,
     /// Completions delivered and not yet reaped, in delivery order.
@@ -120,6 +127,8 @@ pub struct Sim {
     calls: VecDeque<Call>,
     /// Calls taken or not, until the machine answers them.
     asked: BTreeMap<Ticket, Asked>,
+    spawn_asked: BTreeMap<Ticket, (Pid, Token)>,
+    next_child: u64,
     trace: Vec<Entry>,
 }
 
@@ -142,6 +151,8 @@ impl Sim {
             entering: None,
             calls: VecDeque::new(),
             asked: BTreeMap::new(),
+            spawn_asked: BTreeMap::new(),
+            next_child: 0,
             trace: Vec::new(),
         }
     }
@@ -182,7 +193,11 @@ impl Sim {
             next_fd: FIRST_FD,
             fds: BTreeMap::new(),
             files: BTreeMap::new(),
+            pipe_fds: BTreeMap::new(),
+            pidfds: BTreeMap::new(),
+            children: BTreeMap::new(),
             opening: 0,
+            spawning: 0,
             flights: BTreeMap::new(),
             ready: VecDeque::new(),
             deferred: VecDeque::new(),
@@ -227,7 +242,7 @@ impl Sim {
             if !flight.done {
                 self.fail(pid, &format!("a completion of {:?} delivered before it was made", complete.op));
             }
-            let event = Event::Complete { op: complete.op, kind: flight.kind, result: complete.result };
+            let event = Event::Complete { op: complete.op, kind: flight.kind, result: complete.result.clone() };
             self.record(pid, event);
             completions.push(complete);
         }
@@ -257,7 +272,13 @@ impl Sim {
     #[must_use]
     pub fn open_fds(&self, pid: Pid) -> u32 {
         let process = self.process(pid);
-        let open = process.fds.len().checked_add(process.files.len()).expect("fewer than 2^64 descriptors");
+        let open = process
+            .fds
+            .len()
+            .checked_add(process.files.len())
+            .and_then(|n| n.checked_add(process.pipe_fds.len()))
+            .and_then(|n| n.checked_add(process.pidfds.len()))
+            .expect("fewer than usize::MAX descriptors");
         u32::try_from(open).expect("fewer than 2^32 descriptors")
     }
 
@@ -339,6 +360,12 @@ impl Sim {
         if let Some((fd, file)) = process.files.first_key_value() {
             self.fail(pid, &format!("{} files open, the first {fd:?}, {file:?}", process.files.len()));
         }
+        if let Some((fd, _)) = process.pipe_fds.first_key_value() {
+            self.fail(pid, &format!("{} pipes open, the first {fd:?}", process.pipe_fds.len()));
+        }
+        if let Some((fd, _)) = process.pidfds.first_key_value() {
+            self.fail(pid, &format!("{} pidfds open, the first {fd:?}", process.pidfds.len()));
+        }
     }
 
     /// Every submission and every completion reaped so far.
@@ -372,6 +399,10 @@ impl Sim {
         let flight = Flight { serial, kind: summary, held: None, done: false, timer: None };
         self.process_mut(pid).flights.insert(token, flight);
         let socket = match named {
+            On::Process => {
+                self.process_op(pid, token, serial, kind);
+                return;
+            }
             On::Files => {
                 self.file(pid, token, serial, kind);
                 return;
@@ -399,11 +430,15 @@ impl Sim {
             | Op::Remove { .. }
             | Op::MakeDirectory { .. }
             | Op::List { .. } => self.bug("an operation on files is the machine's"),
+            Op::Spawn { .. } | Op::Wait { .. } | Op::Signal { .. } | Op::PipeRead { .. } | Op::PipeWrite { .. } => {
+                self.bug("a process operation was routed to sockets")
+            }
         }
     }
 
     /// Fails the world on a broken invariant of the contract about `kind`'s
     /// descriptors or target, and answers what its descriptor names.
+    #[expect(clippy::too_many_lines, reason = "descriptor and socket checks share one ordered set of invariants")]
     fn check(&self, pid: Pid, kind: Summary) -> On {
         let process = self.process(pid);
         if let Summary::Cancel { target } = kind {
@@ -416,6 +451,19 @@ impl Sim {
                 }
             }
             return On::Nothing;
+        }
+        if matches!(
+            kind,
+            Summary::Spawn { .. }
+                | Summary::Wait { .. }
+                | Summary::Signal { .. }
+                | Summary::PipeRead { .. }
+                | Summary::PipeWrite { .. }
+        ) || matches!(kind, Summary::Close { fd }
+                if process.pipe_fds.contains_key(&fd) || process.pidfds.contains_key(&fd))
+        {
+            self.check_process(pid, kind);
+            return On::Process;
         }
         let [first, second] = kind.fds();
         let Some(fd) = first else {
@@ -491,6 +539,11 @@ impl Sim {
             | Summary::MakeDirectory { .. }
             | Summary::List { .. }
             | Summary::Cancel { .. } => None,
+            Summary::Spawn { .. }
+            | Summary::Wait { .. }
+            | Summary::Signal { .. }
+            | Summary::PipeRead { .. }
+            | Summary::PipeWrite { .. } => self.bug("a process operation passed socket checks"),
         };
         if let Some(broken) = broken {
             self.fail(pid, &format!("{broken}: {kind:?}, with {on_fd:?} in flight on {fd:?}"));
@@ -551,6 +604,11 @@ impl Sim {
             | Summary::Shutdown { .. }
             | Summary::Close { .. }
             | Summary::Cancel { .. } => self.bug("only an operation on files is checked as one"),
+            Summary::Spawn { .. }
+            | Summary::Wait { .. }
+            | Summary::Signal { .. }
+            | Summary::PipeRead { .. }
+            | Summary::PipeWrite { .. } => self.bug("a process operation passed file checks"),
         };
         if let Some(broken) = broken {
             self.fail(pid, &format!("{broken}, opened {how:?}: {kind:?}"));
@@ -567,6 +625,7 @@ enum On {
     /// An operation on files, or a `Close` of a file's descriptor: the
     /// machine's.
     Files,
+    Process,
 }
 
 // The operations.
@@ -849,7 +908,9 @@ impl Sim {
     /// the machine, which is doing it, as a ring's worker would be (a
     /// `Close` of a file's descriptor among them): too late.
     fn stoppable(&self, flight: &Flight) -> bool {
-        flight.held.is_some() && !self.asked.contains_key(&Ticket(flight.serial))
+        flight.held.is_some()
+            && !self.asked.contains_key(&Ticket(flight.serial))
+            && !self.spawn_asked.contains_key(&Ticket(flight.serial))
     }
 
     /// Stops a waiting operation from waiting.
@@ -861,6 +922,23 @@ impl Sim {
                 let process = self.process_mut(pid);
                 process.opening = process.opening.checked_sub(1).expect("an Open waiting holds a place");
             }
+            return;
+        }
+        if let Op::Wait { pidfd } = op {
+            let child_id = *self.process(pid).pidfds.get(pidfd).expect("a Wait keeps its pidfd open");
+            self.process_mut(pid).children.get_mut(&child_id).expect("pidfd names a child").wait = None;
+            return;
+        }
+        if let Op::PipeRead { fd, .. } | Op::PipeWrite { fd, .. } = op {
+            let end = *self.process(pid).pipe_fds.get(fd).expect("a pipe operation keeps its descriptor open");
+            self.process_mut(pid)
+                .children
+                .get_mut(&end.child)
+                .expect("pipe names a child")
+                .pipes
+                .get_mut(end.index)
+                .expect("an index named by the pipe descriptor")
+                .waiting = None;
             return;
         }
         let id = match op {
@@ -881,6 +959,11 @@ impl Sim {
             | Op::Remove { .. }
             | Op::MakeDirectory { .. }
             | Op::List { .. }
+            | Op::Spawn { .. }
+            | Op::Wait { .. }
+            | Op::Signal { .. }
+            | Op::PipeRead { .. }
+            | Op::PipeWrite { .. }
             | Op::Cancel { .. } => self.bug("only accepts, connects, receives and sends wait"),
         };
         let socket = self.socket_mut(id);
@@ -1102,7 +1185,7 @@ impl Sim {
             Ok(Done::Count(u32::try_from(n).expect("a Recv buffer's length fits a u32")))
         };
         stream.receiver = None;
-        if let (Ok(Done::Count(1..)), Some(peer)) = (result, stream.peer) {
+        if let (Ok(Done::Count(1..)), Some(peer)) = (&result, stream.peer) {
             self.pokes.push_back(peer);
         }
         if cut_short {
@@ -1259,9 +1342,14 @@ impl Sim {
     /// `Open`s in flight will take.
     fn fds_full(&self, pid: Pid) -> bool {
         let process = self.process(pid);
-        let open = process.fds.len().checked_add(process.files.len());
+        let open = process
+            .fds
+            .len()
+            .checked_add(process.files.len())
+            .and_then(|n| n.checked_add(process.pipe_fds.len()))
+            .and_then(|n| n.checked_add(process.pidfds.len()));
         match open.and_then(|open| u32::try_from(open).ok()) {
-            Some(open) => open.saturating_add(process.opening) >= self.config.max_fds,
+            Some(open) => open.saturating_add(process.opening).saturating_add(process.spawning) >= self.config.max_fds,
             None => true,
         }
     }

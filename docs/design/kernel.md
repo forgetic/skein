@@ -382,8 +382,6 @@ for its backend.
 
 ## 10. Not built yet
 
-- **The records for processes,** with their rules and their conformance
-  scenarios, when io pulls them.
 - **The descriptor limit on the ring.** The simulator checks it; lowering
   a process's limit on the real kernel takes `unsafe` outside the ring
   adapter, or a child process, and neither is allowed.
