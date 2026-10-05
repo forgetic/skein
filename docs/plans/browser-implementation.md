@@ -1,6 +1,6 @@
 # Implementing skein-browser
 
-Planned, 2026-10-05. A plan for building `skein-browser`, the browser
+Implemented, 2026-10-06. The plan used to build `skein-browser`, the browser
 testing kit of [the browser design](../design/browser.md), and what it
 needs that skein does not have yet. Read it with
 [the programming model](../foundation/programming-model.md),
@@ -9,6 +9,13 @@ needs that skein does not have yet. Read it with
 [the shell](../design/shell.md) and [testing](../design/testing.md).
 The sketches give shapes, not final code: names and details are settled
 as each increment is built.
+
+The implementation keeps operation transitions together in
+`testing/skein-browser/src/browser.rs`, uses a bounded JSON document view
+for CDP replies, and serves fixed pages from `tests/browser/src/serve.rs`.
+The real suite covers six scenarios and runs under the `browser` nextest
+profile. Real CDP transcript fixtures remain to be captured on a machine
+that permits the ring backend.
 
 ## 1. In one page
 
@@ -347,12 +354,9 @@ On 2026-10-05, a throwaway Python script drove the installed Chromium
   `Runtime.consoleAPICalled` of type `error`; an uncaught throw is a
   `Runtime.exceptionThrown`.
 
-## 8. Open
+## 8. Remaining questions
 
-- `pidfd_spawn` or `clone3` in the ring adapter (2.2).
-- Whether processes get a plan of their own, shared with temper's
-  worker.
-- The held stream's name in lib.
-- Polling for `Await`, or DOM mutation events if polling proves slow.
-- Chromium's own sandbox (browser.md, 11).
-- The browser suite's budget.
+- Whether polling for `Await` should gain DOM mutation events if it
+  proves too slow in service tests.
+- Chromium's own sandbox under a service's containment (browser.md, 11).
+- Capturing real CDP transcript fixtures for focused decoder tests.

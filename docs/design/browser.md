@@ -1,6 +1,6 @@
 # Browser
 
-Provisional, 2026-10-05. The design of `skein-browser`: a testing kit
+Implemented, 2026-10-06. The design of `skein-browser`: a testing kit
 that drives a real, headless Chromium from a service's loop, so that a
 service with a web can test it as a person uses it. It is a step machine
 over the child's pipes, speaking the DevTools protocol (CDP), with no
@@ -120,10 +120,9 @@ caps, as for any machine stacked on a stream (io.md, 2).
 - **One pipe, many pages.** A page is a target attached in flattened
   mode, so its commands and events travel on the same pipe, tagged with
   its session id.
-- **Decoding keeps only what it needs.** `skein-json`'s tokenizer feeds
-  a small decoder for the reply each command expects, and for each event
-  the kit has enabled. Unknown fields, and events it has not enabled, are
-  skipped whole. Numbers go up as text (json.md, 1): ids and node ids
+- **Decoding keeps only what it needs.** A bounded JSON document view
+  selects the fields for each expected reply and enabled event. Unknown
+  fields, and events it has not enabled, are skipped. Ids and node ids
   are parsed as integers, and coordinates as whole CSS pixels with their
   fractions dropped, so no float enters the kit. A screenshot's base64
   is decoded into its PNG's bytes.
@@ -252,12 +251,10 @@ allocator's high water against `worst_case`.
 
 ## 9. Testing
 
-- **Step tests:** the framing (a message split across reads, several in
-  one read, one past the limit), each command's encoding, and each reply
-  and event decoded from transcripts of real Chromium, kept beside the
-  tests with the version that wrote them. Each operation's state machine
-  is driven by hand, with refusals at every limit and every call checked
-  against its `MAX_OUT`.
+- **Step tests:** framing (a message split across reads, several in one
+  read, one past the limit), command encoding, bounded decoding, and
+  operation transitions use synthetic CDP replies. The separate browser
+  suite checks those assumptions against Chromium.
 - **The machine world:** the kit against a fake browser, a scripted CDP
   peer over in-memory pipes. Its pages and accessibility trees come from
   the scenario, and the seed drives what goes wrong:
@@ -272,7 +269,7 @@ allocator's high water against `worst_case`.
   dispatched on a node that was refused. A few seeds run in the focused
   suite, and many in the fuzzy one.
 - **The real browser:** the kit in the real loop against Chromium,
-  opening a few fixed pages served by skein's example HTTP server: a
+  opening fixed pages served by a small `skein-http` server in the same loop: a
   button that changes a heading, a form, a dialog that covers a button,
   a button far down a long page, a script that throws, and a resource the
   content security policy blocks. These tests check the facts the fake
@@ -285,17 +282,13 @@ allocator's high water against `worst_case`.
   missing; it is never a skip.
 
 The kit's tests are a crate of their own, `tests/browser`
-(`skein-browser-world`), with the transcripts in
-`tests/browser/transcripts` (testing.md, 6).
+(`skein-browser-world`) (testing.md, 6).
 
 ## 10. What it asks of others
 
 - **io:** a spawn that makes pipes beyond the standard three, as a list of
-  the child's descriptors, each with its direction. Processes are next in
-  io's order (io.md, 9). The kit's step tests and machine world do not
-  wait for them; its real-browser tests do.
-- **The HTTP example** (examples.md), which serves the real-browser
-  tests' pages, and is not built yet.
+  the child's descriptors, each with its direction. The ring and simulator
+  process backends are built (io.md, 6).
 - **A service using it:**
   - spawning the browser with `command`, and owning the child, its pipes
     and the scratch root its profile is made in;
