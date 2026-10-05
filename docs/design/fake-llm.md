@@ -80,6 +80,22 @@ unsupported wire field and the caller still bounds local output.
 
 ## 5. Outside stories and bounds
 
+`skein-llm-world::World::prepared` adopts one freshly prepared Client and
+caller-owned literal HTTP/SSE response bytes. The caller supplies the same
+limits used at preparation. Adoption has no stream entrance, send, read or
+terminal effect and constructs no second Client. `World::new` prepares once
+and delegates to this identical initialization. Existing demand/intake,
+fragmentation, queue limits, terminal checks and lower settlement are shared;
+the constructor neither parses fixtures nor controls application policy.
+The original Client keeps its callback owner and prepared request bytes.
+Its price is counted once; the world's source tape, request tape, terminal
+observations, queues and intakes remain separate owned storage. Focused
+synthetic literal controls cover both native endpoints: original request and
+opaque callback (including zero), exact text and usage, unique completion and
+reuse, explicit Close followed by actual Closed, and repeated settlement
+without another terminal. These controls establish no live provider admission
+and do not use the peer's response encoder as their expected-value oracle.
+
 `skein-llm-world::fake::Exchange` connects the actual shared Client to the
 independent byte peer and real script domain. It records requests, queries,
 response bytes and actual terminals. Its transport uses bounded intakes and

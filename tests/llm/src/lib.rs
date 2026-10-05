@@ -120,8 +120,24 @@ pub struct World {
 impl World {
     #[must_use]
     pub fn new(call: Call, limits: client::Limits, source: Vec<u8>, seed: u64) -> Self {
+        let machine = client::Client::prepare(call, &limits).expect("fixture request is admitted");
+        Self::prepared(machine, limits, source, seed)
+    }
+
+    /// Adopts the caller's one freshly prepared Client and independent literal
+    /// response bytes without preparing another Client or entering either side.
+    /// The caller supplies the unchanged limits used at admission; the original
+    /// callback owner and request bytes remain owned by this Client. Start, Next,
+    /// Cancel, Close and actual lower settlement use the existing entrances.
+    /// Queue and intake capacities are identical to [`Self::new`]. Price the
+    /// Client once, with source bytes, sent/seen observations and world buffers
+    /// separately; this constructor adds no state or memory allowance.
+    /// Contract: docs/design/fake-llm.md, section 5; programming-model.md,
+    /// sections 4.4, 5.2 and 6.3; testing-strategy.md, sections 2.4 and 6.
+    #[must_use]
+    pub fn prepared(machine: client::Client, limits: client::Limits, source: Vec<u8>, seed: u64) -> Self {
         Self {
-            machine: client::Client::prepare(call, &limits).expect("fixture request is admitted"),
+            machine,
             env: Env { now: Time::ZERO, wall: Wall::EPOCH, limits },
             seen: Vec::new(),
             sent: Vec::new(),
