@@ -290,7 +290,9 @@ pub fn up(proto: &mut Protocol, env: &Env<Limits>, event: Told, up: &mut Queue<C
             assert!(owner == LISTENER, "only the listener accepts");
             accepted(proto, socket, env, down);
         }
-        Told::Connecting { .. } | Told::Connected { .. } => unreachable!("the echo connects to no one"),
+        Told::Connecting { .. } | Told::Connected { .. } | Told::Spawned { .. } | Told::Exited { .. } => {
+            unreachable!("the echo connects to no one and spawns no child")
+        }
         Told::Stream { owner, up: event } => {
             let id = Id::<Conn>::from_token(owner);
             let Protocol { conns, tables, .. } = proto;

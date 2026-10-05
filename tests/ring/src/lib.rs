@@ -175,6 +175,11 @@ impl World {
             | Op::Remove { .. }
             | Op::MakeDirectory { .. }
             | Op::List { .. }
+            | Op::Spawn { .. }
+            | Op::Wait { .. }
+            | Op::Signal { .. }
+            | Op::PipeRead { .. }
+            | Op::PipeWrite { .. }
             | Op::Cancel { .. } => panic!("a send hands back its own record"),
         }
         sent.result

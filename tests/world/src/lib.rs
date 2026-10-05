@@ -124,15 +124,15 @@ impl Script {
 
     fn landed(&mut self, now: Time, complete: &Complete) {
         assert_eq!(self.waiting.take(), Some(complete.op), "the record in flight completed");
-        match complete.result {
-            Ok(Done::Fd(fd) | Done::Accepted { fd, .. }) => self.fds.push(fd),
+        match &complete.result {
+            Ok(Done::Fd(fd) | Done::Accepted { fd, .. }) => self.fds.push(*fd),
             Ok(Done::Count(n)) => {
                 if let Op::Recv { buf, .. } = &complete.kind {
-                    let n = usize::try_from(n).expect("small");
+                    let n = usize::try_from(*n).expect("small");
                     self.received.push((now, bytes::copy_of(&buf[..n])));
                 }
             }
-            Ok(Done::Nothing | Done::Bound(_) | Done::Stat(_)) => {}
+            Ok(Done::Nothing | Done::Bound(_) | Done::Stat(_) | Done::Spawned { .. } | Done::Exit(_)) => {}
             Err(_) => self.closing = true,
         }
     }

@@ -31,12 +31,12 @@ pub fn cancels(trace: &[Entry]) -> BTreeSet<(Target, Answer)> {
     let mut submitted: BTreeMap<(Pid, Token), Summary> = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for entry in trace {
-        match entry.event {
+        match &entry.event {
             Event::Submit { op, kind } => {
-                submitted.insert((entry.pid, op), kind);
+                submitted.insert((entry.pid, *op), *kind);
             }
             Event::Complete { kind: Summary::Cancel { target }, result, .. } => {
-                let target = match submitted.get(&(entry.pid, target)) {
+                let target = match submitted.get(&(entry.pid, *target)) {
                     Some(Summary::Accept { .. }) => Target::Accept,
                     Some(Summary::Connect { .. }) => Target::Connect,
                     Some(Summary::Recv { .. }) => Target::Recv,

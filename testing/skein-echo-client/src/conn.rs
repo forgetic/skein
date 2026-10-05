@@ -214,7 +214,9 @@ pub(crate) fn told(conn: &mut Conn, event: Told, now: Time, limits: &Limits, dow
         Told::Closed { .. } => {
             return closed(conn, state, now);
         }
-        Told::Listening { .. } | Told::Accepted { .. } => unreachable!("the client listens to no one"),
+        Told::Listening { .. } | Told::Accepted { .. } | Told::Spawned { .. } | Told::Exited { .. } => {
+            unreachable!("the client listens to no one and spawns no child")
+        }
     };
     After::Nothing
 }
