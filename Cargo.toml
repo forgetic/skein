@@ -9,6 +9,7 @@ members = [
     "examples/echo/service",
     "examples/echo/shell",
     "testing/skein-conformance",
+    "testing/skein-browser",
     "testing/skein-echo-client",
     "testing/skein-fake-machine",
     "testing/skein-fake-checkout",
@@ -49,6 +50,7 @@ skein-tls = { path = "crates/skein-tls" }
 skein-shell = { path = "crates/skein-shell" }
 skein-sim = { path = "crates/skein-sim" }
 skein-conformance = { path = "testing/skein-conformance" }
+skein-browser = { path = "testing/skein-browser" }
 skein-heap = { path = "testing/skein-heap" }
 skein-scratch = { path = "testing/skein-scratch" }
 skein-echo-domain = { path = "examples/echo/domain" }
