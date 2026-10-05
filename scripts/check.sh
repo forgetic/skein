@@ -12,3 +12,4 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo check -p skein-tls
 cargo nextest run --workspace
 cargo nextest run --workspace --profile fuzzy
+cargo nextest run --workspace --profile browser

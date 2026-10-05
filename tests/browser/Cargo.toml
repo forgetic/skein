@@ -1,0 +1,18 @@
+[package]
+name = "skein-browser-world"
+description = "A scripted CDP peer exercising the browser step machine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-browser.workspace = true
+skein-lib.workspace = true
+
+[dev-dependencies]
+skein-io.workspace = true
+skein-shell.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"

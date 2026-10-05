@@ -5,7 +5,7 @@
 # tests it stopped; a test past its slow period is flagged SLOW as it runs.
 
 [profile.default]
-default-filter = "not binary(/^fuzzy_/) and not binary(=live)"
+default-filter = "not binary(/^fuzzy_/) and not binary(/^browser_/) and not binary(=live)"
 global-timeout = "15s"
 slow-timeout = { period = "3s" }
 
@@ -19,6 +19,14 @@ priority = 10
 default-filter = "binary(/^fuzzy_/)"
 global-timeout = "60s"
 slow-timeout = { period = "20s" }
+
+# Real Chromium over io's process pipes and the ring. A missing browser or
+# unavailable ring is a failure in this suite, not a skip.
+[profile.browser]
+default-filter = "package(skein-browser-world) and binary(/^browser_/)"
+global-timeout = "2m"
+slow-timeout = { period = "20s", terminate-after = 3 }
+test-threads = 1
 
 # Measuring, not gating: no budget. With -j 1, each test's own time:
 #   cargo nextest run --workspace --profile measure -j 1

@@ -1,0 +1,434 @@
+//! A real Chromium in the service loop: process pipes, CDP, and a person
+//! pressing a button whose page changes in response.
+
+use std::collections::VecDeque;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+
+use skein_browser::boundary::{Below, Down, Event, Expect, Query, Request};
+use skein_browser::{self as browser, Browser};
+use skein_io::kernel::{self, Complete, Done, Op, Pipe, Spawn, Submit, Way};
+use skein_io::{self as io, Io};
+use skein_lib::stream;
+use skein_lib::{Duration, Env, Queue, Time, Token, Wall};
+use skein_shell::{Clock, Config, Kernel, Wait, open_root};
+
+const PROCESS: Token = Token::new(10);
+const BROWSER: Token = Token::new(11);
+const PERSON: Token = Token::new(12);
+const PAGE: Token = Token::new(13);
+const FIND: Token = Token::new(14);
+const PRESS: Token = Token::new(15);
+const EXPECT: Token = Token::new(16);
+const ROOT_CLOSE: Token = Token::new(u64::MAX);
+
+const HTML: &[u8] = br#"<!doctype html><html><body><button onclick="document.querySelector('h1').textContent='Done'">Press</button><h1>Before</h1></body></html>"#;
+
+#[derive(Debug)]
+struct Profile(PathBuf);
+
+impl Profile {
+    fn fresh() -> Profile {
+        let mut path = std::env::temp_dir();
+        let nonce = Clock::new().now().now.as_nanos();
+        path.push(format!("skein-browser-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&path).expect("fresh Chromium profile directory");
+        Profile(path)
+    }
+}
+
+impl Drop for Profile {
+    fn drop(&mut self) {
+        let _removed = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn chromium() -> PathBuf {
+    if let Some(configured) = std::env::var_os("SKEIN_TEST_CHROMIUM") {
+        let path = PathBuf::from(configured);
+        assert!(path.is_file(), "SKEIN_TEST_CHROMIUM does not name a file: {}", path.display());
+        return path.canonicalize().expect("resolve configured Chromium path");
+    }
+    let path = std::env::var_os("PATH").expect("PATH locates chromium");
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join("chromium");
+        if candidate.is_file() {
+            return candidate.canonicalize().expect("resolve Chromium on PATH");
+        }
+    }
+    panic!("Chromium is required for the browser suite: set SKEIN_TEST_CHROMIUM or put chromium on PATH");
+}
+
+fn data_url() -> Box<[u8]> {
+    let mut url = b"data:text/html;charset=utf-8,".to_vec();
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for byte in HTML {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(byte) {
+            url.push(*byte);
+        } else {
+            url.push(b'%');
+            url.push(HEX[usize::from(byte >> 4)]);
+            url.push(HEX[usize::from(byte & 15)]);
+        }
+    }
+    url.into_boxed_slice()
+}
+
+fn spawn(chromium: &Path, profile: &Path) -> (Spawn, kernel::Fd) {
+    let root = open_root(Path::new("/")).expect("open the child working directory root");
+    let command = browser::command::command(chromium.as_os_str().as_bytes(), profile.as_os_str().as_bytes());
+    let mut env = Vec::new();
+    for variable in &command.env {
+        let mut entry = variable.name.to_vec();
+        entry.push(b'=');
+        entry.extend_from_slice(&variable.value);
+        env.push(entry.into_boxed_slice());
+    }
+    let mut pipes = Vec::new();
+    for spec in command.pipes {
+        let way = match spec.direction {
+            browser::command::Direction::Read => Way::In,
+            browser::command::Direction::Write => Way::Out,
+        };
+        pipes.push(Pipe { child: spec.descriptor, way });
+    }
+    (
+        Spawn {
+            program: command.program,
+            args: command.args.into_boxed(),
+            env: env.into_boxed_slice(),
+            root,
+            dir: Box::from(&b"."[..]),
+            pipes: pipes.into_boxed_slice(),
+        },
+        root,
+    )
+}
+
+fn io_limits(browser: &browser::Limits) -> io::Limits {
+    io::Limits {
+        sockets: 8,
+        refusals: 8,
+        intake: browser.message.checked_add(1).expect("message with NUL fits u32"),
+        receive: 65_536,
+        output: browser.command.checked_add(1).expect("command with NUL fits u32"),
+        sends: 16,
+        accepts: 1,
+        backlog: 1,
+        close_timeout: Duration::from_secs(2),
+        retry: Duration::from_millis(10),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stage {
+    Starting,
+    Context,
+    Opening,
+    Finding,
+    Pressing,
+    Expecting,
+    Closing,
+    Complete,
+}
+
+struct Rig {
+    browser: Browser,
+    io: Io,
+    kernel: Kernel,
+    clock: Clock,
+    browser_env: Env<browser::Limits>,
+    io_env: Env<io::Limits>,
+    complete: Queue<Complete>,
+    submits: Queue<Submit>,
+    io_events: Queue<io::Event>,
+    io_requests: VecDeque<io::Request>,
+    events: Queue<Event>,
+    browser_down: Queue<Down>,
+    pipes: Option<[Token; 3]>,
+    child: Option<Token>,
+    root: kernel::Fd,
+    root_closed: bool,
+    exited: bool,
+    child_closed: bool,
+    stage: Stage,
+    version: Box<[u8]>,
+    stderr: Vec<u8>,
+}
+
+impl Rig {
+    fn new(chromium: &Path, profile: &Path) -> Rig {
+        let browser_limits = browser::Limits::default();
+        let limits = io_limits(&browser_limits);
+        assert!(browser::largest_read(&browser_limits).expect("read size") <= limits.largest_read());
+        assert!(browser::largest_room(&browser_limits).expect("room size") <= limits.largest_room());
+        let operations = io::operations(&limits).expect("ring size fits u32");
+        let kernel = Kernel::open(Config { operations })
+            .unwrap_or_else(|error| panic!("io_uring is required for the browser suite: {error}"));
+        let (spawn, root) = spawn(chromium, profile);
+        let mut io_requests = VecDeque::new();
+        io_requests.push_back(io::Request::Spawn { owner: PROCESS, spawn });
+        Rig {
+            browser: Browser::new(BROWSER, &browser_limits),
+            io: Io::new(&limits),
+            kernel,
+            clock: Clock::new(),
+            browser_env: Env { now: Time::ZERO, wall: Wall::EPOCH, limits: browser_limits },
+            io_env: Env { now: Time::ZERO, wall: Wall::EPOCH, limits },
+            complete: Queue::with_capacity(256),
+            submits: Queue::with_capacity(256),
+            io_events: Queue::with_capacity(256),
+            io_requests,
+            events: Queue::with_capacity(256),
+            browser_down: Queue::with_capacity(256),
+            pipes: None,
+            child: None,
+            root,
+            root_closed: false,
+            exited: false,
+            child_closed: false,
+            stage: Stage::Starting,
+            version: Box::default(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn run(&mut self) {
+        let deadline = self.clock.now().now.saturating_add(Duration::from_secs(30));
+        for _ in 0..50_000_u32 {
+            self.kernel.reap(&mut self.complete);
+            let now = self.clock.now();
+            assert!(
+                now.now < deadline,
+                "Chromium smoke test timed out at {:?}, stderr: {}",
+                self.stage,
+                String::from_utf8_lossy(&self.stderr)
+            );
+            self.browser_env.now = now.now;
+            self.browser_env.wall = now.wall;
+            self.io_env.now = now.now;
+            self.io_env.wall = now.wall;
+            while self.io.is_ready() {
+                io::resume(&mut self.io, &self.io_env, &mut self.io_events, &mut self.submits);
+            }
+            while let Some(complete) = self.complete.pop() {
+                if complete.op == ROOT_CLOSE {
+                    assert_eq!(complete.result, Ok(Done::Nothing), "close the process root descriptor");
+                } else {
+                    io::up(&mut self.io, &self.io_env, complete, &mut self.io_events, &mut self.submits);
+                }
+            }
+            while self.io.is_due(now.now) {
+                io::fire(&mut self.io, &self.io_env, &mut self.io_events, &mut self.submits);
+            }
+            while let Some(event) = self.io_events.pop() {
+                self.io_event(event);
+            }
+            self.browser_steps(now.now);
+            while let Some(event) = self.events.pop() {
+                self.browser_event(event);
+            }
+            self.drain_browser_down();
+            while self.io.takes() {
+                let Some(request) = self.io_requests.pop_front() else { break };
+                io::down(&mut self.io, &self.io_env, request, &mut self.submits);
+            }
+            self.io.reclaim();
+            if self.stage == Stage::Complete && self.child_closed && self.io.is_empty() && self.kernel.in_flight() == 0
+            {
+                return;
+            }
+            let pending = self.io.is_ready()
+                || !self.complete.is_empty()
+                || !self.io_events.is_empty()
+                || !self.events.is_empty()
+                || !self.browser_down.is_empty()
+                || !self.io_requests.is_empty()
+                || self.browser.work_pending();
+            let wait = if pending {
+                Wait::No
+            } else {
+                let mut until = deadline;
+                if let Some(next) = self.io.next_deadline() {
+                    until = until.min(next);
+                }
+                if let Some(next) = self.browser.next_deadline() {
+                    until = until.min(next);
+                }
+                Wait::Until(until)
+            };
+            self.kernel.submit(&mut self.submits, wait);
+        }
+        panic!("Chromium smoke test did not settle at {:?}", self.stage);
+    }
+
+    fn browser_steps(&mut self, now: Time) {
+        if self.pipes.is_none() {
+            return;
+        }
+        for _ in 0..32_u32 {
+            let due = self.browser.next_deadline().is_some_and(|at| at <= now);
+            if !self.browser.work_pending() && !due {
+                break;
+            }
+            browser::fire(&mut self.browser, &self.browser_env, now, &mut self.events, &mut self.browser_down);
+        }
+    }
+
+    fn io_event(&mut self, event: io::Event) {
+        match event {
+            io::Event::Spawned { owner: PROCESS, child, pipes } => {
+                let [commands, replies, errors] = pipes.as_ref() else {
+                    panic!("Chromium needs pipes 3, 4 and stderr")
+                };
+                self.pipes = Some([*commands, *replies, *errors]);
+                self.child = Some(child);
+                self.submits.push(Submit { op: ROOT_CLOSE, kind: Op::Close { fd: self.root } });
+                self.root_closed = true;
+            }
+            io::Event::Spawned { owner, .. } => panic!("unexpected spawned owner {owner:?}"),
+            io::Event::Stream { owner, up } => {
+                let [commands, replies, errors] = self.pipes.expect("pipe event after spawn");
+                if owner == errors
+                    && let stream::Up::Bytes(bytes) = &up
+                {
+                    self.stderr.extend_from_slice(bytes);
+                    if self.stderr.len() > 32_768 {
+                        let excess = self.stderr.len() - 32_768;
+                        self.stderr.drain(..excess);
+                    }
+                }
+                let context_reply = owner == replies
+                    && match &up {
+                        stream::Up::Bytes(bytes) => {
+                            bytes.windows(b"browserContextId".len()).any(|part| part == b"browserContextId")
+                        }
+                        stream::Up::Room | stream::Up::End | stream::Up::Failed(_) => false,
+                    };
+                let from = if owner == commands {
+                    Below::Commands(up)
+                } else if owner == replies {
+                    Below::Replies(up)
+                } else if owner == errors {
+                    Below::Errors(up)
+                } else {
+                    panic!("unknown Chromium pipe {owner:?}")
+                };
+                browser::up(&mut self.browser, &self.browser_env, from, &mut self.events, &mut self.browser_down);
+                if context_reply && self.stage == Stage::Context {
+                    self.stage = Stage::Opening;
+                    self.ask(Request::Page { person: PERSON, page: PAGE, url: data_url() });
+                }
+            }
+            io::Event::Exited { owner: PROCESS, exit } => {
+                assert_eq!(
+                    exit,
+                    kernel::Exit::Code(0),
+                    "Chromium exited with {exit:?}; stderr: {}",
+                    String::from_utf8_lossy(&self.stderr)
+                );
+                self.exited = true;
+                for pipe in self.pipes.expect("spawned pipes") {
+                    self.io_requests.push_back(io::Request::Close { entity: pipe });
+                }
+            }
+            io::Event::Closed { owner: PROCESS } => self.child_closed = true,
+            io::Event::Failed { owner: PROCESS, error } => panic!("Chromium spawn failed: {error:?}"),
+            io::Event::Closed { .. } => {}
+            io::Event::Listening { .. }
+            | io::Event::Accepted { .. }
+            | io::Event::Connecting { .. }
+            | io::Event::Connected { .. }
+            | io::Event::Exited { .. }
+            | io::Event::Failed { .. } => panic!("unexpected io event: {event:?}"),
+        }
+    }
+
+    fn ask(&mut self, request: Request) {
+        browser::down(&mut self.browser, &self.browser_env, request, &mut self.events, &mut self.browser_down);
+    }
+
+    fn browser_event(&mut self, event: Event) {
+        match event {
+            Event::Ready { version } => {
+                assert_eq!(self.stage, Stage::Starting);
+                assert!(!version.is_empty(), "Chromium gives its version");
+                self.version = version;
+                self.stage = Stage::Context;
+                self.ask(Request::Person { person: PERSON });
+            }
+            Event::Opened { page } => {
+                assert_eq!(page, PAGE);
+                assert_eq!(self.stage, Stage::Opening);
+                self.stage = Stage::Finding;
+                self.ask(Request::Find { page: PAGE, op: FIND, query: query(b"button", b"Press") });
+            }
+            Event::Found { op, seen, more } => {
+                assert_eq!(op, FIND);
+                assert_eq!(self.stage, Stage::Finding);
+                assert_eq!(more, 0);
+                assert_eq!(seen.len(), 1, "one accessible Press button");
+                self.stage = Stage::Pressing;
+                self.ask(Request::Press { page: PAGE, op: PRESS, node: seen.get(0).expect("button").node });
+            }
+            Event::Done { op } => {
+                assert_eq!(op, PRESS);
+                assert_eq!(self.stage, Stage::Pressing);
+                self.stage = Stage::Expecting;
+                self.ask(Request::Await {
+                    page: PAGE,
+                    op: EXPECT,
+                    query: query(b"heading", b"Done"),
+                    expect: Expect::Present,
+                    within: Duration::from_secs(3),
+                });
+            }
+            Event::Met { op, seen } => {
+                assert_eq!(op, EXPECT);
+                assert_eq!(self.stage, Stage::Expecting);
+                assert_eq!(seen.len(), 1, "the button changed the heading");
+                self.stage = Stage::Closing;
+                self.ask(Request::Close { entity: BROWSER });
+            }
+            Event::Closed { owner: BROWSER } => {
+                assert_eq!(self.stage, Stage::Closing);
+                self.stage = Stage::Complete;
+            }
+            Event::Closed { owner } if owner == PAGE || owner == PERSON => {}
+            Event::Trouble { trouble, text, .. } => {
+                panic!("unexpected page trouble {trouble:?}: {}", String::from_utf8_lossy(&text))
+            }
+            Event::Refused { op, why } => {
+                panic!("browser refused operation {op:?}: {why:?}; stderr: {}", String::from_utf8_lossy(&self.stderr))
+            }
+            Event::Missed { op, seen, more } => panic!("expectation {op:?} missed; saw {seen:?}, {more} more"),
+            other => panic!("unexpected browser event: {other:?}"),
+        }
+    }
+
+    fn drain_browser_down(&mut self) {
+        while let Some(down) = self.browser_down.pop() {
+            let [commands, replies, errors] = self.pipes.expect("browser output follows spawn");
+            let (pipe, down) = match down {
+                Down::Commands(down) => (commands, down),
+                Down::Replies(down) => (replies, down),
+                Down::Errors(down) => (errors, down),
+            };
+            self.io_requests.push_back(io::Request::Stream { stream: pipe, down });
+        }
+    }
+}
+
+fn query(role: &[u8], name: &[u8]) -> Query {
+    Query { role: Box::from(role), name: Box::from(name), within: None, boxes: false }
+}
+
+#[test]
+fn chromium_opens_finds_and_presses_a_button() {
+    let chromium = chromium();
+    let profile = Profile::fresh();
+    let mut rig = Rig::new(&chromium, &profile.0);
+    rig.run();
+    assert!(rig.root_closed && rig.exited && rig.child_closed);
+    assert!(rig.version.starts_with(b"Chrome/"), "version: {}", String::from_utf8_lossy(&rig.version));
+}
