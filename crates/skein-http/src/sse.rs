@@ -52,12 +52,11 @@ use skein_lib::{Env, List, Queue};
 
 use crate::MaxOut;
 
-mod data;
 mod lines;
 pub mod writer;
 
-pub use data::Data;
 use lines::{Lines, Step};
+pub use skein_lib::stream::Held as Data;
 
 /// The reader's limits (programming-model.md, 7): the same for every step
 /// and for [`Reader::new`], which allocates by them.

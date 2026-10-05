@@ -1,7 +1,8 @@
 //! The building blocks every step crate shares (programming-model.md, 10.2):
 //! typed handles and the slabs that issue them, bounded queues, lists, maps,
 //! sets and stacks, the per-layer deadline table, the stream vocabulary and
-//! the intake that meets its demands, a reader and a writer for sized bytes
+//! the intake that meets its demands, a held buffer serving a stream,
+//! a reader and a writer for sized bytes
 //! and the decimal digits of a count to write with them, monotonic and wall
 //! time, randomness, the tokens that cross layer boundaries, and the
 //! environment a step reads.

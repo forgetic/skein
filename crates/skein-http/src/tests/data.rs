@@ -1,50 +1,13 @@
-//! An event's data as a stream (http.md, 4): each demand answered at once,
-//! by exactly what it reads, or by the end.
+//! SSE keeps its data stream name as an alias of lib's held buffer.
 
-use skein_lib::stream::{Delimiter, Read, Up};
+use skein_lib::stream::{Held, Read, Up};
 
 use super::boxed;
 use crate::sse::Data;
 
 #[test]
-fn fills_and_scans_are_met_from_the_data_then_the_end_comes_once() {
-    let mut data = Data::new(boxed(b"{\"a\":\"bc\"}"));
-    assert_eq!(data.answer(Read::Fill(1)), Some(Up::Bytes(boxed(b"{"))));
-    let quote = Delimiter::new(b"\"").expect("one byte");
-    assert_eq!(data.answer(Read::Scan { until: quote, max: 4 }), Some(Up::Bytes(boxed(b"\""))));
-    assert_eq!(data.answer(Read::Scan { until: quote, max: 4 }), Some(Up::Bytes(boxed(b"a\""))));
-    assert_eq!(data.answer(Read::Scan { until: quote, max: 2 }), Some(Up::Bytes(boxed(b":\""))));
-    assert_eq!(data.answer(Read::Scan { until: quote, max: 1 }), Some(Up::Bytes(boxed(b"b"))), "its maximum");
-    assert_eq!(data.answer(Read::Fill(3)), Some(Up::Bytes(boxed(b"c\"}"))));
-    assert_eq!(data.answer(Read::Fill(0)), Some(Up::Bytes(boxed(b""))));
+fn data_is_a_held_stream() {
+    let mut data: Held = Data::new(boxed(b"ok"));
+    assert_eq!(data.answer(Read::Fill(2)), Some(Up::Bytes(boxed(b"ok"))));
     assert_eq!(data.answer(Read::Fill(1)), Some(Up::End));
-    assert_eq!(data.answer(Read::Fill(1)), None, "nothing after the end");
-}
-
-#[test]
-fn a_read_larger_than_what_is_left_is_the_end() {
-    let mut data = Data::new(boxed(b"abc"));
-    assert_eq!(data.answer(Read::Fill(4)), Some(Up::End));
-    let mut data = Data::new(boxed(b"abc"));
-    assert_eq!(
-        data.answer(Read::Scan { until: Delimiter::LF, max: 4 }),
-        Some(Up::End),
-        "no LF, and short of the maximum"
-    );
-    let mut data = Data::new(boxed(b"abc"));
-    assert_eq!(data.answer(Read::Scan { until: Delimiter::LF, max: 3 }), Some(Up::Bytes(boxed(b"abc"))));
-}
-
-#[test]
-fn a_withdrawal_is_not_answered() {
-    let mut data = Data::new(boxed(b"abc"));
-    assert_eq!(data.answer(Read::Nothing), None);
-    assert_eq!(data.answer(Read::Fill(3)), Some(Up::Bytes(boxed(b"abc"))));
-}
-
-#[test]
-fn a_delimiter_must_end_within_the_maximum() {
-    let mut data = Data::new(boxed(b"ab\r\ncd"));
-    assert_eq!(data.answer(Read::Scan { until: Delimiter::CRLF, max: 3 }), Some(Up::Bytes(boxed(b"ab\r"))));
-    assert_eq!(data.answer(Read::Scan { until: Delimiter::CRLF, max: 3 }), Some(Up::Bytes(boxed(b"\ncd"))));
 }

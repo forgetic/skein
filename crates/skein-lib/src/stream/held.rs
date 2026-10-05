@@ -1,13 +1,12 @@
-//! An event's data as a stream (lib.md, 7), for a machine stacked above
-//! the reader: a JSON tokenizer reading the document an event carries
-//! (http.md, 4).
+//! A complete buffer served as the side below of a stream (lib.md, 7).
 
 use alloc::boxed::Box;
 
-use skein_lib::bytes;
-use skein_lib::stream::{Read, Up};
+use crate::bytes;
 
-/// An event's data, read as a stream: the side below of the machine that
+use super::{Read, Up};
+
+/// A held buffer, read as a stream: the side below of the machine that
 /// reads it. All of it is here, so every demand is answered at once, in
 /// the same step, and what a demand cannot be met by is the stream's end.
 ///
@@ -16,18 +15,18 @@ use skein_lib::stream::{Read, Up};
 /// when what is left can never meet it; `End` comes once, and nothing
 /// after it. It asks nothing of room: the data is read, not written.
 #[derive(Debug)]
-pub struct Data {
+pub struct Held {
     bytes: Box<[u8]>,
     /// Where what is not yet read begins.
     at: usize,
     ended: bool,
 }
 
-impl Data {
-    /// The data `bytes`, an event's, none of it read.
+impl Held {
+    /// The buffer `bytes`, none of it read.
     #[must_use]
-    pub fn new(bytes: Box<[u8]>) -> Data {
-        Data { bytes, at: 0, ended: false }
+    pub fn new(bytes: Box<[u8]>) -> Held {
+        Held { bytes, at: 0, ended: false }
     }
 
     /// The answer to a demand that reads `read`: the bytes it asks for, as

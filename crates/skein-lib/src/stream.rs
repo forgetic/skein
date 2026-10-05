@@ -6,8 +6,13 @@
 //! below holds the bytes received but not yet demanded, in an
 //! [`Intake`](crate::Intake). Every side below meets the contract of a stream
 //! (lib.md, 7), which the comments here sum up.
+//! [`Held`] serves a complete buffer through that same contract.
 
 use alloc::boxed::Box;
+
+mod held;
+
+pub use held::Held;
 
 /// What a state needs from the stream below before it can go on.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
