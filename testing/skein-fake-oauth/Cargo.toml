@@ -1,0 +1,15 @@
+[package]
+name = "skein-fake-oauth"
+description = "Bounded rotating OAuth issuer for client worlds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-json.workspace = true
+skein-oauth.workspace = true
+
+[lints]
+workspace = true

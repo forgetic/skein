@@ -277,6 +277,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-fake-oauth"
+version = "0.0.0"
+dependencies = [
+ "skein-json",
+ "skein-lib",
+ "skein-oauth",
+]
+
+[[package]]
 name = "skein-heap"
 version = "0.0.0"
 
@@ -403,6 +412,16 @@ version = "0.0.0"
 dependencies = [
  "skein-json",
  "skein-lib",
+]
+
+[[package]]
+name = "skein-oauth-world"
+version = "0.0.0"
+dependencies = [
+ "skein-fake-oauth",
+ "skein-heap",
+ "skein-lib",
+ "skein-oauth",
 ]
 
 [[package]]

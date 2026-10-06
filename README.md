@@ -37,6 +37,7 @@ starts from.
 | JSON | `skein-json` | a bounded tokenizer, a sized writer | [json.md](docs/design/json.md) |
 | TLS | `skein-tls` | the TLS client, a stream over rustls's unbuffered connection, with ring | [tls.md](docs/design/tls.md) |
 | LLM | `skein-llm` | provider-neutral calls, streaming deltas, concrete replay and completions; subscription wire dialects | [llm.md](docs/design/llm.md) |
+| OAuth | `skein-oauth`, `skein-fake-oauth` | bounded sign-in and refresh client, with an independent rotating issuer for worlds | [oauth.md](docs/design/oauth.md) |
 | the browser kit | `skein-browser` | for tests: a headless Chromium driven over the DevTools protocol on a pipe, by role and name, from the loop | [browser.md](docs/design/browser.md) |
 
 ```
@@ -47,6 +48,8 @@ skein-http     lib
 skein-json     lib
 skein-tls      lib, rustls (and ring beneath it)
 skein-llm      lib, http, json
+skein-oauth    lib, json
+skein-fake-oauth lib, json, oauth
 skein-browser  lib, json
 skein-shell    lib, io, io-uring, libc
 skein-sim      lib, io

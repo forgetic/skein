@@ -12,6 +12,7 @@ members = [
     "testing/skein-browser",
     "testing/skein-echo-client",
     "testing/skein-fake-machine",
+    "testing/skein-fake-oauth",
     "testing/skein-fake-checkout",
     "testing/skein-fake-llm-domain",
     "testing/skein-fake-llm-protocol",
@@ -30,6 +31,7 @@ members = [
     "tests/kv",
     "tests/lib",
     "tests/llm",
+    "tests/oauth",
     "tests/protocol",
     "tests/ring",
     "tests/sim",
@@ -54,6 +56,7 @@ skein-llm = { path = "crates/skein-llm" }
 skein-oauth = { path = "crates/skein-oauth" }
 skein-fake-llm-domain = { path = "testing/skein-fake-llm-domain" }
 skein-fake-llm-protocol = { path = "testing/skein-fake-llm-protocol" }
+skein-fake-oauth = { path = "testing/skein-fake-oauth" }
 skein-tls = { path = "crates/skein-tls" }
 skein-shell = { path = "crates/skein-shell" }
 skein-sim = { path = "crates/skein-sim" }
