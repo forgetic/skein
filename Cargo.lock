@@ -398,6 +398,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-oauth"
+version = "0.0.0"
+dependencies = [
+ "skein-json",
+ "skein-lib",
+]
+
+[[package]]
 name = "skein-protocol-world"
 version = "0.0.0"
 dependencies = [

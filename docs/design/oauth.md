@@ -8,16 +8,16 @@ The caller supplies endpoints, client registration, clocks, limits, and fresh
 random bytes. It owns the redirect listener, HTTP/TLS connection, durability,
 and the decision to grant a token after keeping it.
 
-This design covers the flows decided in `groundwork-plan/02-oauth.md`:
-refresh; public sign-in with PKCE and a loopback redirect; and confidential
-sign-in with a client secret and the web's redirect. Device authorization is
-outside this component. The same HTTP records travel through `skein-http`
-as in `skein-llm`.
+The client covers refresh; public sign-in with PKCE and a loopback redirect;
+and confidential sign-in with a client secret and the web's redirect. Device
+authorization is outside this component. The same HTTP records travel
+through `skein-http` as in `skein-llm`.
 
 ## 1. Boundary and entities
 
-The caller admits one `Client` with an authorization URL, token endpoint,
-client id, redirect URI, requested scope, and token wire format. The endpoint
+The caller supplies a `Registration` with an authorization URL, token
+endpoint, client id, redirect URI, requested scope, token wire format, and
+optional client secret. It admits one `Client` machine for an exchange. The endpoint
 binding is kept through the exchange; a redirect cannot choose a new token
 endpoint. A public client requires an already bound loopback listener and a
 redirect URI whose loopback address, port, and path match that listener. The
