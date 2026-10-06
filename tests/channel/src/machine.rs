@@ -254,6 +254,7 @@ impl Harness {
     }
 
     /// Independent literal opening/Terms exchange for a ready responder.
+    #[must_use]
     pub fn ready_responder(first: bool) -> Harness {
         let mut harness = Harness::new(schema(Role::Responder, OpeningMode::AcceptHighest, first, 1));
         harness.grant();
@@ -263,7 +264,15 @@ impl Harness {
         harness.feed(&literal(16, INITIATOR_TERMS));
         match harness.events.pop().expect("Ready emitted") {
             Event::Ready { version: 1 } => {}
-            event => panic!("unexpected {event:?}"),
+            event @ (Event::Opening { .. }
+            | Event::Ready { .. }
+            | Event::Body { .. }
+            | Event::Unsupported { .. }
+            | Event::Refused { .. }
+            | Event::Sent { .. }
+            | Event::Unsent { .. }
+            | Event::ReadEnded
+            | Event::Closed { .. }) => panic!("unexpected {event:?}"),
         }
         harness
     }

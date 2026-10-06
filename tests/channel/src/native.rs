@@ -211,8 +211,7 @@ impl Driver {
                         self.channel_poll(owner);
                     }
                 }
-                ChannelEvent::Sent { .. } => {}
-                ChannelEvent::Closed { .. } => {}
+                ChannelEvent::Sent { .. } | ChannelEvent::Closed { .. } => {}
                 ChannelEvent::Opening { .. }
                 | ChannelEvent::Unsupported { .. }
                 | ChannelEvent::Refused { .. }

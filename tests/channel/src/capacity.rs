@@ -688,11 +688,11 @@ impl World {
         assert_eq!(self.driver.channel.queued_bytes(), before);
         assert!(!self.driver.channel.is_ready());
         assert!(!self.driver.io.is_ready(), "actual unavailable or held output grant has no runnable IO work");
-        if pressure != Pressure::BytesExact {
+        if pressure == Pressure::BytesExact {
+            assert_eq!(self.driver.matching_grants, 1, "wrong old token cannot consume genuine current grant");
+        } else {
             assert!(self.driver.held_grant.is_none(), "actual pressured Room has no Granted while capacity is short");
             assert_eq!(self.driver.matching_grants, 0, "no early winning native terminal");
-        } else {
-            assert_eq!(self.driver.matching_grants, 1, "wrong old token cannot consume genuine current grant");
         }
         (retained_bytes, free_bytes, unretired_write_bytes, retained_frames, live_read, before)
     }
