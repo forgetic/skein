@@ -88,18 +88,23 @@ application cuts, cancellation, output truncation and terminal ledgers.
 
 The caller implements `git::Remote`: synchronous repository tip queries,
 fetch selection, branch creation, push policy, and a commit store queried
-for both parents and trees. Remote names and fault policy are opaque to
+for both parents, trees and messages. Remote names and fault policy are opaque to
 the kit. IDs increase topologically in a finite acyclic graph; every
 queried commit exists. Nonmerge store returns `None` for an unchanged
-tree. Merge store always returns a fresh ID with both supplied parents,
-even for an unchanged tree. Local operations never move references.
+tree, dropping the supplied message without creating an object. Merge
+store always returns a fresh ID with both supplied parents, even for an
+unchanged tree. Each stored commit keeps its message as opaque bytes, and
+the world can read the message of an existing commit. Messages are sized
+by the fixture, without a production bound. Local operations never move
+references.
 
 Clone requires an absent destination and imports both parent chains of
 all branch tips, without checking out files. Fetch imports only missing
 objects in both parent chains, retaining existing object versions.
 Checkout requires a local object, replaces non-git files and clears merge
 metadata. Commit requires its local parent and snapshots regular files
-less git paths; unchanged content makes no object. Removing a working
+less git paths, passing the caller's message to the store; unchanged
+content makes no object. Removing a working
 directory removes all its local object-presence markers.
 
 Merge requires checked-out head metadata and a local second parent. It
@@ -109,7 +114,8 @@ merge bases. Independent line edits combine; overlapping edits and
 incompatible additions/deletions produce markers and a sorted conflict
 list. Line comparison uses quadratic scratch in the changed line counts.
 An explicit merge commit checks marker lines only in originally conflicted
-paths; deletion resolves one. It records both parents and clears merge
+paths; deletion resolves one. It records both parents and the supplied
+message, then clears merge
 metadata on success. Missing inputs or unresolved conflicts refuse before
 creating an object or changing that metadata.
 
