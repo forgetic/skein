@@ -47,6 +47,9 @@ pub enum Failure {
     Refused,
     ClientRejected,
     Malformed,
+    InvalidRedirect,
+    Limit,
+    Cancelled,
 }
 /// Classifies an answered refresh. Server failures are ambiguous after sending;
 /// only a transport that proves nothing was sent may use `Unavailable`.

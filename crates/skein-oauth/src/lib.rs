@@ -8,6 +8,8 @@ mod common;
 mod documents;
 mod json;
 mod jwt;
+mod machine;
+mod pkce;
 mod record;
 pub use common::{DecodeError, Failure, Limits, classify, worst_case};
 pub use documents::{
@@ -16,7 +18,14 @@ pub use documents::{
 };
 pub use json::{Collector, Json};
 pub use jwt::{Claims, read_claims};
+pub use machine::{
+    Client, ClientLimits, Event, HttpEvidence, HttpRequest, HttpResponse, MAX_OUT, Registration, Request, WireFormat,
+    client_worst_case,
+};
+pub use pkce::challenge;
 pub use record::{ClaimSelector, RECORD_VERSION, RefreshState, SavedToken, decode_record, encode_record, rotate};
 
+#[cfg(test)]
+mod machine_tests;
 #[cfg(test)]
 mod tests;

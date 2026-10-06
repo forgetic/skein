@@ -14,5 +14,13 @@ durable before lending its access token. `remaining` recalculates validity
 when the caller grants it. The record uses big-endian fields with a `SKOT`
 magic and version 1; readers check every length and reject trailing bytes.
 
-The codecs follow [oauth.md](../../docs/design/oauth.md). The client machine
-and its fake issuer are added in the next increments.
+`Client` runs one sign-in or refresh at a time. It emits a visit URL or token
+POST and takes a terminal HTTP response with send evidence. It retries only
+when the request was proved unsent or the issuer returned a rate limit; an
+ambiguous refresh attempt is handed back to the caller. The caller owns the
+redirect listener, transport, clocks, token persistence, and use of tokens.
+The public flow requires PKCE S256 and a loopback redirect; the confidential
+flow supplies its secret only at the token endpoint.
+
+The codecs and client follow [oauth.md](../../docs/design/oauth.md). The fake
+issuer is added in the next increment.
