@@ -214,6 +214,108 @@ pub struct Limits {
   a read the end crossed withdrawn, the stream finished, and the next
   demand. **`DOWN_MAX_OUT`** is two and two.
 
+### 3.6 Native independent output
+
+The explicit `client::native` face uses lib.md section 7.1 at both boundaries:
+read-only classic Demand/Up, plus named OutputDown/OutputUp. It shares the
+concrete rustls/session/held engine with the classic client. Its constructor
+selects the face immutably; ordinary HTTP/LLM users and every classic contract
+remain unchanged. A classic positive-room Demand or classic Send on the native
+face violates its receiving precondition before effects. No adapter over a
+classic combined lower demand can provide this independence.
+
+Each native connection retains separate upper read, upper output, lower read
+and lower output cells, with one lower token generator and no history. Lower
+Tokens are checked, never reused and permanently exhausted without wrapping.
+An upper output right is admitted only positive and within Limits.send, with
+idle output and usable writing; it can wait during an admitted Handshake but
+cannot be granted before Ready. Grant requires actual lower bytes and one Send
+slot. Its lower token remains the affine backing until matching Send/Release,
+empty Send, permitted Finish or actual close/failure consumes it. Check identity
+before size: stale operations are inert; only matching oversize is a caller bug.
+
+Native ciphertext room is checked `room_for(P) + FLIGHT`, with FLIGHT's actual
+2048-byte owed-control cap, and native largest room is the maximum of that
+requirement at Limits.send and FLIGHT. The complete owed prefix can grow while
+upper grant is held; TLS must preserve its backing slot instead of spending it
+on unrelated output. TLS-owned smaller flight grants send a fitting ordered
+prefix and retain its suffix for a fresh right. Classic helpers and caps remain
+unchanged. `client::native::LowerLimits` describes actual configured lower
+caps: `read` covers LARGEST_READ, `output` covers checked native largest_room,
+and `sends` is at least one queued Send slot beside one in-flight/stalled Send.
+`Client::new(config, name, limits, lower)` checks these before buffer allocation
+or cloning configuration, returning None if the lower cannot honour them. A
+sufficiently configured lower with dynamically one-byte-short credit may admit
+the request and wait. Bytes and queue slots have separate full/one-short
+controls, preserving IO's N queued beside one flight; no second queued slot is
+required merely for independence.
+
+A matching upper cancellation settles Wanted once; lower cancellation retains
+its real identity until the actual lower winner arrives. An already emitted
+upper Grant remains its winner. A genuine failure settles pending upper output
+before classic plaintext Failed and TLS Failed, without answering it twice when
+both lower output Failed and classic Failed arrive. Genuine Ready is retained
+even when a following checked-token exhaustion fails output in the same step.
+Native source targets UP_MAX_OUT={above:4,below:3} and
+DOWN_MAX_OUT={above:3,below:3}; implementation must prove actual emission bounds
+and exact-free-cell cases rather than suppress true events. Classic maxima stay.
+
+The native lower bridge carries actual Closed for the exact ciphertext entity.
+A recorded TLS self-cancel consumes only its output right. Unsolicited matching
+lower Cancelled instead makes transport unusable, stops fresh demands/output,
+settles still-Wanted upper output Cancelled once and emits TransportClosing
+unless local Close is already pending. The coordinating owner requests native
+Close and closes/aborts actual lower IO; TLS owns no timer or physical descriptor.
+No lower Failed, clean End, authenticated bytes or parse error is invented.
+
+Actual lower Closed first settles any still-Wanted upper output Cancelled,
+including pre-Ready with no lower Room and a new upper request crossing an older
+self-cancel. An emitted upper winner is preserved. Real lower obligations must
+already have settled; missing/wrong settlement is a trusted-bridge invariant
+violation. Without local Close, TransportClosed ends native Handshake/read and
+the connection. With local Close pending, Client::Closed answers it once after
+all actual lower output rights settle. A native Close queued after
+TransportClosing may arrive after TransportClosed: it is inert before classic
+core dispatch and creates no second Closed. Classic Close-after-Closed asserts.
+The owner retains physical resource responsibility and validates generation.
+
+Native Finish requires Ready and the existing no-live-upper-read/no-pending-
+output restrictions. After permitted closing withdrawal it admits no further
+positive reads. This explicit read-no-more receiving contract is narrower than
+the classic face; classic pre-Ready Finish and read-after-Finish remain unchanged.
+Ready withdrawal retains one inline exact Fill-size witness for an actual
+Bytes winner already emitted by the lower resource. Its matching owned box is
+dropped before copying, processing or encryption, including across permitted
+Finish; no read acknowledgement or new terminal is required. Withdrawal can win
+without Bytes. No further positive read is admitted, and physical Closed clears
+the witness. During Handshake, withdrawal of the upper read leaves genuine
+internal ciphertext reads progressing through Ready.
+
+The native memory bound includes actual wrapper/cell layouts and checked work
+allowance max(LARGEST_READ,native_room_for(Limits.send)), with drop-before-
+process/encrypt sequencing. Complete owed-plus-sealed ciphertext is counted
+before handoff and on error-before-emission; overlapping allocations require
+the checked sum. Upper input remains caller ownership, not presumed released
+at a grant. Existing buffers/rustls scratch, IO queue/flight boxes and typed
+queues are priced once. Original classic heap pressure, 400 fuzzy runs and all
+32 positive scenario outcomes remain. Acceptance additionally requires genuine
+native IO+TLS late output behind unanswered reads, exact lifecycle/cancel/token
+and capacity controls, actual four-event maximum and metered maximal ownership.
+The pinned rustls 0.23.41 coalesces multiple requesting TLS 1.3 KeyUpdates
+into one deferred notification while the caller holds its grant. Native controls
+retain all 32 admissible requests, then observe the actual notification beside
+the maximal plaintext send. They do not claim 32 encoded notifications. A real
+TLS 1.2 HelloRequest produces a sealed refusal while the upper grant is held;
+its bounded prefix and a subsequent real close_notify test ordered prefix/suffix
+drainage across an older, smaller queued grant. The whole FLIGHT allocation and
+checked reservation envelope remain priced even when authentic logical output
+is smaller. Capacity/one-over tests distinguish allocation bounds from the
+pinned peer's actual admitted control-record limits.
+
+TLS ciphertext is nondeterministic; simulator scheduling is not a ciphertext
+replay claim. This section describes the native increment's contract; its
+implementation and gates are separate evidence.
+
 ## 4. The exception
 
 - **rustls and its dependencies,** ring's among them, are the only step

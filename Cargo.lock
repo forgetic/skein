@@ -467,7 +467,9 @@ dependencies = [
  "rustls",
  "skein-heap",
  "skein-http",
+ "skein-io",
  "skein-lib",
+ "skein-sim",
  "skein-tls",
 ]
 

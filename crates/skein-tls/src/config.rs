@@ -132,3 +132,36 @@ impl TimeProvider for At {
         Some(self.0)
     }
 }
+
+/// Real TLS 1.2 peer for the lowest-tier native Ready/exhaustion control.
+/// This configuration uses the same documented rustls Arc/Vec configuration
+/// exception and actual checked-in PKI fixtures, read only by this test from
+/// Cargo's crate-root working directory (tls.md, 3.6 and 4).
+#[cfg(test)]
+pub(crate) fn native_test_peer() -> (Config, rustls::server::UnbufferedServerConnection) {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(
+            std::fs::read("../../tests/tls/fixtures/root.der").expect("actual fixture root bytes"),
+        ))
+        .expect("actual fixture root");
+    let client = Config::new(roots, &[]).expect("actual client roots");
+    let certificates = Vec::from([
+        CertificateDer::from(std::fs::read("../../tests/tls/fixtures/leaf.der").expect("actual fixture leaf bytes")),
+        CertificateDer::from(
+            std::fs::read("../../tests/tls/fixtures/intermediate.der").expect("actual fixture intermediate bytes"),
+        ),
+    ]);
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        std::fs::read("../../tests/tls/fixtures/leaf.key").expect("actual fixture private key bytes"),
+    ));
+    let server = rustls::server::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+        .with_protocol_versions(&[&rustls::version::TLS12])
+        .expect("TLS 1.2 provider")
+        .with_no_client_auth()
+        .with_single_cert(certificates, key)
+        .expect("actual fixture key");
+    let peer = rustls::server::UnbufferedServerConnection::new(Arc::new(server)).expect("actual rustls peer");
+    (client, peer)
+}

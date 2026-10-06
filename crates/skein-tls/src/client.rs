@@ -45,6 +45,9 @@
 //! included; [`LARGEST_READ`] and [`largest_room`] are what whoever stacks
 //! it checks against the caps of the stream below at startup.
 
+/// Explicit native output on both TLS boundaries (tls.md, 3.6; lib.md, 7.1).
+pub mod native;
+
 use core::mem;
 
 use alloc::boxed::Box;

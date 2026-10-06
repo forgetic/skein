@@ -21,7 +21,8 @@ use skein_lib::{Env, Queue, Time, Wall};
 use crate::client::{self, Client, Event, Limits, Request};
 use crate::{Config, Name};
 
-const LIMITS: Limits = Limits { read: 16, send: 16, records: client::MAX_RECORD };
+/// Original fixed receiving limits, shared with native controls (tls.md, 3.6).
+pub(crate) const LIMITS: Limits = Limits { read: 16, send: 16, records: client::MAX_RECORD };
 
 /// Roots of one anchor, which nothing a test sends is signed by: a
 /// configuration needs a root, and these handshakes never reach one.
@@ -35,7 +36,8 @@ fn roots() -> RootCertStore {
     roots
 }
 
-fn config() -> Config {
+/// Original synthetic-root configuration, also used by native step controls.
+pub(crate) fn config() -> Config {
     Config::new(roots(), &[]).unwrap()
 }
 

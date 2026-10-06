@@ -5,6 +5,10 @@
 //!   streams (lib.md, 7): the ciphertext below, a socket's or a pipe's, and
 //!   the plaintext above, which the machine stacked on it cannot tell from a
 //!   socket.
+//! - [`client::native`] explicitly selects independent named output on both
+//!   faces, beside read-only classic streams. It shares the concrete session
+//!   and held-buffer engine, keeps bounded affine cells, and accepts actual
+//!   lower resource closure from its owner (tls.md, 3.6; lib.md, 7.1).
 //! - [`Config`] is what every connection shares, made at startup from the
 //!   roots a service trusts and the protocols it offers by ALPN; [`Name`]
 //!   is each connection's server.

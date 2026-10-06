@@ -9,11 +9,14 @@ publish.workspace = true
 [dependencies]
 skein-lib.workspace = true
 skein-tls.workspace = true
+# Native ciphertext-output composition uses actual IO on the simulator.
+skein-io.workspace = true
+skein-sim.workspace = true
 # The server: rustls's buffered connection, over std's readers and writers.
 rustls = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
-# The counting allocator, for tests/memory.rs only.
+# The counting allocator, for classic and native heap test binaries.
 skein-heap.workspace = true
 # The HTTP client, stacked on the TLS client in tests/stack.rs.
 skein-http.workspace = true
