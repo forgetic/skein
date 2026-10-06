@@ -139,6 +139,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-channel"
+version = "0.0.0"
+dependencies = [
+ "skein-lib",
+]
+
+[[package]]
+name = "skein-channel-world"
+version = "0.0.0"
+dependencies = [
+ "skein-channel",
+ "skein-heap",
+ "skein-io",
+ "skein-lib",
+ "skein-sim",
+]
+
+[[package]]
 name = "skein-conformance"
 version = "0.0.0"
 dependencies = [

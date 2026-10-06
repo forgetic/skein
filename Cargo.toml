@@ -21,6 +21,7 @@ members = [
     "tests/conformance/ring",
     "tests/conformance/sim",
     "tests/browser",
+    "tests/channel",
     "tests/echo",
     "tests/heap",
     "tests/http",
@@ -44,6 +45,7 @@ publish = false
 
 [workspace.dependencies]
 skein-lib = { path = "crates/skein-lib" }
+skein-channel = { path = "crates/skein-channel" }
 skein-io = { path = "crates/skein-io" }
 skein-kv = { path = "crates/skein-kv" }
 skein-http = { path = "crates/skein-http" }
