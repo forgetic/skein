@@ -69,7 +69,14 @@ fn actual_raw_decoded_array_and_outgoing_final_frame_coexist_by_checked_sum() {
     let event = server.events.pop().expect("raw Body");
     let raw = match event {
         Event::Body { bytes, .. } => bytes,
-        event => panic!("unexpected {event:?}"),
+        event @ (Event::Opening { .. }
+        | Event::Ready { .. }
+        | Event::Unsupported { .. }
+        | Event::Refused { .. }
+        | Event::Sent { .. }
+        | Event::Unsent { .. }
+        | Event::ReadEnded
+        | Event::Closed { .. }) => panic!("unexpected {event:?}"),
     };
     let span = Span::start();
     // Represents the wrapper's actual bounded typed array and field allocation;
