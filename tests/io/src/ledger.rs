@@ -80,7 +80,9 @@ impl Ledger {
         match request {
             Request::Listen { owner, .. } => self.made(*owner, Made::Listen),
             Request::Connect { owner, .. } => self.made(*owner, Made::Connect),
-            Request::Spawn { .. } | Request::Signal { .. } => unreachable!("the socket world spawns no child"),
+            Request::Output { .. } | Request::Spawn { .. } | Request::Signal { .. } => {
+                unreachable!("the socket world spawns no child")
+            }
             Request::Bind { socket, owner } => {
                 assert!(self.announced.remove(socket), "a socket is bound once, after it is announced");
                 self.made(*owner, Made::Bind);
@@ -140,7 +142,9 @@ impl Ledger {
             | Event::Stream { owner, .. }
             | Event::Failed { owner, .. }
             | Event::Closed { owner } => *owner,
-            Event::Spawned { .. } | Event::Exited { .. } => unreachable!("the socket world spawns no child"),
+            Event::Output { .. } | Event::Spawned { .. } | Event::Exited { .. } => {
+                unreachable!("the socket world spawns no child")
+            }
         };
         let told = self.owners.get_mut(&owner).unwrap_or_else(|| panic!("{event:?} names an owner that asked"));
         assert!(!told.closed, "nothing after Closed: {event:?}");
@@ -200,7 +204,9 @@ impl Ledger {
                 told.failed = true;
             }
             Event::Closed { .. } => told.closed = true,
-            Event::Spawned { .. } | Event::Exited { .. } => unreachable!("the socket world spawns no child"),
+            Event::Output { .. } | Event::Spawned { .. } | Event::Exited { .. } => {
+                unreachable!("the socket world spawns no child")
+            }
         }
     }
 

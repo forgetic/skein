@@ -5,17 +5,36 @@
 use alloc::boxed::Box;
 use core::mem;
 
-use skein_lib::stream::{Down, Fault, Read, Up};
+use skein_lib::stream::{Down, Fault, OutputDown, OutputOutcome, OutputUp, Read, Up};
 use skein_lib::{Env, Id, Intake, Queue, Token, bytes};
 
 use crate::kernel::{self, Addr, Done, Fd, Op, Submit};
 use crate::layer::{self, Entity, Flight, Landed, Purpose, Tables, Timer};
 use crate::limits::Limits;
+use crate::output::Reservation;
 use crate::records::{self, Event};
 
 /// A socket that is, or will be, one end of a stream.
 #[derive(Debug)]
-pub(crate) enum Stream {
+pub(crate) struct Stream {
+    state: State,
+    owed: Option<(Token, OutputUp)>,
+}
+
+impl Stream {
+    pub(crate) const fn is_closed(&self) -> bool {
+        self.state.is_closed() && self.owed.is_none()
+    }
+
+    fn emit_owed(&mut self, up: &mut Queue<Event>) {
+        if let Some((owner, terminal)) = self.owed.take() {
+            up.push(Event::Output { owner, up: terminal });
+        }
+    }
+}
+
+#[derive(Debug)]
+enum State {
     /// A connect whose `Socket` is in flight, `Connecting` not yet told: on
     /// the ready list.
     Opening {
@@ -53,7 +72,7 @@ pub(crate) enum Stream {
 
 /// A stream running both ways for its owner.
 #[derive(Debug)]
-pub(crate) struct Open {
+struct Open {
     owner: Token,
     fd: Fd,
     /// What arrived and was not yet demanded.
@@ -62,6 +81,8 @@ pub(crate) struct Open {
     /// The room the owner holds: what the last `Room` granted, less what it
     /// sent since. Each `Send` fits within it (lib.md, 7).
     granted: u32,
+    classic_grant: bool,
+    independent: Reservation,
     reader: Reader,
     writer: Writer,
     output: Output,
@@ -150,7 +171,7 @@ const fn shutting(write: Option<Writing>) -> Option<Id<Flight>> {
 /// A stream that failed, `Failed` told: what it still had in flight finishes,
 /// and it waits for its owner's close.
 #[derive(Debug)]
-pub(crate) struct Broken {
+struct Broken {
     owner: Token,
     fd: Fd,
     recv: Option<Id<Flight>>,
@@ -160,7 +181,7 @@ pub(crate) struct Broken {
 /// A graceful close (io.md, 3): the output flushed and half-closed, the input
 /// discarded until the peer ends, under the close deadline.
 #[derive(Debug)]
-pub(crate) struct Closing {
+struct Closing {
     owner: Token,
     fd: Fd,
     drain: Drain,
@@ -198,7 +219,7 @@ enum Flush {
 /// waits for each of them and each cancel before its close
 /// (programming-model.md, 5.3).
 #[derive(Debug)]
-pub(crate) struct Settling {
+struct Settling {
     /// The owner told `Closed`, unless the socket was rejected.
     owner: Option<Token>,
     /// The descriptor to close, unless its `Socket` has yet to make it.
@@ -241,28 +262,28 @@ struct Sent {
 }
 
 /// A connect whose `Socket` was just submitted.
-pub(crate) const fn opened(owner: Token, addr: Addr) -> Stream {
-    Stream::Opening { owner, addr }
+const fn state_opened(owner: Token, addr: Addr) -> State {
+    State::Opening { owner, addr }
 }
 
 /// A socket `listener` just accepted.
-pub(crate) const fn announced(fd: Fd, listener: Id<Entity>) -> Stream {
-    Stream::Announced { fd, listener }
+const fn state_announced(fd: Fd, listener: Id<Entity>) -> State {
+    State::Announced { fd, listener }
 }
 
-impl Stream {
-    pub(crate) const fn is_closed(&self) -> bool {
+impl State {
+    const fn is_closed(&self) -> bool {
         match self {
-            Stream::Closed => true,
-            Stream::Opening { .. }
-            | Stream::Socket { .. }
-            | Stream::Connecting { .. }
-            | Stream::Announced { .. }
-            | Stream::Open(_)
-            | Stream::Broken(_)
-            | Stream::Closing(_)
-            | Stream::Settling(_)
-            | Stream::Releasing { .. } => false,
+            State::Closed => true,
+            State::Opening { .. }
+            | State::Socket { .. }
+            | State::Connecting { .. }
+            | State::Announced { .. }
+            | State::Open(_)
+            | State::Broken(_)
+            | State::Closing(_)
+            | State::Settling(_)
+            | State::Releasing { .. } => false,
         }
     }
 }
@@ -330,8 +351,8 @@ impl Output {
 }
 
 /// A completion of one of the stream's operations.
-pub(crate) fn landed(
-    stream: &mut Stream,
+fn state_landed(
+    stream: &mut State,
     landed: Landed,
     env: &Env<Limits>,
     tables: &mut Tables,
@@ -340,15 +361,15 @@ pub(crate) fn landed(
 ) {
     let id = landed.entity;
     let happened = decode(landed);
-    let state = mem::replace(stream, Stream::Closed);
+    let state = mem::replace(stream, State::Closed);
     *stream = step(state, id, happened, env, tables, up, subs);
     follow(stream, id, env, tables, up, subs);
 }
 
 /// The stream `id` was on the ready list: a connect is told `Connecting`; an
 /// open stream is delivered what its demand asks for.
-pub(crate) fn resume(
-    stream: &mut Stream,
+fn state_resume(
+    stream: &mut State,
     id: Id<Entity>,
     env: &Env<Limits>,
     tables: &mut Tables,
@@ -356,49 +377,49 @@ pub(crate) fn resume(
     subs: &mut Queue<Submit>,
 ) {
     match *stream {
-        Stream::Opening { owner, addr } => {
+        State::Opening { owner, addr } => {
             up.push(Event::Connecting { owner, socket: id.token() });
-            *stream = Stream::Socket { owner, addr };
+            *stream = State::Socket { owner, addr };
         }
         // Readied, then moved on; or open, and delivered below.
-        Stream::Socket { .. }
-        | Stream::Connecting { .. }
-        | Stream::Announced { .. }
-        | Stream::Open(_)
-        | Stream::Broken(_)
-        | Stream::Closing(_)
-        | Stream::Settling(_)
-        | Stream::Releasing { .. }
-        | Stream::Closed => {}
+        State::Socket { .. }
+        | State::Connecting { .. }
+        | State::Announced { .. }
+        | State::Open(_)
+        | State::Broken(_)
+        | State::Closing(_)
+        | State::Settling(_)
+        | State::Releasing { .. }
+        | State::Closed => {}
     }
     follow(stream, id, env, tables, up, subs);
 }
 
 /// `Bind` (`owner`) or `Reject` (none) of an announced socket; answers the
 /// listener that announced it.
-pub(crate) fn answer(
-    stream: &mut Stream,
+fn state_answer(
+    stream: &mut State,
     id: Id<Entity>,
     owner: Option<Token>,
     env: &Env<Limits>,
     tables: &mut Tables,
     subs: &mut Queue<Submit>,
 ) -> Id<Entity> {
-    let state = mem::replace(stream, Stream::Closed);
+    let state = mem::replace(stream, State::Closed);
     let (fd, listener) = match state {
-        Stream::Announced { fd, listener } => (fd, listener),
-        Stream::Opening { .. }
-        | Stream::Socket { .. }
-        | Stream::Connecting { .. }
-        | Stream::Open(_)
-        | Stream::Broken(_)
-        | Stream::Closing(_)
-        | Stream::Settling(_)
-        | Stream::Releasing { .. }
-        | Stream::Closed => unreachable!("an answer names a socket announced and not yet answered"),
+        State::Announced { fd, listener } => (fd, listener),
+        State::Opening { .. }
+        | State::Socket { .. }
+        | State::Connecting { .. }
+        | State::Open(_)
+        | State::Broken(_)
+        | State::Closing(_)
+        | State::Settling(_)
+        | State::Releasing { .. }
+        | State::Closed => unreachable!("an answer names a socket announced and not yet answered"),
     };
     *stream = match owner {
-        Some(owner) => Stream::Open(open(owner, fd, id, env, tables, subs)),
+        Some(owner) => State::Open(open(owner, fd, id, env, tables, subs)),
         None => release(None, fd, id, tables, subs),
     };
     tidy(stream, id, tables);
@@ -407,8 +428,8 @@ pub(crate) fn answer(
 
 /// A request in the stream vocabulary (lib.md, 7). Whatever it makes due up
 /// is told by `resume`, from the ready list.
-pub(crate) fn request(
-    stream: &mut Stream,
+fn state_request(
+    stream: &mut State,
     id: Id<Entity>,
     down: Down,
     env: &Env<Limits>,
@@ -416,34 +437,34 @@ pub(crate) fn request(
     subs: &mut Queue<Submit>,
 ) {
     match stream {
-        Stream::Open(open) => match down {
+        State::Open(open) => match down {
             Down::Demand { read, room } => demand(open, read, room, id, env, tables),
             Down::Send(bytes) => queue(open, bytes, id, env, tables, subs),
             Down::Finish => finish(open, id, tables, subs),
         },
         // The stream failed, or its owner closed it: dropped.
-        Stream::Broken(_) | Stream::Closing(_) | Stream::Settling(_) | Stream::Releasing { .. } | Stream::Closed => {}
-        Stream::Opening { .. } | Stream::Socket { .. } | Stream::Connecting { .. } => {
+        State::Broken(_) | State::Closing(_) | State::Settling(_) | State::Releasing { .. } | State::Closed => {}
+        State::Opening { .. } | State::Socket { .. } | State::Connecting { .. } => {
             unreachable!("a stream request comes once the stream is connected")
         }
-        Stream::Announced { .. } => unreachable!("a stream request comes once the socket is bound"),
+        State::Announced { .. } => unreachable!("a stream request comes once the socket is bound"),
     }
     tidy(stream, id, tables);
 }
 
 /// `Close` (graceful) or `Abort`.
-pub(crate) fn close(
-    stream: &mut Stream,
+fn state_close(
+    stream: &mut State,
     id: Id<Entity>,
     abort: bool,
     env: &Env<Limits>,
     tables: &mut Tables,
     subs: &mut Queue<Submit>,
 ) {
-    let state = mem::replace(stream, Stream::Closed);
+    let state = mem::replace(stream, State::Closed);
     *stream = match state {
         // Nothing to flush before it is connected: a close is an abort.
-        Stream::Socket { owner, addr: _ } => {
+        State::Socket { owner, addr: _ } => {
             let settling = Settling {
                 owner: Some(owner),
                 fd: None,
@@ -453,9 +474,9 @@ pub(crate) fn close(
                 write: None,
                 cancels: 0,
             };
-            Stream::Settling(settling)
+            State::Settling(settling)
         }
-        Stream::Connecting { owner, fd, connect } => {
+        State::Connecting { owner, fd, connect } => {
             tables.cancel(subs, id, connect);
             let settling = Settling {
                 owner: Some(owner),
@@ -466,9 +487,9 @@ pub(crate) fn close(
                 write: None,
                 cancels: 1,
             };
-            Stream::Settling(settling)
+            State::Settling(settling)
         }
-        Stream::Open(open) => {
+        State::Open(open) => {
             if abort {
                 let (recv, write) = in_flight(open.reader, &open.writer);
                 wind_down(open.owner, open.fd, recv, write, id, tables, subs)
@@ -477,50 +498,50 @@ pub(crate) fn close(
             }
         }
         // Nothing to flush once it failed: a close is an abort.
-        Stream::Broken(broken) => wind_down(broken.owner, broken.fd, broken.recv, broken.write, id, tables, subs),
-        Stream::Closing(closing) => {
+        State::Broken(broken) => wind_down(broken.owner, broken.fd, broken.recv, broken.write, id, tables, subs),
+        State::Closing(closing) => {
             if abort {
                 abort_closing(closing, id, tables, subs)
             } else {
-                Stream::Closing(closing)
+                State::Closing(closing)
             }
         }
         // Closing already, or closed and not yet reclaimed.
-        state @ (Stream::Settling(_) | Stream::Releasing { .. } | Stream::Closed) => state,
-        Stream::Opening { .. } => unreachable!("a connect is named above only once it is told Connecting"),
-        Stream::Announced { .. } => unreachable!("an announced socket is bound or rejected, not closed"),
+        state @ (State::Settling(_) | State::Releasing { .. } | State::Closed) => state,
+        State::Opening { .. } => unreachable!("a connect is named above only once it is told Connecting"),
+        State::Announced { .. } => unreachable!("an announced socket is bound or rejected, not closed"),
     };
     tidy(stream, id, tables);
 }
 
 /// The close deadline of a graceful close passed: it aborts.
-pub(crate) fn expired(
-    stream: &mut Stream,
+fn state_expired(
+    stream: &mut State,
     id: Id<Entity>,
     env: &Env<Limits>,
     tables: &mut Tables,
     up: &mut Queue<Event>,
     subs: &mut Queue<Submit>,
 ) {
-    let state = mem::replace(stream, Stream::Closed);
+    let state = mem::replace(stream, State::Closed);
     *stream = match state {
-        Stream::Closing(closing) => abort_closing(closing, id, tables, subs),
-        Stream::Opening { .. }
-        | Stream::Socket { .. }
-        | Stream::Connecting { .. }
-        | Stream::Announced { .. }
-        | Stream::Open(_)
-        | Stream::Broken(_)
-        | Stream::Settling(_)
-        | Stream::Releasing { .. }
-        | Stream::Closed => unreachable!("a close deadline runs only while closing gracefully"),
+        State::Closing(closing) => abort_closing(closing, id, tables, subs),
+        State::Opening { .. }
+        | State::Socket { .. }
+        | State::Connecting { .. }
+        | State::Announced { .. }
+        | State::Open(_)
+        | State::Broken(_)
+        | State::Settling(_)
+        | State::Releasing { .. }
+        | State::Closed => unreachable!("a close deadline runs only while closing gracefully"),
     };
     follow(stream, id, env, tables, up, subs);
 }
 
 /// The retry deadline passed: what found no buffer is submitted again.
-pub(crate) fn retried(
-    stream: &mut Stream,
+fn state_retried(
+    stream: &mut State,
     id: Id<Entity>,
     env: &Env<Limits>,
     tables: &mut Tables,
@@ -528,7 +549,7 @@ pub(crate) fn retried(
     subs: &mut Queue<Submit>,
 ) {
     match stream {
-        Stream::Open(open) => {
+        State::Open(open) => {
             // A stalled reader receives again when it is delivered, below.
             open.reader = match open.reader {
                 Reader::Stalled => Reader::Full,
@@ -542,7 +563,7 @@ pub(crate) fn retried(
                 writer @ (Writer::Idle | Writer::Sending { .. } | Writer::Shutting(_) | Writer::Shut) => writer,
             };
         }
-        Stream::Closing(closing) => {
+        State::Closing(closing) => {
             closing.drain = match closing.drain {
                 Drain::Stalled => Drain::Receiving(receive(closing.fd, env.limits.receive, id, tables, subs)),
                 drain @ (Drain::Receiving(_) | Drain::Done) => drain,
@@ -553,14 +574,14 @@ pub(crate) fn retried(
                 flush @ (Flush::Sending(_) | Flush::Shutting(_) | Flush::Done) => flush,
             };
         }
-        Stream::Opening { .. }
-        | Stream::Socket { .. }
-        | Stream::Connecting { .. }
-        | Stream::Announced { .. }
-        | Stream::Broken(_)
-        | Stream::Settling(_)
-        | Stream::Releasing { .. }
-        | Stream::Closed => unreachable!("a retry deadline runs only while an open or closing stream stalls"),
+        State::Opening { .. }
+        | State::Socket { .. }
+        | State::Connecting { .. }
+        | State::Announced { .. }
+        | State::Broken(_)
+        | State::Settling(_)
+        | State::Releasing { .. }
+        | State::Closed => unreachable!("a retry deadline runs only while an open or closing stream stalls"),
     }
     follow(stream, id, env, tables, up, subs);
 }
@@ -569,7 +590,7 @@ pub(crate) fn retried(
 /// (programming-model.md, 5.4): an open stream delivered what its demand asks
 /// for, and the deadlines its state no longer needs cancelled.
 fn follow(
-    stream: &mut Stream,
+    stream: &mut State,
     id: Id<Entity>,
     env: &Env<Limits>,
     tables: &mut Tables,
@@ -577,16 +598,16 @@ fn follow(
     subs: &mut Queue<Submit>,
 ) {
     match stream {
-        Stream::Open(open) => deliver(open, id, env, tables, up, subs),
-        Stream::Opening { .. }
-        | Stream::Socket { .. }
-        | Stream::Connecting { .. }
-        | Stream::Announced { .. }
-        | Stream::Broken(_)
-        | Stream::Closing(_)
-        | Stream::Settling(_)
-        | Stream::Releasing { .. }
-        | Stream::Closed => {}
+        State::Open(open) => deliver(open, id, env, tables, up, subs),
+        State::Opening { .. }
+        | State::Socket { .. }
+        | State::Connecting { .. }
+        | State::Announced { .. }
+        | State::Broken(_)
+        | State::Closing(_)
+        | State::Settling(_)
+        | State::Releasing { .. }
+        | State::Closed => {}
     }
     tidy(stream, id, tables);
 }
@@ -595,18 +616,18 @@ fn follow(
 /// deadline runs only while closing gracefully, the retry deadline only while
 /// a side stalls. Each is armed where its state begins, and cancelled here
 /// once its state is left.
-fn tidy(stream: &Stream, id: Id<Entity>, tables: &mut Tables) {
+fn tidy(stream: &State, id: Id<Entity>, tables: &mut Tables) {
     let (closing, stalled) = match stream {
-        Stream::Open(open) => (false, open.stalled()),
-        Stream::Closing(closing) => (true, closing.stalled()),
-        Stream::Opening { .. }
-        | Stream::Socket { .. }
-        | Stream::Connecting { .. }
-        | Stream::Announced { .. }
-        | Stream::Broken(_)
-        | Stream::Settling(_)
-        | Stream::Releasing { .. }
-        | Stream::Closed => (false, false),
+        State::Open(open) => (false, open.stalled()),
+        State::Closing(closing) => (true, closing.stalled()),
+        State::Opening { .. }
+        | State::Socket { .. }
+        | State::Connecting { .. }
+        | State::Announced { .. }
+        | State::Broken(_)
+        | State::Settling(_)
+        | State::Releasing { .. }
+        | State::Closed => (false, false),
     };
     if !closing {
         tables.deadlines.cancel((id, Timer::Close));
@@ -753,24 +774,24 @@ fn counted(result: Result<Done, kernel::Error>) -> Result<u32, kernel::Error> {
 
 /// The transition table of io.md, 3.3, for completions.
 fn step(
-    state: Stream,
+    state: State,
     id: Id<Entity>,
     happened: Happened,
     env: &Env<Limits>,
     tables: &mut Tables,
     up: &mut Queue<Event>,
     subs: &mut Queue<Submit>,
-) -> Stream {
+) -> State {
     match state {
-        Stream::Opening { .. } => {
+        State::Opening { .. } => {
             unreachable!("the ready list is drained before completions, so a connect is told Connecting first")
         }
-        Stream::Socket { owner, addr } => match happened {
+        State::Socket { owner, addr } => match happened {
             Happened::Socket(Ok(fd)) => made(owner, addr, fd, id, tables, subs),
             Happened::Socket(Err(error)) => {
                 up.push(Event::Failed { owner, error: records::setup_error(error) });
                 up.push(Event::Closed { owner });
-                Stream::Closed
+                State::Closed
             }
             Happened::Connected { .. }
             | Happened::Received(_)
@@ -779,7 +800,7 @@ fn step(
             | Happened::Released
             | Happened::Cancelled { .. } => unreachable!("a socket being made has nothing else in flight"),
         },
-        Stream::Connecting { owner, fd, connect } => match happened {
+        State::Connecting { owner, fd, connect } => match happened {
             Happened::Connected { flight, result } => {
                 assert!(flight == connect, "the connect that completed is the one in flight");
                 match result {
@@ -794,8 +815,8 @@ fn step(
             | Happened::Released
             | Happened::Cancelled { .. } => unreachable!("a socket connecting has nothing else in flight"),
         },
-        Stream::Announced { .. } => unreachable!("an announced socket has nothing in flight"),
-        Stream::Open(open) => match happened {
+        State::Announced { .. } => unreachable!("an announced socket has nothing in flight"),
+        State::Open(open) => match happened {
             Happened::Received(received) => open_received(open, received, id, env, tables, up),
             Happened::Sent(sent) => open_sent(open, sent, id, env, tables, up, subs),
             Happened::Shut { flight, result } => open_shut(open, flight, result, id, env, tables, up),
@@ -803,8 +824,8 @@ fn step(
                 unreachable!("an open stream has only its receive and its send in flight")
             }
         },
-        Stream::Broken(broken) => Stream::Broken(broken_landed(broken, happened)),
-        Stream::Closing(closing) => match happened {
+        State::Broken(broken) => State::Broken(broken_landed(broken, happened)),
+        State::Closing(closing) => match happened {
             Happened::Received(received) => closing_received(closing, received, id, env, tables, subs),
             Happened::Sent(sent) => closing_sent(closing, sent, id, env, tables, subs),
             Happened::Shut { flight, result } => closing_shut(closing, flight, result, id, env, tables, subs),
@@ -812,16 +833,16 @@ fn step(
                 unreachable!("a stream closing gracefully has only its receive and its send in flight")
             }
         },
-        Stream::Settling(settling) => {
+        State::Settling(settling) => {
             let settling = settling_landed(settling, happened, id, tables, subs);
             settle(settling, id, tables, up, subs)
         }
-        Stream::Releasing { owner } => match happened {
+        State::Releasing { owner } => match happened {
             Happened::Released => {
                 if let Some(owner) = owner {
                     up.push(Event::Closed { owner });
                 }
-                Stream::Closed
+                State::Closed
             }
             Happened::Socket(_)
             | Happened::Connected { .. }
@@ -830,14 +851,14 @@ fn step(
             | Happened::Shut { .. }
             | Happened::Cancelled { .. } => unreachable!("a stream releasing has only its close in flight"),
         },
-        Stream::Closed => unreachable!("a closed stream has nothing in flight"),
+        State::Closed => unreachable!("a closed stream has nothing in flight"),
     }
 }
 
 /// Socket ok: connect it.
-fn made(owner: Token, addr: Addr, fd: Fd, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) -> Stream {
+fn made(owner: Token, addr: Addr, fd: Fd, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) -> State {
     let connect = tables.submit(subs, id, Purpose::Connect, Op::Connect { fd, addr });
-    Stream::Connecting { owner, fd, connect }
+    State::Connecting { owner, fd, connect }
 }
 
 /// Connect ok: told, and open.
@@ -849,9 +870,9 @@ fn connected(
     tables: &mut Tables,
     up: &mut Queue<Event>,
     subs: &mut Queue<Submit>,
-) -> Stream {
+) -> State {
     up.push(Event::Connected { owner });
-    Stream::Open(open(owner, fd, id, env, tables, subs))
+    State::Open(open(owner, fd, id, env, tables, subs))
 }
 
 /// Connect failed: told, and the socket closed.
@@ -863,7 +884,7 @@ fn unconnected(
     tables: &mut Tables,
     up: &mut Queue<Event>,
     subs: &mut Queue<Submit>,
-) -> Stream {
+) -> State {
     up.push(Event::Failed { owner, error: records::connect_error(error) });
     release(Some(owner), fd, id, tables, subs)
 }
@@ -885,6 +906,8 @@ fn open(
         intake,
         demand: Demand { read: Read::Nothing, room: 0 },
         granted: 0,
+        classic_grant: false,
+        independent: Reservation::Idle,
         reader: Reader::Receiving(recv),
         writer: Writer::Idle,
         output: Output { queue: Queue::with_capacity(env.limits.sends), bytes: 0 },
@@ -917,6 +940,7 @@ fn deliver(
     {
         up.push(Event::Stream { owner, up: Up::Room });
         open.granted = open.demand.room;
+        open.classic_grant = true;
         open.demand = Demand { read: Read::Nothing, room: 0 };
     }
     // With a read outstanding, the end comes once it can never be met; with
@@ -931,6 +955,15 @@ fn deliver(
     if end {
         up.push(Event::Stream { owner, up: Up::End });
         open.reader = Reader::Told;
+    }
+    if let Some(terminal) = open.independent.take_terminal() {
+        up.push(Event::Output { owner: open.owner, up: terminal });
+    } else if let Some((_, bytes)) = open.independent.wanted()
+        && open.writer.takes_sends()
+        && open.output.fits(bytes, env.limits.output)
+    {
+        let terminal = open.independent.grant();
+        up.push(Event::Output { owner: open.owner, up: terminal });
     }
     open.reader = match open.reader {
         Reader::Full if open.intake.room() > 0 => {
@@ -974,6 +1007,7 @@ fn demand(open: &mut Open, read: Read, room: u32, id: Id<Entity>, env: &Env<Limi
         withdrawal || !outstanding,
         "a demand is stated once the last is answered, never in place of it, or it withdraws it (lib.md, 7)"
     );
+    assert!(room == 0 || open.independent.idle(), "classic room cannot overlap independent output");
     assert!(room <= env.limits.output, "room past the output cap could never be granted (Limits::largest_room)");
     assert!(room == 0 || open.writer.takes_sends(), "no room is demanded after Finish");
     open.demand = Demand { read, room };
@@ -991,7 +1025,10 @@ fn queue(
     subs: &mut Queue<Submit>,
 ) {
     assert!(open.writer.takes_sends(), "no Send after Finish");
+    assert!(open.independent.idle(), "classic Send cannot spend an independent grant");
+    open.classic_grant = false;
     if bytes.is_empty() {
+        open.granted = 0;
         return;
     }
     let len = u32::try_from(bytes.len()).expect("a Send within the room granted, under a u32 cap");
@@ -1015,6 +1052,12 @@ fn queue(
 /// already on its way.
 fn finish(open: &mut Open, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) {
     open.demand.room = 0;
+    open.classic_grant = false;
+    let pending_output = open.independent.wanted().is_some();
+    open.independent.retire(OutputOutcome::Cancelled);
+    if pending_output {
+        tables.ready.mark(id);
+    }
     open.writer = match mem::replace(&mut open.writer, Writer::Idle) {
         Writer::Idle => Writer::Shutting(shutdown(open.fd, id, tables, subs)),
         Writer::Sending { flight, finishing: _ } => Writer::Sending { flight, finishing: true },
@@ -1030,7 +1073,7 @@ fn open_received(
     env: &Env<Limits>,
     tables: &mut Tables,
     up: &mut Queue<Event>,
-) -> Stream {
+) -> State {
     let Received { flight, buf, result } = received;
     match open.reader {
         Reader::Receiving(receiving) => assert!(receiving == flight, "the receive that completed is the one in flight"),
@@ -1056,7 +1099,7 @@ fn open_received(
     // Freed before the next receive's is made, when the stream is delivered:
     // one buffer per stream at once (io.md, 3.4).
     drop(buf);
-    Stream::Open(open)
+    State::Open(open)
 }
 
 fn open_sent(
@@ -1067,7 +1110,7 @@ fn open_sent(
     tables: &mut Tables,
     up: &mut Queue<Event>,
     subs: &mut Queue<Submit>,
-) -> Stream {
+) -> State {
     let finishing = match open.writer {
         Writer::Sending { flight, finishing } => {
             assert!(flight == sent.flight, "the send that completed is the one in flight");
@@ -1103,7 +1146,7 @@ fn open_sent(
             return broken(open, records::stream_fault(error), up);
         }
     };
-    Stream::Open(open)
+    State::Open(open)
 }
 
 fn open_shut(
@@ -1114,7 +1157,7 @@ fn open_shut(
     env: &Env<Limits>,
     tables: &mut Tables,
     up: &mut Queue<Event>,
-) -> Stream {
+) -> State {
     match open.writer {
         Writer::Shutting(shutting) => assert!(shutting == flight, "the half-close that completed is the one in flight"),
         Writer::Idle | Writer::Sending { .. } | Writer::Stalled { .. } | Writer::Unshut | Writer::Shut => {
@@ -1134,14 +1177,18 @@ fn open_shut(
             return broken(open, records::stream_fault(error), up);
         }
     };
-    Stream::Open(open)
+    State::Open(open)
 }
 
 /// The stream failed: told at once, the intake and the output dropped.
-fn broken(open: Open, fault: Fault, up: &mut Queue<Event>) -> Stream {
+fn broken(mut open: Open, fault: Fault, up: &mut Queue<Event>) -> State {
+    open.independent.retire(OutputOutcome::Failed(fault));
+    if let Some(terminal) = open.independent.take_terminal() {
+        up.push(Event::Output { owner: open.owner, up: terminal });
+    }
     up.push(Event::Stream { owner: open.owner, up: Up::Failed(fault) });
     let (recv, write) = in_flight(open.reader, &open.writer);
-    Stream::Broken(Broken { owner: open.owner, fd: open.fd, recv, write })
+    State::Broken(Broken { owner: open.owner, fd: open.fd, recv, write })
 }
 
 /// What an open stream's two sides have in flight.
@@ -1181,8 +1228,9 @@ fn broken_landed(broken: Broken, happened: Happened) -> Broken {
 
 /// `Close` of an open stream: flush and half-close, discarding the input,
 /// under the close deadline; or released at once if nothing is left to do.
-fn close_open(open: Open, id: Id<Entity>, env: &Env<Limits>, tables: &mut Tables, subs: &mut Queue<Submit>) -> Stream {
-    let Open { owner, fd, intake: _, demand: _, granted: _, reader, writer, output } = open;
+fn close_open(open: Open, id: Id<Entity>, env: &Env<Limits>, tables: &mut Tables, subs: &mut Queue<Submit>) -> State {
+    let Open { owner, fd, intake: _, demand: _, granted: _, classic_grant: _, independent: _, reader, writer, output } =
+        open;
     // Discarding starts now, so a peer blocked on its upload drains, then
     // reads what is flushed to it.
     let drain = match reader {
@@ -1205,7 +1253,7 @@ fn close_open(open: Open, id: Id<Entity>, env: &Env<Limits>, tables: &mut Tables
     }
     let at = env.now.saturating_add(env.limits.close_timeout);
     tables.deadlines.arm((id, Timer::Close), at).expect("a close deadline for every socket");
-    Stream::Closing(closing)
+    State::Closing(closing)
 }
 
 fn closing_received(
@@ -1215,7 +1263,7 @@ fn closing_received(
     env: &Env<Limits>,
     tables: &mut Tables,
     subs: &mut Queue<Submit>,
-) -> Stream {
+) -> State {
     let Received { flight, buf, result } = received;
     match closing.drain {
         Drain::Receiving(receiving) => assert!(receiving == flight, "the receive that completed is the one in flight"),
@@ -1245,7 +1293,7 @@ fn closing_sent(
     env: &Env<Limits>,
     tables: &mut Tables,
     subs: &mut Queue<Submit>,
-) -> Stream {
+) -> State {
     match closing.flush {
         Flush::Sending(sending) => assert!(sending == sent.flight, "the send that completed is the one in flight"),
         Flush::Stalled { .. } | Flush::Shutting(_) | Flush::Unshut | Flush::Done => {
@@ -1285,7 +1333,7 @@ fn closing_shut(
     env: &Env<Limits>,
     tables: &mut Tables,
     subs: &mut Queue<Submit>,
-) -> Stream {
+) -> State {
     match closing.flush {
         Flush::Shutting(shutting) => assert!(shutting == flight, "the half-close that completed is the one in flight"),
         Flush::Sending(_) | Flush::Stalled { .. } | Flush::Unshut | Flush::Done => {
@@ -1307,16 +1355,16 @@ fn closing_shut(
 
 /// Drained and flushed: the socket closed, its deadlines cancelled as it
 /// leaves `Closing`.
-fn closed_if_done(closing: Closing, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) -> Stream {
+fn closed_if_done(closing: Closing, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) -> State {
     if !closing.done() {
-        return Stream::Closing(closing);
+        return State::Closing(closing);
     }
     release(Some(closing.owner), closing.fd, id, tables, subs)
 }
 
 /// The deadline passed, or the owner aborted: what the close still had in
 /// flight is cancelled, and what stalled is dropped.
-fn abort_closing(closing: Closing, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) -> Stream {
+fn abort_closing(closing: Closing, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) -> State {
     let recv = match closing.drain {
         Drain::Receiving(flight) => Some(flight),
         Drain::Stalled | Drain::Done => None,
@@ -1338,7 +1386,7 @@ fn wind_down(
     id: Id<Entity>,
     tables: &mut Tables,
     subs: &mut Queue<Submit>,
-) -> Stream {
+) -> State {
     let mut cancels = 0_u32;
     if let Some(flight) = recv {
         tables.cancel(subs, id, flight);
@@ -1354,7 +1402,7 @@ fn wind_down(
     }
     let settling = Settling { owner: Some(owner), fd: Some(fd), socket: false, connect: None, recv, write, cancels };
     if waits(&settling) {
-        return Stream::Settling(settling);
+        return State::Settling(settling);
     }
     release(Some(owner), fd, id, tables, subs)
 }
@@ -1427,9 +1475,9 @@ fn settle(
     tables: &mut Tables,
     up: &mut Queue<Event>,
     subs: &mut Queue<Submit>,
-) -> Stream {
+) -> State {
     if waits(&settling) {
-        return Stream::Settling(settling);
+        return State::Settling(settling);
     }
     match settling.fd {
         Some(fd) => release(settling.owner, fd, id, tables, subs),
@@ -1437,14 +1485,14 @@ fn settle(
             if let Some(owner) = settling.owner {
                 up.push(Event::Closed { owner });
             }
-            Stream::Closed
+            State::Closed
         }
     }
 }
 
-fn release(owner: Option<Token>, fd: Fd, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) -> Stream {
+fn release(owner: Option<Token>, fd: Fd, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) -> State {
     let _close: Id<Flight> = tables.submit(subs, id, Purpose::Close, Op::Close { fd });
-    Stream::Releasing { owner }
+    State::Releasing { owner }
 }
 
 /// The next queued `Send`, or, the output flushed, the half-close when
@@ -1487,4 +1535,167 @@ fn shutdown(fd: Fd, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit
 
 fn index(n: u32) -> usize {
     usize::try_from(n).expect("a u32 fits a usize")
+}
+
+pub(crate) const fn opened(owner: Token, addr: Addr) -> Stream {
+    Stream { state: state_opened(owner, addr), owed: None }
+}
+
+pub(crate) const fn announced(fd: Fd, listener: Id<Entity>) -> Stream {
+    Stream { state: state_announced(fd, listener), owed: None }
+}
+
+pub(crate) fn landed(
+    stream: &mut Stream,
+    landed: Landed,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    up: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    stream.emit_owed(up);
+    state_landed(&mut stream.state, landed, env, tables, up, subs);
+}
+
+pub(crate) fn resume(
+    stream: &mut Stream,
+    id: Id<Entity>,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    up: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    stream.emit_owed(up);
+    state_resume(&mut stream.state, id, env, tables, up, subs);
+}
+
+pub(crate) fn answer(
+    stream: &mut Stream,
+    id: Id<Entity>,
+    owner: Option<Token>,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    subs: &mut Queue<Submit>,
+) -> Id<Entity> {
+    state_answer(&mut stream.state, id, owner, env, tables, subs)
+}
+
+pub(crate) fn request(
+    stream: &mut Stream,
+    id: Id<Entity>,
+    down: Down,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    subs: &mut Queue<Submit>,
+) {
+    state_request(&mut stream.state, id, down, env, tables, subs);
+}
+
+pub(crate) fn close(
+    stream: &mut Stream,
+    id: Id<Entity>,
+    abort: bool,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    subs: &mut Queue<Submit>,
+) {
+    match &mut stream.state {
+        State::Open(open) => {
+            open.independent.retire(OutputOutcome::Cancelled);
+            if let Some(terminal) = open.independent.take_terminal() {
+                assert!(stream.owed.is_none(), "one independent terminal at a time");
+                stream.owed = Some((open.owner, terminal));
+                tables.ready.mark(id);
+            }
+        }
+        State::Opening { .. }
+        | State::Socket { .. }
+        | State::Connecting { .. }
+        | State::Announced { .. }
+        | State::Broken(_)
+        | State::Closing(_)
+        | State::Settling(_)
+        | State::Releasing { .. }
+        | State::Closed => {}
+    }
+    state_close(&mut stream.state, id, abort, env, tables, subs);
+}
+
+pub(crate) fn expired(
+    stream: &mut Stream,
+    id: Id<Entity>,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    up: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    stream.emit_owed(up);
+    state_expired(&mut stream.state, id, env, tables, up, subs);
+}
+
+pub(crate) fn retried(
+    stream: &mut Stream,
+    id: Id<Entity>,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    up: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    stream.emit_owed(up);
+    state_retried(&mut stream.state, id, env, tables, up, subs);
+}
+
+/// Native output whose demand does not answer or withdraw a classic read.
+pub(crate) fn output_request(
+    stream: &mut Stream,
+    id: Id<Entity>,
+    down: OutputDown,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    subs: &mut Queue<Submit>,
+) {
+    let open = match &mut stream.state {
+        State::Open(open) => open,
+        State::Opening { .. }
+        | State::Socket { .. }
+        | State::Connecting { .. }
+        | State::Announced { .. }
+        | State::Broken(_)
+        | State::Closing(_)
+        | State::Settling(_)
+        | State::Releasing { .. }
+        | State::Closed => return,
+    };
+    match down {
+        OutputDown::Room { right, bytes } => {
+            if bytes == 0
+                || bytes > env.limits.output
+                || !open.writer.takes_sends()
+                || !open.independent.idle()
+                || open.demand.room > 0
+                || open.classic_grant
+            {
+                return;
+            }
+            open.granted = 0;
+            open.independent.admit(right, bytes);
+            tables.ready.mark(id);
+        }
+        OutputDown::Cancel { right } => {
+            let cancelled = open.independent.cancel(right);
+            if cancelled {
+                tables.ready.mark(id);
+            }
+        }
+        OutputDown::Send { right, bytes } => {
+            let Some(granted) = open.independent.granted(right) else { return };
+            let length = u32::try_from(bytes.len()).expect("a matching independent Send fits u32");
+            assert!(length <= granted, "a matching independent Send fits its grant");
+            open.independent.release(right);
+            open.granted = granted;
+            queue(open, bytes, id, env, tables, subs);
+            open.granted = 0;
+        }
+        OutputDown::Release { right } => open.independent.release(right),
+    }
 }

@@ -3,7 +3,7 @@
 //! refusals; `resume`, `up`, `fire` and `down`, which the loop calls in that
 //! order within an iteration, and `Io::reclaim` at its end.
 
-use skein_lib::stream::Down;
+use skein_lib::stream::{Down, OutputDown};
 use skein_lib::{Deadlines, Env, Id, Queue, Set, Slab, Time, Token};
 
 use crate::kernel::{self, Addr, Complete, Done, Family, Op, Submit};
@@ -360,6 +360,7 @@ pub fn down(io: &mut Io, env: &Env<Limits>, request: Request, subs: &mut Queue<S
         Request::Bind { socket, owner } => answer(io, env, socket, Some(owner), subs),
         Request::Reject { socket } => answer(io, env, socket, None, subs),
         Request::Stream { stream, down } => stream_request(io, env, stream, down, subs),
+        Request::Output { stream, down } => output_request(io, env, stream, down, subs),
         Request::Spawn { owner, spawn } => process::spawn(io, owner, spawn, subs),
         Request::Signal { child, signal } => process::signal(io, child, signal, subs),
         Request::Close { entity } => close(io, env, entity, false, subs),
@@ -421,6 +422,16 @@ fn stream_request(io: &mut Io, env: &Env<Limits>, token: Token, down: Down, subs
         Entity::Stream(stream) => stream::request(stream, id, down, env, &mut io.tables, subs),
         Entity::Pipe(pipe) => pipe::request(pipe, id, down, env, &mut io.tables, subs),
         Entity::Listener(_) | Entity::Child(_) => unreachable!("a stream request names a stream"),
+    }
+}
+
+fn output_request(io: &mut Io, env: &Env<Limits>, token: Token, down: OutputDown, subs: &mut Queue<Submit>) {
+    let id = Id::<Entity>::from_token(token);
+    let Some(entity) = io.entities.get_mut(id) else { return };
+    match entity {
+        Entity::Stream(stream) => stream::output_request(stream, id, down, env, &mut io.tables, subs),
+        Entity::Pipe(pipe) => pipe::output_request(pipe, id, down, env, &mut io.tables, subs),
+        Entity::Listener(_) | Entity::Child(_) => {}
     }
 }
 

@@ -29,6 +29,15 @@ pub enum Request {
     /// The stream vocabulary (lib.md, 7), to a socket once it is connected or
     /// bound.
     Stream { stream: Token, down: stream::Down },
+    /// Native independent output (lib.md, 7.1), once connected or bound.
+    /// Only positive within-cap Room on idle writable output is admitted;
+    /// its exact terminal precedes Closed. Stale identities are inert.
+    Output {
+        /// The connected socket or actual writable parent pipe (io.md, 3.3).
+        stream: Token,
+        /// One bounded request or owning Send within a matching grant (lib.md, 7.1).
+        down: stream::OutputDown,
+    },
     /// Start a child, returning its pidfd-backed token and pipe tokens.
     Spawn { owner: Token, spawn: Spawn },
     /// Send a signal to a child by its token.
@@ -37,11 +46,14 @@ pub enum Request {
     // them: File { owner, root, op }, Spawn { owner, spawn },
     // Signal { child, signal }.
     /// A graceful close (io.md, 3): the output flushed and half-closed, the
-    /// input discarded until the peer ends or the close deadline passes. Only
-    /// `Closed` follows.
+    /// input discarded until the peer ends or the close deadline passes. On
+    /// the classic face only `Closed` follows; a pending native output right
+    /// also receives its owed `Cancelled` terminal before `Closed`
+    /// (lib.md, 7.1; io.md, 3.3).
     Close { entity: Token },
-    /// A close at once, whatever is in flight or queued. Only `Closed`
-    /// follows.
+    /// A close at once, whatever is in flight or queued. On the classic face
+    /// only `Closed` follows; a pending native output right also receives its
+    /// owed `Cancelled` terminal before `Closed` (lib.md, 7.1; io.md, 3.3).
     Abort { entity: Token },
 }
 
@@ -78,6 +90,13 @@ pub enum Event {
     Stream {
         owner: Token,
         up: stream::Up,
+    },
+    /// Native independent output terminal, distinct from classic Stream (lib.md, 7.1).
+    Output {
+        /// The owner of the actual stream, retained until Closed (io.md, 3.3).
+        owner: Token,
+        /// One exactly-once terminal for its admitted output right (lib.md, 7.1).
+        up: stream::OutputUp,
     },
     Spawned {
         owner: Token,

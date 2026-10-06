@@ -328,6 +328,7 @@ impl Rig {
                 self.root_closed = true;
             }
             io::Event::Spawned { owner, .. } => panic!("unexpected spawned owner {owner:?}"),
+            io::Event::Output { .. } => panic!("Chromium uses only classic output"),
             io::Event::Stream { owner, up } => {
                 let [commands, replies, errors] = self.pipes.expect("pipe event after spawn");
                 if owner == errors

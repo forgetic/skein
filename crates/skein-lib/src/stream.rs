@@ -11,8 +11,10 @@
 use alloc::boxed::Box;
 
 mod held;
+mod output;
 
 pub use held::Held;
+pub use output::{OutputDown, OutputOutcome, OutputUp};
 
 /// What a state needs from the stream below before it can go on.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

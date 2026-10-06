@@ -77,8 +77,23 @@ pub enum Unusable {
 }
 
 impl Limits {
-    /// The smallest queue the loop can reserve every stage's `MAX_OUT` in.
-    pub const LEAST_QUEUE: u32 = 2;
+    /// The smallest queue the loop can reserve every stage's `MAX_OUT` in:
+    /// the maximum of IO's events/submissions, the protocol's events/requests,
+    /// and the domain's requests. IO's independent terminal can accompany
+    /// classic Bytes and End, so the current minimum is three (io.md, 3.3).
+    pub const LEAST_QUEUE: u32 = {
+        let io_down = larger(io::MAX_OUT_DOWN.events, io::MAX_OUT_DOWN.submissions);
+        let io_up = larger(io::MAX_OUT_UP.events, io::MAX_OUT_UP.submissions);
+        let io_resume = larger(io::MAX_OUT_RESUME.events, io::MAX_OUT_RESUME.submissions);
+        let io_fire = larger(io::MAX_OUT_FIRE.events, io::MAX_OUT_FIRE.submissions);
+        let io_maximum = larger(larger(io_down, io_up), larger(io_resume, io_fire));
+        let protocol_up = larger(protocol::MAX_OUT_UP.events, protocol::MAX_OUT_UP.requests);
+        let protocol_resume = larger(protocol::MAX_OUT_RESUME.events, protocol::MAX_OUT_RESUME.requests);
+        let protocol_fire = larger(protocol::MAX_OUT_FIRE.events, protocol::MAX_OUT_FIRE.requests);
+        let protocol_maximum =
+            larger(larger(protocol_up, protocol_resume), larger(protocol_fire, protocol::MAX_OUT_DOWN));
+        larger(io_maximum, larger(protocol_maximum, domain::MAX_OUT))
+    };
 
     /// Whether the service can run under these limits: each layer's usable,
     /// queues that hold the largest `MAX_OUT`, and io's caps no smaller than
@@ -102,6 +117,10 @@ impl Limits {
         }
         Ok(())
     }
+}
+
+const fn larger(left: u32, right: u32) -> u32 {
+    if left > right { left } else { right }
 }
 
 /// The most heap the service holds under `limits`, or `None` past a `u64`

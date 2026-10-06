@@ -123,6 +123,7 @@ impl Pages {
                 self.requests.push_back(Request::Bind { socket, owner });
                 self.down(owner, server::Request::Next);
             }
+            io::Event::Output { .. } => panic!("page server requests only classic output"),
             io::Event::Stream { owner, up } => self.up(owner, up),
             io::Event::Closed { owner: OWNER } => self.listener = None,
             io::Event::Closed { owner } => {

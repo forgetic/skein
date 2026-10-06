@@ -386,7 +386,9 @@ impl Owner {
     /// Takes one event io told.
     pub fn on(&mut self, now: Time, event: Event, directory: &mut Directory, requests: &mut VecDeque<Request>) {
         match event {
-            Event::Spawned { .. } | Event::Exited { .. } => unreachable!("the socket world spawns no child"),
+            Event::Output { .. } | Event::Spawned { .. } | Event::Exited { .. } => {
+                unreachable!("the socket world spawns no child")
+            }
             Event::Listening { owner, listener, addr } => {
                 let listening = self.listeners.get_mut(&owner).expect("a listener of this owner");
                 listening.token = Some(listener);

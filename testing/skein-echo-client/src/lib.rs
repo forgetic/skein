@@ -493,7 +493,8 @@ fn owner(event: &io::Event) -> u32 {
         | io::Event::Stream { owner, .. }
         | io::Event::Failed { owner, .. }
         | io::Event::Closed { owner } => *owner,
-        io::Event::Listening { .. }
+        io::Event::Output { .. }
+        | io::Event::Listening { .. }
         | io::Event::Accepted { .. }
         | io::Event::Spawned { .. }
         | io::Event::Exited { .. } => unreachable!("the client listens to no one and spawns no child"),

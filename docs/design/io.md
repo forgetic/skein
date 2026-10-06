@@ -42,6 +42,7 @@ pub enum Request {
     Bind    { socket: Token, owner: Token },          // attach to an accepted socket
     Reject  { socket: Token },
     Stream  { stream: Token, down: stream::Down },    // sockets and pipes alike
+    Output  { stream: Token, down: stream::OutputDown }, // independent output reservation
     Spawn   { owner: Token, spawn: Spawn },
     Signal  { child: Token, signal: Signal },
     // File { owner, root, op }
@@ -55,6 +56,7 @@ pub enum Event {
     Connecting { owner: Token, socket: Token },
     Connected  { owner: Token },
     Stream     { owner: Token, up: stream::Up },
+    Output     { owner: Token, up: stream::OutputUp },
     Spawned   { owner: Token, child: Token, pipes: Box<[Token]> },
     Exited    { owner: Token, exit: Exit },
     // File { owner, result }, Shutdown { signal }
@@ -237,6 +239,33 @@ iteration. Any other error says the socket no longer listens, and stops
 it.
 
 ### 3.3 The stream
+
+Sockets and write pipes also expose lib.md, section 7.1's independent
+output reservations through `Request::Output` and `Event::Output`. They
+keep one pending or granted output token beside the classic demand; a
+read-only demand remains live while that output progresses. The native
+reservation checks both byte capacity and a Send record slot, including
+the write in flight. A matching Send spends the full grant and enters the
+same bounded output queue and kernel write path as classic Send. Read
+pipes cannot admit output reservations.
+
+Classic room ownership and independent output ownership are mutually
+exclusive. Stale Cancel/Send/Release tokens do not affect a current
+reservation. Room requests require an open, connected or bound stream;
+they are not admitted after failure or closing. Cancelling an admitted
+pending reservation stages its exact terminal for the next up pass.
+Close/Abort likewise stages Cancelled before Closed; a genuine stream
+failure emits the pending reservation's Failed terminal before classic
+Failed. A previously emitted Granted is never answered again. Existing
+Close/Abort's promise of only Closed applies to the classic face; the
+independent face additionally owes its already admitted pending terminal.
+
+The loop reserves the declared maximum for all simultaneous events,
+including Bytes, End and an independent output terminal. The extra cell,
+staged terminal and actual enum layouts enter io's checked worst-case
+bound. IO support alone does not establish TLS support: a TLS consumer
+must implement this face natively at both its plaintext and ciphertext
+boundaries before a framed connection uses it.
 
 | State | Holds | In flight | Serves | Deadline |
 |---|---|---|---|---|

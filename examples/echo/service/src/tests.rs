@@ -280,11 +280,18 @@ fn shutdown_stops_the_listener_and_the_service_empties_once_its_peers_leave() {
 fn limits_are_checked_layer_by_layer_and_against_each_other() {
     let good = limits();
     assert_eq!(good.check(), Ok(()));
+    assert_eq!(Limits::LEAST_QUEUE, 3, "IO can emit Bytes, End and an independent terminal together");
+    assert_eq!(Limits { queue: 3, ..good }.check(), Ok(()), "the actual minimum admits every stage");
     let io = skein_io::Limits { output: 0, ..good.io };
     assert_eq!(Limits { io, ..good }.check(), Err(Unusable::Io));
     let protocol = protocol::Limits { conns: 0, ..good.protocol };
     assert_eq!(Limits { protocol, ..good }.check(), Err(Unusable::Protocol));
     assert_eq!(Limits { queue: 1, ..good }.check(), Err(Unusable::Queue));
+    assert_eq!(
+        Limits { queue: 2, ..good }.check(),
+        Err(Unusable::Queue),
+        "the former minimum cannot reserve IO's actual three-event bound"
+    );
     let protocol = protocol::Limits { line: 25, ..good.protocol };
     assert_eq!(Limits { protocol, ..good }.check(), Err(Unusable::Read { largest: 25, intake: 24 }));
     let io = skein_io::Limits { intake: 64, output: 20, ..good.io };

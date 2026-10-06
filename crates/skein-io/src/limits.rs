@@ -29,6 +29,9 @@ pub struct Limits {
     /// (`Limits::largest_room`).
     pub output: u32,
     /// The most `Send`s queued on a stream at once, beside the one in flight.
+    /// Independent output reserves a free queued/direct-flight slot within
+    /// this same envelope; it does not subtract the flight from this count
+    /// (lib.md, 7.1; io.md, 3.3).
     pub sends: u32,
     /// The most accepts armed in one iteration, over every listener.
     pub accepts: u32,
@@ -143,18 +146,21 @@ pub struct MaxOut {
 
 /// `resume`: a refusal's `Failed` and `Closed`; or a connect's `Connecting`;
 /// or a stream's answer to its demand (`Bytes` or `Room`) and `End`, and the
-/// receive the intake has room for again; or a listener's accept.
-pub const MAX_OUT_RESUME: MaxOut = MaxOut { events: 2, submissions: 1 };
+/// receive the intake has room for again; or a listener's accept. An
+/// independent output terminal can coexist with Bytes and End (lib.md, 7.1).
+pub const MAX_OUT_RESUME: MaxOut = MaxOut { events: 3, submissions: 1 };
 
 /// `up`: a stream's answer to its demand (`Bytes` or `Room`) and `End`, or an
 /// entity's `Failed` and `Closed`; the operation that follows the one
-/// completed, and a receive the intake has room for again.
-pub const MAX_OUT_UP: MaxOut = MaxOut { events: 2, submissions: 2 };
+/// completed, and a receive the intake has room for again. One independent
+/// terminal may join those classic events, before Failed or Closed.
+pub const MAX_OUT_UP: MaxOut = MaxOut { events: 3, submissions: 2 };
 
 /// `fire`: the cancels of a closing stream's receive and send; or a stream's
 /// receive and send or half-close tried again, and whatever its demand is
-/// then answered with (`Bytes` or `Room`, and `End`); or a listener's accept.
-pub const MAX_OUT_FIRE: MaxOut = MaxOut { events: 2, submissions: 2 };
+/// then answered with (`Bytes` or `Room`, and `End`), alongside one native
+/// output terminal; or a listener's accept.
+pub const MAX_OUT_FIRE: MaxOut = MaxOut { events: 3, submissions: 2 };
 
 /// `down`: a bound socket's receive and its listener's next accept; a close's
 /// discarding receive and half-close; an abort's two cancels; or a child's

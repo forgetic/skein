@@ -22,7 +22,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use skein_heap::{Counting, Meter};
 use skein_io::kernel::{Complete, Done, Error, Fd, Op, Submit};
 use skein_io::{Event, Io, Limits, Request, worst_case};
-use skein_lib::stream::{Down, Read};
+use skein_lib::stream::{Down, OutputDown, OutputOutcome, OutputUp, Read};
 use skein_lib::{Duration, Env, Queue, Time, Token, Wall};
 
 #[global_allocator]
@@ -48,6 +48,7 @@ struct Driver {
     next_fd: i32,
     /// The most io held of its own in a step.
     most: u64,
+    output_events: Vec<(Token, Token, OutputOutcome)>,
 }
 
 /// Room for every operation in flight, and every socket.
@@ -72,6 +73,7 @@ impl Driver {
             listener: None,
             next_fd: 3,
             most: 0,
+            output_events: Vec::with_capacity(ROOM),
         };
         driver.meter = Meter::new();
         driver.meter.start();
@@ -94,6 +96,10 @@ impl Driver {
                 Event::Connecting { socket, .. } => connecting = Some(socket),
                 Event::Accepted { socket, .. } => accepted = Some(socket),
                 Event::Listening { listener, .. } => self.listener = Some(listener),
+                Event::Output { owner, up: OutputUp::Settled { right, outcome } } => {
+                    assert!(self.output_events.len() < ROOM, "preallocated native terminal observations");
+                    self.output_events.push((owner, right, outcome));
+                }
                 other @ (Event::Connected { .. }
                 | Event::Stream { .. }
                 | Event::Spawned { .. }
@@ -379,7 +385,18 @@ fn listen_accept_and_discard(limits: Limits) -> (u64, u64) {
 
 #[test]
 fn io_never_holds_more_than_its_worst_case_filled_to_its_limits() {
-    for limits in [
+    for limits in workloads() {
+        let (most, bound) = fill_and_drain(limits);
+        // The shared bound also reserves room for a child's pipe lists, which
+        // this socket-only workload does not allocate.
+        assert!(most * 10 >= bound * 6, "{limits:?}: filled, io held {most} of its worst case of {bound}");
+        let (most, bound) = listen_accept_and_discard(limits);
+        assert!(most <= bound, "{limits:?}: a listener's life held {most} of {bound}");
+    }
+}
+
+fn workloads() -> [Limits; 4] {
+    [
         Limits {
             sockets: 2,
             refusals: 1,
@@ -430,12 +447,89 @@ fn io_never_holds_more_than_its_worst_case_filled_to_its_limits() {
             close_timeout: Duration::from_secs(1),
             retry: Duration::from_millis(10),
         },
-    ] {
-        let (most, bound) = fill_and_drain(limits);
-        // The shared bound also reserves room for a child's pipe lists, which
-        // this socket-only workload does not allocate.
-        assert!(most * 10 >= bound * 6, "{limits:?}: filled, io held {most} of its worst case of {bound}");
-        let (most, bound) = listen_accept_and_discard(limits);
-        assert!(most <= bound, "{limits:?}: a listener's life held {most} of {bound}");
+    ]
+}
+
+#[test]
+fn native_output_fills_the_same_actual_payload_and_slot_maxima_with_pending_and_staged_terminals() {
+    for limits in workloads() {
+        let mut driver = Driver::new(limits);
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 80));
+        for owner in 0..u64::from(limits.sockets) {
+            driver.down(Request::Connect { owner: Token::new(owner), addr });
+        }
+        driver.next();
+        driver.complete_all(is_socket, succeed);
+        driver.complete_all(is_connect, succeed);
+        driver.next();
+        let fills = limits
+            .intake
+            .checked_div(limits.receive)
+            .expect("positive receive cap")
+            .checked_sub(1)
+            .expect("one held receive");
+        for _ in 0..fills {
+            driver.complete_all(is_recv, succeed);
+        }
+        let boxes = limits.sends.checked_add(1).expect("the original actual slot envelope");
+        let each = limits.output.checked_div(boxes).expect("positive actual slot count");
+        assert!(each > 0);
+        for index in 0..driver.sockets.len() {
+            let socket = driver.sockets[index];
+            let owner = Token::new(u64::try_from(index).expect("bounded socket index"));
+            driver.down(Request::Stream {
+                stream: socket,
+                down: Down::Demand { read: Read::Fill(limits.intake), room: 0 },
+            });
+            for number in 1..=boxes {
+                let right = Token::new(u64::from(number));
+                let before = driver.output_events.len();
+                driver.down(Request::Output { stream: socket, down: OutputDown::Room { right, bytes: each } });
+                driver.next();
+                assert_eq!(
+                    driver.output_events.get(before..).expect("bounded event suffix"),
+                    &[(owner, right, OutputOutcome::Granted)]
+                );
+                let bytes = vec![1_u8; usize::try_from(each).expect("unchanged payload size")].into_boxed_slice();
+                driver.down(Request::Output { stream: socket, down: OutputDown::Send { right, bytes } });
+            }
+            let waiting = Token::new(u64::from(boxes).checked_add(1).expect("bounded caller identity"));
+            let before = driver.output_events.len();
+            driver.down(Request::Output { stream: socket, down: OutputDown::Room { right: waiting, bytes: 1 } });
+            driver.next();
+            assert_eq!(
+                driver.output_events.len(),
+                before,
+                "actual flight plus N queued Sends fills the slots even with byte room"
+            );
+        }
+        for index in 0..driver.sockets.len() {
+            let socket = driver.sockets[index];
+            let owner = Token::new(u64::try_from(index).expect("bounded socket index"));
+            let waiting = Token::new(u64::from(boxes).checked_add(1).expect("bounded caller identity"));
+            let before = driver.output_events.len();
+            if index.checked_rem(2).expect("positive divisor") == 0 {
+                driver.down(Request::Close { entity: socket });
+            } else {
+                driver.down(Request::Output { stream: socket, down: OutputDown::Cancel { right: waiting } });
+            }
+            driver.next();
+            assert_eq!(
+                driver.output_events.get(before..).expect("bounded event suffix"),
+                &[(owner, waiting, OutputOutcome::Cancelled)]
+            );
+        }
+        for index in 0..driver.sockets.len() {
+            let socket = driver.sockets[index];
+            driver.down(Request::Abort { entity: socket });
+        }
+        drain(&mut driver);
+        assert!(
+            driver.most.checked_mul(10).expect("small measured heap")
+                >= driver.bound.checked_mul(6).expect("small heap bound"),
+            "native maximal scene held {} of {}",
+            driver.most,
+            driver.bound
+        );
     }
 }

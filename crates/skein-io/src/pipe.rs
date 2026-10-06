@@ -1,12 +1,13 @@
 //! Parent ends of a child's one-way pipes, exposed as streams.
 
 use alloc::boxed::Box;
-use skein_lib::stream::{Down, Fault, Read, Up};
+use skein_lib::stream::{Down, Fault, OutputDown, OutputOutcome, Read, Up};
 use skein_lib::{Env, Id, Intake, Queue, bytes};
 
 use crate::kernel::{self, Done, Fd, Op, Submit, Way};
 use crate::layer::{Entity, Flight, Landed, Purpose, Tables};
 use crate::limits::Limits;
+use crate::output::Reservation;
 use crate::records::Event;
 
 #[derive(Debug)]
@@ -21,6 +22,8 @@ pub(crate) struct Pipe {
     intake: Option<Intake>,
     demand: Option<(Read, u32)>,
     granted: u32,
+    classic_grant: bool,
+    independent: Reservation,
     queued: Queue<Box<[u8]>>,
     queued_bytes: u32,
     read: Option<Id<Flight>>,
@@ -43,6 +46,8 @@ impl Pipe {
             intake: None,
             demand: None,
             granted: 0,
+            classic_grant: false,
+            independent: Reservation::Idle,
             queued: Queue::with_capacity(0),
             queued_bytes: 0,
             read: None,
@@ -110,6 +115,7 @@ pub(crate) fn request(
             if pipe.way == Way::Out {
                 assert!(room == 0, "a parent read pipe has no write side");
             }
+            assert!(room == 0 || pipe.independent.idle(), "classic room cannot overlap independent output");
             assert!(pipe.demand.is_none(), "one demand at a time");
             assert!(room <= env.limits.output, "demand fits the output cap");
             pipe.demand = Some((read, room));
@@ -117,6 +123,8 @@ pub(crate) fn request(
         }
         Down::Send(bytes) => {
             assert!(pipe.way == Way::In && !pipe.finish, "only an unfinished write pipe sends");
+            assert!(pipe.independent.idle(), "classic Send cannot spend an independent grant");
+            pipe.classic_grant = false;
             let size = u32::try_from(bytes.len()).expect("a send fits u32");
             assert!(size <= pipe.granted, "a send stays within granted room");
             pipe.granted = 0;
@@ -130,6 +138,12 @@ pub(crate) fn request(
         Down::Finish => {
             assert!(pipe.way == Way::In, "only a write pipe finishes");
             pipe.finish = true;
+            pipe.classic_grant = false;
+            let pending_output = pipe.independent.wanted().is_some();
+            pipe.independent.retire(OutputOutcome::Cancelled);
+            if pending_output {
+                tables.ready.mark(id);
+            }
             maybe_close(pipe, id, tables, subs);
         }
     }
@@ -144,6 +158,7 @@ pub(crate) fn landed(
     subs: &mut Queue<Submit>,
 ) {
     let id = landed.entity;
+    emit_terminal(pipe, id, up);
     match landed.purpose {
         Purpose::PipeRead => {
             assert!(pipe.read.take() == Some(landed.flight), "read flight matches");
@@ -162,6 +177,8 @@ pub(crate) fn landed(
                     Err(error) => {
                         pipe.eof = true;
                         pipe.ended = true;
+                        pipe.independent.retire(OutputOutcome::Failed(fault(error)));
+                        emit_terminal(pipe, id, up);
                         up.push(Event::Stream { owner: id.token(), up: Up::Failed(fault(error)) });
                     }
                     Ok(
@@ -192,6 +209,8 @@ pub(crate) fn landed(
                 }
                 Err(error) if !pipe.closing => {
                     pipe.queued_bytes = pipe.queued_bytes.checked_sub(total).expect("queued bytes include write");
+                    pipe.independent.retire(OutputOutcome::Failed(fault(error)));
+                    emit_terminal(pipe, id, up);
                     up.push(Event::Stream { owner: id.token(), up: Up::Failed(fault(error)) });
                     pipe.closing = true;
                 }
@@ -236,6 +255,11 @@ pub(crate) fn close(pipe: &mut Pipe, id: Id<Entity>, abort: bool, tables: &mut T
     if pipe.closed {
         return;
     }
+    let pending_output = pipe.independent.wanted().is_some();
+    pipe.independent.retire(OutputOutcome::Cancelled);
+    if pending_output {
+        tables.ready.mark(id);
+    }
     if pipe.closing {
         if abort && pipe.finish {
             pipe.finish = false;
@@ -277,6 +301,7 @@ fn progress(
     up: &mut Queue<Event>,
     subs: &mut Queue<Submit>,
 ) {
+    emit_terminal(pipe, id, up);
     if pipe.closing {
         if pipe.way == Way::In {
             start_write(pipe, id, tables, subs);
@@ -314,11 +339,21 @@ fn progress(
     } else if let Some((_, room)) = pipe.demand {
         if room > 0 && pipe.queued_bytes.saturating_add(room) <= env.limits.output && pipe.queued.room() > 0 {
             pipe.granted = room;
+            pipe.classic_grant = true;
             pipe.demand = None;
             up.push(Event::Stream { owner: id.token(), up: Up::Room });
         } else if room == 0 {
             pipe.demand = None;
         }
+    }
+    if let Some((_, bytes)) = pipe.independent.wanted()
+        && pipe.way == Way::In
+        && !pipe.finish
+        && output_bytes(pipe, bytes, env.limits.output)
+        && pipe.queued.room() > 0
+    {
+        let terminal = pipe.independent.grant();
+        up.push(Event::Output { owner: id.token(), up: terminal });
     }
 }
 
@@ -371,5 +406,61 @@ fn fault(error: kernel::Error) -> Fault {
         | kernel::Error::NotAFile
         | kernel::Error::InvalidArgument
         | kernel::Error::Other(_) => Fault::Other,
+    }
+}
+
+fn emit_terminal(pipe: &mut Pipe, id: Id<Entity>, up: &mut Queue<Event>) {
+    if let Some(terminal) = pipe.independent.take_terminal() {
+        up.push(Event::Output { owner: id.token(), up: terminal });
+    }
+}
+
+fn output_bytes(pipe: &Pipe, bytes: u32, cap: u32) -> bool {
+    match pipe.queued_bytes.checked_add(bytes) {
+        Some(held) => held <= cap,
+        None => false,
+    }
+}
+
+pub(crate) fn output_request(
+    pipe: &mut Pipe,
+    id: Id<Entity>,
+    down: OutputDown,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    subs: &mut Queue<Submit>,
+) {
+    if pipe.fd.is_none() || pipe.closing || pipe.closed || pipe.finish || pipe.way != Way::In {
+        return;
+    }
+    match down {
+        OutputDown::Room { right, bytes } => {
+            let classic_room = match pipe.demand {
+                Some((_, room)) => room > 0,
+                None => false,
+            };
+            if bytes == 0 || bytes > env.limits.output || !pipe.independent.idle() || classic_room || pipe.classic_grant
+            {
+                return;
+            }
+            pipe.granted = 0;
+            pipe.independent.admit(right, bytes);
+            tables.ready.mark(id);
+        }
+        OutputDown::Cancel { right } => {
+            let cancelled = pipe.independent.cancel(right);
+            if cancelled {
+                tables.ready.mark(id);
+            }
+        }
+        OutputDown::Send { right, bytes } => {
+            let Some(granted) = pipe.independent.granted(right) else { return };
+            let length = u32::try_from(bytes.len()).expect("a matching independent pipe Send fits u32");
+            assert!(length <= granted, "a matching independent pipe Send fits its grant");
+            pipe.independent.release(right);
+            pipe.granted = granted;
+            request(pipe, id, Down::Send(bytes), env, tables, subs);
+        }
+        OutputDown::Release { right } => pipe.independent.release(right),
     }
 }
