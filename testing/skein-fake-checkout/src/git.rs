@@ -61,11 +61,16 @@ pub trait Remote {
     /// (fake-checkout.md, section 4).
     fn tree(&self, commit: u64) -> Tree;
 
+    /// Pure owned message lookup of an existing commit. The opaque bytes are
+    /// bounded by the fixture (fake-checkout.md, section 4).
+    fn message(&self, commit: u64) -> Vec<u8>;
+
     /// Store the supplied tree with existing parent IDs. With no second parent,
     /// return `None` only when unchanged from `parent`; with a second parent,
     /// always issue a fresh ID recording both parents, even if unchanged.
+    /// A new object records `message` verbatim; an unchanged tree drops it.
     /// No remote reference moves (fake-checkout.md, section 4).
-    fn store(&mut self, parent: u64, merging: Option<u64>, tree: Tree) -> Option<u64>;
+    fn store(&mut self, parent: u64, merging: Option<u64>, tree: Tree, message: &[u8]) -> Option<u64>;
 }
 
 /// Remote implementation’s terminal refusal to a synchronous call. The kit
@@ -218,7 +223,8 @@ pub fn check_out(forge: &impl Remote, checkout: &mut Checkout, at: &[u8], commit
 }
 
 /// World adapter snapshots non-git regular files on a locally held parent.
-/// Unchanged tree returns `None`; a new commit records local presence and head.
+/// Unchanged tree returns `None`; a new commit records the opaque message,
+/// local presence and head.
 /// No remote reference moves; missing parent returns before mutation
 /// (fake-checkout.md, section 4).
 pub fn commit(
@@ -226,13 +232,14 @@ pub fn commit(
     checkout: &mut Checkout,
     at: &[u8],
     parent: u64,
+    message: &[u8],
 ) -> Result<Option<u64>, NotFetched> {
     if !checkout.exists(&object(at, parent)) {
         return Err(NotFetched);
     }
     let mut tree = checkout.tree(at);
     tree.retain(|path, _| !in_git(path));
-    let Some(commit) = forge.store(parent, None, tree) else {
+    let Some(commit) = forge.store(parent, None, tree, message) else {
         return Ok(None);
     };
     checkout.write(&object(at, commit), b"");
@@ -332,7 +339,8 @@ pub enum CommitFailure {
 /// World adapter commits the current non-git tree with two supplied locally
 /// held parents, even if unchanged. Only originally conflicted paths are
 /// checked for marker lines; deleting one resolves it. Success writes object
-/// presence/head and clears merge metadata, without moving references.
+/// presence/head, records the opaque message and clears merge metadata,
+/// without moving references.
 /// `Remote::store` must return a merge ID or this asserts
 /// (fake-checkout.md, section 4).
 pub fn commit_merging(
@@ -341,6 +349,7 @@ pub fn commit_merging(
     at: &[u8],
     parent: u64,
     merging: u64,
+    message: &[u8],
 ) -> Result<u64, CommitFailure> {
     if !checkout.exists(&object(at, parent)) || !checkout.exists(&object(at, merging)) {
         return Err(CommitFailure::NotFetched);
@@ -355,7 +364,7 @@ pub fn commit_merging(
     }
     let mut tree = checkout.tree(at);
     tree.retain(|path, _| !in_git(path));
-    let commit = forge.store(parent, Some(merging), tree).expect("a merge always records both parents");
+    let commit = forge.store(parent, Some(merging), tree, message).expect("a merge always records both parents");
     checkout.write(&object(at, commit), b"");
     checkout.write(&[at, b"/.git/temper-head"].concat(), &commit.to_le_bytes());
     checkout.remove(&[at, b"/.git/temper-conflicts"].concat());

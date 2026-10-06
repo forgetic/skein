@@ -12,6 +12,7 @@ struct Commit {
     parent: Option<u64>,
     merging: Option<u64>,
     tree: Tree,
+    message: Vec<u8>,
 }
 
 /// Tiny synchronous graph store with exact-head rejection, not a general forge.
@@ -35,7 +36,7 @@ impl Store {
     /// One root commit, ID 1, at the fixture's `main` branch (fake-checkout.md, section 5).
     pub(super) fn new(tree: Tree) -> Store {
         Store {
-            commits: BTreeMap::from([(1, Commit { parent: None, merging: None, tree })]),
+            commits: BTreeMap::from([(1, Commit { parent: None, merging: None, tree, message: Vec::new() })]),
             branches: BTreeMap::from([(b"main".to_vec(), 1)]),
             next: 2,
             fault: None,
@@ -121,7 +122,11 @@ impl Remote for Store {
         self.commits.get(&commit).expect("test queries an existing commit").tree.clone()
     }
 
-    fn store(&mut self, parent: u64, merging: Option<u64>, tree: Tree) -> Option<u64> {
+    fn message(&self, commit: u64) -> Vec<u8> {
+        self.commits.get(&commit).expect("test queries an existing commit").message.clone()
+    }
+
+    fn store(&mut self, parent: u64, merging: Option<u64>, tree: Tree, message: &[u8]) -> Option<u64> {
         let old = self.commits.get(&parent).expect("test stores on an existing parent");
         if merging.is_none() && old.tree == tree {
             return None;
@@ -129,7 +134,7 @@ impl Remote for Store {
         assert!(merging.is_none_or(|commit| self.commits.contains_key(&commit)), "test merge parent exists");
         let commit = self.next;
         self.next = self.next.checked_add(1).expect("small test graph");
-        self.commits.insert(commit, Commit { parent: Some(parent), merging, tree });
+        self.commits.insert(commit, Commit { parent: Some(parent), merging, tree, message: message.to_vec() });
         Some(commit)
     }
 }
@@ -183,8 +188,8 @@ pub(super) fn merge_case(seed: u64) -> String {
     }
     let (mut store, mut checkout, first) = cloned(&[(b"code", b"a\nb\nc\n")]);
     checkout.write(b"work/code", &left_bytes);
-    let ours = git::commit(&mut store, &mut checkout, b"work", first).expect("local root").unwrap_or(first);
-    let theirs = store.store(first, None, tree(&[(b"code", &right_bytes)])).unwrap_or(first);
+    let ours = git::commit(&mut store, &mut checkout, b"work", first, b"left").expect("local root").unwrap_or(first);
+    let theirs = store.store(first, None, tree(&[(b"code", &right_bytes)]), b"right").unwrap_or(first);
     git::fetch(&mut store, &mut checkout, b"repo", b"work", Want::Commit(theirs)).expect("known side");
     let before = format!("{checkout:?}");
     git::fetch(&mut store, &mut checkout, b"repo", b"work", Want::Commit(theirs)).expect("repeat fetch");
@@ -196,7 +201,7 @@ pub(super) fn merge_case(seed: u64) -> String {
             [b"<<<<<<< ours\n".as_slice(), &left_bytes, b"=======\n", &right_bytes, b">>>>>>> theirs\n"].concat();
         assert_eq!(checkout.content(b"work/code"), Some(markers.as_slice()));
         assert_eq!(
-            git::commit_merging(&mut store, &mut checkout, b"work", ours, theirs),
+            git::commit_merging(&mut store, &mut checkout, b"work", ours, theirs, b"merged"),
             Err(git::CommitFailure::Unresolved { files: vec![b"code".to_vec()] })
         );
         checkout.write(b"work/code", &expected.concat());
@@ -204,10 +209,12 @@ pub(super) fn merge_case(seed: u64) -> String {
         assert!(merged.conflicts.is_empty());
     }
     assert_eq!(files(&checkout), tree(&[(b"code", &expected.concat())]));
-    let commit = git::commit_merging(&mut store, &mut checkout, b"work", ours, theirs).expect("resolved or clean");
+    let commit =
+        git::commit_merging(&mut store, &mut checkout, b"work", ours, theirs, b"merged").expect("resolved or clean");
     assert_eq!(store.parent(commit), Some(ours));
     assert_eq!(store.merge_parent(commit), Some(theirs));
     assert_eq!(store.tree(commit), tree(&[(b"code", &expected.concat())]));
+    assert_eq!(store.message(commit), b"merged");
     assert_eq!(store.branch(b"main"), Some(first));
     assert_eq!(store.moves(), 0, "local work moves no remote references");
     assert!(store.last_push.is_none(), "local work sent no push");
