@@ -348,9 +348,9 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
 ## 8. Open questions
 
 - **Decoding by hand** into an application's types is verbose without
-  serde or traits. If that hurts, the candidate is a generator that turns
-  a schema into plain step code at build time, with its output checked in
-  and reviewed. Procedural macros stay out.
+  serde or traits. If that hurts, the candidate is codec.md's generator,
+  writing JSON codecs from schemas the way it writes binary ones, its
+  output checked in and reviewed. Procedural macros stay out.
 - **Text that is not UTF-8,** such as a command's output going to an LLM,
   is refused by the writer. A caller that must send it replaces what is
   not UTF-8 first; whether the writer should offer that is open.

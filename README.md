@@ -35,6 +35,8 @@ starts from.
 | the world harness | `skein-world` | for tests: each process's `iterate` in one loop, over the simulator or the ring, with a referee | [examples.md](docs/design/examples.md) |
 | HTTP | `skein-http` | HTTP/1.1 client and server, server-sent events | [http.md](docs/design/http.md) |
 | JSON | `skein-json` | a bounded tokenizer, a sized writer | [json.md](docs/design/json.md) |
+| framed channels | `skein-channel` | a framed channel between two peers over a stream: an opening that agrees a version, bounds, flow control | [channel.md](docs/design/channel.md) |
+| codecs | `skein-codec`, `skein-codegen` | records described by schemas, and their codecs, worst cases and golden bytes generated from them | [codec.md](docs/design/codec.md) |
 | TLS | `skein-tls` | the TLS client, a stream over rustls's unbuffered connection, with ring | [tls.md](docs/design/tls.md) |
 | LLM | `skein-llm` | provider-neutral calls, streaming deltas, concrete replay and completions; subscription wire dialects | [llm.md](docs/design/llm.md) |
 | OAuth | `skein-oauth`, `skein-fake-oauth` | bounded sign-in and refresh client, with an independent rotating issuer for worlds | [oauth.md](docs/design/oauth.md) |
@@ -46,6 +48,9 @@ skein-lib      nothing
 skein-io       lib
 skein-http     lib
 skein-json     lib
+skein-channel  lib
+skein-codec    lib
+skein-codegen  nothing from skein (a generator, in consumers' tests)
 skein-tls      lib, rustls (and ring beneath it)
 skein-llm      lib, http, json
 skein-oauth    lib, json
