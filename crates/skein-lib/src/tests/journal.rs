@@ -191,3 +191,82 @@ fn answer_for_unsent_or_old_commit_stops() {
     another.committed(1);
     assert!(another.stopped());
 }
+
+#[test]
+fn restored_journal_continues_numbering_and_releases_after_durability() {
+    let mut journal = Journal::<u8, u8>::from_durable(&limits(), 42);
+    let room = JournalRoom { writes: 1, held: 1 };
+    let mut out = Queue::with_capacity(2);
+    assert!(journal.idle());
+    assert!(journal.takes(&room));
+
+    let mut before = journal.decision(&JournalRoom { writes: 0, held: 1 }).expect("fits");
+    assert_eq!(before.hold(7), Ok(()));
+    journal.accept(before);
+    assert_eq!(journal.release(&mut out), Released::Some);
+    assert_eq!(out.pop(), Some(7));
+
+    for (write, output) in [(1, 10), (2, 20)] {
+        let mut decision = journal.decision(&room).expect("fits");
+        assert_eq!(decision.write(write), Ok(()));
+        assert_eq!(decision.hold(output), Ok(()));
+        journal.accept(decision);
+    }
+    assert!(!journal.takes(&room));
+    assert_eq!(journal.release(&mut out), Released::None);
+    assert_eq!(journal.commit().expect("first").number, 43);
+    assert_eq!(journal.commit().expect("second").number, 44);
+    journal.committed(43);
+    assert!(!journal.takes(&room));
+    assert!(journal.takes(&JournalRoom { writes: 1, held: 0 }));
+    assert_eq!(journal.release(&mut out), Released::Some);
+    assert_eq!(out.pop(), Some(10));
+    assert!(journal.takes(&room));
+    assert_eq!(journal.release(&mut out), Released::None);
+    journal.committed(44);
+    assert_eq!(journal.release(&mut out), Released::Some);
+    assert_eq!(out.pop(), Some(20));
+    assert!(journal.idle());
+}
+
+#[test]
+fn idle_tracks_open_decisions_commits_outputs_and_stop() {
+    let mut journal = Journal::<u8, u8>::new(&limits());
+    let mut out = Queue::with_capacity(2);
+    let room = JournalRoom { writes: 1, held: 1 };
+    assert!(journal.idle());
+    let mut decision = journal.decision(&room).expect("fits");
+    assert!(!journal.idle());
+    assert_eq!(decision.write(1), Ok(()));
+    assert_eq!(decision.hold(10), Ok(()));
+    journal.accept(decision);
+    assert!(!journal.idle());
+    assert_eq!(journal.commit().expect("commit").number, 1);
+    assert!(!journal.idle());
+    journal.committed(1);
+    assert!(!journal.idle());
+    assert_eq!(journal.release(&mut out), Released::Some);
+    assert_eq!(out.pop(), Some(10));
+    assert!(journal.idle());
+    assert_eq!(journal.now(20), Ok(()));
+    assert!(!journal.idle());
+    assert_eq!(journal.release(&mut out), Released::Some);
+    assert!(journal.idle());
+    assert_eq!(out.pop(), Some(20));
+    journal.failed(1);
+    assert!(journal.stopped());
+    assert!(!journal.idle());
+}
+
+#[test]
+fn restored_maximum_number_refuses_writes_but_allows_unwritten_outputs() {
+    let mut journal = Journal::<u8, u8>::from_durable(&limits(), u64::MAX);
+    assert!(!journal.takes(&JournalRoom { writes: 1, held: 0 }));
+    let mut decision = journal.decision(&JournalRoom { writes: 0, held: 1 }).expect("fits");
+    assert_eq!(decision.hold(9), Ok(()));
+    journal.accept(decision);
+    let mut out = Queue::with_capacity(1);
+    assert_eq!(journal.release(&mut out), Released::Some);
+    assert_eq!(out.pop(), Some(9));
+    assert!(journal.idle());
+}

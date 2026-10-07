@@ -6,6 +6,7 @@
 //! `takes` and `decision` reserve room before the owner changes state;
 //! `accept` makes at most one commit. The owner sends `commit` values to its
 //! store, answers them with `committed` or `failed`, then calls `release`.
+//! `from_durable` resumes numbering after a durable commit on restart.
 //!
 //! Commit transitions (lib.md, section 11):
 //!
@@ -119,6 +120,12 @@ impl<W, O> Journal<W, O> {
     /// Allocates the journal's fixed-capacity containers.
     #[must_use]
     pub fn new(limits: &JournalLimits) -> Journal<W, O> {
+        Self::from_durable(limits, 0)
+    }
+
+    /// Allocates an empty journal after the supplied durable commit number.
+    #[must_use]
+    pub fn from_durable(limits: &JournalLimits, durable: u64) -> Journal<W, O> {
         Journal {
             limits: *limits,
             pending: Queue::with_capacity(limits.commits),
@@ -126,9 +133,9 @@ impl<W, O> Journal<W, O> {
             held: Queue::with_capacity(limits.held),
             now: Queue::with_capacity(limits.now),
             reserved: None,
-            last_number: 0,
-            sent: 0,
-            durable: 0,
+            last_number: durable,
+            sent: durable,
+            durable,
             stopped: false,
         }
     }
@@ -260,6 +267,17 @@ impl<W, O> Journal<W, O> {
     #[must_use]
     pub const fn stopped(&self) -> bool {
         self.stopped
+    }
+
+    /// Whether the running journal has no open decision, commit, or output.
+    #[must_use]
+    pub fn idle(&self) -> bool {
+        !self.stopped
+            && self.reserved.is_none()
+            && self.pending.is_empty()
+            && self.outstanding.is_empty()
+            && self.held.is_empty()
+            && self.now.is_empty()
     }
 
     /// Prices fixed containers and one decision's reserved buffers.
