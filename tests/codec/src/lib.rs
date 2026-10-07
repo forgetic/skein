@@ -10,3 +10,7 @@ extern crate alloc;
 #[rustfmt::skip]
 #[path = "generated/v1.rs"]
 pub mod v1;
+
+#[rustfmt::skip]
+#[path = "scalars/v1.rs"]
+pub mod scalars;

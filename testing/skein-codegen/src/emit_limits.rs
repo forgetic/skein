@@ -87,7 +87,11 @@ fn collect_bound_names(ty: &Type, name: &str, result: &mut Vec<(String, u32)>) {
 
 pub(crate) fn emit(schema: &Schema, out: &mut String) {
     let bounds = bound_names(schema);
-    out.push_str("/// The family's adjustable limits, each no larger than its ceiling.\n#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]\npub struct Limits {\n");
+    if bounds.is_empty() {
+        out.push_str("/// The family has no adjustable bounds.\n#[derive(Clone, Debug, PartialEq, Eq, Hash)]\npub struct Limits {\n");
+    } else {
+        out.push_str("/// The family's adjustable limits, each no larger than its ceiling.\n#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]\npub struct Limits {\n");
+    }
     for (name, _) in &bounds {
         out.push_str(&format!("    pub {name}: u32,\n"));
     }
@@ -106,6 +110,7 @@ pub(crate) fn emit(schema: &Schema, out: &mut String) {
                 if record.versioned {
                     out.push_str(&format!("    /// The version of {}.\n    {}Version,\n", record.name, record.name));
                 }
+                out.push_str(&format!("    /// Bytes after {}.\n    {}Tail,\n", record.name, record.name));
             }
             Declaration::Enum(enumeration) => {
                 out.push_str(&format!("    /// The tag of {}.\n    {}Tag,\n", enumeration.name, enumeration.name));

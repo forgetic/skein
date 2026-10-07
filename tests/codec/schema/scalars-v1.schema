@@ -1,0 +1,14 @@
+family scalars 1
+
+enum Flag { off, on }
+
+record Scalars {
+    a: u8
+    b: u16
+    c: u32
+    d: u64
+    e: bool
+    f: duration
+    g: fixed 2
+    h: Flag
+}

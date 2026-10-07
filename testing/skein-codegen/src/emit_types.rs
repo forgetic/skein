@@ -114,7 +114,11 @@ fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
     out.push_str("}\n\n");
     out.push_str(&format!("impl {} {{\n", record.name));
     let members = record.fields.iter().map(|field| field.name.as_str()).collect::<Vec<_>>().join(", ");
-    out.push_str(&format!("    /// Makes a value within the given limits.\n    pub fn new(limits: &Limits, parts: {}Parts) -> Result<Self, Problem> {{\n        let {}Parts {{ {members} }} = parts;\n        let value = Self {{ {members} }};\n        value.check(limits)?;\n        Ok(value)\n    }}\n\n", record.name, record.name));
+    if emit_limits::bound_names(schema).is_empty() {
+        out.push_str(&format!("    /// Makes a value; this family has no adjustable bounds.\n    #[must_use]\n    pub fn new(_limits: &Limits, parts: {}Parts) -> Self {{\n        let {}Parts {{ {members} }} = parts;\n        Self {{ {members} }}\n    }}\n\n", record.name, record.name));
+    } else {
+        out.push_str(&format!("    /// Makes a value within the given limits.\n    pub fn new(limits: &Limits, parts: {}Parts) -> Result<Self, Problem> {{\n        let {}Parts {{ {members} }} = parts;\n        let value = Self {{ {members} }};\n        value.check(limits)?;\n        Ok(value)\n    }}\n\n", record.name, record.name));
+    }
     for field in &record.fields {
         out.push_str(&format!(
             "    /// Reads the {} field.\n    #[must_use]\n    pub fn {}(&self) -> {} {{ {} }}\n\n",
@@ -127,14 +131,17 @@ fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
     let moved =
         record.fields.iter().map(|field| format!("{}: self.{}", field.name, field.name)).collect::<Vec<_>>().join(", ");
     out.push_str(&format!("    /// Moves the fields out without copying.\n    #[must_use]\n    pub fn into_parts(self) -> {}Parts {{ {}Parts {{ {moved} }} }}\n\n", record.name, record.name));
-    out.push_str("    fn check(&self, limits: &Limits) -> Result<(), Problem> {\n");
-    emit_limit_checks(schema, out);
-    for field in &record.fields {
-        let bound_name = format!("{}_{}", emit_limits::snake(&record.name), field.name);
-        let path = format!("{}{}", record.name, emit_limits::pascal(&field.name));
-        emit_check(&field.ty, &format!("self.{}", field.name), &bound_name, &path, 0, out);
+    if !emit_limits::bound_names(schema).is_empty() {
+        out.push_str("    fn check(&self, limits: &Limits) -> Result<(), Problem> {\n");
+        emit_limit_checks(schema, out);
+        for field in &record.fields {
+            let bound_name = format!("{}_{}", emit_limits::snake(&record.name), field.name);
+            let path = format!("{}{}", record.name, emit_limits::pascal(&field.name));
+            emit_check(&field.ty, &format!("self.{}", field.name), &bound_name, &path, 0, out);
+        }
+        out.push_str("        Ok(())\n    }\n");
     }
-    out.push_str("        Ok(())\n    }\n}\n\n");
+    out.push_str("}\n\n");
 }
 
 fn emit_enum(schema: &Schema, enumeration: &Enumeration, out: &mut String) {
@@ -152,6 +159,10 @@ fn emit_enum(schema: &Schema, enumeration: &Enumeration, out: &mut String) {
         }
     }
     out.push_str("}\n\n");
+    if emit_limits::bound_names(schema).is_empty() {
+        out.push_str(&format!("impl {} {{\n    /// Accepts a variant; this family has no adjustable bounds.\n    #[must_use]\n    pub fn new(_limits: &Limits, value: Self) -> Self {{ value }}\n}}\n\n", enumeration.name));
+        return;
+    }
     out.push_str(&format!("impl {} {{\n    /// Checks the payload against the given limits.\n    pub fn new(limits: &Limits, value: Self) -> Result<Self, Problem> {{\n        value.check(limits)?;\n        Ok(value)\n    }}\n\n", enumeration.name));
     out.push_str("    fn check(&self, limits: &Limits) -> Result<(), Problem> {\n        match self {\n");
     // Every arm is explicit; payload-free variants can share one arm.

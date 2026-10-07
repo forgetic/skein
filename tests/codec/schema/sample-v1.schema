@@ -15,3 +15,5 @@ versioned record Report {
     nonce: fixed 2
     age: duration
 }
+
+enum Choice { report: Report, empty }

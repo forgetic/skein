@@ -27,6 +27,8 @@ pub enum Path {
     FieldName,
     /// The value field of Field.
     FieldValue,
+    /// Bytes after Field.
+    FieldTail,
     /// The tag of Effect.
     EffectTag,
     /// The title field of Report.
@@ -43,6 +45,10 @@ pub enum Path {
     ReportAge,
     /// The version of Report.
     ReportVersion,
+    /// Bytes after Report.
+    ReportTail,
+    /// The tag of Choice.
+    ChoiceTag,
 }
 
 /// A decoding or bound failure at a schema path.
@@ -207,6 +213,221 @@ impl Report {
         }
         self.effect.check(limits)?;
         Ok(())
+    }
+}
+
+/// Choice in this codec family.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Choice {
+    /// report carrying Report.
+    Report(Report),
+    /// empty without a payload.
+    Empty,
+}
+
+impl Choice {
+    /// Checks the payload against the given limits.
+    pub fn new(limits: &Limits, value: Self) -> Result<Self, Problem> {
+        value.check(limits)?;
+        Ok(value)
+    }
+
+    fn check(&self, limits: &Limits) -> Result<(), Problem> {
+        match self {
+            Self::Report(record) => record.check(limits),
+            Self::Empty => Ok(()),
+        }?;
+        if limits.field_name > CEILINGS.field_name { return Err(Problem { path: Path::FieldName, reason: skein_codec::Reason::Bound }); }
+        if limits.field_value > CEILINGS.field_value { return Err(Problem { path: Path::FieldValue, reason: skein_codec::Reason::Bound }); }
+        if limits.report_title > CEILINGS.report_title { return Err(Problem { path: Path::ReportTitle, reason: skein_codec::Reason::Bound }); }
+        if limits.report_fields > CEILINGS.report_fields { return Err(Problem { path: Path::ReportFields, reason: skein_codec::Reason::Bound }); }
+        Ok(())
+    }
+}
+
+impl Field {
+    /// Measures this record's wire encoding.
+    #[must_use]
+    pub fn measure(&self) -> u32 {
+        let mut size = 0_u32;
+        let field_name = &self.name;
+        size = size.checked_add(4).expect("schema ceilings fit u32");
+        size = size.checked_add(u32::try_from(field_name.len()).expect("field ceiling fits u32")).expect("schema ceilings fit u32");
+        let field_value = &self.value;
+        size = size.checked_add(4).expect("schema ceilings fit u32");
+        size = size.checked_add(u32::try_from(field_value.len()).expect("field ceiling fits u32")).expect("schema ceilings fit u32");
+        size
+    }
+
+    /// Writes into a writer with room for the measured bytes.
+    pub fn encode(&self, writer: &mut skein_lib::Writer) -> Result<(), skein_lib::Overflow> {
+        let field_name = &self.name;
+        writer.put(&u32::try_from(field_name.len()).expect("field ceiling fits u32").to_be_bytes())?;
+        writer.put(field_name.as_ref())?;
+        let field_value = &self.value;
+        writer.put(&u32::try_from(field_value.len()).expect("field ceiling fits u32").to_be_bytes())?;
+        writer.put(field_value.as_ref())?;
+        Ok(())
+    }
+
+    /// Reads a whole record and refuses trailing bytes.
+    pub fn decode(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {
+        let value = Self::decode_from(limits, reader)?;
+        if !reader.is_empty() { return Err(Problem { path: Path::FieldTail, reason: skein_codec::Reason::Trailing }); }
+        Ok(value)
+    }
+
+    fn decode_from(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {
+        let decoded_name = match skein_codec::read_text(reader, limits.field_name.min(CEILINGS.field_name)) { Ok(text) => text, Err(reason) => return Err(Problem { path: Path::FieldName, reason }), };
+        let decoded_value = { let length = match skein_codec::read_len(reader, limits.field_value.min(CEILINGS.field_value)) { Ok(length) => length, Err(reason) => return Err(Problem { path: Path::FieldValue, reason }), }; Box::from(reader.bytes(length).ok_or(Problem { path: Path::FieldValue, reason: skein_codec::Reason::Short })?) };
+        Self::new(limits, FieldParts { name: decoded_name, value: decoded_value })
+    }
+}
+
+impl Effect {
+    /// Measures this variant's wire encoding.
+    #[must_use]
+    pub fn measure(&self) -> u32 {
+        match self {
+            Self::Read | Self::Write => 1,
+        }
+    }
+
+    /// Writes this variant's tag and payload.
+    pub fn encode(&self, writer: &mut skein_lib::Writer) -> Result<(), skein_lib::Overflow> {
+        match self {
+            Self::Read => writer.put(&[0_u8])?,
+            Self::Write => writer.put(&[1_u8])?,
+        }
+        Ok(())
+    }
+
+    /// Reads a whole variant and refuses trailing bytes.
+    pub fn decode(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {
+        let value = Self::decode_from(limits, reader)?;
+        if !reader.is_empty() { return Err(Problem { path: Path::EffectTag, reason: skein_codec::Reason::Trailing }); }
+        Ok(value)
+    }
+
+    fn decode_from(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {
+        let tag = reader.u8().ok_or(Problem { path: Path::EffectTag, reason: skein_codec::Reason::Short })?;
+        let value = match tag {
+            0 => Self::Read,
+            1 => Self::Write,
+            _ => return Err(Problem { path: Path::EffectTag, reason: skein_codec::Reason::Tag }),
+        };
+        Self::new(limits, value)
+    }
+}
+
+impl Report {
+    /// Measures this record's wire encoding.
+    #[must_use]
+    pub fn measure(&self) -> u32 {
+        let mut size = 0_u32;
+        size = size.checked_add(2).expect("schema ceilings fit u32");
+        let field_title = &self.title;
+        size = size.checked_add(4).expect("schema ceilings fit u32");
+        size = size.checked_add(u32::try_from(field_title.len()).expect("field ceiling fits u32")).expect("schema ceilings fit u32");
+        let field_fields = &self.fields;
+        size = size.checked_add(4).expect("schema ceilings fit u32");
+        for item_0 in field_fields.as_slice() {
+        size = size.checked_add(item_0.measure()).expect("schema ceilings fit u32");
+        }
+        let field_effect = &self.effect;
+        size = size.checked_add(field_effect.measure()).expect("schema ceilings fit u32");
+        let field_present = &self.present;
+        size = size.checked_add(1).expect("schema ceilings fit u32");
+        if field_present.is_some() {
+        size = size.checked_add(1).expect("schema ceilings fit u32");
+        }
+        size = size.checked_add(2).expect("schema ceilings fit u32");
+        size = size.checked_add(8).expect("schema ceilings fit u32");
+        size
+    }
+
+    /// Writes into a writer with room for the measured bytes.
+    pub fn encode(&self, writer: &mut skein_lib::Writer) -> Result<(), skein_lib::Overflow> {
+        writer.put(&1_u16.to_be_bytes())?;
+        let field_title = &self.title;
+        writer.put(&u32::try_from(field_title.len()).expect("field ceiling fits u32").to_be_bytes())?;
+        writer.put(field_title.as_ref())?;
+        let field_fields = &self.fields;
+        writer.put(&field_fields.len().to_be_bytes())?;
+        for item_0 in field_fields.as_slice() {
+        item_0.encode(writer)?;
+        }
+        let field_effect = &self.effect;
+        field_effect.encode(writer)?;
+        let field_present = &self.present;
+        match field_present {
+            Some(some_0) => {
+                writer.put(&[1_u8])?;
+        writer.put(&[u8::from(*some_0)])?;
+            }
+            None => writer.put(&[0_u8])?,
+        }
+        let field_nonce = &self.nonce;
+        writer.put(field_nonce)?;
+        let field_age = &self.age;
+        writer.put(&field_age.as_nanos().to_be_bytes())?;
+        Ok(())
+    }
+
+    /// Reads a whole record and refuses trailing bytes.
+    pub fn decode(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {
+        let value = Self::decode_from(limits, reader)?;
+        if !reader.is_empty() { return Err(Problem { path: Path::ReportTail, reason: skein_codec::Reason::Trailing }); }
+        Ok(value)
+    }
+
+    fn decode_from(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {
+        let version = reader.u16().ok_or(Problem { path: Path::ReportVersion, reason: skein_codec::Reason::Short })?;
+        if version != 1 { return Err(Problem { path: Path::ReportVersion, reason: skein_codec::Reason::Version }); }
+        let decoded_title = match skein_codec::read_text(reader, limits.report_title.min(CEILINGS.report_title)) { Ok(text) => text, Err(reason) => return Err(Problem { path: Path::ReportTitle, reason }), };
+        let decoded_fields = { let count = match skein_codec::read_count(reader, limits.report_fields.min(CEILINGS.report_fields)) { Ok(count) => count, Err(reason) => return Err(Problem { path: Path::ReportFields, reason }), }; if count > reader.remaining() / 8 { return Err(Problem { path: Path::ReportFields, reason: skein_codec::Reason::Short }); } let mut items_0 = List::with_capacity(count); for _index in 0_u32..count { let item = Field::decode_from(limits, reader)?; items_0.push(item).expect("count within capacity"); } items_0 };
+        let decoded_effect = Effect::decode_from(limits, reader)?;
+        let decoded_present = match reader.u8().ok_or(Problem { path: Path::ReportPresent, reason: skein_codec::Reason::Short })? { 0 => None, 1 => Some(match reader.u8().ok_or(Problem { path: Path::ReportPresent, reason: skein_codec::Reason::Short })? { 0 => false, 1 => true, _ => return Err(Problem { path: Path::ReportPresent, reason: skein_codec::Reason::Bool }) }), _ => return Err(Problem { path: Path::ReportPresent, reason: skein_codec::Reason::Tag }) };
+        let decoded_nonce = { let bytes = reader.bytes(2).ok_or(Problem { path: Path::ReportNonce, reason: skein_codec::Reason::Short })?; bytes.try_into().expect("fixed length checked") };
+        let decoded_age = skein_lib::Duration::from_nanos(reader.u64().ok_or(Problem { path: Path::ReportAge, reason: skein_codec::Reason::Short })?);
+        Self::new(limits, ReportParts { title: decoded_title, fields: decoded_fields, effect: decoded_effect, present: decoded_present, nonce: decoded_nonce, age: decoded_age })
+    }
+}
+
+impl Choice {
+    /// Measures this variant's wire encoding.
+    #[must_use]
+    pub fn measure(&self) -> u32 {
+        match self {
+            Self::Report(record) => 1_u32.checked_add(record.measure()).expect("schema ceilings fit u32"),
+            Self::Empty => 1,
+        }
+    }
+
+    /// Writes this variant's tag and payload.
+    pub fn encode(&self, writer: &mut skein_lib::Writer) -> Result<(), skein_lib::Overflow> {
+        match self {
+            Self::Report(record) => { writer.put(&[0_u8])?; record.encode(writer)?; }
+            Self::Empty => writer.put(&[1_u8])?,
+        }
+        Ok(())
+    }
+
+    /// Reads a whole variant and refuses trailing bytes.
+    pub fn decode(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {
+        let value = Self::decode_from(limits, reader)?;
+        if !reader.is_empty() { return Err(Problem { path: Path::ChoiceTag, reason: skein_codec::Reason::Trailing }); }
+        Ok(value)
+    }
+
+    fn decode_from(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {
+        let tag = reader.u8().ok_or(Problem { path: Path::ChoiceTag, reason: skein_codec::Reason::Short })?;
+        let value = match tag {
+            0 => Self::Report(Report::decode_from(limits, reader)?),
+            1 => Self::Empty,
+            _ => return Err(Problem { path: Path::ChoiceTag, reason: skein_codec::Reason::Tag }),
+        };
+        Self::new(limits, value)
     }
 }
 
