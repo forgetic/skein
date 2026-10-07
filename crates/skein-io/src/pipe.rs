@@ -1,4 +1,5 @@
-//! Parent ends of a child's one-way pipes, exposed as streams.
+//! One-way pipes, whether inherited at startup or returned by a child,
+//! exposed through the same stream requests and events (io.md, sections 3 and 6).
 
 use alloc::boxed::Box;
 use skein_lib::stream::{Down, Fault, OutputDown, OutputOutcome, Read, Up};
@@ -65,6 +66,11 @@ impl Pipe {
         assert!(self.fd.is_none() && self.way == way, "a pending pipe activates once");
         self.child = Some(child);
         self.fd = Some(fd);
+    }
+    pub(crate) fn inherited(fd: Fd, way: Way) -> Pipe {
+        let mut pipe = Pipe::pending(way);
+        pipe.fd = Some(fd);
+        pipe
     }
     pub(crate) const fn is_closed(&self) -> bool {
         self.closed

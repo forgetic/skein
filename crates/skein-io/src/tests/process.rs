@@ -25,6 +25,49 @@ fn command(pipes: &[(u32, Way)]) -> Spawn {
 }
 
 #[test]
+fn inherited_read_pipe_uses_stream_events_and_closes_once() {
+    let mut rig = Rig::new(limits());
+    let pipe = rig.io.adopt_read_pipe(Fd::new(40)).expect("room for an inherited pipe");
+    let read = rig.next().take(Kind::PipeRead);
+    let Op::PipeRead { fd, .. } = &read.kind else { panic!("readable pipe") };
+    assert_eq!(*fd, Fd::new(40));
+    rig.down(Request::Stream { stream: pipe, down: Down::Demand { read: Read::Fill(2), room: 0 } }).nothing();
+    rig.next().nothing();
+    let Op::PipeRead { fd, mut buf } = read.kind else { panic!("readable pipe") };
+    for (to, from) in buf.iter_mut().zip(b"ok") {
+        *to = *from;
+    }
+    let mut out =
+        rig.complete(crate::kernel::Submit { op: read.op, kind: Op::PipeRead { fd, buf } }, Ok(Done::Count(2)));
+    assert_eq!(out.events, [Event::Stream { owner: pipe, up: Up::Bytes(Box::from(&b"ok"[..])) }]);
+    let read = out.take(Kind::PipeRead);
+    assert_eq!(rig.complete(read, Ok(Done::Count(0))).events, [Event::Stream { owner: pipe, up: Up::End }]);
+    let close = rig.down(Request::Close { entity: pipe }).take(Kind::Close);
+    assert_eq!(close.kind, Op::Close { fd: Fd::new(40) });
+    assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner: pipe }]);
+    rig.empty();
+}
+
+#[test]
+fn inherited_write_pipe_uses_room_and_returns_descriptor_on_full_slab() {
+    let mut rig = Rig::new(Limits { sockets: 1, ..limits() });
+    let pipe = rig.io.adopt_write_pipe(Fd::new(41)).expect("one slot");
+    assert_eq!(rig.io.adopt_read_pipe(Fd::new(42)), Err(Fd::new(42)));
+    rig.next().nothing();
+    rig.down(Request::Stream { stream: pipe, down: Down::Demand { read: Read::Nothing, room: 2 } }).nothing();
+    assert_eq!(rig.next().events, [Event::Stream { owner: pipe, up: Up::Room }]);
+    let write =
+        rig.down(Request::Stream { stream: pipe, down: Down::Send(Box::from(&b"ok"[..])) }).take(Kind::PipeWrite);
+    let Op::PipeWrite { fd, .. } = &write.kind else { panic!("writable pipe") };
+    assert_eq!(*fd, Fd::new(41));
+    rig.complete(write, Ok(Done::Count(2))).nothing();
+    let close = rig.down(Request::Stream { stream: pipe, down: Down::Finish }).take(Kind::Close);
+    assert_eq!(close.kind, Op::Close { fd: Fd::new(41) });
+    assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner: pipe }]);
+    rig.empty();
+}
+
+#[test]
 fn a_childs_output_is_a_stream_and_the_child_closes_after_its_pipe() {
     let mut rig = Rig::new(Limits { sockets: 3, ..limits() });
     let spawn = rig.down(Request::Spawn { owner: owner(1), spawn: command(&[(9, Way::Out)]) }).take(Kind::Spawn);

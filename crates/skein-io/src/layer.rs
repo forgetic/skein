@@ -6,7 +6,7 @@
 use skein_lib::stream::{Down, OutputDown};
 use skein_lib::{Deadlines, Env, Id, Queue, Set, Slab, Time, Token};
 
-use crate::kernel::{self, Addr, Complete, Done, Family, Op, Submit};
+use crate::kernel::{self, Addr, Complete, Done, Family, Fd, Op, Submit, Way};
 use crate::limits::{self, Limits};
 use crate::listener::{self, Listener};
 use crate::pipe::{self, Pipe};
@@ -124,6 +124,30 @@ impl Io {
                 refused: Queue::with_capacity(limits.refusals),
                 armed: 0,
             },
+        }
+    }
+
+    /// Takes an inherited readable pipe descriptor at startup, returning its
+    /// stream token. From then on the descriptor belongs to io and its
+    /// `Stream`/`Close`/`Abort` vocabulary (io.md, sections 3 and 6). If the
+    /// entity slab is full, the caller retains the descriptor.
+    pub fn adopt_read_pipe(&mut self, fd: Fd) -> Result<Token, Fd> {
+        self.adopt_pipe(fd, Way::Out)
+    }
+
+    /// Takes an inherited writable pipe descriptor at startup, with the same
+    /// stream and ownership contract as [`Io::adopt_read_pipe`].
+    pub fn adopt_write_pipe(&mut self, fd: Fd) -> Result<Token, Fd> {
+        self.adopt_pipe(fd, Way::In)
+    }
+
+    fn adopt_pipe(&mut self, fd: Fd, way: Way) -> Result<Token, Fd> {
+        match self.entities.insert(Entity::Pipe(Pipe::inherited(fd, way))) {
+            Ok(id) => {
+                self.tables.ready.mark(id);
+                Ok(id.token())
+            }
+            Err(_) => Err(fd),
         }
     }
 
