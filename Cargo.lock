@@ -419,6 +419,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-llm-connection"
+version = "0.0.0"
+dependencies = [
+ "skein-http",
+ "skein-io",
+ "skein-lib",
+ "skein-llm",
+ "skein-tls",
+]
+
+[[package]]
 name = "skein-llm-world"
 version = "0.0.0"
 dependencies = [

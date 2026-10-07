@@ -1,0 +1,19 @@
+[package]
+name = "skein-llm-connection"
+description = "Bounded LLM calls through io and TLS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-io.workspace = true
+skein-tls.workspace = true
+skein-llm.workspace = true
+
+[dev-dependencies]
+skein-http.workspace = true
+
+[lints]
+workspace = true
