@@ -13,6 +13,7 @@ members = [
     "testing/skein-browser",
     "testing/skein-echo-client",
     "testing/skein-fake-machine",
+    "testing/skein-fake-channel",
     "testing/skein-fake-oauth",
     "testing/skein-fake-checkout",
     "testing/skein-fake-llm-domain",
@@ -72,6 +73,7 @@ skein-echo-service = { path = "examples/echo/service" }
 skein-echo-client = { path = "testing/skein-echo-client" }
 skein-browser-world = { path = "tests/browser" }
 skein-fake-machine = { path = "testing/skein-fake-machine" }
+skein-fake-channel = { path = "testing/skein-fake-channel" }
 skein-fake-checkout = { path = "testing/skein-fake-checkout" }
 skein-world = { path = "testing/skein-world" }
 

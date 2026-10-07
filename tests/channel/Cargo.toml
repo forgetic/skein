@@ -1,6 +1,6 @@
 [package]
 name = "skein-channel-world"
-description = "Framed channel worlds, admission rights, wire literals, lifecycle, replay and measured allocation bounds"
+description = "Generic framed channel machine and protocol worlds"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,6 @@ publish.workspace = true
 [dependencies]
 skein-lib.workspace = true
 skein-channel.workspace = true
-skein-io.workspace = true
-skein-sim.workspace = true
 
 [dev-dependencies]
 # The counting allocator for actual framing allocation measurements.

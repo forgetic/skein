@@ -2,11 +2,11 @@
 //! streams (channel.md, sections 7 and 11; testing-strategy.md, section 2.5).
 use std::collections::VecDeque;
 
-use skein_channel::generic::{
+use skein_channel::{
     Direction, Event, Kind, Limits, Lower, LowerEvent, Machine, Request, Role, Schema, StreamMode, Version,
     frame_writer,
 };
-use skein_lib::{List, Queue, Token, stream};
+use skein_lib::{List, Queue, Rng, Token, stream};
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -126,6 +126,46 @@ impl Peer {
                 event => panic!("unexpected owner event: {event:?}"),
             }
         }
+    }
+}
+
+/// Runs both channel machines over deterministic byte cuts for the fuzzy suite.
+pub fn seeded_protocol(seed: u64) {
+    let mut rng = Rng::new(seed);
+    for mode in [Mode::Socket, Mode::Pipes] {
+        let mut wire = Wire::new(mode);
+        let mut seeded_limits = limits();
+        seeded_limits.chunk = u32::try_from(rng.below(7) + 1).expect("small chunk");
+        let mut initiator = Peer::new(Role::Initiator, schema(), seeded_limits, mode);
+        let mut responder = Peer::new(Role::Responder, schema(), seeded_limits, mode);
+        initiator.down(Request::Open { credential: Box::from([]) });
+        for _ in 0..500 {
+            initiator.step(&mut wire);
+            responder.step(&mut wire);
+            if initiator.ready && responder.ready {
+                break;
+            }
+        }
+        assert!(initiator.ready && responder.ready, "seed {seed}");
+        let left_len = usize::try_from(rng.below(32) + 1).expect("bounded length");
+        let right_len = usize::try_from(rng.below(32) + 1).expect("bounded length");
+        let mut left = frame_writer(0x0100, u32::try_from(left_len).expect("length")).expect("frame");
+        left.put(&vec![17; left_len]).expect("body");
+        let mut right = frame_writer(0x0101, u32::try_from(right_len).expect("length")).expect("frame");
+        right.put(&vec![29; right_len]).expect("body");
+        initiator.down(Request::Read);
+        responder.down(Request::Read);
+        initiator.down(Request::Send { token: Token::new(1), frame: left.finish().expect("frame") });
+        responder.down(Request::Send { token: Token::new(2), frame: right.finish().expect("frame") });
+        for _ in 0..200 {
+            initiator.step(&mut wire);
+            responder.step(&mut wire);
+            if initiator.received.is_some() && responder.received.is_some() {
+                break;
+            }
+        }
+        assert_eq!(initiator.received.expect("response").1.as_ref(), vec![29; right_len], "seed {seed}");
+        assert_eq!(responder.received.expect("request").1.as_ref(), vec![17; left_len], "seed {seed}");
     }
 }
 

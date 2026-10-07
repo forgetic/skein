@@ -1,6 +1,6 @@
 [package]
 name = "skein-channel"
-description = "Bounded framed channels with opening negotiation, raw body receipts and native output rights"
+description = "Bounded generic framed channels with opening negotiation and independent output"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "skein-fake-channel"
+description = "Scripted framed peer for service protocol worlds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-channel.workspace = true
+skein-lib.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_panics_doc = "allow"
+unwrap_used = "deny"
