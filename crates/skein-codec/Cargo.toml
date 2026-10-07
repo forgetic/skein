@@ -1,0 +1,13 @@
+[package]
+name = "skein-codec"
+description = "Bounded reads and decoding reasons shared by schema-generated codecs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+
+[lints]
+workspace = true

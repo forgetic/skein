@@ -157,6 +157,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-codec"
+version = "0.0.0"
+dependencies = [
+ "skein-lib",
+]
+
+[[package]]
 name = "skein-conformance"
 version = "0.0.0"
 dependencies = [
