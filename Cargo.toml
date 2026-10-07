@@ -8,6 +8,7 @@ members = [
     "examples/echo/protocol",
     "examples/echo/service",
     "examples/echo/shell",
+    "testing/skein-codegen",
     "testing/skein-conformance",
     "testing/skein-browser",
     "testing/skein-echo-client",

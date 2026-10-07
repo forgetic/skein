@@ -164,6 +164,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-codegen"
+version = "0.0.0"
+
+[[package]]
 name = "skein-conformance"
 version = "0.0.0"
 dependencies = [
