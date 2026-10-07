@@ -14,7 +14,9 @@ use skein_lib::{Duration, Map, Queue, Time, Token};
 enum Pending {
     Create { owner: Token },
     OpenRead { owner: Token },
+    OpenDirectory { owner: Token },
     Stat { owner: Token, fd: Fd },
+    Stating { owner: Token },
     Cleanup { owner: Token, error: Error },
     Write { owner: Token },
     Read { owner: Token, fd: Fd, offset: u64, max: u32, bytes: Vec<u8> },
@@ -73,6 +75,18 @@ impl FileIo {
         self.files.len()
     }
 
+    /// Adopts a directory descriptor opened by the shell as an io-owned root.
+    /// The returned token is closed with `Request::Close`.
+    pub fn adopt_root(&mut self, root: Fd) -> Option<Token> {
+        self.insert(root)
+    }
+
+    /// Resolves an open file or root token within io.
+    #[must_use]
+    pub fn descriptor(&self, file: Token) -> Option<Fd> {
+        self.file(file)
+    }
+
     #[must_use]
     pub const fn next_deadline(&self) -> Option<Time> {
         self.deadline
@@ -128,21 +142,18 @@ pub fn down(io: &mut FileIo, now: Time, request: Request, events: &mut Queue<Eve
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "one exhaustive request match keeps file admission in one place")]
 fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
     match request {
-        Request::Create { owner, root, name, mode } => {
-            if name.contains(&0) || mode & !crate::kernel::PERMISSIONS != 0 {
-                events.push(Event::Failed { owner, error: Error::InvalidArgument });
-                return;
-            }
-            if io.files.len() == io.files.capacity() {
-                events.push(Event::Failed { owner, error: Error::TooManyOpenFiles });
-                return;
-            }
-            io.pending = Some(Pending::Create { owner });
-            io.issue(Op::Open { root, path: name, how: OpenHow::Create { mode: Some(mode) } }, subs);
+        Request::Create { owner, root, name, mode } => create(io, owner, root, name, mode, false, events, subs),
+        Request::CreateNoFollow { owner, root, name, mode } => {
+            create(io, owner, root, name, mode, true, events, subs);
         }
-        Request::OpenRead { owner, root, name } => {
+        Request::OpenRead { owner, root, name } => open_read(io, owner, root, name, false, events, subs),
+        Request::OpenReadNoFollow { owner, root, name } => {
+            open_read(io, owner, root, name, true, events, subs);
+        }
+        Request::OpenDirectory { owner, root, name, no_follow } => {
             if name.contains(&0) {
                 events.push(Event::Failed { owner, error: Error::InvalidArgument });
                 return;
@@ -151,8 +162,17 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
                 events.push(Event::Failed { owner, error: Error::TooManyOpenFiles });
                 return;
             }
-            io.pending = Some(Pending::OpenRead { owner });
-            io.issue(Op::Open { root, path: name, how: OpenHow::Read }, subs);
+            io.pending = Some(Pending::OpenDirectory { owner });
+            let how = if no_follow { OpenHow::DirectoryNoFollow } else { OpenHow::Directory };
+            io.issue(Op::Open { root, path: name, how }, subs);
+        }
+        Request::Stat { owner, file } => {
+            let Some(fd) = io.file(file) else {
+                events.push(Event::Failed { owner, error: Error::NotFound });
+                return;
+            };
+            io.pending = Some(Pending::Stating { owner });
+            io.issue(Op::Stat { fd }, subs);
         }
         Request::WriteAt { owner, file, offset, bytes } => {
             let Some(fd) = io.file(file) else {
@@ -230,6 +250,53 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
     }
 }
 
+#[expect(clippy::too_many_arguments, reason = "the file admission inputs and two output queues are explicit")]
+fn create(
+    io: &mut FileIo,
+    owner: Token,
+    root: Fd,
+    name: Box<[u8]>,
+    mode: u32,
+    no_follow: bool,
+    events: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    if name.contains(&0) || mode & !crate::kernel::PERMISSIONS != 0 {
+        events.push(Event::Failed { owner, error: Error::InvalidArgument });
+        return;
+    }
+    if io.files.len() == io.files.capacity() {
+        events.push(Event::Failed { owner, error: Error::TooManyOpenFiles });
+        return;
+    }
+    io.pending = Some(Pending::Create { owner });
+    let how =
+        if no_follow { OpenHow::CreateNoFollow { mode: Some(mode) } } else { OpenHow::Create { mode: Some(mode) } };
+    io.issue(Op::Open { root, path: name, how }, subs);
+}
+
+fn open_read(
+    io: &mut FileIo,
+    owner: Token,
+    root: Fd,
+    name: Box<[u8]>,
+    no_follow: bool,
+    events: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    if name.contains(&0) {
+        events.push(Event::Failed { owner, error: Error::InvalidArgument });
+        return;
+    }
+    if io.files.len() == io.files.capacity() {
+        events.push(Event::Failed { owner, error: Error::TooManyOpenFiles });
+        return;
+    }
+    io.pending = Some(Pending::OpenRead { owner });
+    let how = if no_follow { OpenHow::ReadNoFollow } else { OpenHow::Read };
+    io.issue(Op::Open { root, path: name, how }, subs);
+}
+
 /// Cancels the outstanding kernel operation after its request deadline. The
 /// terminal failure is emitted when the target has settled, exactly once.
 pub fn expire(io: &mut FileIo, now: Time, subs: &mut Queue<Submit>) {
@@ -271,7 +338,9 @@ fn timed_out(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, sub
     let owner = match &pending {
         Pending::Create { owner }
         | Pending::OpenRead { owner }
+        | Pending::OpenDirectory { owner }
         | Pending::Stat { owner, .. }
+        | Pending::Stating { owner }
         | Pending::Cleanup { owner, .. }
         | Pending::Write { owner }
         | Pending::Read { owner, .. }
@@ -284,7 +353,13 @@ fn timed_out(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, sub
         | Pending::ListClosing { owner, .. } => *owner,
     };
     let fd = match (pending, complete.result) {
-        (Pending::Create { .. } | Pending::OpenRead { .. } | Pending::ListOpening { .. }, Ok(Done::Fd(fd)))
+        (
+            Pending::Create { .. }
+            | Pending::OpenRead { .. }
+            | Pending::OpenDirectory { .. }
+            | Pending::ListOpening { .. },
+            Ok(Done::Fd(fd)),
+        )
         | (Pending::Stat { fd, .. } | Pending::List { fd, .. }, _) => Some(fd),
         _ => None,
     };
@@ -312,6 +387,8 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             }
             Pending::Create { owner }
             | Pending::OpenRead { owner }
+            | Pending::OpenDirectory { owner }
+            | Pending::Stating { owner }
             | Pending::Write { owner }
             | Pending::Read { owner, .. }
             | Pending::Sync { owner }
@@ -336,6 +413,15 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             io.pending = Some(Pending::Stat { owner, fd });
             io.issue(Op::Stat { fd }, subs);
         }
+        (Pending::OpenDirectory { owner }, Op::Open { .. }, Done::Fd(fd)) => {
+            if let Some(file) = io.insert(fd) {
+                events.push(Event::Opened { owner, file, len: 0 });
+            } else {
+                io.pending = Some(Pending::Cleanup { owner, error: Error::TooManyOpenFiles });
+                io.issue(Op::Close { fd }, subs);
+            }
+        }
+        (Pending::Stating { owner }, Op::Stat { .. }, Done::Stat(stat)) => events.push(Event::Stated { owner, stat }),
         (Pending::Stat { owner, fd }, Op::Stat { .. }, Done::Stat(stat)) => {
             if let Some(file) = io.insert(fd) {
                 events.push(Event::Opened { owner, file, len: stat.size });
@@ -399,7 +485,7 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             }
             for record in records.get(..count).expect("list count is within buffer") {
                 let name = record.name(&names).expect("a listed entry names bytes");
-                entries.push(Entry { name: Box::from(name) });
+                entries.push(Entry { name: Box::from(name), kind: record.kind });
             }
             if entries.len() > usize::try_from(io.max_entries).expect("u32 fits usize") {
                 io.pending = Some(Pending::Cleanup { owner, error: Error::NoBufferSpace });

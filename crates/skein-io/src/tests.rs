@@ -6,6 +6,7 @@
 
 #![expect(clippy::disallowed_types, reason = "what a step emitted is collected in Vecs, for the test to look at")]
 
+mod file;
 mod kernel;
 mod layer;
 mod listener;
