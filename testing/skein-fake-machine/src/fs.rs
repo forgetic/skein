@@ -61,11 +61,17 @@ pub enum How {
     /// An existing file or directory, to read: a final symbolic link is
     /// followed.
     Read,
+    /// An existing file to read, refusing every symbolic link in its path.
+    ReadNoFollow,
     /// An existing directory, to list or to open beneath.
     Directory,
+    /// An existing directory, refusing every symbolic link in its path.
+    DirectoryNoFollow,
     /// A new, empty file, to write, its name free, made with `mode`'s
     /// permission bits less the umask.
     Create { mode: u32 },
+    /// A new file, refusing every symbolic link in its parent path.
+    CreateNoFollow { mode: u32 },
 }
 
 /// What a name names.
@@ -304,10 +310,11 @@ impl Machine {
     pub fn open(&mut self, root: Opened, path: &[u8], how: How) -> Result<Opened, Refusal> {
         let root = self.handle(root).node;
         let node = match how {
-            How::Read | How::Directory => {
-                let found = self.resolve(root, path, false)?;
+            How::Read | How::ReadNoFollow | How::Directory | How::DirectoryNoFollow => {
+                let no_follow = matches!(how, How::ReadNoFollow | How::DirectoryNoFollow);
+                let found = self.resolve(root, path, false, no_follow)?;
                 let node = found.node.ok_or(Refusal::NotFound)?;
-                if (found.slash || how == How::Directory) && !self.is_directory(node) {
+                if (found.slash || matches!(how, How::Directory | How::DirectoryNoFollow)) && !self.is_directory(node) {
                     return Err(Refusal::NotADirectory);
                 }
                 if !self.may(node, READ) {
@@ -319,8 +326,8 @@ impl Machine {
                 }
                 node
             }
-            How::Create { mode } => {
-                let found = self.resolve(root, path, true)?;
+            How::Create { mode } | How::CreateNoFollow { mode } => {
+                let found = self.resolve(root, path, true, matches!(how, How::CreateNoFollow { .. }))?;
                 // A path that ends at a directory of no name of its own
                 // (`.`, `a/..`) is taken: O_EXCL answers before O_CREAT.
                 let Some(name) = found.name else {
@@ -607,7 +614,7 @@ impl Machine {
     /// path or link, links followed, and no more than 40 of them. To
     /// `create` follows no final link, and refuses a final `/` before it
     /// looks the last name up, as `O_CREAT` does.
-    fn resolve(&self, root: NodeId, path: &[u8], create: bool) -> Result<Found, Refusal> {
+    fn resolve(&self, root: NodeId, path: &[u8], create: bool, no_follow: bool) -> Result<Found, Refusal> {
         if path.is_empty() {
             return Err(Refusal::NotFound);
         }
@@ -657,6 +664,7 @@ impl Machine {
                 };
             };
             match &self.node(node).body {
+                Body::Link(_) if no_follow => return Err(Refusal::Loop),
                 Body::Link(target) if !last || !create => {
                     links = links.checked_add(1).expect("fewer than 2^32 links");
                     if links > MOST_LINKS {

@@ -130,12 +130,15 @@ impl Sim {
     /// 4), each for the operations that may answer it.
     fn failure(&mut self, pid: Pid, op: &Op) -> Option<Error> {
         let (space, read_only, io) = match op {
-            Op::Open { how: OpenHow::Create { .. }, .. } | Op::Rename { .. } | Op::MakeDirectory { .. } => {
-                (true, true, false)
+            Op::Open { how: OpenHow::Create { .. } | OpenHow::CreateNoFollow { .. }, .. }
+            | Op::Rename { .. }
+            | Op::MakeDirectory { .. } => (true, true, false),
+            Op::Open {
+                how: OpenHow::Read | OpenHow::ReadNoFollow | OpenHow::Directory | OpenHow::DirectoryNoFollow,
+                ..
             }
-            Op::Open { how: OpenHow::Read | OpenHow::Directory, .. } | Op::Stat { .. } | Op::List { .. } => {
-                (false, false, false)
-            }
+            | Op::Stat { .. }
+            | Op::List { .. } => (false, false, false),
             Op::Read { .. } => (false, false, true),
             Op::Write { .. } => (true, true, true),
             Op::Sync { .. } => (true, false, true),

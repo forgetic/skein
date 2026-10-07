@@ -73,6 +73,23 @@ fn a_resolution_follows_forty_links() {
 }
 
 #[test]
+fn no_follow_refuses_links_in_every_path_part() {
+    let (mut machine, root) = machine(&[
+        Item::directory(b"dir"),
+        Item::file(b"dir/file", b"data"),
+        Item::link(b"parent", b"dir"),
+        Item::link(b"leaf", b"dir/file"),
+    ]);
+    assert_eq!(machine.open(root, b"parent/file", How::ReadNoFollow), Err(Refusal::Loop));
+    assert_eq!(machine.open(root, b"leaf", How::ReadNoFollow), Err(Refusal::Loop));
+    assert_eq!(machine.open(root, b"parent/new", How::CreateNoFollow { mode: 0o644 }), Err(Refusal::Loop));
+    assert_eq!(machine.open(root, b"parent", How::DirectoryNoFollow), Err(Refusal::Loop));
+    let file = machine.open(root, b"dir/file", How::ReadNoFollow).unwrap();
+    assert_eq!(machine.read(file, 0, 4).unwrap(), b"data");
+    machine.close(file);
+}
+
+#[test]
 fn a_listing_resumes_after_the_last_name_it_handed_back() {
     let (mut machine, root) = machine(&[Item::file(b"b", b""), Item::file(b"d", b"")]);
     let first = machine.list(root, 1, 255).unwrap();

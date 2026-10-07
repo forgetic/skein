@@ -672,6 +672,13 @@ fn escape_cases() -> Vec<(Vec<u8>, OpenHow, Outcome)> {
         (b"up".to_vec(), OpenHow::Read, refused(Error::Escape)),
         (b"in".to_vec(), OpenHow::Read, a()),
         (b"chain".to_vec(), OpenHow::Read, a()),
+        (b"in".to_vec(), OpenHow::ReadNoFollow, refused(Error::TooManyLinks)),
+        (b"chain".to_vec(), OpenHow::ReadNoFollow, refused(Error::TooManyLinks)),
+        (b"deep".to_vec(), OpenHow::DirectoryNoFollow, refused(Error::TooManyLinks)),
+        (b"deep/new".to_vec(), OpenHow::CreateNoFollow { mode: None }, refused(Error::TooManyLinks)),
+        (b"a.txt".to_vec(), OpenHow::ReadNoFollow, a()),
+        (b"sub".to_vec(), OpenHow::DirectoryNoFollow, Outcome::Opened),
+        (b"sub/new-safe".to_vec(), OpenHow::CreateNoFollow { mode: None }, Outcome::Opened),
         (b"sub/../a.txt".to_vec(), OpenHow::Read, a()),
         (b"sub//../a.txt".to_vec(), OpenHow::Read, a()),
         (b"loop1".to_vec(), OpenHow::Read, refused(Error::TooManyLinks)),
@@ -753,7 +760,7 @@ pub fn escapes<B: Backend>(backend: &mut B) -> Escapes {
     let mut outcomes = Vec::new();
     for (path, how, _) in escape_cases() {
         let outcome = match (run.open(process, root, &path, how), how) {
-            (Ok(fd), OpenHow::Read) => {
+            (Ok(fd), OpenHow::Read | OpenHow::ReadNoFollow) => {
                 let (read, _) = run.read_all(process, fd);
                 run.close(process, fd);
                 match read {
@@ -761,7 +768,13 @@ pub fn escapes<B: Backend>(backend: &mut B) -> Escapes {
                     Err(error) => Outcome::Refused(error),
                 }
             }
-            (Ok(fd), OpenHow::Directory | OpenHow::Create { .. }) => {
+            (
+                Ok(fd),
+                OpenHow::Directory
+                | OpenHow::DirectoryNoFollow
+                | OpenHow::Create { .. }
+                | OpenHow::CreateNoFollow { .. },
+            ) => {
                 run.close(process, fd);
                 Outcome::Opened
             }

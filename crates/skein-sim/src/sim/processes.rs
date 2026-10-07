@@ -47,7 +47,12 @@ impl Sim {
         let fd = kind.fd().expect("a process operation names a descriptor");
         match kind {
             Summary::Spawn { .. } => {
-                if process.files.get(&fd).is_none_or(|file| file.how != skein_io::kernel::OpenHow::Directory) {
+                if process.files.get(&fd).is_none_or(|file| {
+                    !matches!(
+                        file.how,
+                        skein_io::kernel::OpenHow::Directory | skein_io::kernel::OpenHow::DirectoryNoFollow
+                    )
+                }) {
                     self.fail(pid, &format!("Spawn root {fd:?} is not an open directory"));
                 }
             }

@@ -97,7 +97,10 @@
 //!   its path beneath its root as `openat2` does with `RESOLVE_BENEATH` and
 //!   `RESOLVE_NO_MAGICLINKS`: `..` above the root, an absolute path, and a
 //!   symbolic link that leads out of it (an absolute one among them) fail
-//!   with `Escape`; a symbolic link that stays beneath it is followed. A
+//!   with `Escape`; a symbolic link that stays beneath it is followed by
+//!   the ordinary open modes. The `NoFollow` modes refuse any symbolic link
+//!   in the path with `TooManyLinks`, for writes that must stay in the named
+//!   directory. A
 //!   loop of links, more than 40 in one resolution, and a magic link
 //!   (`/proc/*/fd/*`, should a root hold one) fail with `TooManyLinks`. A name longer than 255 bytes, or a path of 4096 or
 //!   more, fails with `NameTooLong`; an empty path with `NotFound`. A `..`
@@ -506,14 +509,20 @@ pub enum Exit {
 pub enum OpenHow {
     /// An existing file or directory, to `Read` or `Stat` (`O_RDONLY`).
     Read,
+    /// An existing file to read, refusing a symbolic link in any path part.
+    ReadNoFollow,
     /// An existing directory: a root beneath this one, or a directory to
     /// `List` (`O_RDONLY | O_DIRECTORY`).
     Directory,
+    /// An existing directory, refusing a symbolic link in any path part.
+    DirectoryNoFollow,
     /// A new, empty file, to `Write` (`O_WRONLY | O_CREAT | O_EXCL`), made
     /// with `mode`'s permission bits (`0o777` at most), or `0o666` without
     /// one, less the process's umask: to keep an old file's when replacing
     /// it.
     Create { mode: Option<u32> },
+    /// A new file, refusing a symbolic link in any parent path part.
+    CreateNoFollow { mode: Option<u32> },
 }
 
 /// What a name beneath a root names.
@@ -824,8 +833,15 @@ impl Op {
             }
             Op::Open { path, how, .. } => {
                 let mode = match how {
-                    OpenHow::Create { mode: Some(mode) } => *mode & !PERMISSIONS == 0,
-                    OpenHow::Create { mode: None } | OpenHow::Read | OpenHow::Directory => true,
+                    OpenHow::Create { mode: Some(mode) } | OpenHow::CreateNoFollow { mode: Some(mode) } => {
+                        *mode & !PERMISSIONS == 0
+                    }
+                    OpenHow::Create { mode: None }
+                    | OpenHow::CreateNoFollow { mode: None }
+                    | OpenHow::Read
+                    | OpenHow::ReadNoFollow
+                    | OpenHow::Directory
+                    | OpenHow::DirectoryNoFollow => true,
                 };
                 !path.contains(&0) && mode
             }

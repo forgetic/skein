@@ -134,9 +134,13 @@ fn done(result: Result<(), Refusal>) -> Result<Reply, Error> {
 const fn how_of(how: OpenHow) -> How {
     match how {
         OpenHow::Read => How::Read,
+        OpenHow::ReadNoFollow => How::ReadNoFollow,
         OpenHow::Directory => How::Directory,
+        OpenHow::DirectoryNoFollow => How::DirectoryNoFollow,
         OpenHow::Create { mode: Some(mode) } => How::Create { mode },
         OpenHow::Create { mode: None } => How::Create { mode: 0o666 },
+        OpenHow::CreateNoFollow { mode: Some(mode) } => How::CreateNoFollow { mode },
+        OpenHow::CreateNoFollow { mode: None } => How::CreateNoFollow { mode: 0o666 },
     }
 }
 

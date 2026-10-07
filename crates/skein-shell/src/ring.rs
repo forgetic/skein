@@ -1062,10 +1062,11 @@ fn blocking(fd: i32) -> Result<(), Error> {
 /// without blocking or taking a controlling terminal, and resolved beneath
 /// the root, without magic links (kernel.md, 6.1).
 fn open(how: OpenHow) -> types::OpenHow {
+    let no_follow = matches!(how, OpenHow::ReadNoFollow | OpenHow::DirectoryNoFollow | OpenHow::CreateNoFollow { .. });
     let (flags, mode) = match how {
-        OpenHow::Read => (libc::O_RDONLY, 0),
-        OpenHow::Directory => (libc::O_RDONLY | libc::O_DIRECTORY, 0),
-        OpenHow::Create { mode } => {
+        OpenHow::Read | OpenHow::ReadNoFollow => (libc::O_RDONLY, 0),
+        OpenHow::Directory | OpenHow::DirectoryNoFollow => (libc::O_RDONLY | libc::O_DIRECTORY, 0),
+        OpenHow::Create { mode } | OpenHow::CreateNoFollow { mode } => {
             let mode = match mode {
                 Some(mode) => u64::from(mode),
                 None => FILE_MODE,
@@ -1075,7 +1076,12 @@ fn open(how: OpenHow) -> types::OpenHow {
     };
     let flags = flags | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
     let flags = u64::try_from(flags).expect("open's flags are positive");
-    types::OpenHow::new().flags(flags).mode(mode).resolve(libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS)
+    let resolve = if no_follow {
+        libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS
+    } else {
+        libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS
+    };
+    types::OpenHow::new().flags(flags).mode(mode).resolve(resolve)
 }
 
 /// What a `Stat`'s `statx` found.
