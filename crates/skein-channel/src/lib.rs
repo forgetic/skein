@@ -44,6 +44,9 @@ mod machine;
 mod records;
 mod schema;
 
+/// Generic channel vocabulary and frozen control frames (channel.md, sections 3–5).
+pub mod generic;
+
 pub use codec::{Encoded, FrameWriter, Header, framing};
 pub use machine::{Machine, down, poll, resolve, up};
 pub use records::{
