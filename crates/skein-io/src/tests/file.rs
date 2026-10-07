@@ -18,6 +18,19 @@ fn io() -> FileIo {
     FileIo::new(3, 16, 4, Duration::from_secs(1))
 }
 
+#[test]
+fn file_driver_worst_case_counts_each_configured_limit() {
+    let base = FileIo::worst_case(1, 8, 1, 8).expect("small file limits fit");
+    assert!(FileIo::worst_case(32, 8, 1, 8).expect("more slots fit") > base);
+    assert!(FileIo::worst_case(1, 9, 1, 8).expect("larger reads fit") > base);
+    assert!(FileIo::worst_case(1, 8, 2, 8).expect("more entries fit") > base);
+    assert!(FileIo::worst_case(1, 8, 1, 9).expect("larger files fit") > base);
+    assert_eq!(FileIo::worst_case(0, 8, 1, 8), None);
+    assert_eq!(FileIo::worst_case(1, 0, 1, 8), None);
+    assert_eq!(FileIo::worst_case(1, 8, 0, 8), None);
+    assert_eq!(FileIo::worst_case(1, 8, 1, 0), None);
+}
+
 fn complete(
     io: &mut FileIo,
     submit: Submit,

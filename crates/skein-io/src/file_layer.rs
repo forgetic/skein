@@ -210,6 +210,62 @@ pub struct FileIo {
 }
 
 impl FileIo {
+    /// The most heap retained by a file driver with these limits, including
+    /// its file map, one pending request, the file buffers in its kernel
+    /// records, and transient whole-file and directory buffers
+    /// (programming-model.md, section 6.3; io.md, section 5).
+    ///
+    /// The caller accounts for buffers it supplies in requests, including
+    /// `WriteAt` bytes and paths passed to simple file operations. The bound
+    /// counts buffers made by the driver and the admitted `Store`, `Load`,
+    /// and `Scan` requests. It returns `None` when arithmetic overflows or
+    /// a limit cannot be used by the driver.
+    #[must_use]
+    pub fn worst_case(files: u32, max_read: u32, max_entries: u32, max_file: u32) -> Option<u64> {
+        if files == 0 || max_read == 0 || max_entries == 0 || max_file == 0 {
+            return None;
+        }
+
+        let file_map = Map::<Token, Fd>::worst_case(files)?;
+
+        // A list can append a full kernel batch before rejecting excess
+        // entries. A scan can insert one transient entry into a vector
+        // initially reserved for max_entries + 1. Allow a doubled vector
+        // capacity for either growth path, and names for all live entries.
+        let entries = u64::from(max_entries).checked_add(32)?;
+        let entry_cells = entries.checked_mul(2)?.checked_mul(u64::try_from(size_of::<Entry>()).ok()?)?;
+        let entry_names = entries.checked_add(1)?.checked_mul(u64::try_from(crate::kernel::LONGEST_NAME).ok()?)?;
+
+        // A whole-file load may hold max_file + 1 bytes while checking for
+        // overflow, beside one max_read kernel buffer. A store can hold its
+        // content in the pending request or the write record, and can also
+        // keep a max_read recheck buffer. Count both envelopes together so
+        // they cover every transition, including cancellation.
+        let whole_files = u64::from(max_file).checked_mul(2)?.checked_add(1)?;
+        let read_buffers = u64::from(max_read).checked_mul(3)?;
+
+        // One listing record carries fixed entry and name arrays. Its
+        // completion returns those same arrays; a cancel has no payload.
+        let kernel_listing =
+            u64::try_from(size_of::<crate::kernel::Entry>()).ok()?.checked_mul(32)?.checked_add(8192)?;
+
+        // Whole-file paths are shorter than 4096 bytes. A store can hold
+        // the target beside a parent path in the operation record, while
+        // temporary and copied target names coexist during replacement.
+        let paths = 4095_u64.checked_mul(4)?.checked_add(255_u64.checked_mul(4)?)?;
+
+        file_map
+            .checked_add(entry_cells)?
+            .checked_add(entry_names)?
+            .checked_add(whole_files)?
+            .checked_add(read_buffers)?
+            .checked_add(kernel_listing)?
+            .checked_add(paths)?
+            .checked_add(u64::try_from(size_of::<Pending>()).ok()?)?
+            .checked_add(u64::try_from(size_of::<Submit>()).ok()?.checked_mul(2)?)?
+            .checked_add(u64::try_from(size_of::<Complete>()).ok()?)
+    }
+
     #[must_use]
     pub fn new(files: u32, max_read: u32, max_entries: u32, timeout: Duration) -> FileIo {
         Self::with_whole_limit(files, max_read, max_entries, max_read, timeout)
