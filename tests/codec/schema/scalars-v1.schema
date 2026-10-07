@@ -1,5 +1,7 @@
 family scalars 1
 
+record Empty {}
+
 enum Flag { off, on }
 
 record Scalars {

@@ -8,7 +8,9 @@ extern crate alloc;
 mod check;
 mod emit_codec;
 mod emit_limits;
+mod emit_tests;
 mod emit_types;
+mod emit_worst;
 mod parse;
 
 pub use parse::{Error, parse};
@@ -82,6 +84,14 @@ pub enum Type {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Output {
     pub rust: String,
+    pub goldens: Vec<Golden>,
+}
+
+/// Frozen wire bytes for one generated test value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Golden {
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 fn uses_box(ty: &Type) -> bool {
@@ -139,5 +149,7 @@ pub fn generate(schema: &Schema) -> Output {
     emit_limits::emit(schema, &mut rust);
     emit_types::emit(schema, &mut rust);
     emit_codec::emit(schema, &mut rust);
-    Output { rust }
+    emit_worst::emit(schema, &mut rust);
+    let goldens = emit_tests::emit(schema, &mut rust);
+    Output { rust, goldens }
 }

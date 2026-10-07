@@ -135,6 +135,13 @@ fn min_bytes(ty: &Type, schema: &Schema) -> u32 {
     }
 }
 
+fn empty_unversioned_record(schema: &Schema, name: &str) -> bool {
+    schema.declarations.iter().any(|declaration| match declaration {
+        Declaration::Record(record) => record.name == name && record.fields.is_empty() && !record.versioned,
+        Declaration::Enum(_) => false,
+    })
+}
+
 fn decode_type(ty: &Type, schema: &Schema, bound_name: &str, path: &str, depth: usize) -> String {
     let short = short(path);
     match ty {
@@ -186,22 +193,33 @@ fn decode_type(ty: &Type, schema: &Schema, bound_name: &str, path: &str, depth: 
                 "match reader.u8().ok_or({short})? {{ 0 => None, 1 => Some({item_expr}), _ => return Err(Problem {{ path: Path::{path}, reason: skein_codec::Reason::Tag }}) }}"
             )
         }
-        Type::Named(name) => format!("{name}::decode_from(limits, reader)?"),
+        Type::Named(name) => {
+            if empty_unversioned_record(schema, name) && emit_limits::bound_names(schema).is_empty() {
+                format!("{name}::decode_from(limits, reader)")
+            } else {
+                format!("{name}::decode_from(limits, reader)?")
+            }
+        }
     }
 }
 
 fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
-    out.push_str(&format!("impl {} {{\n    /// Measures this record's wire encoding.\n    #[must_use]\n    pub fn measure(&self) -> u32 {{\n        let mut size = 0_u32;\n", record.name));
-    if record.versioned {
-        add_size("2", out);
-    }
-    for field in &record.fields {
-        if fixed_size(&field.ty).is_none() {
-            out.push_str(&format!("        let field_{} = &self.{};\n", field.name, field.name));
+    if record.fields.is_empty() && !record.versioned {
+        out.push_str(&format!("impl {} {{\n    /// Measures this empty record's wire encoding.\n    #[must_use]\n    pub fn measure(&self) -> u32 {{ 0_u32 }}\n\n", record.name));
+    } else {
+        out.push_str(&format!("impl {} {{\n    /// Measures this record's wire encoding.\n    #[must_use]\n    pub fn measure(&self) -> u32 {{\n        let mut size = 0_u32;\n", record.name));
+        if record.versioned {
+            add_size("2", out);
         }
-        measure_type(&field.ty, &format!("field_{}", field.name), 0, out);
+        for field in &record.fields {
+            if fixed_size(&field.ty).is_none() {
+                out.push_str(&format!("        let field_{} = &self.{};\n", field.name, field.name));
+            }
+            measure_type(&field.ty, &format!("field_{}", field.name), 0, out);
+        }
+        out.push_str("        size\n    }\n\n");
     }
-    out.push_str("        size\n    }\n\n    /// Writes into a writer with room for the measured bytes.\n    pub fn encode(&self, writer: &mut skein_lib::Writer) -> Result<(), skein_lib::Overflow> {\n");
+    out.push_str("    /// Writes into a writer with room for the measured bytes.\n    pub fn encode(&self, writer: &mut skein_lib::Writer) -> Result<(), skein_lib::Overflow> {\n");
     if record.versioned {
         out.push_str(&format!("        writer.put(&{}_u16.to_be_bytes())?;\n", schema.version));
     }
@@ -209,8 +227,25 @@ fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
         out.push_str(&format!("        let field_{} = &self.{};\n", field.name, field.name));
         encode_type(&field.ty, &format!("field_{}", field.name), 0, out);
     }
-    out.push_str("        Ok(())\n    }\n\n    /// Reads a whole record and refuses trailing bytes.\n    pub fn decode(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {\n        let value = Self::decode_from(limits, reader)?;\n");
+    if record.fields.is_empty() && !record.versioned {
+        out.push_str("        writer.put(&[])\n    }\n\n    /// Reads a whole record and refuses trailing bytes.\n    pub fn decode(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {\n");
+    } else {
+        out.push_str("        Ok(())\n    }\n\n    /// Reads a whole record and refuses trailing bytes.\n    pub fn decode(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {\n");
+    }
+    if record.fields.is_empty() && !record.versioned && emit_limits::bound_names(schema).is_empty() {
+        out.push_str("        let value = Self::decode_from(limits, reader);\n");
+    } else {
+        out.push_str("        let value = Self::decode_from(limits, reader)?;\n");
+    }
     out.push_str(&format!("        if !reader.is_empty() {{ return Err(Problem {{ path: Path::{}Tail, reason: skein_codec::Reason::Trailing }}); }}\n        Ok(value)\n    }}\n\n", record.name));
+    if record.fields.is_empty() && !record.versioned {
+        if emit_limits::bound_names(schema).is_empty() {
+            out.push_str(&format!("    fn decode_from(limits: &Limits, _reader: &mut skein_lib::Reader<'_>) -> Self {{\n        Self::new(limits, {}Parts {{}})\n    }}\n}}\n\n", record.name));
+        } else {
+            out.push_str(&format!("    fn decode_from(limits: &Limits, _reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {{\n        Self::new(limits, {}Parts {{}})\n    }}\n}}\n\n", record.name));
+        }
+        return;
+    }
     out.push_str(
         "    fn decode_from(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {\n",
     );
@@ -272,7 +307,15 @@ fn emit_enum(schema: &Schema, enumeration: &Enumeration, out: &mut String) {
         let tag = u8::try_from(index).expect("at most 256 variants");
         match &variant.record {
             Some(record) => {
-                out.push_str(&format!("            {tag} => Self::{name}({record}::decode_from(limits, reader)?),\n"));
+                let suffix = if empty_unversioned_record(schema, record) && emit_limits::bound_names(schema).is_empty()
+                {
+                    ""
+                } else {
+                    "?"
+                };
+                out.push_str(&format!(
+                    "            {tag} => Self::{name}({record}::decode_from(limits, reader){suffix}),\n"
+                ));
             }
             None => out.push_str(&format!("            {tag} => Self::{name},\n")),
         }

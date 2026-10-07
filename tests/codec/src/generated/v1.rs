@@ -49,6 +49,8 @@ pub enum Path {
     ReportTail,
     /// The tag of Choice.
     ChoiceTag,
+    /// Bytes after Marker.
+    MarkerTail,
 }
 
 /// A decoding or bound failure at a schema path.
@@ -245,6 +247,39 @@ impl Choice {
     }
 }
 
+/// Movable fields of Marker.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MarkerParts {
+}
+
+/// Marker in this codec family.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Marker {
+}
+
+impl Marker {
+    /// Makes a value within the given limits.
+    pub fn new(limits: &Limits, parts: MarkerParts) -> Result<Self, Problem> {
+        let MarkerParts {  } = parts;
+        let value = Self {  };
+        value.check(limits)?;
+        Ok(value)
+    }
+
+    /// Moves the fields out without copying.
+    #[must_use]
+    pub fn into_parts(self) -> MarkerParts { MarkerParts {  } }
+
+    fn check(&self, limits: &Limits) -> Result<(), Problem> {
+        let Self {} = self;
+        if limits.field_name > CEILINGS.field_name { return Err(Problem { path: Path::FieldName, reason: skein_codec::Reason::Bound }); }
+        if limits.field_value > CEILINGS.field_value { return Err(Problem { path: Path::FieldValue, reason: skein_codec::Reason::Bound }); }
+        if limits.report_title > CEILINGS.report_title { return Err(Problem { path: Path::ReportTitle, reason: skein_codec::Reason::Bound }); }
+        if limits.report_fields > CEILINGS.report_fields { return Err(Problem { path: Path::ReportFields, reason: skein_codec::Reason::Bound }); }
+        Ok(())
+    }
+}
+
 impl Field {
     /// Measures this record's wire encoding.
     #[must_use]
@@ -431,3 +466,389 @@ impl Choice {
     }
 }
 
+impl Marker {
+    /// Measures this empty record's wire encoding.
+    #[must_use]
+    pub fn measure(&self) -> u32 { 0_u32 }
+
+    /// Writes into a writer with room for the measured bytes.
+    pub fn encode(&self, writer: &mut skein_lib::Writer) -> Result<(), skein_lib::Overflow> {
+        writer.put(&[])
+    }
+
+    /// Reads a whole record and refuses trailing bytes.
+    pub fn decode(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {
+        let value = Self::decode_from(limits, reader)?;
+        if !reader.is_empty() { return Err(Problem { path: Path::MarkerTail, reason: skein_codec::Reason::Trailing }); }
+        Ok(value)
+    }
+
+    fn decode_from(limits: &Limits, _reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {
+        Self::new(limits, MarkerParts {})
+    }
+}
+
+fn limits_valid(limits: &Limits) -> bool {
+    limits.field_name <= CEILINGS.field_name && limits.field_value <= CEILINGS.field_value && limits.report_title <= CEILINGS.report_title && limits.report_fields <= CEILINGS.report_fields
+}
+
+impl Field {
+    /// Maximum encoded bytes under these limits.
+    #[must_use]
+    pub fn worst_case_bytes(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let mut size = 0_u64;
+        size = size.checked_add(4_u64.checked_add(u64::from(limits.field_name))?)?;
+        size = size.checked_add(4_u64.checked_add(u64::from(limits.field_value))?)?;
+        Some(size)
+    }
+
+    /// Maximum heap held by one decoded value under these limits.
+    #[must_use]
+    pub fn worst_case_heap(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let mut heap = 0_u64;
+        heap = heap.checked_add(u64::from(limits.field_name))?;
+        heap = heap.checked_add(u64::from(limits.field_value))?;
+        Some(heap)
+    }
+}
+
+impl Effect {
+    /// Maximum encoded bytes among variants.
+    #[must_use]
+    pub fn worst_case_bytes(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let biggest = 0_u64;
+        1_u64.checked_add(biggest)
+    }
+
+    /// Maximum heap held by any decoded variant.
+    #[must_use]
+    pub fn worst_case_heap(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let biggest = 0_u64;
+        Some(biggest)
+    }
+}
+
+impl Report {
+    /// Maximum encoded bytes under these limits.
+    #[must_use]
+    pub fn worst_case_bytes(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let mut size = 2_u64;
+        size = size.checked_add(4_u64.checked_add(u64::from(limits.report_title))?)?;
+        size = size.checked_add(4_u64.checked_add(u64::from(limits.report_fields).checked_mul(Field::worst_case_bytes(limits)?)?)?)?;
+        size = size.checked_add(Effect::worst_case_bytes(limits)?)?;
+        size = size.checked_add(1_u64.checked_add(1_u64)?)?;
+        size = size.checked_add(u64::from(2_u32))?;
+        size = size.checked_add(8_u64)?;
+        Some(size)
+    }
+
+    /// Maximum heap held by one decoded value under these limits.
+    #[must_use]
+    pub fn worst_case_heap(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let mut heap = 0_u64;
+        heap = heap.checked_add(u64::from(limits.report_title))?;
+        heap = heap.checked_add(List::<Field>::worst_case(limits.report_fields)?.checked_add(u64::from(limits.report_fields).checked_mul(Field::worst_case_heap(limits)?)?)?)?;
+        heap = heap.checked_add(Effect::worst_case_heap(limits)?)?;
+        heap = heap.checked_add(0_u64)?;
+        heap = heap.checked_add(0_u64)?;
+        heap = heap.checked_add(0_u64)?;
+        Some(heap)
+    }
+}
+
+impl Choice {
+    /// Maximum encoded bytes among variants.
+    #[must_use]
+    pub fn worst_case_bytes(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let mut biggest = 0_u64;
+        biggest = biggest.max(Report::worst_case_bytes(limits)?);
+        1_u64.checked_add(biggest)
+    }
+
+    /// Maximum heap held by any decoded variant.
+    #[must_use]
+    pub fn worst_case_heap(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let mut biggest = 0_u64;
+        biggest = biggest.max(Report::worst_case_heap(limits)?);
+        Some(biggest)
+    }
+}
+
+impl Marker {
+    /// Maximum encoded bytes under these limits.
+    #[must_use]
+    pub fn worst_case_bytes(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let size = 0_u64;
+        Some(size)
+    }
+
+    /// Maximum heap held by one decoded value under these limits.
+    #[must_use]
+    pub fn worst_case_heap(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let heap = 0_u64;
+        Some(heap)
+    }
+}
+
+/// Maximum wire bytes among this family's top-level types.
+#[must_use]
+pub fn worst_case_bytes(limits: &Limits) -> Option<u64> {
+    if !limits_valid(limits) { return None; }
+    let mut biggest = 0_u64;
+    biggest = biggest.max(Field::worst_case_bytes(limits)?);
+    biggest = biggest.max(Effect::worst_case_bytes(limits)?);
+    biggest = biggest.max(Report::worst_case_bytes(limits)?);
+    biggest = biggest.max(Choice::worst_case_bytes(limits)?);
+    biggest = biggest.max(Marker::worst_case_bytes(limits)?);
+    Some(biggest)
+}
+
+/// Maximum heap held by one decoded top-level value.
+#[must_use]
+pub fn worst_case_heap(limits: &Limits) -> Option<u64> {
+    if !limits_valid(limits) { return None; }
+    let mut biggest = 0_u64;
+    biggest = biggest.max(Field::worst_case_heap(limits)?);
+    biggest = biggest.max(Effect::worst_case_heap(limits)?);
+    biggest = biggest.max(Report::worst_case_heap(limits)?);
+    biggest = biggest.max(Choice::worst_case_heap(limits)?);
+    biggest = biggest.max(Marker::worst_case_heap(limits)?);
+    Some(biggest)
+}
+
+#[cfg(test)]
+mod golden_tests {
+    use super::{CEILINGS, Path, Field, FieldParts, Effect, Report, ReportParts, Choice, Marker, MarkerParts};
+    use alloc::boxed::Box;
+
+    #[test]
+    fn record_field_smallest() {
+        let value = Field::new(&CEILINGS, FieldParts { name: Box::from([].as_slice()), value: Box::from([].as_slice()) }).expect("golden within ceilings");
+        let golden: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Field::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn record_field_full() {
+        let value = Field::new(&CEILINGS, FieldParts { name: Box::from([97_u8, 98_u8, 99_u8].as_slice()), value: Box::from([0_u8, 127_u8, 255_u8].as_slice()) }).expect("golden within ceilings");
+        let golden: &[u8] = &[0, 0, 0, 3, 97, 98, 99, 0, 0, 0, 3, 0, 127, 255];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Field::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_effect_read_smallest() {
+        let value = Effect::Read;
+        let golden: &[u8] = &[0];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Effect::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_effect_read_full() {
+        let value = Effect::Read;
+        let golden: &[u8] = &[0];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Effect::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_effect_write_smallest() {
+        let value = Effect::Write;
+        let golden: &[u8] = &[1];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Effect::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_effect_write_full() {
+        let value = Effect::Write;
+        let golden: &[u8] = &[1];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Effect::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn record_report_smallest() {
+        let value = Report::new(&CEILINGS, ReportParts { title: Box::from([].as_slice()), fields: skein_lib::List::with_capacity(0), effect: Effect::Read, present: None, nonce: [0_u8; 2], age: skein_lib::Duration::from_nanos(0_u64) }).expect("golden within ceilings");
+        let golden: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Report::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn record_report_full() {
+        let value = Report::new(&CEILINGS, ReportParts { title: Box::from([97_u8, 98_u8, 99_u8].as_slice()), fields: { let mut items = skein_lib::List::with_capacity(1); items.push(Field::new(&CEILINGS, FieldParts { name: Box::from([97_u8, 98_u8, 99_u8].as_slice()), value: Box::from([0_u8, 127_u8, 255_u8].as_slice()) }).expect("golden within ceilings")).expect("one slot"); items }, effect: Effect::Read, present: Some(true), nonce: [165_u8; 2], age: skein_lib::Duration::from_nanos(u64::MAX) }).expect("golden within ceilings");
+        let golden: &[u8] = &[0, 1, 0, 0, 0, 3, 97, 98, 99, 0, 0, 0, 1, 0, 0, 0, 3, 97, 98, 99, 0, 0, 0, 3, 0, 127, 255, 0, 1, 1, 165, 165, 255, 255, 255, 255, 255, 255, 255, 255];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Report::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_choice_report_smallest() {
+        let value = Choice::Report(Report::new(&CEILINGS, ReportParts { title: Box::from([].as_slice()), fields: skein_lib::List::with_capacity(0), effect: Effect::Read, present: None, nonce: [0_u8; 2], age: skein_lib::Duration::from_nanos(0_u64) }).expect("golden within ceilings"));
+        let golden: &[u8] = &[0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Choice::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_choice_report_full() {
+        let value = Choice::Report(Report::new(&CEILINGS, ReportParts { title: Box::from([97_u8, 98_u8, 99_u8].as_slice()), fields: { let mut items = skein_lib::List::with_capacity(1); items.push(Field::new(&CEILINGS, FieldParts { name: Box::from([97_u8, 98_u8, 99_u8].as_slice()), value: Box::from([0_u8, 127_u8, 255_u8].as_slice()) }).expect("golden within ceilings")).expect("one slot"); items }, effect: Effect::Read, present: Some(true), nonce: [165_u8; 2], age: skein_lib::Duration::from_nanos(u64::MAX) }).expect("golden within ceilings"));
+        let golden: &[u8] = &[0, 0, 1, 0, 0, 0, 3, 97, 98, 99, 0, 0, 0, 1, 0, 0, 0, 3, 97, 98, 99, 0, 0, 0, 3, 0, 127, 255, 0, 1, 1, 165, 165, 255, 255, 255, 255, 255, 255, 255, 255];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Choice::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_choice_empty_smallest() {
+        let value = Choice::Empty;
+        let golden: &[u8] = &[1];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Choice::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_choice_empty_full() {
+        let value = Choice::Empty;
+        let golden: &[u8] = &[1];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Choice::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn record_marker_smallest() {
+        let value = Marker::new(&CEILINGS, MarkerParts {  }).expect("golden within ceilings");
+        let golden: &[u8] = &[];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Marker::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn record_marker_full() {
+        let value = Marker::new(&CEILINGS, MarkerParts {  }).expect("golden within ceilings");
+        let golden: &[u8] = &[];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Marker::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn bound_field_name() {
+        fn wire(count: u32, payload: bool) -> Box<[u8]> {
+            let body = usize::try_from(count).expect("u32 fits usize").checked_mul(1).expect("schema ceiling");
+            let header = 0_usize.checked_add(4).expect("header size");
+            let total = if payload { let with_body = header.checked_add(body).expect("body size"); with_body.checked_add(4_usize).expect("wire size") } else { header };
+            let mut writer = skein_lib::Writer::new(total);
+            writer.put(&[]).expect("prefix room");
+            writer.put(&count.to_be_bytes()).expect("length room");
+            if payload {
+                writer.put(&skein_lib::bytes::zeroed(body)).expect("body room");
+                writer.put(&[0, 0, 0, 0]).expect("suffix room");
+            }
+            writer.finish()
+        }
+        Field::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire(4, true))).expect("field at ceiling");
+        let problem = Field::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire(5, false))).expect_err("field past ceiling");
+        assert_eq!((problem.path, problem.reason), (Path::FieldName, skein_codec::Reason::Bound));
+    }
+
+    #[test]
+    fn bound_field_value() {
+        fn wire(count: u32, payload: bool) -> Box<[u8]> {
+            let body = usize::try_from(count).expect("u32 fits usize").checked_mul(1).expect("schema ceiling");
+            let header = 4_usize.checked_add(4).expect("header size");
+            let total = if payload { let with_body = header.checked_add(body).expect("body size"); with_body.checked_add(0_usize).expect("wire size") } else { header };
+            let mut writer = skein_lib::Writer::new(total);
+            writer.put(&[0, 0, 0, 0]).expect("prefix room");
+            writer.put(&count.to_be_bytes()).expect("length room");
+            if payload {
+                writer.put(&skein_lib::bytes::zeroed(body)).expect("body room");
+                writer.put(&[]).expect("suffix room");
+            }
+            writer.finish()
+        }
+        Field::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire(4, true))).expect("field at ceiling");
+        let problem = Field::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire(5, false))).expect_err("field past ceiling");
+        assert_eq!((problem.path, problem.reason), (Path::FieldValue, skein_codec::Reason::Bound));
+    }
+
+    #[test]
+    fn bound_report_title() {
+        fn wire(count: u32, payload: bool) -> Box<[u8]> {
+            let body = usize::try_from(count).expect("u32 fits usize").checked_mul(1).expect("schema ceiling");
+            let header = 2_usize.checked_add(4).expect("header size");
+            let total = if payload { let with_body = header.checked_add(body).expect("body size"); with_body.checked_add(16_usize).expect("wire size") } else { header };
+            let mut writer = skein_lib::Writer::new(total);
+            writer.put(&[0, 1]).expect("prefix room");
+            writer.put(&count.to_be_bytes()).expect("length room");
+            if payload {
+                writer.put(&skein_lib::bytes::zeroed(body)).expect("body room");
+                writer.put(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).expect("suffix room");
+            }
+            writer.finish()
+        }
+        Report::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire(8, true))).expect("field at ceiling");
+        let problem = Report::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire(9, false))).expect_err("field past ceiling");
+        assert_eq!((problem.path, problem.reason), (Path::ReportTitle, skein_codec::Reason::Bound));
+    }
+
+    #[test]
+    fn bound_report_fields() {
+        fn wire(count: u32, payload: bool) -> Box<[u8]> {
+            let body = usize::try_from(count).expect("u32 fits usize").checked_mul(8).expect("schema ceiling");
+            let header = 6_usize.checked_add(4).expect("header size");
+            let total = if payload { let with_body = header.checked_add(body).expect("body size"); with_body.checked_add(12_usize).expect("wire size") } else { header };
+            let mut writer = skein_lib::Writer::new(total);
+            writer.put(&[0, 1, 0, 0, 0, 0]).expect("prefix room");
+            writer.put(&count.to_be_bytes()).expect("length room");
+            if payload {
+                for _item in 0_u32..count { writer.put(&[0, 0, 0, 0, 0, 0, 0, 0]).expect("item room"); }
+                writer.put(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).expect("suffix room");
+            }
+            writer.finish()
+        }
+        Report::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire(2, true))).expect("field at ceiling");
+        let problem = Report::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire(3, false))).expect_err("field past ceiling");
+        assert_eq!((problem.path, problem.reason), (Path::ReportFields, skein_codec::Reason::Bound));
+    }
+
+}

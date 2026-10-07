@@ -17,3 +17,5 @@ versioned record Report {
 }
 
 enum Choice { report: Report, empty }
+
+record Marker {}

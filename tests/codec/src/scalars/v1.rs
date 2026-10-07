@@ -13,6 +13,8 @@ pub const CEILINGS: Limits = Limits {
 /// A field or tag that caused a codec problem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Path {
+    /// Bytes after Empty.
+    EmptyTail,
     /// The tag of Flag.
     FlagTag,
     /// The a field of Scalars.
@@ -40,6 +42,30 @@ pub enum Path {
 pub struct Problem {
     pub path: Path,
     pub reason: skein_codec::Reason,
+}
+
+/// Movable fields of Empty.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct EmptyParts {
+}
+
+/// Empty in this codec family.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Empty {
+}
+
+impl Empty {
+    /// Makes a value; this family has no adjustable bounds.
+    #[must_use]
+    pub fn new(_limits: &Limits, parts: EmptyParts) -> Self {
+        let EmptyParts {  } = parts;
+        Self {  }
+    }
+
+    /// Moves the fields out without copying.
+    #[must_use]
+    pub fn into_parts(self) -> EmptyParts { EmptyParts {  } }
+
 }
 
 /// Flag in this codec family.
@@ -137,6 +163,28 @@ impl Scalars {
 
 }
 
+impl Empty {
+    /// Measures this empty record's wire encoding.
+    #[must_use]
+    pub fn measure(&self) -> u32 { 0_u32 }
+
+    /// Writes into a writer with room for the measured bytes.
+    pub fn encode(&self, writer: &mut skein_lib::Writer) -> Result<(), skein_lib::Overflow> {
+        writer.put(&[])
+    }
+
+    /// Reads a whole record and refuses trailing bytes.
+    pub fn decode(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {
+        let value = Self::decode_from(limits, reader);
+        if !reader.is_empty() { return Err(Problem { path: Path::EmptyTail, reason: skein_codec::Reason::Trailing }); }
+        Ok(value)
+    }
+
+    fn decode_from(limits: &Limits, _reader: &mut skein_lib::Reader<'_>) -> Self {
+        Self::new(limits, EmptyParts {})
+    }
+}
+
 impl Flag {
     /// Measures this variant's wire encoding.
     #[must_use]
@@ -231,3 +279,182 @@ impl Scalars {
     }
 }
 
+fn limits_valid(_limits: &Limits) -> bool { true }
+
+impl Empty {
+    /// Maximum encoded bytes under these limits.
+    #[must_use]
+    pub fn worst_case_bytes(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let size = 0_u64;
+        Some(size)
+    }
+
+    /// Maximum heap held by one decoded value under these limits.
+    #[must_use]
+    pub fn worst_case_heap(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let heap = 0_u64;
+        Some(heap)
+    }
+}
+
+impl Flag {
+    /// Maximum encoded bytes among variants.
+    #[must_use]
+    pub fn worst_case_bytes(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let biggest = 0_u64;
+        1_u64.checked_add(biggest)
+    }
+
+    /// Maximum heap held by any decoded variant.
+    #[must_use]
+    pub fn worst_case_heap(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let biggest = 0_u64;
+        Some(biggest)
+    }
+}
+
+impl Scalars {
+    /// Maximum encoded bytes under these limits.
+    #[must_use]
+    pub fn worst_case_bytes(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let mut size = 0_u64;
+        size = size.checked_add(1_u64)?;
+        size = size.checked_add(2_u64)?;
+        size = size.checked_add(4_u64)?;
+        size = size.checked_add(8_u64)?;
+        size = size.checked_add(1_u64)?;
+        size = size.checked_add(8_u64)?;
+        size = size.checked_add(u64::from(2_u32))?;
+        size = size.checked_add(Flag::worst_case_bytes(limits)?)?;
+        Some(size)
+    }
+
+    /// Maximum heap held by one decoded value under these limits.
+    #[must_use]
+    pub fn worst_case_heap(limits: &Limits) -> Option<u64> {
+        if !limits_valid(limits) { return None; }
+        let mut heap = 0_u64;
+        heap = heap.checked_add(0_u64)?;
+        heap = heap.checked_add(0_u64)?;
+        heap = heap.checked_add(0_u64)?;
+        heap = heap.checked_add(0_u64)?;
+        heap = heap.checked_add(0_u64)?;
+        heap = heap.checked_add(0_u64)?;
+        heap = heap.checked_add(0_u64)?;
+        heap = heap.checked_add(Flag::worst_case_heap(limits)?)?;
+        Some(heap)
+    }
+}
+
+/// Maximum wire bytes among this family's top-level types.
+#[must_use]
+pub fn worst_case_bytes(limits: &Limits) -> Option<u64> {
+    if !limits_valid(limits) { return None; }
+    let mut biggest = 0_u64;
+    biggest = biggest.max(Empty::worst_case_bytes(limits)?);
+    biggest = biggest.max(Flag::worst_case_bytes(limits)?);
+    biggest = biggest.max(Scalars::worst_case_bytes(limits)?);
+    Some(biggest)
+}
+
+/// Maximum heap held by one decoded top-level value.
+#[must_use]
+pub fn worst_case_heap(limits: &Limits) -> Option<u64> {
+    if !limits_valid(limits) { return None; }
+    let mut biggest = 0_u64;
+    biggest = biggest.max(Empty::worst_case_heap(limits)?);
+    biggest = biggest.max(Flag::worst_case_heap(limits)?);
+    biggest = biggest.max(Scalars::worst_case_heap(limits)?);
+    Some(biggest)
+}
+
+#[cfg(test)]
+mod golden_tests {
+    use super::{CEILINGS, Empty, EmptyParts, Flag, Scalars, ScalarsParts};
+
+    #[test]
+    fn record_empty_smallest() {
+        let value = Empty::new(&CEILINGS, EmptyParts {  });
+        let golden: &[u8] = &[];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Empty::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn record_empty_full() {
+        let value = Empty::new(&CEILINGS, EmptyParts {  });
+        let golden: &[u8] = &[];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Empty::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_flag_off_smallest() {
+        let value = Flag::Off;
+        let golden: &[u8] = &[0];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Flag::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_flag_off_full() {
+        let value = Flag::Off;
+        let golden: &[u8] = &[0];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Flag::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_flag_on_smallest() {
+        let value = Flag::On;
+        let golden: &[u8] = &[1];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Flag::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn enum_flag_on_full() {
+        let value = Flag::On;
+        let golden: &[u8] = &[1];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Flag::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn record_scalars_smallest() {
+        let value = Scalars::new(&CEILINGS, ScalarsParts { a: 0_u8, b: 0_u16, c: 0_u32, d: 0_u64, e: false, f: skein_lib::Duration::from_nanos(0_u64), g: [0_u8; 2], h: Flag::Off });
+        let golden: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Scalars::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+    #[test]
+    fn record_scalars_full() {
+        let value = Scalars::new(&CEILINGS, ScalarsParts { a: u8::MAX, b: u16::MAX, c: u32::MAX, d: u64::MAX, e: true, f: skein_lib::Duration::from_nanos(u64::MAX), g: [165_u8; 2], h: Flag::Off });
+        let golden: &[u8] = &[255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 1, 255, 255, 255, 255, 255, 255, 255, 255, 165, 165, 0];
+        let mut writer = skein_lib::Writer::new(usize::try_from(value.measure()).expect("size fits usize"));
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), golden);
+        assert_eq!(Scalars::decode(&CEILINGS, &mut skein_lib::Reader::new(golden)), Ok(value));
+    }
+
+}

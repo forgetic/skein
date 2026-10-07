@@ -18,5 +18,12 @@ fn main() -> Result<(), Box<dyn core::error::Error>> {
     let output = generate(&schema);
     let path = Path::new(&out_dir).join(format!("v{}.rs", schema.version));
     std::fs::write(path, output.rust)?;
+    let schema_directory = Path::new(&schema_path).parent().ok_or("schema has no parent directory")?;
+    let crate_directory = schema_directory.parent().ok_or("schema directory has no parent")?;
+    let golden_directory = crate_directory.join("golden").join(format!("v{}", schema.version));
+    std::fs::create_dir_all(&golden_directory)?;
+    for golden in output.goldens {
+        std::fs::write(golden_directory.join(golden.name), golden.bytes)?;
+    }
     Ok(())
 }

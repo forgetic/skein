@@ -133,6 +133,9 @@ fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
     out.push_str(&format!("    /// Moves the fields out without copying.\n    #[must_use]\n    pub fn into_parts(self) -> {}Parts {{ {}Parts {{ {moved} }} }}\n\n", record.name, record.name));
     if !emit_limits::bound_names(schema).is_empty() {
         out.push_str("    fn check(&self, limits: &Limits) -> Result<(), Problem> {\n");
+        if record.fields.is_empty() {
+            out.push_str("        let Self {} = self;\n");
+        }
         emit_limit_checks(schema, out);
         for field in &record.fields {
             let bound_name = format!("{}_{}", emit_limits::snake(&record.name), field.name);
