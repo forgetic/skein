@@ -311,6 +311,11 @@ impl Sim {
             let (spec, ended, available, exit) = {
                 let child = &self.process(pid).children[&child_id];
                 let pipe = &child.pipes[index];
+                // Completing an earlier waiter can reenter wake_pipe and
+                // consume this waiter before the outer pass reaches it.
+                if pipe.waiting != Some(token) {
+                    continue;
+                }
                 (pipe.spec, pipe.ended, !pipe.bytes.is_empty(), child.exit.is_some())
             };
             let ready = match spec.way {
@@ -347,5 +352,74 @@ impl Sim {
             return true;
         };
         !target.open || target.bytes.len() < usize::try_from(self.config.buffer).expect("buffer fits")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use skein_io::kernel::{Done, Exit, Op, Pipe, Signal, Spawn, Submit, Way};
+    use skein_lib::{Queue, Token};
+
+    use crate::{Answer, Ask, Config, Handle, Program, Reply, Sim};
+
+    #[test]
+    fn terminating_a_child_wakes_each_waiting_output_pipe_once() {
+        let mut sim = Sim::new(1, Config::calm());
+        let pid = sim.spawn_process();
+        let root = sim.root(pid, Handle::new(1));
+        let mut submits = Queue::with_capacity(4);
+        submits.push(Submit {
+            op: Token::new(0),
+            kind: Op::Spawn {
+                spawn: Box::new(Spawn {
+                    program: b"never".to_vec().into_boxed_slice(),
+                    args: Box::new([]),
+                    env: Box::new([]),
+                    root,
+                    dir: Box::new([]),
+                    pipes: Box::new([Pipe { child: 1, way: Way::Out }, Pipe { child: 2, way: Way::Out }]),
+                }),
+            },
+        });
+        sim.submit(pid, &mut submits);
+
+        let mut calls = Queue::with_capacity(1);
+        sim.calls(&mut calls);
+        let call = calls.pop().expect("the spawn call");
+        assert!(matches!(call.ask, Ask::Spawn { .. }));
+        let mut answers = Queue::with_capacity(1);
+        answers.push(Answer { ticket: call.ticket, result: Ok(Reply::Program(Program::Never)) });
+        sim.answer(&mut answers);
+
+        let mut completes = Queue::with_capacity(4);
+        sim.reap(pid, &mut completes);
+        let spawned = completes.pop().expect("the spawn completion");
+        let Ok(Done::Spawned { pidfd, pipes }) = spawned.result else {
+            unreachable!("the child and its pipes are created")
+        };
+        assert_eq!(pipes.len(), 2);
+
+        submits.push(Submit { op: Token::new(1), kind: Op::Wait { pidfd } });
+        submits.push(Submit { op: Token::new(2), kind: Op::PipeRead { fd: pipes[0], buf: Box::new([0; 1]) } });
+        submits.push(Submit { op: Token::new(3), kind: Op::PipeRead { fd: pipes[1], buf: Box::new([0; 1]) } });
+        submits.push(Submit { op: Token::new(4), kind: Op::Signal { pidfd, signal: Signal::Terminate } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+
+        assert_eq!(completes.len(), 4);
+        let mut seen = [false; 4];
+        while let Some(complete) = completes.pop() {
+            let index = usize::try_from(complete.op.raw() - 1).expect("the submitted token");
+            assert!(!seen[index], "one completion per token");
+            seen[index] = true;
+            match complete.op.raw() {
+                1 => assert_eq!(complete.result, Ok(Done::Exit(Exit::Signal(15)))),
+                2 | 3 => assert_eq!(complete.result, Ok(Done::Count(0))),
+                4 => assert_eq!(complete.result, Ok(Done::Nothing)),
+                _ => unreachable!("only the four expected completions"),
+            }
+        }
+        assert!(seen.into_iter().all(|completed| completed));
+        assert_eq!(sim.in_flight(pid), 0);
     }
 }
