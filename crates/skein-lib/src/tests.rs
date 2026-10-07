@@ -6,6 +6,7 @@ mod bytes;
 mod containers;
 mod handles;
 mod held;
+mod journal;
 mod streams;
 mod time;
 
