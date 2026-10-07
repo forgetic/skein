@@ -1,10 +1,22 @@
 //! A bounded commit barrier for writes and outputs (lib.md, section 11).
 //!
-//! The journal keeps accepted commits, their numbers, and outputs held for
-//! durability. It never inspects writes or outputs and never knows whether a
-//! store has made a commit durable until its owner says so. Admission and
-//! acceptance are separate: a decision reserves its room before the owner
-//! changes state, then acceptance makes at most one commit.
+//! The journal keeps accepted commits, their numbers, outputs held for
+//! durability, and untagged outputs at its door. It never inspects writes or
+//! outputs, and it learns durability only when its owner answers a commit.
+//! `takes` and `decision` reserve room before the owner changes state;
+//! `accept` makes at most one commit. The owner sends `commit` values to its
+//! store, answers them with `committed` or `failed`, then calls `release`.
+//!
+//! Commit transitions (lib.md, section 11):
+//!
+//! | State | Event | Next | What becomes available |
+//! |---|---|---|---|
+//! | open | `commit` | sent | the writes go to the owner |
+//! | sent | `committed(n)` | durable | output tagged at most `n` |
+//! | sent | `failed(n)` | failed | nothing tagged at or after `n`; admission stops |
+//!
+//! A decision without writes makes no commit. Its outputs follow the last
+//! commit made, or number zero, which is already durable.
 
 use crate::Queue;
 
@@ -39,6 +51,23 @@ pub struct Commit<W> {
     pub number: u64,
     /// The writes the store applies together, in order.
     pub writes: Queue<W>,
+}
+
+/// Whether release moved outputs, found none ready, or found a stopped journal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Released {
+    /// At least one output moved to the caller's queue.
+    Some,
+    /// No output was ready or the caller's queue had no room.
+    None,
+    /// The journal stopped after a failure or decision overrun.
+    Stopped,
+}
+
+#[derive(Debug)]
+struct Held<O> {
+    after: u64,
+    output: O,
 }
 
 /// One decision's reserved writes and held outputs.
@@ -77,9 +106,12 @@ pub struct Journal<W, O> {
     limits: JournalLimits,
     pending: Queue<Commit<W>>,
     outstanding: Queue<u64>,
-    held: Queue<O>,
+    held: Queue<Held<O>>,
+    now: Queue<O>,
     reserved: Option<JournalRoom>,
     last_number: u64,
+    sent: u64,
+    durable: u64,
     stopped: bool,
 }
 
@@ -92,8 +124,11 @@ impl<W, O> Journal<W, O> {
             pending: Queue::with_capacity(limits.commits),
             outstanding: Queue::with_capacity(limits.commits),
             held: Queue::with_capacity(limits.held),
+            now: Queue::with_capacity(limits.now),
             reserved: None,
             last_number: 0,
+            sent: 0,
+            durable: 0,
             stopped: false,
         }
     }
@@ -127,10 +162,21 @@ impl<W, O> Journal<W, O> {
         })
     }
 
+    /// Adds an untagged output at the door, returning it if the door is full.
+    pub fn now(&mut self, output: O) -> Result<(), O> {
+        if self.stopped {
+            return Err(output);
+        }
+        self.now.try_push(output)
+    }
+
     /// Accepts one decision; an overrun stops the journal before emission.
     pub fn accept(&mut self, mut decision: Decision<W, O>) {
         assert_eq!(self.reserved, Some(decision.room), "accept the reserved decision");
         self.reserved = None;
+        if self.stopped {
+            return;
+        }
         if decision.overrun {
             self.stopped = true;
             return;
@@ -141,13 +187,73 @@ impl<W, O> Journal<W, O> {
             self.pending.push(Commit { number: self.last_number, writes: decision.writes });
         }
         while let Some(output) = decision.held.pop() {
-            self.held.push(output);
+            self.held.push(Held { after: self.last_number, output });
         }
     }
 
     /// Takes the next numbered commit for the store, in order.
     pub fn commit(&mut self) -> Option<Commit<W>> {
-        self.pending.pop()
+        if self.stopped {
+            return None;
+        }
+        let commit = self.pending.pop()?;
+        self.sent = commit.number;
+        Some(commit)
+    }
+
+    /// Marks a sent commit and every earlier one durable; invalid answers stop.
+    pub fn committed(&mut self, number: u64) {
+        if self.stopped {
+            return;
+        }
+        if number <= self.durable || number > self.sent {
+            self.stopped = true;
+            return;
+        }
+        while let Some(front) = self.outstanding.iter().next() {
+            if *front > number {
+                break;
+            }
+            self.outstanding.pop().expect("front exists");
+        }
+        self.durable = number;
+    }
+
+    /// Stops after a failed sent commit; nothing tagged with it or later leaves.
+    pub fn failed(&mut self, number: u64) {
+        if self.stopped {
+            return;
+        }
+        if number <= self.durable || number > self.sent {
+            self.stopped = true;
+            return;
+        }
+        self.stopped = true;
+    }
+
+    /// Moves at most the release limit of ready outputs into `out`.
+    pub fn release(&mut self, out: &mut Queue<O>) -> Released {
+        if self.stopped {
+            return Released::Stopped;
+        }
+        let mut moved = 0;
+        while moved < self.limits.release && out.room() > 0 {
+            let held_ready = match self.held.iter().next() {
+                Some(held) => held.after <= self.durable,
+                None => false,
+            };
+            if let Some(output) = self.now.pop() {
+                out.push(output);
+                moved = moved.checked_add(1).expect("bounded by the release limit");
+            } else if held_ready {
+                let held = self.held.pop().expect("ready front exists");
+                out.push(held.output);
+                moved = moved.checked_add(1).expect("bounded by the release limit");
+            } else {
+                break;
+            }
+        }
+        if moved > 0 { Released::Some } else { Released::None }
     }
 
     /// Whether an overrun has stopped admission and emission.
@@ -161,9 +267,15 @@ impl<W, O> Journal<W, O> {
     pub fn worst_case(limits: &JournalLimits) -> Option<u64> {
         let commits = Queue::<Commit<W>>::worst_case(limits.commits)?;
         let outstanding = Queue::<u64>::worst_case(limits.commits)?;
-        let held = Queue::<O>::worst_case(limits.held)?;
+        let held = Queue::<Held<O>>::worst_case(limits.held)?;
+        let now = Queue::<O>::worst_case(limits.now)?;
         let writes = Queue::<W>::worst_case(limits.writes)?.checked_mul(u64::from(limits.commits).checked_add(1)?)?;
         let decision_held = Queue::<O>::worst_case(limits.held)?;
-        commits.checked_add(outstanding)?.checked_add(held)?.checked_add(writes)?.checked_add(decision_held)
+        commits
+            .checked_add(outstanding)?
+            .checked_add(held)?
+            .checked_add(now)?
+            .checked_add(writes)?
+            .checked_add(decision_held)
     }
 }

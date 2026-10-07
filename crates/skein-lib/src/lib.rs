@@ -43,7 +43,7 @@ pub use decimal::Decimal;
 pub use env::Env;
 pub use id::Id;
 pub use intake::Intake;
-pub use journal::{Commit, Decision, Journal, JournalLimits, JournalRoom};
+pub use journal::{Commit, Decision, Journal, JournalLimits, JournalRoom, Released};
 pub use list::List;
 pub use map::Map;
 pub use queue::Queue;
