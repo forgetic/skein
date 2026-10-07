@@ -435,11 +435,13 @@ version = "0.0.0"
 dependencies = [
  "skein-fake-llm-domain",
  "skein-fake-llm-protocol",
+ "skein-heap",
  "skein-io",
  "skein-lib",
  "skein-llm",
  "skein-llm-connection",
  "skein-llm-world",
+ "skein-sim",
  "skein-tls",
  "skein-tls-world",
 ]

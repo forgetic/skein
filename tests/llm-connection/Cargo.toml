@@ -16,6 +16,10 @@ skein-llm-world = { path = "../llm" }
 skein-tls-world = { path = "../tls" }
 skein-fake-llm-domain.workspace = true
 skein-fake-llm-protocol.workspace = true
+skein-sim.workspace = true
+
+[dev-dependencies]
+skein-heap.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"
