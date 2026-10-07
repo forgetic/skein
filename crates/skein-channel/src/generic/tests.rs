@@ -280,3 +280,156 @@ fn opening_refusal_reasons_cover_magic_range_version_and_owner() {
     }
     assert!(saw_refusal);
 }
+
+#[expect(clippy::wildcard_enum_match_arm, reason = "the test fails on unexpected opening events")]
+fn ready_pair() -> (Peer, Peer) {
+    let mut initiator = Peer::new(Role::Initiator);
+    let mut responder = Peer::new(Role::Responder);
+    initiator.down(Request::Open { credential: Box::from([]) });
+    let mut first_ready = false;
+    let mut second_ready = false;
+    for _ in 0_u32..80_u32 {
+        initiator.step(&mut responder);
+        responder.step(&mut initiator);
+        while let Some(event) = responder.events.pop() {
+            match event {
+                Event::Opening { .. } => responder.down(Request::Accept { version: 2 }),
+                Event::Ready { version: 2, .. } => second_ready = true,
+                Event::Drained => {}
+                event => panic!("unexpected responder opening event: {event:?}"),
+            }
+        }
+        while let Some(event) = initiator.events.pop() {
+            match event {
+                Event::Ready { version: 2, .. } => first_ready = true,
+                Event::Drained => {}
+                event => panic!("unexpected initiator opening event: {event:?}"),
+            }
+        }
+        if first_ready && second_ready {
+            return (initiator, responder);
+        }
+    }
+    panic!("both peers should become ready");
+}
+
+#[test]
+#[expect(clippy::wildcard_enum_match_arm, reason = "the test fails on unexpected events")]
+fn one_read_skips_unknown_body_then_delivers_chunked_known_body() {
+    let (mut initiator, mut responder) = ready_pair();
+    let mut unknown = frame_writer(0x01ff, 40).expect("bounded unknown frame");
+    unknown.put(&[7_u8; 40]).expect("measured body");
+    let unknown = unknown.finish().expect("filled frame");
+    let mut known = frame_writer(0x0101, 32).expect("bounded known frame");
+    known.put(&[9_u8; 32]).expect("measured body");
+    let known = known.finish().expect("filled frame");
+    initiator.input.extend(unknown.bytes().iter().copied());
+    initiator.input.extend(known.bytes().iter().copied());
+    initiator.input.extend(known.bytes().iter().copied());
+    initiator.down(Request::Read);
+    let mut body_count = 0_u32;
+    for _ in 0_u32..40_u32 {
+        initiator.step(&mut responder);
+        while let Some(event) = initiator.events.pop() {
+            match event {
+                Event::Body { kind, body } => {
+                    assert_eq!(kind, 0x0101);
+                    assert_eq!(&*body, &[9_u8; 32]);
+                    body_count = body_count.checked_add(1).expect("bounded count");
+                }
+                Event::Drained => {}
+                event => panic!("unexpected read event: {event:?}"),
+            }
+        }
+    }
+    assert_eq!(body_count, 1);
+    assert_eq!(initiator.input.len(), usize::try_from(known.wire_len()).expect("bounded frame"));
+    initiator.down(Request::Read);
+    for _ in 0_u32..20_u32 {
+        initiator.step(&mut responder);
+    }
+    match initiator.events.pop() {
+        Some(Event::Body { kind: 0x0101, .. }) => {}
+        event => panic!("second Read should deliver the second body: {event:?}"),
+    }
+    let mut answer = Vec::new();
+    while let Some(byte) = responder.input.pop_front() {
+        answer.push(byte);
+    }
+    let header = parse_header(answer.get(..8).expect("Unsupported header")).expect("valid header");
+    assert_eq!(header.kind, 6);
+    match decode_control(header.kind, answer.get(8..).expect("Unsupported body"), &limits()).expect("Unsupported") {
+        Control::Unsupported { kind } => assert_eq!(kind, 0x01ff),
+        _ => panic!("expected Unsupported"),
+    }
+}
+
+#[test]
+#[expect(clippy::disallowed_macros, reason = "the test uses an ordinary Rust vector for peer bytes")]
+fn wrong_direction_and_oversized_headers_refuse_before_body() {
+    let cases = [(0x0101_u16, 0_u32, true), (0x0101, 65, false), (0x01ff, 129, false)];
+    for (kind, body_len, target_responder) in cases {
+        let (mut initiator, mut responder) = ready_pair();
+        let (target, other) =
+            if target_responder { (&mut responder, &mut initiator) } else { (&mut initiator, &mut responder) };
+        let mut frame = frame_writer(kind, body_len).expect("bounded test frame");
+        let body = alloc::vec![0_u8; usize::try_from(body_len).expect("small body")];
+        frame.put(&body).expect("measured frame");
+        let frame = frame.finish().expect("complete frame");
+        target.input.extend(frame.bytes().get(..8).expect("header").iter().copied());
+        target.down(Request::Read);
+        for _ in 0_u32..25_u32 {
+            target.step(other);
+        }
+        let mut refused = false;
+        while let Some(event) = target.events.pop() {
+            if let Event::Closed { why: super::Closed::RefusedHere(3) } = event {
+                refused = true;
+            }
+        }
+        assert!(refused, "invalid header {kind} length {body_len} should send framing refusal");
+        let mut answer = Vec::new();
+        while let Some(byte) = other.input.pop_front() {
+            answer.push(byte);
+        }
+        let header = parse_header(answer.get(..8).expect("Refuse header")).expect("valid header");
+        assert_eq!(header.kind, 3);
+    }
+}
+
+#[test]
+fn end_between_frames_answers_read_and_end_inside_header_or_body_closes() {
+    let (mut initiator, mut responder) = ready_pair();
+    initiator.down(Request::Read);
+    initiator.step(&mut responder);
+    initiator.machine.up(LowerEvent::Read(stream::Up::End), &mut initiator.events, &mut initiator.below);
+    match initiator.events.pop() {
+        Some(Event::Ended) => {}
+        event => panic!("expected Ended: {event:?}"),
+    }
+
+    let (mut initiator, mut responder) = ready_pair();
+    initiator.down(Request::Read);
+    initiator.input.push_back(1);
+    initiator.step(&mut responder);
+    initiator.machine.up(LowerEvent::Read(stream::Up::End), &mut initiator.events, &mut initiator.below);
+    match initiator.events.pop() {
+        Some(Event::Closed { why: super::Closed::Truncated }) => {}
+        event => panic!("expected truncated header: {event:?}"),
+    }
+
+    let (mut initiator, mut responder) = ready_pair();
+    let mut frame = frame_writer(0x0101, 32).expect("measured frame");
+    frame.put(&[1_u8; 32]).expect("body fits");
+    let frame = frame.finish().expect("complete frame");
+    initiator.input.extend(frame.bytes().get(..10).expect("head and partial body").iter().copied());
+    initiator.down(Request::Read);
+    for _ in 0_u32..4_u32 {
+        initiator.step(&mut responder);
+    }
+    initiator.machine.up(LowerEvent::Read(stream::Up::End), &mut initiator.events, &mut initiator.below);
+    match initiator.events.pop() {
+        Some(Event::Closed { why: super::Closed::Truncated }) => {}
+        event => panic!("expected truncated body: {event:?}"),
+    }
+}

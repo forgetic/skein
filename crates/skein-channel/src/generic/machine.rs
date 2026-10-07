@@ -23,6 +23,7 @@ use skein_lib::{List, Queue, Token, bytes, stream};
 use super::boundary::{Closed, Event, Lower, LowerEvent, ReadWait, Request, Waiting, WriteWait};
 use super::frame::{Control, Frame, Header, Term, control_frame, decode_control, parse_header};
 use super::opening::{accept_open, check_terms, local_terms, offers_version};
+use super::read::{ReadKind, classify};
 use super::schema::{Limits, Role, Schema, SchemaError};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -75,8 +76,10 @@ impl Phase {
 
 #[derive(Debug)]
 enum ReadState {
-    Header,
+    Header { first: Option<u8> },
     Body { header: Header, body: Box<[u8]>, filled: u32 },
+    Skip { kind: u16, remaining: u32 },
+    Ended,
     Idle,
 }
 
@@ -96,6 +99,8 @@ pub struct Machine {
     phase: Phase,
     read: ReadState,
     read_outstanding: bool,
+    read_credit: bool,
+    pending_unsupported: Option<u16>,
     output: Queue<Queued>,
     output_right: Option<Token>,
     output_granted: bool,
@@ -113,7 +118,7 @@ impl Machine {
         let output_capacity = limits.output_frames.checked_add(3).ok_or(SchemaError::InvalidLimit)?;
         let (phase, read) = match role {
             Role::Initiator => (Phase::Idle, ReadState::Idle),
-            Role::Responder => (Phase::WaitOpen, ReadState::Header),
+            Role::Responder => (Phase::WaitOpen, ReadState::Header { first: None }),
         };
         Ok(Machine {
             schema,
@@ -122,6 +127,8 @@ impl Machine {
             phase,
             read,
             read_outstanding: false,
+            read_credit: false,
+            pending_unsupported: None,
             output: Queue::with_capacity(output_capacity),
             output_right: None,
             output_granted: false,
@@ -139,7 +146,7 @@ impl Machine {
             Request::Open { credential } => self.open(credential),
             Request::Accept { version } => self.accept(version),
             Request::Refuse { reason, text } => self.refuse(reason, text),
-            Request::Read => {}
+            Request::Read => self.read(up),
             Request::Send { token, frame } => {
                 drop(frame);
                 up.push(Event::Unsent { token });
@@ -160,6 +167,16 @@ impl Machine {
 
     /// Emits the current read demand and a separate output reservation or send.
     pub fn poll(&mut self, above: &mut Queue<Event>, below: &mut Queue<Lower>) {
+        self.flush_unsupported();
+        if self.read_outstanding {
+            match self.read {
+                ReadState::Ended => {
+                    below.push(Lower::Read(stream::Down::Demand { read: stream::Read::Nothing, room: 0 }));
+                    self.read_outstanding = false;
+                }
+                ReadState::Header { .. } | ReadState::Body { .. } | ReadState::Skip { .. } | ReadState::Idle => {}
+            }
+        }
         self.emit_read(below);
         self.emit_output(above, below);
         self.maybe_ready(above);
@@ -171,6 +188,7 @@ impl Machine {
     pub fn waiting(&self) -> Waiting {
         let read = match self.phase {
             Phase::WaitOpen | Phase::WaitAccept | Phase::WaitTerms { .. } => ReadWait::Opening,
+            Phase::Ready { .. } if self.read_credit => ReadWait::Frame,
             Phase::Idle
             | Phase::WaitOwner { .. }
             | Phase::Finished
@@ -209,7 +227,7 @@ impl Machine {
             Ok(frame) => {
                 self.queue(frame, false);
                 self.phase = Phase::WaitAccept;
-                self.read = ReadState::Header;
+                self.read = ReadState::Header { first: None };
             }
             Err(_) => self.phase = Phase::Closed,
         }
@@ -237,7 +255,7 @@ impl Machine {
         let frame = control_frame(&Control::Terms { entries: terms }, &self.limits).expect("checked Terms fit");
         self.queue(frame, true);
         self.phase = Phase::WaitTerms { version };
-        self.read = ReadState::Header;
+        self.read = ReadState::Header { first: None };
     }
 
     fn refuse(&mut self, reason: u16, text: Box<[u8]>) {
@@ -251,6 +269,22 @@ impl Machine {
         self.queue(frame, false);
         self.phase = Phase::Refusing { reason };
         self.read = ReadState::Idle;
+    }
+
+    fn read(&mut self, above: &mut Queue<Event>) {
+        if self.version().is_none() || self.read_credit {
+            return;
+        }
+        match self.read {
+            ReadState::Ended => above.push(Event::Ended),
+            ReadState::Idle => {
+                self.read_credit = true;
+                self.read = ReadState::Header { first: None };
+            }
+            ReadState::Header { .. } | ReadState::Body { .. } | ReadState::Skip { .. } => {
+                unreachable!("one owner Read installs only one frame demand")
+            }
+        }
     }
 
     fn ping(&mut self) {
@@ -294,12 +328,16 @@ impl Machine {
             return;
         }
         let demand = match &self.read {
-            ReadState::Header => Some(8),
+            ReadState::Header { first } => match first {
+                Some(_) => Some(7),
+                None => Some(1),
+            },
             ReadState::Body { header, filled, .. } => {
                 let left = header.body_len.checked_sub(*filled).expect("filled body does not pass length");
                 Some(left.min(self.limits.chunk))
             }
-            ReadState::Idle => None,
+            ReadState::Skip { remaining, .. } => Some((*remaining).min(self.limits.chunk)),
+            ReadState::Ended | ReadState::Idle => None,
         };
         if let Some(bytes) = demand
             && bytes > 0
@@ -363,7 +401,17 @@ impl Machine {
                 self.read_bytes(bytes, above);
             }
             stream::Up::End => {
-                if !self.phase.may_end_input() {
+                let between_frames = match &self.read {
+                    ReadState::Header { first: None } | ReadState::Idle | ReadState::Ended => true,
+                    ReadState::Header { first: Some(_) } | ReadState::Body { .. } | ReadState::Skip { .. } => false,
+                };
+                if self.phase.may_end_input() && between_frames {
+                    self.read = ReadState::Ended;
+                    if self.read_credit {
+                        self.read_credit = false;
+                        above.push(Event::Ended);
+                    }
+                } else {
                     self.phase = Phase::Closed;
                     self.read = ReadState::Idle;
                     above.push(Event::Closed { why: Closed::Truncated });
@@ -379,31 +427,37 @@ impl Machine {
     }
 
     #[expect(clippy::manual_let_else, reason = "step code uses exhaustive matches instead of let-else")]
+    #[expect(clippy::boxed_local, reason = "application bodies move from this handler into Event::Body")]
     fn read_bytes(&mut self, bytes: Box<[u8]>, above: &mut Queue<Event>) {
         let state = mem::replace(&mut self.read, ReadState::Idle);
         match state {
-            ReadState::Header => {
-                if bytes.len() != 8 {
+            ReadState::Header { first: None } => {
+                if bytes.len() == 1 {
+                    let first = *bytes.first().expect("one delivered byte");
+                    self.read = ReadState::Header { first: Some(first) };
+                } else {
+                    self.framing_error();
+                }
+            }
+            ReadState::Header { first: Some(first) } => {
+                if bytes.len() != 7 {
                     self.framing_error();
                     return;
                 }
-                let header = match parse_header(&bytes) {
+                let mut head = [0_u8; 8];
+                *head.get_mut(0).expect("first header cell") = first;
+                let rest = head.get_mut(1..).expect("seven header cells");
+                for (destination, source) in rest.iter_mut().zip(bytes.iter()) {
+                    *destination = *source;
+                }
+                let header = match parse_header(&head) {
                     Ok(header) => header,
                     Err(_) => {
                         self.framing_error();
                         return;
                     }
                 };
-                if !self.header_allowed(header) {
-                    self.framing_error();
-                    return;
-                }
-                if header.body_len == 0 {
-                    self.received(header.kind, &[], above);
-                } else {
-                    let body = bytes::zeroed(usize::try_from(header.body_len).expect("header length bounded"));
-                    self.read = ReadState::Body { header, body, filled: 0 };
-                }
+                self.begin_body(header, above);
             }
             ReadState::Body { header, mut body, filled } => {
                 let count = u32::try_from(bytes.len()).expect("bounded read chunk");
@@ -415,13 +469,75 @@ impl Machine {
                     *destination = *source;
                 }
                 if end == header.body_len {
-                    self.received(header.kind, &body, above);
+                    self.received(header.kind, body, above);
                 } else {
                     self.read = ReadState::Body { header, body, filled: end };
                 }
             }
-            ReadState::Idle => {}
+            ReadState::Skip { kind, remaining } => {
+                let delivered = u32::try_from(bytes.len()).expect("bounded skip chunk");
+                let left = remaining.checked_sub(delivered).expect("skip demand fits remaining body");
+                if left == 0 {
+                    self.pending_unsupported = Some(kind);
+                } else {
+                    self.read = ReadState::Skip { kind, remaining: left };
+                }
+            }
+            ReadState::Ended | ReadState::Idle => {}
         }
+    }
+
+    fn begin_body(&mut self, header: Header, above: &mut Queue<Event>) {
+        let kind = match self.phase {
+            Phase::Ready { version } => classify(&self.schema, self.role, &self.limits, version, header),
+            Phase::Idle
+            | Phase::WaitOpen
+            | Phase::WaitOwner { .. }
+            | Phase::WaitAccept
+            | Phase::WaitTerms { .. }
+            | Phase::Refusing { .. }
+            | Phase::Finished
+            | Phase::Closed => {
+                if self.header_allowed(header) {
+                    Some(ReadKind::Control)
+                } else {
+                    None
+                }
+            }
+        };
+        match kind {
+            Some(ReadKind::Control | ReadKind::Body) => {
+                if header.body_len == 0 {
+                    self.received(header.kind, Box::from([]), above);
+                } else {
+                    let body = bytes::zeroed(usize::try_from(header.body_len).expect("header length bounded"));
+                    self.read = ReadState::Body { header, body, filled: 0 };
+                }
+            }
+            Some(ReadKind::Skip) => {
+                if header.body_len == 0 {
+                    self.pending_unsupported = Some(header.kind);
+                } else {
+                    self.read = ReadState::Skip { kind: header.kind, remaining: header.body_len };
+                }
+            }
+            None => self.framing_error(),
+        }
+    }
+
+    #[expect(clippy::manual_let_else, reason = "step code uses exhaustive matches instead of let-else")]
+    fn flush_unsupported(&mut self) {
+        let kind = match self.pending_unsupported {
+            Some(kind) => kind,
+            None => return,
+        };
+        if self.output.room() == 0 {
+            return;
+        }
+        let frame = control_frame(&Control::Unsupported { kind }, &self.limits).expect("fixed Unsupported fits");
+        self.queue(frame, false);
+        self.pending_unsupported = None;
+        self.read = ReadState::Header { first: None };
     }
 
     fn header_allowed(&self, header: Header) -> bool {
@@ -444,8 +560,17 @@ impl Machine {
     }
 
     #[expect(clippy::manual_let_else, reason = "step code uses exhaustive matches instead of let-else")]
-    fn received(&mut self, kind: u16, body: &[u8], above: &mut Queue<Event>) {
-        let control = match decode_control(kind, body, &self.limits) {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the control transition table is kept together until the machine migration completes"
+    )]
+    fn received(&mut self, kind: u16, body: Box<[u8]>, above: &mut Queue<Event>) {
+        if kind >= 0x0100 {
+            self.read_credit = false;
+            above.push(Event::Body { kind, body });
+            return;
+        }
+        let control = match decode_control(kind, &body, &self.limits) {
             Ok(control) => control,
             Err(_) => {
                 self.framing_error();
@@ -475,12 +600,13 @@ impl Machine {
             Control::Accept { version, features } => {
                 if self.phase == Phase::WaitAccept && features == 0 && offers_version(&self.schema, version) {
                     self.phase = Phase::WaitTerms { version };
-                    self.read = ReadState::Header;
+                    self.read = ReadState::Header { first: None };
                 } else {
                     self.framing_error();
                 }
             }
             Control::Refuse { reason, text } => {
+                self.read_credit = false;
                 above.push(Event::Refused { reason, text });
                 self.phase = Phase::Closed;
                 self.read = ReadState::Idle;
@@ -520,12 +646,33 @@ impl Machine {
             Control::Ping => {
                 if self.phase.may_ping() {
                     above.push(Event::Ping);
-                    self.read = ReadState::Header;
+                    match self.phase {
+                        Phase::Ready { .. } => self.read_credit = false,
+                        Phase::WaitOwner { .. } | Phase::WaitAccept | Phase::WaitTerms { .. } => {
+                            self.read = ReadState::Header { first: None };
+                        }
+                        Phase::Idle | Phase::WaitOpen | Phase::Refusing { .. } | Phase::Finished | Phase::Closed => {
+                            unreachable!("may_ping checked the phase")
+                        }
+                    }
                 } else {
                     self.framing_error();
                 }
             }
-            Control::Unsupported { .. } => self.framing_error(),
+            Control::Unsupported { kind } => match self.phase {
+                Phase::Ready { .. } => {
+                    self.read_credit = false;
+                    above.push(Event::Unsupported { kind });
+                }
+                Phase::Idle
+                | Phase::WaitOpen
+                | Phase::WaitOwner { .. }
+                | Phase::WaitAccept
+                | Phase::WaitTerms { .. }
+                | Phase::Refusing { .. }
+                | Phase::Finished
+                | Phase::Closed => self.framing_error(),
+            },
         }
     }
 

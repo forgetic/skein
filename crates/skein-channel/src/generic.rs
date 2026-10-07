@@ -8,6 +8,7 @@ mod boundary;
 mod frame;
 mod machine;
 mod opening;
+mod read;
 mod schema;
 
 pub use boundary::{Closed, Event, Lower, LowerEvent, MAX_DOWN, MAX_UP, ReadWait, Request, Waiting, WriteWait};
