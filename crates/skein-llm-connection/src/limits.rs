@@ -1,6 +1,8 @@
 //! Startup limits and checked memory bounds (llm-connection.md, section 7).
 
-use skein_lib::Duration;
+use skein_lib::{Duration, Id, List, Queue, Slab};
+
+use crate::call::Connection;
 
 /// Bounded pool and child machine limits, fixed at startup.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -20,7 +22,18 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     if limits.endpoints == 0 || limits.connections == 0 || limits.per_endpoint == 0 {
         return None;
     }
-    let each = skein_tls::client::worst_case(&limits.tls)?.checked_add(skein_llm::client::worst_case(&limits.llm)?)?;
+    let routes = Queue::<skein_llm::client::Event>::worst_case(64)?
+        .checked_add(Queue::<skein_lib::stream::Down>::worst_case(256)?.checked_mul(2)?)?
+        .checked_add(Queue::<skein_tls::client::Event>::worst_case(64)?)?;
+    let each = skein_tls::client::worst_case(&limits.tls)?
+        .checked_add(skein_llm::client::worst_case(&limits.llm)?)?
+        .checked_add(routes)?
+        .checked_add(u64::from(limits.llm.dialect.answer_bytes).checked_mul(64)?)?
+        .checked_add(u64::from(limits.llm.http.request.max(limits.llm.http.send)).checked_mul(256)?)?
+        .checked_add(u64::from(skein_tls::client::largest_room(&limits.tls)).checked_mul(256)?)?;
     let pool = each.checked_mul(u64::from(limits.connections))?;
-    pool.checked_add(skein_io::worst_case(&limits.io)?)
+    pool.checked_add(Slab::<Connection>::worst_case(limits.connections)?)?
+        .checked_add(List::<Option<Id<Connection>>>::worst_case(limits.connections)?)?
+        .checked_add(List::<crate::Endpoint>::worst_case(limits.endpoints)?)?
+        .checked_add(skein_io::worst_case(&limits.io)?)
 }

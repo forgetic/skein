@@ -2,7 +2,7 @@ use super::*;
 use core::net::Ipv4Addr;
 use skein_io::kernel::Addr;
 use skein_lib::bytes;
-use skein_lib::{Duration, List, Token};
+use skein_lib::{Duration, Env, List, Queue, Time, Token, Wall};
 use skein_llm::{Block, Credential, Message, Prompt, Role};
 
 fn limits() -> Limits {
@@ -128,4 +128,86 @@ fn startup_rejects_impossible_limits() {
     let mut endpoints = List::with_capacity(1);
     endpoints.push(endpoint()).expect("one endpoint fits");
     assert_eq!(Component::new(endpoints, &config).err(), Some(EndpointError::TooMany));
+}
+
+fn component() -> Component {
+    let mut endpoints = List::with_capacity(1);
+    endpoints.push(endpoint()).expect("one endpoint fits");
+    Component::new(endpoints, &limits()).expect("valid component")
+}
+
+fn start(component: &mut Component, up: &mut Queue<Event>, io: &mut Queue<Lower>) -> Token {
+    let env = Env { now: Time::ZERO, wall: Wall::from_nanos(1_893_456_000_000_000_000), limits: limits() };
+    component.down(
+        &env,
+        Request::Start {
+            call: Token::new(7),
+            endpoint: 0,
+            prompt: prompt(),
+            credential: credential(),
+            deadlines: Deadlines::none(),
+        },
+        up,
+        io,
+    );
+    match io.pop().expect("one connect") {
+        Lower::Connect { owner, .. } => owner,
+        other @ (Lower::Listen { .. }
+        | Lower::Bind { .. }
+        | Lower::Reject { .. }
+        | Lower::Stream { .. }
+        | Lower::Output { .. }
+        | Lower::Spawn { .. }
+        | Lower::Signal { .. }
+        | Lower::Close { .. }
+        | Lower::Abort { .. }) => panic!("expected connect, got {other:?}"),
+    }
+}
+
+#[test]
+fn failed_connect_has_one_unsent_terminal_and_settles() {
+    let mut component = component();
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    let owner = start(&mut component, &mut up, &mut io);
+    let env = Env { now: Time::ZERO, wall: Wall::from_nanos(1_893_456_000_000_000_000), limits: limits() };
+    component.up(&env, LowerEvent::Failed { owner, error: skein_io::Error::Refused }, &mut up, &mut io);
+    match up.pop().expect("one failure") {
+        Event::Failed { call, failure, evidence, .. } => {
+            assert_eq!(call, Token::new(7));
+            assert_eq!(failure, skein_llm::Failure::Unavailable);
+            assert_eq!(evidence, skein_llm::client::Evidence::Unsent);
+        }
+        other @ (Event::Refused { .. }
+        | Event::Delta { .. }
+        | Event::Block { .. }
+        | Event::Completed { .. }
+        | Event::Cancelled { .. }) => panic!("expected failure, got {other:?}"),
+    }
+    component.up(&env, LowerEvent::Closed { owner }, &mut up, &mut io);
+    assert!(up.is_empty(), "settlement does not repeat the terminal");
+    component.reclaim();
+}
+
+#[test]
+fn cancel_while_connecting_waits_for_socket_settlement() {
+    let mut component = component();
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    let owner = start(&mut component, &mut up, &mut io);
+    let env = Env { now: Time::ZERO, wall: Wall::from_nanos(1_893_456_000_000_000_000), limits: limits() };
+    component.down(&env, Request::Cancel { call: Token::new(7) }, &mut up, &mut io);
+    assert!(up.is_empty());
+    component.up(&env, LowerEvent::Connecting { owner, socket: Token::new(19) }, &mut up, &mut io);
+    match io.pop() {
+        Some(Lower::Abort { entity }) => assert_eq!(entity, Token::new(19)),
+        other => panic!("expected abort, got {other:?}"),
+    }
+    component.up(&env, LowerEvent::Closed { owner }, &mut up, &mut io);
+    match up.pop() {
+        Some(Event::Cancelled { call }) => assert_eq!(call, Token::new(7)),
+        other => panic!("expected cancellation, got {other:?}"),
+    }
+    assert!(up.is_empty());
+    component.reclaim();
 }

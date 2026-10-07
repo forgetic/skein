@@ -1,0 +1,27 @@
+[package]
+name = "skein-llm-connection-world"
+description = "In-memory TLS and fake LLM peer world for the connection component"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-io.workspace = true
+skein-llm.workspace = true
+skein-llm-connection.workspace = true
+skein-tls.workspace = true
+skein-llm-world = { path = "../llm" }
+skein-tls-world = { path = "../tls" }
+skein-fake-llm-domain.workspace = true
+skein-fake-llm-protocol.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+wildcard_enum_match_arm = "deny"
+unwrap_used = "deny"

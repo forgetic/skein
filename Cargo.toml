@@ -34,6 +34,7 @@ members = [
     "tests/kv",
     "tests/lib",
     "tests/llm",
+    "tests/llm-connection",
     "tests/oauth",
     "tests/protocol",
     "tests/ring",

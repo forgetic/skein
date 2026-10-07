@@ -2,6 +2,7 @@
 //! (llm-connection.md, sections 2 and 4). The owner translates its domain
 //! vocabulary and keeps io's token with each component token.
 
+use alloc::boxed::Box;
 use skein_lib::{Duration, Token};
 use skein_llm::client::Evidence;
 use skein_llm::{self as llm, Block, Completion, Credential, Delta, Failure, Prompt};
@@ -14,6 +15,14 @@ pub struct Deadlines {
     pub head: Option<Duration>,
     pub idle: Option<Duration>,
     pub whole: Option<Duration>,
+}
+
+impl Deadlines {
+    /// No per-call deadlines.
+    #[must_use]
+    pub const fn none() -> Deadlines {
+        Deadlines { connect: None, handshake: None, head: None, idle: None, whole: None }
+    }
 }
 
 /// A request from the owning protocol layer.
@@ -51,7 +60,7 @@ pub enum Event {
     /// The accepted call completed successfully.
     Completed { call: Token, completion: Completion },
     /// The accepted call failed with the client's sending evidence.
-    Failed { call: Token, failure: Failure, evidence: Evidence },
+    Failed { call: Token, failure: Failure, evidence: Evidence, detail: Box<[u8]> },
     /// The accepted call ended at the owner's request.
     Cancelled { call: Token },
 }
