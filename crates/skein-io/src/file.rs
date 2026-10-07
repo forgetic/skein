@@ -3,6 +3,7 @@
 //! A file request carries the owner's token and produces exactly one event.
 //! Files remain open across positioned operations; names stay beneath a root.
 
+use crate::digest::Digest;
 use crate::kernel::Fd;
 use alloc::boxed::Box;
 use skein_lib::Token;
@@ -54,6 +55,15 @@ pub enum Request {
         root: Token,
         path: Box<[u8]>,
         max: u32,
+        no_follow: bool,
+    },
+    /// Replaces one file after rechecking its content version, through a synced temporary.
+    Store {
+        owner: Token,
+        root: Token,
+        path: Box<[u8]>,
+        bytes: Box<[u8]>,
+        expected: Option<Digest>,
         no_follow: bool,
     },
     /// States an open file or directory.
@@ -125,6 +135,15 @@ pub enum Event {
         owner: Token,
         entries: Box<[Entry]>,
     },
+    /// A whole-file replacement is durable and has this content digest.
+    Stored {
+        owner: Token,
+        digest: Digest,
+    },
+    /// The target did not have the expected content version at the recheck.
+    Conflict {
+        owner: Token,
+    },
     /// A load exceeded its requested byte bound.
     TooLarge {
         owner: Token,
@@ -174,6 +193,8 @@ impl Event {
             Event::Opened { owner, .. }
             | Event::Loaded { owner, .. }
             | Event::Scanned { owner, .. }
+            | Event::Stored { owner, .. }
+            | Event::Conflict { owner }
             | Event::TooLarge { owner }
             | Event::TooManyEntries { owner }
             | Event::Stated { owner, .. }

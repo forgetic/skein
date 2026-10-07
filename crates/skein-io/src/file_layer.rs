@@ -18,6 +18,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use skein_lib::{Duration, Map, Queue, Time, Token};
 
+mod store;
+
 #[derive(Debug)]
 enum Pending {
     Create { owner: Token },
@@ -44,6 +46,7 @@ enum Pending {
     ScanListing { owner: Token, fd: Fd, max: u32, entries: Vec<Entry> },
     ScanClosing { owner: Token, entries: Vec<Entry> },
     ScanTooManyClosing { owner: Token },
+    Store(store::Store),
 }
 
 impl Pending {
@@ -73,6 +76,7 @@ impl Pending {
             | Pending::ScanListing { .. }
             | Pending::ScanClosing { .. }
             | Pending::ScanTooManyClosing { .. } => false,
+            Pending::Store(store) => store.can_cancel(),
         }
     }
 }
@@ -93,6 +97,7 @@ pub struct FileIo {
     deadline: Option<Time>,
     cancel_op: Option<Token>,
     expired: bool,
+    random: Option<u64>,
 }
 
 impl FileIo {
@@ -121,6 +126,7 @@ impl FileIo {
             deadline: None,
             cancel_op: None,
             expired: false,
+            random: None,
         }
     }
 
@@ -144,6 +150,12 @@ impl FileIo {
     #[must_use]
     pub fn descriptor(&self, file: Token) -> Option<Fd> {
         self.file(file)
+    }
+
+    /// Supplies the random seed used to choose temporary names for stores.
+    pub fn seed_randomness(&mut self, seed: u64) {
+        assert!(self.takes(), "seed randomness between file requests");
+        self.random = Some(seed);
     }
 
     #[must_use]
@@ -250,6 +262,9 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
             io.pending = Some(Pending::ScanOpening { owner, max });
             let how = if no_follow { OpenHow::DirectoryNoFollow } else { OpenHow::Directory };
             io.issue(Op::Open { root: fd, path, how }, subs);
+        }
+        Request::Store { owner, root, path, bytes, expected, no_follow } => {
+            store::start(io, owner, root, path, bytes, expected, no_follow, events, subs);
         }
         Request::Stat { owner, file } => {
             let Some(fd) = io.file(file) else {
@@ -434,6 +449,36 @@ pub fn up(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs: 
 fn timed_out(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
     io.expired = false;
     let pending = io.pending.take().expect("a timed out completion has a request");
+    let pending = match pending {
+        Pending::Store(store) => {
+            store::timed_out(io, store, complete, events, subs);
+            return;
+        }
+        other @ (Pending::Create { .. }
+        | Pending::OpenRead { .. }
+        | Pending::OpenDirectory { .. }
+        | Pending::Stat { .. }
+        | Pending::Stating { .. }
+        | Pending::Cleanup { .. }
+        | Pending::Write { .. }
+        | Pending::Read { .. }
+        | Pending::Sync { .. }
+        | Pending::Close { .. }
+        | Pending::Rename { .. }
+        | Pending::Remove { .. }
+        | Pending::ListOpening { .. }
+        | Pending::List { .. }
+        | Pending::ListClosing { .. }
+        | Pending::LoadOpening { .. }
+        | Pending::LoadStating { .. }
+        | Pending::LoadReading { .. }
+        | Pending::LoadClosing { .. }
+        | Pending::LoadTooLargeClosing { .. }
+        | Pending::ScanOpening { .. }
+        | Pending::ScanListing { .. }
+        | Pending::ScanClosing { .. }
+        | Pending::ScanTooManyClosing { .. }) => other,
+    };
     let owner = match &pending {
         Pending::Create { owner }
         | Pending::OpenRead { owner }
@@ -459,6 +504,7 @@ fn timed_out(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, sub
         | Pending::ScanListing { owner, .. }
         | Pending::ScanClosing { owner, .. }
         | Pending::ScanTooManyClosing { owner } => *owner,
+        Pending::Store(_) => unreachable!("store completion is handled separately"),
     };
     let fd = match (pending, complete.result) {
         (
@@ -491,6 +537,36 @@ fn timed_out(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, sub
 #[expect(clippy::too_many_lines, reason = "one exhaustive completion transition handles every file operation")]
 fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
     let pending = io.pending.take().expect("a completion has a request");
+    let pending = match pending {
+        Pending::Store(store) => {
+            store::up(io, store, complete, events, subs);
+            return;
+        }
+        other @ (Pending::Create { .. }
+        | Pending::OpenRead { .. }
+        | Pending::OpenDirectory { .. }
+        | Pending::Stat { .. }
+        | Pending::Stating { .. }
+        | Pending::Cleanup { .. }
+        | Pending::Write { .. }
+        | Pending::Read { .. }
+        | Pending::Sync { .. }
+        | Pending::Close { .. }
+        | Pending::Rename { .. }
+        | Pending::Remove { .. }
+        | Pending::ListOpening { .. }
+        | Pending::List { .. }
+        | Pending::ListClosing { .. }
+        | Pending::LoadOpening { .. }
+        | Pending::LoadStating { .. }
+        | Pending::LoadReading { .. }
+        | Pending::LoadClosing { .. }
+        | Pending::LoadTooLargeClosing { .. }
+        | Pending::ScanOpening { .. }
+        | Pending::ScanListing { .. }
+        | Pending::ScanClosing { .. }
+        | Pending::ScanTooManyClosing { .. }) => other,
+    };
     if let Err(error) = complete.result {
         let owner = match pending {
             Pending::Stat { owner, fd }
@@ -524,6 +600,7 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             | Pending::ScanOpening { owner, .. }
             | Pending::ScanClosing { owner, .. }
             | Pending::ScanTooManyClosing { owner } => owner,
+            Pending::Store(_) => unreachable!("store completion is handled separately"),
         };
         events.push(Event::Failed { owner, error });
         return;

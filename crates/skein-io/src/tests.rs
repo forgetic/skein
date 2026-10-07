@@ -12,6 +12,7 @@ mod layer;
 mod listener;
 mod output;
 mod process;
+mod store;
 mod stream;
 
 use alloc::vec::Vec;

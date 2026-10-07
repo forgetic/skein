@@ -29,6 +29,7 @@
 
 extern crate alloc;
 
+pub mod digest;
 pub mod file;
 pub mod file_layer;
 pub mod kernel;
