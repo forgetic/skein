@@ -306,7 +306,49 @@ is no longer the container's, and the meter takes it off.
   values. Below 12, a tree is at most one leaf, and the worst case counts
   up to three nodes.
 
-## 11. Not built yet
+## 11. The journal
+
+`Journal<W, O>` is a bounded commit barrier for writes and outputs. It is
+generic over both and inspects neither. It belongs in lib because it is a
+data structure, like a queue; a service does not hand-roll one
+(programming-model.md, 10.2).
+
+- **Admission by counts:** the owner states a decision's worst-case room
+  for writes and held outputs before changing its state. `takes(room)`
+  leaves the journal unchanged, and refuses unless the room fits the
+  commits in flight, writes per commit, and outputs held. A decision
+  reserves that room; accepting it returns unused room.
+- **One decision:** a `#[must_use]` value, not `Clone`, collects its
+  writes and held outputs. Each addition past its reserved room is
+  refused and returns ownership to the caller. Such an overrun is the
+  owner's bug: accepting the decision stops the journal.
+- **Commit and tags:** accepting a decision makes at most one numbered
+  commit, holding all its writes. Numbers begin at one and increase in
+  order. A decision without a write makes no commit. Each held output
+  follows that decision's commit, or the last commit made if there was
+  no write; it leaves only once that commit is durable. A commit answer
+  makes that commit and every earlier one durable. Answers outside the
+  order the store sends commits are the owner's bug and stop the
+  journal.
+- **The door and release:** `now(output)` admits an untagged output that
+  decides nothing and is ready to leave at once. These outputs leave in
+  their own order, within the door's capacity. Held outputs leave in
+  the order they were collected, after their tags are durable. Each
+  release call moves at most its configured count. The journal does not
+  arm a deadline or advance commits by itself.
+- **Failure:** when a commit fails, no output tagged with it or a later
+  commit leaves, and the journal reports that it has stopped. It admits
+  no more decisions or outputs.
+- **Memory:** capacities are fixed at construction. `worst_case` prices
+  the journal's containers and bookkeeping from its limits with checked
+  arithmetic, as other lib containers do. Values it holds own their
+  own payload bytes; their owner prices those separately.
+
+The journal uses generic types and lib's containers. It defines no
+traits, takes no closures, and uses no `dyn` (programming-model.md,
+10.2).
+
+## 12. Not built yet
 
 - **`Slab::get2_mut`,** which looks up two entities at once and fails on
   equal handles (programming-model.md, 5.1).

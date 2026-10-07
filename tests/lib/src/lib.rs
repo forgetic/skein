@@ -8,4 +8,5 @@
 //! declares it.
 
 pub mod intake;
+pub mod journal;
 pub mod search;
