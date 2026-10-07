@@ -3,7 +3,7 @@
 Provisional, 2026-10-07. io spawns one child and signals it (io.md,
 section 6). A contained tree is a child and everything it starts:
 
-- held in a group of its own;
+- held whole;
 - seeing the file system through a view in which only named directories
   are writable;
 - stopped as a whole;
@@ -11,16 +11,16 @@ section 6). A contained tree is a child and everything it starts:
 
 Services that run commands they do not trust need this: smith's agent for
 its tools and checks, and its hosts for the agent processes they spawn.
+This document says what a tree guarantees. How io provides it is decided
+when trees are built (section 7).
 
 ## 1. In one page
 
-- **One tree, one cgroup.** Each tree starts in a cgroup of its own under
-  the service's, so whatever it starts stays inside it, double forks
-  included.
-- **A view of the file system.** The tree runs in a mount namespace of its
-  own:
-  - the directories it is given are mounted where it sees them, each
-    writable or not;
+- **Held whole.** Whatever a tree's processes start stays in the tree,
+  double forks included.
+- **A view of the file system:**
+  - the directories it is given are where it sees them, each writable or
+    not;
   - named paths within them, such as a repository's git directory, are
     read-only;
   - everything else is read-only, with a private temporary directory.
@@ -30,24 +30,19 @@ its tools and checks, and its hosts for the agent processes they spawn.
   - politely, a signal to the tree's first process;
   - terminated, the same signal to every process in it;
   - killed, all at once.
-- **Proved empty.** A tree is gone only once its cgroup holds no process,
-  which the kernel reports. Only then are its pipes and cgroup closed.
+- **Proved empty.** A tree is gone only once it holds no process, as the
+  kernel reports. Only then is what is left of it closed.
+- **Nested.** A process in a tree may contain trees of its own within it,
+  which are held, stopped and proved empty with it.
 - **Deadlines are the owner's,** as everywhere in io: for the spawn, and
   for each step of stopping.
 
 ## 2. In skein
 
 - **io gains trees** beside children: the same pipes as streams, the same
-  slab, one terminal each.
-- **A small helper program,** shipped with skein, is a tree's first
-  process. It sets up the namespace and the view, then executes the
-  command, so io's spawn stays a plain spawn into a cgroup.
-- **What the machine must allow:**
-  - cgroup v2, with a subtree delegated to the service;
-  - unprivileged user namespaces;
-  - pidfds.
-
-  A service checks these at startup and refuses to start without them.
+  slab, and one terminal each.
+- **What the machine must allow** follows from how trees are built. A
+  service checks it at startup, and refuses to start without it.
 
 ## 3. Spawning a tree
 
@@ -60,28 +55,28 @@ The owner gives:
     writable or not;
   - the paths inside them that stay read-only;
 - **the pipes,** as for a child;
-- **the cgroup's limits,** if any: memory and the number of processes.
+- **limits,** if any: memory and the number of processes.
 
 io answers once:
 
 - **spawned,** with the tree and its pipes, once the command is executing in
   its view;
-- **or failed,** saying what failed: the cgroup, the view, or the command
-  itself.
+- **or failed,** saying what failed: holding the tree, its view, or the
+  command itself.
 
 ## 4. Stopping and the end
 
 | Step | What io does |
 |---|---|
 | polite | sends the termination signal to the first process |
-| terminate | sends the termination signal to every process in the cgroup |
-| kill | kills every process in the cgroup at once |
+| terminate | sends the termination signal to every process in the tree |
+| kill | kills every process in the tree at once |
 
 - **The first process's exit** goes up with its status. The tree may still
   hold others.
-- **Empty** goes up when the cgroup holds no process. After it, io closes
-  what is left (the pipes, the pidfd and the cgroup), and the tree's
-  terminal, closed, comes once all of that has settled.
+- **Empty** goes up when the tree holds no process. After it, io closes
+  what is left, and the tree's terminal, closed, comes once that has
+  settled.
 - **Closing a tree** that is not empty kills it first, then settles the
   same way.
 
@@ -90,8 +85,6 @@ io answers once:
 - **Trees** share io's entity slab with children and their pipes. A tree
   takes one slot, plus one per pipe.
 - **A view** is bounded in directories and in read-only paths.
-- **The helper's** memory is its own process's, outside the service's
-  worst case.
 
 ## 6. Testing
 
@@ -102,17 +95,17 @@ io answers once:
   - empty reported late.
 - **The fake machine** keeps a tree's view, so a world can check that a
   command wrote only where its view allows.
-- **Conformance tests** run the same cases on the kernel: double forks
-  stay contained, a git directory is read-only inside a writable one, kill
-  empties the cgroup.
+- **Conformance tests** run the same cases on the kernel: double forks stay
+  held, a git directory is read-only inside a writable one, and a kill
+  empties the tree.
 
 ## 7. Open questions
 
-- **The network:** whether a tree gets a namespace without network by
-  default, with the owner allowing it per tree.
-- **Machines without user namespaces:** a fallback that keeps the
-  writable directories but cannot make paths inside them read-only, or
-  none.
+- **How io holds a tree and builds its view:** cgroups and mount namespaces
+  are the likely means. What each asks of the machine, and any fallback
+  where the machine does not allow it, is decided when trees are built.
+- **The network:** whether a tree has a network by default, with the owner
+  allowing it per tree.
 - **Trees in one process:** smith's agent in its host's process, where each
-  run's commands could share a cgroup per run (smith's `domain/host.md`,
+  run's commands could share a tree per run (smith's `domain/host.md`,
   section 12).

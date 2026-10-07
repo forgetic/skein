@@ -27,7 +27,7 @@ starts from.
 | lib | `skein-lib` | handles, slabs, bounded containers, cursors, streams, deadlines, time | [lib.md](docs/design/lib.md) |
 | the kernel boundary | `skein-io` (`kernel`) | the records io submits to a backend and the completions it gets back | [kernel.md](docs/design/kernel.md) |
 | io | `skein-io` | sockets, pipes, files, processes, signals to the service | [io.md](docs/design/io.md) |
-| contained trees | `skein-io` | a process and all it starts, in a cgroup with a view of the file system, stopped whole and proved empty | [process.md](docs/design/process.md) |
+| contained trees | `skein-io` | a process and all it starts, held whole with a view of the file system, stopped whole and proved empty | [process.md](docs/design/process.md) |
 | the shell kit | `skein-shell` | the io_uring backend, the clock, the seed, startup | [shell.md](docs/design/shell.md) |
 | the simulator | `skein-sim` | the simulated kernel and its faults; beside it, the conformance suite (`skein-conformance`) | [simulator.md](docs/design/simulator.md) |
 | the fake LLM | `skein-fake-llm-domain`, `skein-fake-llm-protocol` | shared bounded scripts and independent byte peers; application worlds supply tools and policy | [fake-llm.md](docs/design/fake-llm.md) |
