@@ -27,6 +27,7 @@ starts from.
 | lib | `skein-lib` | handles, slabs, bounded containers, cursors, streams, deadlines, time | [lib.md](docs/design/lib.md) |
 | the kernel boundary | `skein-io` (`kernel`) | the records io submits to a backend and the completions it gets back | [kernel.md](docs/design/kernel.md) |
 | io | `skein-io` | sockets, pipes, files, processes, signals to the service | [io.md](docs/design/io.md) |
+| contained trees | `skein-io` | a process and all it starts, in a cgroup with a view of the file system, stopped whole and proved empty | [process.md](docs/design/process.md) |
 | the shell kit | `skein-shell` | the io_uring backend, the clock, the seed, startup | [shell.md](docs/design/shell.md) |
 | the simulator | `skein-sim` | the simulated kernel and its faults; beside it, the conformance suite (`skein-conformance`) | [simulator.md](docs/design/simulator.md) |
 | the fake LLM | `skein-fake-llm-domain`, `skein-fake-llm-protocol` | shared bounded scripts and independent byte peers; application worlds supply tools and policy | [fake-llm.md](docs/design/fake-llm.md) |
@@ -39,6 +40,7 @@ starts from.
 | codecs | `skein-codec`, `skein-codegen` | records described by schemas, and their codecs, worst cases and golden bytes generated from them | [codec.md](docs/design/codec.md) |
 | TLS | `skein-tls` | the TLS client, a stream over rustls's unbuffered connection, with ring | [tls.md](docs/design/tls.md) |
 | LLM | `skein-llm` | provider-neutral calls, streaming deltas, concrete replay and completions; subscription wire dialects | [llm.md](docs/design/llm.md) |
+| LLM connections | `skein-llm-connection` | a protocol layer's component that runs LLM calls end to end: connecting, TLS, deadlines, reuse | [llm-connection.md](docs/design/llm-connection.md) |
 | OAuth | `skein-oauth`, `skein-fake-oauth` | bounded sign-in and refresh client, with an independent rotating issuer for worlds | [oauth.md](docs/design/oauth.md) |
 | the browser kit | `skein-browser` | for tests: a headless Chromium driven over the DevTools protocol on a pipe, by role and name, from the loop | [browser.md](docs/design/browser.md) |
 
@@ -53,6 +55,7 @@ skein-codec    lib
 skein-codegen  nothing from skein (a generator, in consumers' tests)
 skein-tls      lib, rustls (and ring beneath it)
 skein-llm      lib, http, json
+skein-llm-connection lib, io, tls, llm
 skein-oauth    lib, json
 skein-fake-oauth lib, json, oauth
 skein-browser  lib, json
