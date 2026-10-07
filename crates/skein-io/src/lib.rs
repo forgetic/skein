@@ -4,8 +4,9 @@
 //! the mechanics in between: buffers in flight, short transfers, cancels and
 //! settling, graceful close, the accept batch.
 //!
-//! Built for sockets (io.md, 3) and child processes with one-way pipe streams
-//! (io.md, 6). Files and service termination signals come later.
+//! Built for sockets (io.md, 3), child processes with one-way pipe streams
+//! (io.md, 6), and bounded file operations (io.md, 5). Service termination
+//! signals come later.
 //!
 //! # Driving it
 //!

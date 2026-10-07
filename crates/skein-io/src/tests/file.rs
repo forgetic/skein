@@ -18,6 +18,34 @@ fn io() -> FileIo {
     FileIo::new(3, 16, 4, Duration::from_secs(1))
 }
 
+fn complete(
+    io: &mut FileIo,
+    submit: Submit,
+    result: Result<Done, crate::kernel::Error>,
+    events: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    file_layer::up(io, Complete { op: submit.op, kind: submit.kind, result }, events, subs);
+}
+
+fn read(io: &mut FileIo, submit: Submit, bytes: &[u8], events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
+    let Op::Read { fd, mut buf, at } = submit.kind else { panic!("a read") };
+    for (slot, byte) in buf.get_mut(..bytes.len()).expect("read fits the buffer").iter_mut().zip(bytes) {
+        *slot = *byte;
+    }
+    let kind = Op::Read { fd, buf, at };
+    file_layer::up(
+        io,
+        Complete {
+            op: submit.op,
+            kind,
+            result: Ok(Done::Count(u32::try_from(bytes.len()).expect("short test input"))),
+        },
+        events,
+        subs,
+    );
+}
+
 #[test]
 fn adopted_root_and_open_directory_keep_tokens_inside_io() {
     let mut io = io();
@@ -95,4 +123,130 @@ fn read_and_create_no_follow_use_the_safe_kernel_modes() {
     let submit: Submit = subs.pop().expect("one create");
     let Op::Open { how, .. } = submit.kind else { panic!("an open") };
     assert_eq!(how, OpenHow::CreateNoFollow { mode: Some(0o600) });
+}
+
+#[test]
+fn a_whole_load_continues_short_reads_and_closes_before_its_terminal() {
+    let mut io = FileIo::with_whole_limit(3, 2, 4, 8, Duration::from_secs(1));
+    let root = io.adopt_root(ROOT).expect("room for the root");
+    let mut events = Queue::with_capacity(2);
+    let mut subs = Queue::with_capacity(2);
+    file_layer::down(
+        &mut io,
+        Time::ZERO,
+        Request::Load { owner: OWNER, root, path: Box::from(&b"f"[..]), max: 4, no_follow: true },
+        &mut events,
+        &mut subs,
+    );
+    let open = subs.pop().expect("open");
+    let Op::Open { how, .. } = &open.kind else { panic!("an open") };
+    assert_eq!(*how, OpenHow::ReadNoFollow);
+    complete(&mut io, open, Ok(Done::Fd(CHILD)), &mut events, &mut subs);
+    let stat = subs.pop().expect("stat");
+    complete(&mut io, stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 3, mode: 0o644 })), &mut events, &mut subs);
+    read(&mut io, subs.pop().expect("first read"), b"ab", &mut events, &mut subs);
+    read(&mut io, subs.pop().expect("second read"), b"c", &mut events, &mut subs);
+    read(&mut io, subs.pop().expect("end read"), b"", &mut events, &mut subs);
+    assert!(events.is_empty(), "the close must finish first");
+    let close = subs.pop().expect("close");
+    complete(&mut io, close, Ok(Done::Nothing), &mut events, &mut subs);
+    assert_eq!(events.pop(), Some(Event::Loaded { owner: OWNER, bytes: Box::from(&b"abc"[..]) }));
+    assert!(io.takes());
+    assert_eq!(io.open_files(), 1, "only the root stays open");
+}
+
+#[test]
+fn a_whole_load_refuses_a_file_over_its_bound_after_closing() {
+    let mut io = FileIo::with_whole_limit(3, 2, 4, 8, Duration::from_secs(1));
+    let root = io.adopt_root(ROOT).expect("room for the root");
+    let mut events = Queue::with_capacity(2);
+    let mut subs = Queue::with_capacity(2);
+    file_layer::down(
+        &mut io,
+        Time::ZERO,
+        Request::Load { owner: OWNER, root, path: Box::from(&b"f"[..]), max: 3, no_follow: false },
+        &mut events,
+        &mut subs,
+    );
+    complete(&mut io, subs.pop().expect("open"), Ok(Done::Fd(CHILD)), &mut events, &mut subs);
+    complete(
+        &mut io,
+        subs.pop().expect("stat"),
+        Ok(Done::Stat(Stat { kind: Kind::File, size: 4, mode: 0o644 })),
+        &mut events,
+        &mut subs,
+    );
+    assert!(events.is_empty());
+    complete(&mut io, subs.pop().expect("close"), Ok(Done::Nothing), &mut events, &mut subs);
+    assert_eq!(events.pop(), Some(Event::TooLarge { owner: OWNER }));
+}
+
+#[test]
+fn a_whole_scan_returns_entries_or_a_bound_refusal_after_close() {
+    for max in [0, 1] {
+        let mut io = io();
+        let root = io.adopt_root(ROOT).expect("room for the root");
+        let mut events = Queue::with_capacity(2);
+        let mut subs = Queue::with_capacity(2);
+        file_layer::down(
+            &mut io,
+            Time::ZERO,
+            Request::Scan { owner: OWNER, root, path: Box::from(&b"dir"[..]), max, no_follow: true },
+            &mut events,
+            &mut subs,
+        );
+        let open = subs.pop().expect("open");
+        let Op::Open { how, .. } = &open.kind else { panic!("an open") };
+        assert_eq!(*how, OpenHow::DirectoryNoFollow);
+        complete(&mut io, open, Ok(Done::Fd(CHILD)), &mut events, &mut subs);
+        let list = subs.pop().expect("list");
+        let Op::List { fd, mut entries, mut names } = list.kind else { panic!("a list") };
+        entries[0] = crate::kernel::Entry { kind: Kind::File, start: 0, len: 1 };
+        names[0] = b'f';
+        file_layer::up(
+            &mut io,
+            Complete { op: list.op, kind: Op::List { fd, entries, names }, result: Ok(Done::Count(1)) },
+            &mut events,
+            &mut subs,
+        );
+        if max == 1 {
+            complete(&mut io, subs.pop().expect("end listing"), Ok(Done::Count(0)), &mut events, &mut subs);
+        }
+        assert!(events.is_empty());
+        complete(&mut io, subs.pop().expect("close"), Ok(Done::Nothing), &mut events, &mut subs);
+        if max == 0 {
+            assert_eq!(events.pop(), Some(Event::TooManyEntries { owner: OWNER }));
+        } else {
+            assert_eq!(
+                events.pop(),
+                Some(Event::Scanned {
+                    owner: OWNER,
+                    entries: Box::new([crate::file::Entry { name: Box::from(&b"f"[..]), kind: Kind::File }])
+                })
+            );
+        }
+    }
+}
+
+#[test]
+fn a_deadline_waits_for_uncancellable_stat_then_closes_the_file() {
+    let mut io = FileIo::with_whole_limit(3, 2, 4, 8, Duration::from_secs(1));
+    let root = io.adopt_root(ROOT).expect("room for the root");
+    let mut events = Queue::with_capacity(2);
+    let mut subs = Queue::with_capacity(2);
+    file_layer::down(
+        &mut io,
+        Time::ZERO,
+        Request::Load { owner: OWNER, root, path: Box::from(&b"f"[..]), max: 4, no_follow: false },
+        &mut events,
+        &mut subs,
+    );
+    complete(&mut io, subs.pop().expect("open"), Ok(Done::Fd(CHILD)), &mut events, &mut subs);
+    let stat = subs.pop().expect("stat");
+    file_layer::expire(&mut io, Time::ZERO.saturating_add(Duration::from_secs(1)), &mut subs);
+    assert!(subs.is_empty(), "stat is not cancellable");
+    complete(&mut io, stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 1, mode: 0o644 })), &mut events, &mut subs);
+    assert!(events.is_empty());
+    complete(&mut io, subs.pop().expect("cleanup close"), Ok(Done::Nothing), &mut events, &mut subs);
+    assert_eq!(events.pop(), Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::TimedOut }));
 }

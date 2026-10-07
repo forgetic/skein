@@ -40,6 +40,22 @@ pub enum Request {
         name: Box<[u8]>,
         no_follow: bool,
     },
+    /// Loads one whole file through a root token, refusing content above `max` bytes.
+    Load {
+        owner: Token,
+        root: Token,
+        path: Box<[u8]>,
+        max: u32,
+        no_follow: bool,
+    },
+    /// Scans one directory through a root token, refusing more than `max` entries.
+    Scan {
+        owner: Token,
+        root: Token,
+        path: Box<[u8]>,
+        max: u32,
+        no_follow: bool,
+    },
     /// States an open file or directory.
     Stat {
         owner: Token,
@@ -99,6 +115,24 @@ pub enum Event {
         file: Token,
         len: u64,
     },
+    /// A whole file loaded within its requested byte bound.
+    Loaded {
+        owner: Token,
+        bytes: Box<[u8]>,
+    },
+    /// A directory scanned within its requested entry bound.
+    Scanned {
+        owner: Token,
+        entries: Box<[Entry]>,
+    },
+    /// A load exceeded its requested byte bound.
+    TooLarge {
+        owner: Token,
+    },
+    /// A scan exceeded its requested entry bound.
+    TooManyEntries {
+        owner: Token,
+    },
     /// Metadata of the open file or directory.
     Stated {
         owner: Token,
@@ -138,6 +172,10 @@ impl Event {
     pub const fn owner(&self) -> Token {
         match self {
             Event::Opened { owner, .. }
+            | Event::Loaded { owner, .. }
+            | Event::Scanned { owner, .. }
+            | Event::TooLarge { owner }
+            | Event::TooManyEntries { owner }
             | Event::Stated { owner, .. }
             | Event::Written { owner }
             | Event::Read { owner, .. }
