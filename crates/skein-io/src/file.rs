@@ -185,6 +185,10 @@ pub enum Event {
         owner: Token,
         error: crate::kernel::Error,
     },
+    /// The owner stopped a file request before it completed.
+    Cancelled {
+        owner: Token,
+    },
 }
 
 impl Event {
@@ -205,7 +209,8 @@ impl Event {
             | Event::Renamed { owner }
             | Event::Removed { owner }
             | Event::Listed { owner, .. }
-            | Event::Failed { owner, .. } => *owner,
+            | Event::Failed { owner, .. }
+            | Event::Cancelled { owner } => *owner,
         }
     }
 }

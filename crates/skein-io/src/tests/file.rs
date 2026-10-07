@@ -345,3 +345,101 @@ fn a_deadline_waits_for_uncancellable_stat_then_closes_the_file() {
     complete(&mut io, subs.pop().expect("cleanup close"), Ok(Done::Nothing), &mut events, &mut subs);
     assert_eq!(events.pop(), Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::TimedOut }));
 }
+
+#[test]
+fn each_file_request_uses_its_own_absolute_deadline() {
+    let mut io = io();
+    let mut events = Queue::with_capacity(2);
+    let mut subs = Queue::with_capacity(2);
+    let deadline = Time::from_nanos(7_000_000_000);
+    file_layer::down_until(
+        &mut io,
+        deadline,
+        Request::OpenRead { owner: OWNER, root: ROOT, name: Box::from(&b"file"[..]) },
+        &mut events,
+        &mut subs,
+    );
+    assert_eq!(io.next_deadline(), Some(deadline));
+    let open = subs.pop().expect("open in flight");
+    file_layer::expire(&mut io, Time::from_nanos(1_000_000_000), &mut subs);
+    assert!(subs.is_empty());
+    file_layer::expire(&mut io, deadline, &mut subs);
+    let cancel = subs.pop().expect("deadline cancels open");
+    assert_eq!(cancel.kind, Op::Cancel { target: open.op });
+    complete(&mut io, cancel, Ok(Done::Nothing), &mut events, &mut subs);
+    complete(&mut io, open, Err(crate::kernel::Error::Cancelled), &mut events, &mut subs);
+    assert_eq!(events.pop(), Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::TimedOut }));
+    assert!(io.takes());
+}
+
+#[test]
+fn an_owner_cancel_waits_for_the_target_and_reports_when_it_stopped() {
+    let mut io = io();
+    let mut events = Queue::with_capacity(2);
+    let mut subs = Queue::with_capacity(2);
+    file_layer::down_until(
+        &mut io,
+        Time::from_nanos(9_000_000_000),
+        Request::OpenRead { owner: OWNER, root: ROOT, name: Box::from(&b"file"[..]) },
+        &mut events,
+        &mut subs,
+    );
+    let open = subs.pop().expect("open in flight");
+    file_layer::cancel(&mut io, Token::new(99), &mut subs);
+    assert!(subs.is_empty(), "another owner cannot cancel the request");
+    file_layer::cancel(&mut io, OWNER, &mut subs);
+    file_layer::cancel(&mut io, OWNER, &mut subs);
+    let cancel = subs.pop().expect("one cancel");
+    assert_eq!(cancel.kind, Op::Cancel { target: open.op });
+    complete(&mut io, open, Err(crate::kernel::Error::Cancelled), &mut events, &mut subs);
+    assert_eq!(events.pop(), Some(Event::Cancelled { owner: OWNER }));
+    assert!(!io.takes(), "the cancel completion still holds its slot");
+    complete(&mut io, cancel, Ok(Done::Nothing), &mut events, &mut subs);
+    assert!(io.takes());
+    assert!(events.is_empty());
+}
+
+#[test]
+fn a_successful_direct_write_reports_written_when_cancel_was_too_late() {
+    let mut io = io();
+    let file = io.adopt_root(ROOT).expect("room for file");
+    let mut events = Queue::with_capacity(2);
+    let mut subs = Queue::with_capacity(2);
+    file_layer::down_until(
+        &mut io,
+        Time::from_nanos(9_000_000_000),
+        Request::WriteAt { owner: OWNER, file, offset: 0, bytes: Box::from(&b"hi"[..]) },
+        &mut events,
+        &mut subs,
+    );
+    let write = subs.pop().expect("write in flight");
+    file_layer::cancel(&mut io, OWNER, &mut subs);
+    let cancel = subs.pop().expect("cancel submitted");
+    complete(&mut io, cancel, Err(crate::kernel::Error::TooLate), &mut events, &mut subs);
+    complete(&mut io, write, Ok(Done::Count(2)), &mut events, &mut subs);
+    assert_eq!(events.pop(), Some(Event::Written { owner: OWNER }));
+    assert!(io.takes() && events.is_empty());
+}
+
+#[test]
+fn a_short_write_can_be_cancelled_before_its_remaining_bytes() {
+    let mut io = io();
+    let file = io.adopt_root(ROOT).expect("room for file");
+    let mut events = Queue::with_capacity(2);
+    let mut subs = Queue::with_capacity(2);
+    file_layer::down_until(
+        &mut io,
+        Time::from_nanos(9_000_000_000),
+        Request::WriteAt { owner: OWNER, file, offset: 0, bytes: Box::from(&b"hi"[..]) },
+        &mut events,
+        &mut subs,
+    );
+    let write = subs.pop().expect("write in flight");
+    file_layer::cancel(&mut io, OWNER, &mut subs);
+    let cancel = subs.pop().expect("cancel submitted");
+    complete(&mut io, write, Ok(Done::Count(1)), &mut events, &mut subs);
+    assert_eq!(events.pop(), Some(Event::Cancelled { owner: OWNER }));
+    assert!(subs.is_empty(), "the remainder is not written");
+    complete(&mut io, cancel, Err(crate::kernel::Error::TooLate), &mut events, &mut subs);
+    assert!(io.takes());
+}

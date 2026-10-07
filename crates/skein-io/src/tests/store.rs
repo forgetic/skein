@@ -291,3 +291,32 @@ fn a_rename_settled_at_the_deadline_does_not_remove_the_new_file() {
     assert_eq!(rig.events.pop(), Some(Event::Failed { owner: OWNER, error: Error::TimedOut }));
     assert!(rig.events.is_empty() && rig.subs.is_empty());
 }
+
+#[test]
+fn cancelling_a_store_before_rename_removes_its_temporary_and_reports_cancelled() {
+    let mut rig = Rig::new();
+    rig.store(None);
+    rig.parent_and_absent_old();
+    let create = rig.take();
+    let Op::Open { path: temp_name, .. } = &create.kind else { panic!("temporary create") };
+    let temp_name = temp_name.clone();
+    rig.complete(create, Ok(Done::Fd(TEMP)));
+    let write = rig.take();
+    file_layer::cancel(&mut rig.io, OWNER, &mut rig.subs);
+    let cancel = rig.take();
+    assert_eq!(cancel.kind, Op::Cancel { target: write.op });
+    rig.complete(cancel, Ok(Done::Nothing));
+    rig.complete(write, Err(Error::Cancelled));
+    let close = rig.take();
+    assert_eq!(close.kind, Op::Close { fd: TEMP });
+    rig.complete(close, Ok(Done::Nothing));
+    let remove = rig.take();
+    let Op::Remove { dir, name, directory } = &remove.kind else { panic!("remove temporary") };
+    assert_eq!((*dir, name.as_ref(), *directory), (PARENT, temp_name.as_ref(), false));
+    rig.complete(remove, Ok(Done::Nothing));
+    let close = rig.take();
+    assert_eq!(close.kind, Op::Close { fd: PARENT });
+    rig.complete(close, Ok(Done::Nothing));
+    assert_eq!(rig.events.pop(), Some(Event::Cancelled { owner: OWNER }));
+    assert!(rig.io.takes() && rig.events.is_empty() && rig.subs.is_empty());
+}

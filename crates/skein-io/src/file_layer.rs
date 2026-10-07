@@ -124,7 +124,42 @@ enum Pending {
     Store(store::Store),
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Stop {
+    Deadline,
+    Cancel,
+}
+
 impl Pending {
+    fn owner(&self) -> Token {
+        match self {
+            Pending::Create { owner }
+            | Pending::OpenRead { owner }
+            | Pending::OpenDirectory { owner }
+            | Pending::Stat { owner, .. }
+            | Pending::Stating { owner }
+            | Pending::Cleanup { owner, .. }
+            | Pending::Write { owner }
+            | Pending::Read { owner, .. }
+            | Pending::Sync { owner }
+            | Pending::Close { owner }
+            | Pending::Rename { owner }
+            | Pending::Remove { owner }
+            | Pending::ListOpening { owner }
+            | Pending::List { owner, .. }
+            | Pending::ListClosing { owner, .. }
+            | Pending::LoadOpening { owner, .. }
+            | Pending::LoadStating { owner, .. }
+            | Pending::LoadReading { owner, .. }
+            | Pending::LoadClosing { owner, .. }
+            | Pending::LoadTooLargeClosing { owner, .. }
+            | Pending::ScanOpening { owner, .. }
+            | Pending::ScanListing { owner, .. }
+            | Pending::ScanClosing { owner, .. } => *owner,
+            Pending::Store(store) => store.owner(),
+        }
+    }
+
     fn can_cancel(&self) -> bool {
         match self {
             Pending::Create { .. }
@@ -170,7 +205,7 @@ pub struct FileIo {
     timeout: Duration,
     deadline: Option<Time>,
     cancel_op: Option<Token>,
-    expired: bool,
+    stop: Option<Stop>,
     random: Option<u64>,
 }
 
@@ -199,7 +234,7 @@ impl FileIo {
             timeout,
             deadline: None,
             cancel_op: None,
-            expired: false,
+            stop: None,
             random: None,
         }
     }
@@ -279,8 +314,19 @@ impl FileIo {
 
 /// One file request, only while `FileIo::takes` is true.
 pub fn down(io: &mut FileIo, now: Time, request: Request, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
+    down_until(io, now.saturating_add(io.timeout), request, events, subs);
+}
+
+/// Starts one request with the owner's absolute deadline.
+pub fn down_until(
+    io: &mut FileIo,
+    deadline: Time,
+    request: Request,
+    events: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
     assert!(io.takes(), "a file request completes before the next begins");
-    io.deadline = Some(now.saturating_add(io.timeout));
+    io.deadline = Some(deadline);
     down_inner(io, request, events, subs);
     if io.pending.is_none() {
         io.deadline = None;
@@ -485,14 +531,61 @@ fn read_whole(io: &mut FileIo, owner: Token, fd: Fd, max: u32, bytes: Vec<u8>, s
 /// Cancels the outstanding kernel operation after its request deadline. The
 /// terminal failure is emitted when the target has settled, exactly once.
 pub fn expire(io: &mut FileIo, now: Time, subs: &mut Queue<Submit>) {
-    if !io.is_due(now) || io.expired {
+    if !io.is_due(now) || io.stop.is_some() {
         return;
     }
+    io.stop = Some(Stop::Deadline);
+    io.deadline = None;
+    submit_cancel(io, subs);
+}
+
+/// Requests cancellation of the active owner's file operation. The terminal
+/// reports `Cancelled` only when the request was stopped before completion.
+pub fn cancel(io: &mut FileIo, owner: Token, subs: &mut Queue<Submit>) {
+    let Some(pending) = io.pending.as_ref() else {
+        return;
+    };
+    if io.stop.is_some() || pending.owner() != owner {
+        return;
+    }
+    match pending {
+        Pending::Store(store) => {
+            if !store.can_abandon() {
+                return;
+            }
+        }
+        Pending::Cleanup { .. } => return,
+        Pending::Create { .. }
+        | Pending::OpenRead { .. }
+        | Pending::OpenDirectory { .. }
+        | Pending::Stat { .. }
+        | Pending::Stating { .. }
+        | Pending::Write { .. }
+        | Pending::Read { .. }
+        | Pending::Sync { .. }
+        | Pending::Close { .. }
+        | Pending::Rename { .. }
+        | Pending::Remove { .. }
+        | Pending::ListOpening { .. }
+        | Pending::List { .. }
+        | Pending::ListClosing { .. }
+        | Pending::LoadOpening { .. }
+        | Pending::LoadStating { .. }
+        | Pending::LoadReading { .. }
+        | Pending::LoadClosing { .. }
+        | Pending::LoadTooLargeClosing { .. }
+        | Pending::ScanOpening { .. }
+        | Pending::ScanListing { .. }
+        | Pending::ScanClosing { .. } => {}
+    }
+    io.stop = Some(Stop::Cancel);
+    submit_cancel(io, subs);
+}
+
+fn submit_cancel(io: &mut FileIo, subs: &mut Queue<Submit>) {
     let Some(target) = io.outstanding else {
         return;
     };
-    io.expired = true;
-    io.deadline = None;
     if !io.pending.as_ref().expect("an outstanding operation has a request").can_cancel() {
         return;
     }
@@ -510,22 +603,130 @@ pub fn up(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs: 
     }
     assert!(io.outstanding == Some(complete.op), "completion names the outstanding file operation");
     io.outstanding = None;
-    if io.expired {
-        timed_out(io, complete, events, subs);
-    } else {
-        up_inner(io, complete, events, subs);
+    match io.stop.take() {
+        Some(Stop::Deadline) => stopped(io, complete, Error::TimedOut, events, subs),
+        Some(Stop::Cancel) => cancelled(io, complete, events, subs),
+        None => up_inner(io, complete, events, subs),
     }
     if io.pending.is_none() {
         io.deadline = None;
     }
 }
 
-fn timed_out(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
-    io.expired = false;
+fn cancelled(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
+    let pending = io.pending.as_ref().expect("a cancelled completion has a request");
+    let can_abandon = match pending {
+        Pending::Store(store) => store.can_abandon(),
+        Pending::OpenRead { .. }
+        | Pending::Stat { .. }
+        | Pending::ListOpening { .. }
+        | Pending::List { .. }
+        | Pending::LoadOpening { .. }
+        | Pending::LoadStating { .. }
+        | Pending::LoadReading { .. }
+        | Pending::ScanOpening { .. }
+        | Pending::ScanListing { .. } => true,
+        Pending::Write { .. } => !write_finished(&complete),
+        Pending::Read { max, bytes, .. } => !read_finished(&complete, *max, bytes.len()),
+        Pending::Create { .. }
+        | Pending::OpenDirectory { .. }
+        | Pending::Stating { .. }
+        | Pending::Cleanup { .. }
+        | Pending::Sync { .. }
+        | Pending::Close { .. }
+        | Pending::Rename { .. }
+        | Pending::Remove { .. }
+        | Pending::ListClosing { .. }
+        | Pending::LoadClosing { .. }
+        | Pending::LoadTooLargeClosing { .. }
+        | Pending::ScanClosing { .. } => false,
+    };
+    let stop_won = match &complete.result {
+        Err(Error::Cancelled) => match pending {
+            Pending::Store(_) => can_abandon,
+            Pending::Create { .. }
+            | Pending::OpenRead { .. }
+            | Pending::OpenDirectory { .. }
+            | Pending::Stat { .. }
+            | Pending::Stating { .. }
+            | Pending::Cleanup { .. }
+            | Pending::Write { .. }
+            | Pending::Read { .. }
+            | Pending::Sync { .. }
+            | Pending::Close { .. }
+            | Pending::Rename { .. }
+            | Pending::Remove { .. }
+            | Pending::ListOpening { .. }
+            | Pending::List { .. }
+            | Pending::ListClosing { .. }
+            | Pending::LoadOpening { .. }
+            | Pending::LoadStating { .. }
+            | Pending::LoadReading { .. }
+            | Pending::LoadClosing { .. }
+            | Pending::LoadTooLargeClosing { .. }
+            | Pending::ScanOpening { .. }
+            | Pending::ScanListing { .. }
+            | Pending::ScanClosing { .. } => true,
+        },
+        Ok(_) | Err(_) => can_abandon,
+    };
+    if stop_won {
+        stopped(io, complete, Error::Cancelled, events, subs);
+    } else {
+        up_inner(io, complete, events, subs);
+    }
+}
+
+fn write_finished(complete: &Complete) -> bool {
+    match &complete.kind {
+        Op::Write { bytes, from, .. } => match complete.result {
+            Ok(Done::Count(count)) => {
+                u64::from(*from).saturating_add(u64::from(count))
+                    >= u64::try_from(bytes.len()).expect("buffer fits u64")
+            }
+            Ok(_) | Err(_) => false,
+        },
+        Op::Socket { .. }
+        | Op::Bind { .. }
+        | Op::Listen { .. }
+        | Op::Accept { .. }
+        | Op::Connect { .. }
+        | Op::Recv { .. }
+        | Op::Send { .. }
+        | Op::Shutdown { .. }
+        | Op::Close { .. }
+        | Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. }
+        | Op::Spawn { .. }
+        | Op::Wait { .. }
+        | Op::Signal { .. }
+        | Op::PipeRead { .. }
+        | Op::PipeWrite { .. }
+        | Op::Cancel { .. } => false,
+    }
+}
+
+fn read_finished(complete: &Complete, max: u32, prior: usize) -> bool {
+    match complete.result {
+        Ok(Done::Count(count)) => {
+            count == 0
+                || u64::try_from(prior).expect("bytes fit u64").saturating_add(u64::from(count)) >= u64::from(max)
+        }
+        Ok(_) | Err(_) => false,
+    }
+}
+
+fn stopped(io: &mut FileIo, complete: Complete, reason: Error, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
     let pending = io.pending.take().expect("a timed out completion has a request");
     let pending = match pending {
         Pending::Store(store) => {
-            store::timed_out(io, store, complete, events, subs);
+            store::stopped(io, store, complete, reason, events, subs);
             return;
         }
         other @ (Pending::Create { .. }
@@ -599,10 +800,18 @@ fn timed_out(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, sub
         _ => None,
     };
     if let Some(fd) = fd {
-        io.pending = Some(Pending::Cleanup { owner, error: Error::TimedOut });
+        io.pending = Some(Pending::Cleanup { owner, error: reason });
         io.issue(Op::Close { fd }, subs);
     } else {
-        events.push(Event::Failed { owner, error: Error::TimedOut });
+        terminal_failure(events, owner, reason);
+    }
+}
+
+fn terminal_failure(events: &mut Queue<Event>, owner: Token, reason: Error) {
+    if reason == Error::Cancelled {
+        events.push(Event::Cancelled { owner });
+    } else {
+        events.push(Event::Failed { owner, error: reason });
     }
 }
 
@@ -692,7 +901,7 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
                 return;
             }
             Pending::Cleanup { owner, error } => {
-                events.push(Event::Failed { owner, error });
+                terminal_failure(events, owner, error);
                 return;
             }
             Pending::Create { owner }
@@ -746,7 +955,7 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             }
         }
         (Pending::Cleanup { owner, error }, Op::Close { .. }, Done::Nothing) => {
-            events.push(Event::Failed { owner, error });
+            terminal_failure(events, owner, error);
         }
         (Pending::ListOpening { owner }, Op::Open { .. }, Done::Fd(fd)) => {
             io.pending = Some(Pending::List { owner, fd, entries: Vec::new() });

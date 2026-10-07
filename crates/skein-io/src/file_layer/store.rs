@@ -72,6 +72,36 @@ pub(super) struct Store {
 }
 
 impl Store {
+    pub(super) const fn owner(&self) -> Token {
+        self.owner
+    }
+
+    /// A store can still leave the old target in place before its rename.
+    pub(super) fn can_abandon(&self) -> bool {
+        match self.phase {
+            Phase::ParentOpening
+            | Phase::OldOpening
+            | Phase::OldStating
+            | Phase::OldClosing
+            | Phase::TempCreating
+            | Phase::TempWriting
+            | Phase::TempSyncing
+            | Phase::TempClosing
+            | Phase::CheckOpening
+            | Phase::CheckStating
+            | Phase::CheckReading
+            | Phase::CheckClosing => true,
+            Phase::Renaming
+            | Phase::DirectorySyncing
+            | Phase::ParentClosing
+            | Phase::CleanupCheck
+            | Phase::CleanupOld
+            | Phase::CleanupTemp
+            | Phase::CleanupRemove
+            | Phase::CleanupParent => false,
+        }
+    }
+
     pub(super) fn can_cancel(&self) -> bool {
         match self.phase {
             Phase::ParentOpening
@@ -252,6 +282,7 @@ fn read_check(io: &mut FileIo, mut store: Store, subs: &mut Queue<Submit>) {
 
 fn terminal(store: Store, events: &mut Queue<Event>) {
     match store.failure.expect("cleanup has a failure") {
+        Failure::Kernel(Error::Cancelled) => events.push(Event::Cancelled { owner: store.owner }),
         Failure::Kernel(error) => events.push(Event::Failed { owner: store.owner, error }),
         Failure::Conflict { now } => events.push(Event::Conflict { owner: store.owner, now }),
     }
@@ -416,10 +447,11 @@ fn failed_operation(
     }
 }
 
-pub(super) fn timed_out(
+pub(super) fn stopped(
     io: &mut FileIo,
     mut store: Store,
     complete: Complete,
+    reason: Error,
     events: &mut Queue<Event>,
     subs: &mut Queue<Submit>,
 ) {
@@ -486,7 +518,7 @@ pub(super) fn timed_out(
         | Phase::CleanupRemove
         | Phase::CleanupParent => {}
     }
-    fail(io, store, Failure::Kernel(Error::TimedOut), events, subs);
+    fail(io, store, Failure::Kernel(reason), events, subs);
 }
 
 fn done_fd(done: Done) -> Fd {
