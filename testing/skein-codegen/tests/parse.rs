@@ -53,4 +53,21 @@ mod tests {
         refuses("family f 1\nrecord A {\n a: ?\n}", 3, "unexpected character");
         refuses("family f 1\nrecord A {\n a text 3\n}", 3, "expected :");
     }
+
+    #[test]
+    fn names_that_would_break_generated_rust_are_refused() {
+        refuses("family f 1\nrecord type {}", 2, "invalid generated type name");
+        refuses("family f 1\nrecord lowercase {}", 2, "invalid generated type name");
+        refuses("family f 1\nrecord Box {}", 2, "generated type name Box");
+        refuses("family f 1\nrecord A {}\nrecord AParts {}", 3, "generated type name AParts");
+        refuses("family f 1\nrecord A { type: u8 }", 2, "invalid generated field name");
+        refuses("family f 1\nrecord A { new: u8 }", 2, "invalid generated field name");
+        refuses("family f 1\nrecord A { Title: u8 }", 2, "invalid generated field name");
+        refuses("family f 1\nenum A { Read }", 2, "invalid generated variant name");
+        refuses("family f 1\nenum A { foo_bar, foo__bar }", 2, "generated variant FooBar");
+        refuses("family f 1\nrecord A { tail: u8 }", 2, "generated path ATail");
+        refuses("family f 1\nversioned record A { version: u8 }", 2, "generated path AVersion");
+        refuses("family f 1\nrecord A { b_item: bytes 1 b: list 1 bytes 1 }", 2, "generated limit name a_b_item");
+        parse("family f 1\nrecord A { version: u8 }").expect("unversioned record has no version path");
+    }
 }
