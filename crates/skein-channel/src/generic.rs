@@ -10,8 +10,11 @@ mod machine;
 mod opening;
 mod read;
 mod schema;
+mod write;
 
-pub use boundary::{Closed, Event, Lower, LowerEvent, MAX_DOWN, MAX_UP, ReadWait, Request, Waiting, WriteWait};
+pub use boundary::{
+    Closed, Event, Lower, LowerEvent, MAX_DOWN, MAX_UP, ReadWait, Request, Room, Unsent, Waiting, WriteWait,
+};
 pub use frame::{
     Control, Frame, FrameError, FrameWriter, Header, Term, control_frame, decode_control, frame_writer, parse_header,
 };

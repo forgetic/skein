@@ -20,11 +20,12 @@ use alloc::boxed::Box;
 use core::mem;
 use skein_lib::{List, Queue, Token, bytes, stream};
 
-use super::boundary::{Closed, Event, Lower, LowerEvent, ReadWait, Request, Waiting, WriteWait};
+use super::boundary::{Closed, Event, Lower, LowerEvent, ReadWait, Request, Room, Unsent, Waiting, WriteWait};
 use super::frame::{Control, Frame, Header, Term, control_frame, decode_control, parse_header};
 use super::opening::{accept_open, check_terms, local_terms, offers_version};
 use super::read::{ReadKind, classify};
 use super::schema::{Limits, Role, Schema, SchemaError};
+use super::write::admit;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Phase {
@@ -86,7 +87,16 @@ enum ReadState {
 #[derive(Debug)]
 struct Queued {
     frame: Frame,
-    terms: bool,
+    tag: QueueTag,
+}
+
+#[derive(Debug)]
+enum QueueTag {
+    Control,
+    Terms,
+    Ping,
+    Unsupported,
+    Application,
 }
 
 /// One channel machine over a read stream and independent output stream.
@@ -105,6 +115,10 @@ pub struct Machine {
     output_right: Option<Token>,
     output_granted: bool,
     next_right: u64,
+    used_bytes: u32,
+    used_frames: u32,
+    ping_queued: bool,
+    unsupported_queued: bool,
     local_terms_sent: bool,
     peer_terms: Option<List<Term>>,
     finish_sent: bool,
@@ -133,6 +147,10 @@ impl Machine {
             output_right: None,
             output_granted: false,
             next_right: 1,
+            used_bytes: 0,
+            used_frames: 0,
+            ping_queued: false,
+            unsupported_queued: false,
             local_terms_sent: false,
             peer_terms: None,
             finish_sent: false,
@@ -147,10 +165,7 @@ impl Machine {
             Request::Accept { version } => self.accept(version),
             Request::Refuse { reason, text } => self.refuse(reason, text),
             Request::Read => self.read(up),
-            Request::Send { token, frame } => {
-                drop(frame);
-                up.push(Event::Unsent { token });
-            }
+            Request::Send { token, frame } => self.send(token, frame, up),
             Request::Ping => self.ping(),
             Request::Finish => self.finish(),
             Request::Close => self.close(up, below),
@@ -217,6 +232,15 @@ impl Machine {
         }
     }
 
+    /// Application output room after all admitted frames are counted.
+    #[must_use]
+    pub fn room(&self) -> Room {
+        Room {
+            bytes: self.limits.output_bytes.checked_sub(self.used_bytes).expect("queued bytes fit the cap"),
+            frames: self.limits.output_frames.checked_sub(self.used_frames).expect("queued frames fit the cap"),
+        }
+    }
+
     fn open(&mut self, credential: Box<[u8]>) {
         if self.role != Role::Initiator || self.phase != Phase::Idle {
             return;
@@ -225,7 +249,7 @@ impl Machine {
         let control = Control::Open { magic: self.schema.magic, lowest, highest, features: 0, credential };
         match control_frame(&control, &self.limits) {
             Ok(frame) => {
-                self.queue(frame, false);
+                self.queue(frame, QueueTag::Control);
                 self.phase = Phase::WaitAccept;
                 self.read = ReadState::Header { first: None };
             }
@@ -250,10 +274,10 @@ impl Machine {
         }
         let answer = Control::Accept { version, features: 0 };
         let frame = control_frame(&answer, &self.limits).expect("fixed Accept fits");
-        self.queue(frame, false);
+        self.queue(frame, QueueTag::Control);
         let terms = local_terms(&self.schema, self.role, version, &self.limits);
         let frame = control_frame(&Control::Terms { entries: terms }, &self.limits).expect("checked Terms fit");
-        self.queue(frame, true);
+        self.queue(frame, QueueTag::Terms);
         self.phase = Phase::WaitTerms { version };
         self.read = ReadState::Header { first: None };
     }
@@ -266,7 +290,7 @@ impl Machine {
         self.output = Queue::with_capacity(self.output.capacity());
         let control = Control::Refuse { reason, text };
         let frame = control_frame(&control, &self.limits).expect("bounded Refuse fits");
-        self.queue(frame, false);
+        self.queue(frame, QueueTag::Control);
         self.phase = Phase::Refusing { reason };
         self.read = ReadState::Idle;
     }
@@ -288,9 +312,37 @@ impl Machine {
     }
 
     fn ping(&mut self) {
-        if self.phase.may_ping() {
+        if self.phase.may_ping() && !self.ping_queued {
             let frame = control_frame(&Control::Ping, &self.limits).expect("fixed Ping fits");
-            self.queue(frame, false);
+            self.queue(frame, QueueTag::Ping);
+            self.ping_queued = true;
+        }
+    }
+
+    fn send(&mut self, token: Token, frame: Frame, above: &mut Queue<Event>) {
+        let version = match self.phase {
+            Phase::Ready { version } => version,
+            Phase::Idle
+            | Phase::WaitOpen
+            | Phase::WaitOwner { .. }
+            | Phase::WaitAccept
+            | Phase::WaitTerms { .. }
+            | Phase::Refusing { .. }
+            | Phase::Finished
+            | Phase::Closed => {
+                above.push(Event::Unsent { token, why: Unsent::Closed });
+                return;
+            }
+        };
+        let terms = self.peer_terms.as_ref().expect("Ready holds peer terms");
+        match admit(&self.schema, self.role, version, terms, self.room(), &frame) {
+            Ok(()) => {
+                self.used_bytes = self.used_bytes.checked_add(frame.wire_len()).expect("admission checked byte room");
+                self.used_frames = self.used_frames.checked_add(1).expect("admission checked frame room");
+                self.queue(frame, QueueTag::Application);
+                above.push(Event::Sent { token });
+            }
+            Err(why) => above.push(Event::Unsent { token, why }),
         }
     }
 
@@ -319,8 +371,8 @@ impl Machine {
         }
     }
 
-    fn queue(&mut self, frame: Frame, terms: bool) {
-        self.output.try_push(Queued { frame, terms }).expect("control reserve has room");
+    fn queue(&mut self, frame: Frame, tag: QueueTag) {
+        self.output.try_push(Queued { frame, tag }).expect("control reserve has room");
     }
 
     fn emit_read(&mut self, below: &mut Queue<Lower>) {
@@ -351,11 +403,19 @@ impl Machine {
         if self.output_granted {
             let right = self.output_right.take().expect("grant has named right");
             let item = self.output.pop().expect("grant has a queued frame");
+            match item.tag {
+                QueueTag::Control => {}
+                QueueTag::Terms => self.local_terms_sent = true,
+                QueueTag::Ping => self.ping_queued = false,
+                QueueTag::Unsupported => self.unsupported_queued = false,
+                QueueTag::Application => {
+                    self.used_bytes =
+                        self.used_bytes.checked_sub(item.frame.wire_len()).expect("queued bytes were counted");
+                    self.used_frames = self.used_frames.checked_sub(1).expect("queued frame was counted");
+                }
+            }
             below.push(Lower::Write(stream::OutputDown::Send { right, bytes: item.frame.into_bytes() }));
             self.output_granted = false;
-            if item.terms {
-                self.local_terms_sent = true;
-            }
             above.push(Event::Drained);
             return;
         }
@@ -531,11 +591,12 @@ impl Machine {
             Some(kind) => kind,
             None => return,
         };
-        if self.output.room() == 0 {
+        if self.output.room() == 0 || self.unsupported_queued {
             return;
         }
         let frame = control_frame(&Control::Unsupported { kind }, &self.limits).expect("fixed Unsupported fits");
-        self.queue(frame, false);
+        self.queue(frame, QueueTag::Unsupported);
+        self.unsupported_queued = true;
         self.pending_unsupported = None;
         self.read = ReadState::Header { first: None };
     }
@@ -640,7 +701,7 @@ impl Machine {
                     let terms = local_terms(&self.schema, self.role, version, &self.limits);
                     let frame =
                         control_frame(&Control::Terms { entries: terms }, &self.limits).expect("checked Terms fit");
-                    self.queue(frame, true);
+                    self.queue(frame, QueueTag::Terms);
                 }
             }
             Control::Ping => {
@@ -699,10 +760,10 @@ impl Machine {
             | Phase::Finished
             | Phase::Closed => return,
         };
-        if let Some(terms) = self.peer_terms.take() {
+        if let Some(terms) = self.peer_terms.as_ref() {
             self.phase = Phase::Ready { version };
             self.read = ReadState::Idle;
-            above.push(Event::Ready { version, terms });
+            above.push(Event::Ready { version, terms: terms.clone() });
         }
     }
 

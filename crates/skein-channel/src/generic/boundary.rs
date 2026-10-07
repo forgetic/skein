@@ -49,6 +49,28 @@ pub enum Closed {
     Truncated,
 }
 
+/// Why an owner's measured frame was refused before queue admission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unsent {
+    /// This kind is absent or belongs to the other sender.
+    WrongDirection,
+    /// The peer omitted this kind from its receive terms.
+    PeerDoesNotTake,
+    /// The body exceeds the peer's or this side's bound.
+    TooLarge,
+    /// The application output cap has no byte or frame room.
+    Full,
+    /// The channel has not become ready or is ending.
+    Closed,
+}
+
+/// Remaining application output credit, excluding control reserves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Room {
+    pub bytes: u32,
+    pub frames: u32,
+}
+
 /// An event delivered to the channel's owner.
 #[derive(Debug)]
 pub enum Event {
@@ -69,7 +91,7 @@ pub enum Event {
     /// An owner's frame was admitted to the queue.
     Sent { token: Token },
     /// An owner's frame was refused at the entrance.
-    Unsent { token: Token },
+    Unsent { token: Token, why: Unsent },
     /// A queued frame was handed to the stream below.
     Drained,
     /// The write stream failed while input may continue.

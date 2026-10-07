@@ -3,11 +3,11 @@
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use skein_lib::{List, Queue, stream};
+use skein_lib::{List, Queue, Token, stream};
 
 use super::{
-    Control, Direction, Event, FrameError, Kind, Limits, Lower, LowerEvent, Machine, Request, Role, Schema,
-    SchemaError, Term, Version, control_frame, decode_control, frame_writer, parse_header,
+    Control, Direction, Event, FrameError, Kind, Limits, Lower, LowerEvent, Machine, Request, Role, Room, Schema,
+    SchemaError, Term, Unsent, Version, control_frame, decode_control, frame_writer, parse_header,
 };
 
 fn limits() -> Limits {
@@ -432,4 +432,79 @@ fn end_between_frames_answers_read_and_end_inside_header_or_body_closes() {
         Some(Event::Closed { why: super::Closed::Truncated }) => {}
         event => panic!("expected truncated body: {event:?}"),
     }
+}
+
+#[test]
+fn send_checks_direction_peer_terms_size_and_room_in_order() {
+    let source = schema();
+    let mut writer = frame_writer(0x0101, 9).expect("measured frame");
+    writer.put(&[5_u8; 9]).expect("body fits");
+    let frame = writer.finish().expect("complete frame");
+    let mut terms = List::with_capacity(1);
+    assert_eq!(
+        super::write::admit(&source, Role::Initiator, 2, &terms, Room { bytes: 1024, frames: 4 }, &frame),
+        Err(Unsent::WrongDirection)
+    );
+    assert_eq!(
+        super::write::admit(&source, Role::Responder, 2, &terms, Room { bytes: 1024, frames: 4 }, &frame),
+        Err(Unsent::PeerDoesNotTake)
+    );
+    terms.push(Term { kind: 0x0101, largest: 8 }).expect("term fits");
+    assert_eq!(
+        super::write::admit(&source, Role::Responder, 2, &terms, Room { bytes: 1024, frames: 4 }, &frame),
+        Err(Unsent::TooLarge)
+    );
+    terms.get_mut(0).expect("term").largest = 64;
+    assert_eq!(
+        super::write::admit(&source, Role::Responder, 2, &terms, Room { bytes: 16, frames: 4 }, &frame),
+        Err(Unsent::Full)
+    );
+    assert_eq!(
+        super::write::admit(&source, Role::Responder, 2, &terms, Room { bytes: 1024, frames: 0 }, &frame),
+        Err(Unsent::Full)
+    );
+    assert_eq!(
+        super::write::admit(&source, Role::Responder, 2, &terms, Room { bytes: 1024, frames: 4 }, &frame),
+        Ok(())
+    );
+}
+
+#[test]
+#[expect(clippy::wildcard_enum_match_arm, reason = "the protocol story fails on unexpected owner events")]
+fn measured_frame_moves_between_two_peers_while_read_and_output_progress() {
+    let (mut initiator, mut responder) = ready_pair();
+    let mut writer = frame_writer(0x0101, 32).expect("measured frame");
+    writer.put(&[12_u8; 32]).expect("body fits");
+    responder.down(Request::Send { token: Token::new(42), frame: writer.finish().expect("frame") });
+    assert_eq!(responder.machine.room(), Room { bytes: 984, frames: 3 });
+    match responder.events.pop() {
+        Some(Event::Sent { token }) => assert_eq!(token, Token::new(42)),
+        event => panic!("expected queue admission: {event:?}"),
+    }
+    initiator.down(Request::Read);
+    let mut drained = 0_u32;
+    let mut received = 0_u32;
+    for _ in 0_u32..30_u32 {
+        responder.step(&mut initiator);
+        initiator.step(&mut responder);
+        while let Some(event) = responder.events.pop() {
+            match event {
+                Event::Drained => drained = drained.checked_add(1).expect("bounded count"),
+                event => panic!("unexpected sender event: {event:?}"),
+            }
+        }
+        while let Some(event) = initiator.events.pop() {
+            match event {
+                Event::Body { kind, body } => {
+                    assert_eq!(kind, 0x0101);
+                    assert_eq!(&*body, &[12_u8; 32]);
+                    received = received.checked_add(1).expect("bounded count");
+                }
+                event => panic!("unexpected receiver event: {event:?}"),
+            }
+        }
+    }
+    assert_eq!(drained, 1);
+    assert_eq!(received, 1);
+    assert_eq!(responder.machine.room(), Room { bytes: 1024, frames: 4 });
 }
