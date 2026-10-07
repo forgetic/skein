@@ -14,3 +14,7 @@ pub mod v1;
 #[rustfmt::skip]
 #[path = "scalars/v1.rs"]
 pub mod scalars;
+
+#[rustfmt::skip]
+#[path = "lints/v1.rs"]
+pub mod lints;

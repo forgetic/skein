@@ -62,6 +62,7 @@ mod tests {
         refuses("family f 1\nrecord A {}\nrecord AParts {}", 3, "generated type name AParts");
         refuses("family f 1\nrecord A { type: u8 }", 2, "invalid generated field name");
         refuses("family f 1\nrecord A { new: u8 }", 2, "invalid generated field name");
+        refuses("family f 1\nrecord A { skein_bools: bool }", 2, "invalid generated field name");
         refuses("family f 1\nrecord A { Title: u8 }", 2, "invalid generated field name");
         refuses("family f 1\nenum A { Read }", 2, "invalid generated variant name");
         refuses("family f 1\nenum A { foo_bar, foo__bar }", 2, "generated variant FooBar");

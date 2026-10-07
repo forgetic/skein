@@ -2,7 +2,14 @@
 
 //! Measured, canonical wire operations for codec.md, section 4.
 
-use crate::{Declaration, Enumeration, Record, Schema, Type, emit_limits};
+use crate::{Declaration, Enumeration, Record, Schema, Type, emit_limits, emit_types};
+
+fn member(record: &Record, name: &str) -> String {
+    match emit_types::bool_index(record, name) {
+        Some(_) => format!("self.{name}()"),
+        None => format!("self.{name}"),
+    }
+}
 
 fn add_size(size: &str, out: &mut String) {
     out.push_str(&format!("        size = size.checked_add({size}).expect(\"schema ceilings fit u32\");\n"));
@@ -25,7 +32,7 @@ fn measure_type(ty: &Type, value: &str, depth: usize, out: &mut String) {
         Type::U16 => add_size("2", out),
         Type::U32 => add_size("4", out),
         Type::U64 | Type::Duration => add_size("8", out),
-        Type::Fixed(bound) => add_size(&bound.to_string(), out),
+        Type::Fixed(bound) => add_size(&emit_limits::literal(*bound), out),
         Type::Bytes(_) | Type::Text(_) => {
             add_size("4", out);
             add_size(&format!("u32::try_from({value}.len()).expect(\"field ceiling fits u32\")"), out);
@@ -42,7 +49,7 @@ fn measure_type(ty: &Type, value: &str, depth: usize, out: &mut String) {
             match fixed_size(item) {
                 Some(fixed) => {
                     out.push_str(&format!("        if {value}.is_some() {{\n"));
-                    add_size(&fixed.to_string(), out);
+                    add_size(&emit_limits::literal(fixed), out);
                     out.push_str("        }\n");
                 }
                 None => {
@@ -154,7 +161,8 @@ fn decode_type(ty: &Type, schema: &Schema, bound_name: &str, path: &str, depth: 
         ),
         Type::Duration => format!("skein_lib::Duration::from_nanos(reader.u64().ok_or({short})?)"),
         Type::Fixed(bound) => format!(
-            "{{ let bytes = reader.bytes({bound}).ok_or({short})?; bytes.try_into().expect(\"fixed length checked\") }}"
+            "{{ let bytes = reader.bytes({}).ok_or({short})?; bytes.try_into().expect(\"fixed length checked\") }}",
+            emit_limits::literal(*bound)
         ),
         Type::Bytes(_) => format!(
             "{{ let length = match skein_codec::read_len(reader, limits.{bound_name}.min(CEILINGS.{bound_name})) {{ Ok(length) => length, Err(reason) => return Err(Problem {{ path: Path::{path}, reason }}), }}; Box::from(reader.bytes(length).ok_or({short})?) }}"
@@ -175,7 +183,7 @@ fn decode_type(ty: &Type, schema: &Schema, bound_name: &str, path: &str, depth: 
             let precheck = if minimum == 0 {
                 String::new()
             } else {
-                format!("if count > reader.remaining() / {minimum} {{ return Err({short}); }} ")
+                format!("if count > reader.remaining() / {} {{ return Err({short}); }} ", emit_limits::literal(minimum))
             };
             format!(
                 "{{ let count = match skein_codec::read_count(reader, limits.{bound_name}.min(CEILINGS.{bound_name})) {{ Ok(count) => count, Err(reason) => return Err(Problem {{ path: Path::{path}, reason }}), }}; {precheck}let mut {list_name} = List::with_capacity(count); for _index in 0_u32..count {{ let item = {item_expr}; {list_name}.push(item).expect(\"count within capacity\"); }} {list_name} }}"
@@ -213,7 +221,7 @@ fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
         }
         for field in &record.fields {
             if fixed_size(&field.ty).is_none() {
-                out.push_str(&format!("        let field_{} = &self.{};\n", field.name, field.name));
+                out.push_str(&format!("        let field_{} = &{};\n", field.name, member(record, &field.name)));
             }
             measure_type(&field.ty, &format!("field_{}", field.name), 0, out);
         }
@@ -221,10 +229,10 @@ fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
     }
     out.push_str("    /// Writes into a writer with room for the measured bytes.\n    pub fn encode(&self, writer: &mut skein_lib::Writer) -> Result<(), skein_lib::Overflow> {\n");
     if record.versioned {
-        out.push_str(&format!("        writer.put(&{}_u16.to_be_bytes())?;\n", schema.version));
+        out.push_str(&format!("        writer.put(&{}_u16.to_be_bytes())?;\n", emit_limits::literal(schema.version)));
     }
     for field in &record.fields {
-        out.push_str(&format!("        let field_{} = &self.{};\n", field.name, field.name));
+        out.push_str(&format!("        let field_{} = &{};\n", field.name, member(record, &field.name)));
         encode_type(&field.ty, &format!("field_{}", field.name), 0, out);
     }
     if record.fields.is_empty() && !record.versioned {
@@ -250,7 +258,7 @@ fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
         "    fn decode_from(limits: &Limits, reader: &mut skein_lib::Reader<'_>) -> Result<Self, Problem> {\n",
     );
     if record.versioned {
-        out.push_str(&format!("        let version = reader.u16().ok_or({})?;\n        if version != {} {{ return Err(Problem {{ path: Path::{}Version, reason: skein_codec::Reason::Version }}); }}\n", short(&format!("{}Version", record.name)), schema.version, record.name));
+        out.push_str(&format!("        let version = reader.u16().ok_or({})?;\n        if version != {} {{ return Err(Problem {{ path: Path::{}Version, reason: skein_codec::Reason::Version }}); }}\n", short(&format!("{}Version", record.name)), emit_limits::literal(schema.version), record.name));
     }
     for field in &record.fields {
         let bound_name = format!("{}_{}", emit_limits::snake(&record.name), field.name);
@@ -258,12 +266,23 @@ fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
         let expr = decode_type(&field.ty, schema, &bound_name, &path, 0);
         out.push_str(&format!("        let decoded_{} = {expr};\n", field.name));
     }
-    let members = record
+    let mut members = record
         .fields
         .iter()
+        .filter(|field| !emit_types::grouped_bools(record) || !matches!(field.ty, Type::Bool))
         .map(|field| format!("{}: decoded_{}", field.name, field.name))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
+    if emit_types::grouped_bools(record) {
+        let bools = record
+            .fields
+            .iter()
+            .filter(|field| matches!(field.ty, Type::Bool))
+            .map(|field| format!("decoded_{}", field.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        members.insert(0, format!("skein_bools: [{bools}]"));
+    }
+    let members = members.join(", ");
     if emit_limits::bound_names(schema).is_empty() {
         out.push_str(&format!("        Ok(Self::new(limits, {}Parts {{ {members} }}))\n    }}\n}}\n\n", record.name));
     } else {

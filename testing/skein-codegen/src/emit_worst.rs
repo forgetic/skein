@@ -12,7 +12,7 @@ fn rust_type(ty: &Type) -> String {
         Type::U64 => "u64".into(),
         Type::Bool => "bool".into(),
         Type::Duration => "skein_lib::Duration".into(),
-        Type::Fixed(bound) => format!("[u8; {bound}]"),
+        Type::Fixed(bound) => format!("[u8; {}]", emit_limits::literal(*bound)),
         Type::Bytes(_) | Type::Text(_) => "Box<[u8]>".into(),
         Type::List(_, item) => format!("List<{}>", rust_type(item)),
         Type::Option(item) => format!("Option<{}>", rust_type(item)),

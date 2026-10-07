@@ -46,4 +46,9 @@ mod tests {
     fn scalar_schema_code_and_goldens_have_no_drift() {
         check("schema/scalars-v1.schema", "src/scalars/v1.rs");
     }
+
+    #[test]
+    fn lint_fixture_schema_code_and_goldens_have_no_drift() {
+        check("schema/lints-v1.schema", "src/lints/v1.rs");
+    }
 }

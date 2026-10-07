@@ -12,7 +12,7 @@ fn rust_type(ty: &Type) -> String {
         Type::U64 => "u64".into(),
         Type::Bool => "bool".into(),
         Type::Duration => "skein_lib::Duration".into(),
-        Type::Fixed(bound) => format!("[u8; {bound}]"),
+        Type::Fixed(bound) => format!("[u8; {}]", emit_limits::literal(*bound)),
         Type::Bytes(_) | Type::Text(_) => "Box<[u8]>".into(),
         Type::List(_, item) => format!("List<{}>", rust_type(item)),
         Type::Option(item) => format!("Option<{}>", rust_type(item)),
@@ -28,12 +28,38 @@ fn accessor_type(ty: &Type) -> String {
     }
 }
 
-fn accessor_expr(field: &Field) -> String {
+fn accessor_expr(field: &Field, bool_index: Option<usize>, bool_count: usize) -> String {
+    if let Some(index) = bool_index {
+        let pattern = (0..bool_count)
+            .map(|position| if position == index { "value" } else { "_" })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("{{ let [{pattern}] = self.skein_bools; value }}");
+    }
     match field.ty {
         Type::U8 | Type::U16 | Type::U32 | Type::U64 | Type::Bool | Type::Duration => format!("self.{}", field.name),
         Type::Fixed(_) | Type::List(_, _) | Type::Option(_) | Type::Named(_) | Type::Bytes(_) | Type::Text(_) => {
             format!("&self.{}", field.name)
         }
+    }
+}
+
+pub(crate) fn grouped_bools(record: &Record) -> bool {
+    record.fields.iter().filter(|field| matches!(field.ty, Type::Bool)).count() > 3
+}
+
+pub(crate) fn bool_index(record: &Record, name: &str) -> Option<usize> {
+    if !grouped_bools(record) {
+        return None;
+    }
+    record.fields.iter().filter(|field| matches!(field.ty, Type::Bool)).position(|field| field.name == name)
+}
+
+fn needs_value_check(ty: &Type) -> bool {
+    match ty {
+        Type::Bytes(_) | Type::Text(_) | Type::List(_, _) | Type::Named(_) => true,
+        Type::Option(item) => needs_value_check(item),
+        Type::U8 | Type::U16 | Type::U32 | Type::U64 | Type::Bool | Type::Duration | Type::Fixed(_) => false,
     }
 }
 
@@ -91,13 +117,21 @@ fn emit_limit_checks(schema: &Schema, out: &mut String) {
 }
 
 fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
+    let grouped = grouped_bools(record);
+    let bool_count = record.fields.iter().filter(|field| matches!(field.ty, Type::Bool)).count();
     out.push_str(&format!(
-        "/// Movable fields of {}.\n#[derive(Clone, Debug, PartialEq, Eq, Hash)]\npub struct {}Parts {{\n",
+        "/// Movable fields of `{}`.\n#[derive(Clone, Debug, PartialEq, Eq, Hash)]\npub struct {}Parts {{\n",
         record.name, record.name
     ));
+    if grouped {
+        out.push_str(&format!("    /// Boolean fields in schema order.\n    pub skein_bools: [bool; {bool_count}],\n"));
+    }
     for field in &record.fields {
+        if grouped && matches!(field.ty, Type::Bool) {
+            continue;
+        }
         out.push_str(&format!(
-            "    /// The {} field.\n    pub {}: {},\n",
+            "    /// The `{}` field.\n    pub {}: {},\n",
             field.name,
             field.name,
             rust_type(&field.ty)
@@ -105,15 +139,30 @@ fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
     }
     out.push_str("}\n\n");
     out.push_str(&format!(
-        "/// {} in this codec family.\n#[derive(Clone, Debug, PartialEq, Eq, Hash)]\npub struct {} {{\n",
+        "/// `{}` in this codec family.\n#[derive(Clone, Debug, PartialEq, Eq, Hash)]\npub struct {} {{\n",
         record.name, record.name
     ));
+    if grouped {
+        out.push_str(&format!("    skein_bools: [bool; {bool_count}],\n"));
+    }
     for field in &record.fields {
+        if grouped && matches!(field.ty, Type::Bool) {
+            continue;
+        }
         out.push_str(&format!("    {}: {},\n", field.name, rust_type(&field.ty)));
     }
     out.push_str("}\n\n");
     out.push_str(&format!("impl {} {{\n", record.name));
-    let members = record.fields.iter().map(|field| field.name.as_str()).collect::<Vec<_>>().join(", ");
+    let mut names = record
+        .fields
+        .iter()
+        .filter(|field| !grouped || !matches!(field.ty, Type::Bool))
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+    if grouped {
+        names.insert(0, "skein_bools");
+    }
+    let members = names.join(", ");
     if emit_limits::bound_names(schema).is_empty() {
         out.push_str(&format!("    /// Makes a value; this family has no adjustable bounds.\n    #[must_use]\n    pub fn new(_limits: &Limits, parts: {}Parts) -> Self {{\n        let {}Parts {{ {members} }} = parts;\n        Self {{ {members} }}\n    }}\n\n", record.name, record.name));
     } else {
@@ -121,20 +170,19 @@ fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
     }
     for field in &record.fields {
         out.push_str(&format!(
-            "    /// Reads the {} field.\n    #[must_use]\n    pub fn {}(&self) -> {} {{ {} }}\n\n",
+            "    /// Reads the `{}` field.\n    #[must_use]\n    pub fn {}(&self) -> {} {{ {} }}\n\n",
             field.name,
             field.name,
             accessor_type(&field.ty),
-            accessor_expr(field)
+            accessor_expr(field, bool_index(record, &field.name), bool_count)
         ));
     }
-    let moved =
-        record.fields.iter().map(|field| format!("{}: self.{}", field.name, field.name)).collect::<Vec<_>>().join(", ");
+    let moved = names.iter().map(|name| format!("{name}: self.{name}")).collect::<Vec<_>>().join(", ");
     out.push_str(&format!("    /// Moves the fields out without copying.\n    #[must_use]\n    pub fn into_parts(self) -> {}Parts {{ {}Parts {{ {moved} }} }}\n\n", record.name, record.name));
     if !emit_limits::bound_names(schema).is_empty() {
         out.push_str("    fn check(&self, limits: &Limits) -> Result<(), Problem> {\n");
-        if record.fields.is_empty() {
-            out.push_str("        let Self {} = self;\n");
+        if !record.fields.iter().any(|field| needs_value_check(&field.ty)) {
+            out.push_str("        let Self { .. } = self;\n");
         }
         emit_limit_checks(schema, out);
         for field in &record.fields {
@@ -149,16 +197,16 @@ fn emit_record(schema: &Schema, record: &Record, out: &mut String) {
 
 fn emit_enum(schema: &Schema, enumeration: &Enumeration, out: &mut String) {
     out.push_str(&format!(
-        "/// {} in this codec family.\n#[derive(Clone, Debug, PartialEq, Eq, Hash)]\npub enum {} {{\n",
+        "/// `{}` in this codec family.\n#[derive(Clone, Debug, PartialEq, Eq, Hash)]\npub enum {} {{\n",
         enumeration.name, enumeration.name
     ));
     for variant in &enumeration.variants {
         let name = emit_limits::pascal(&variant.name);
         match &variant.record {
             Some(record) => {
-                out.push_str(&format!("    /// {} carrying {}.\n    {name}({record}),\n", variant.name, record));
+                out.push_str(&format!("    /// `{}` carrying `{}`.\n    {name}({record}),\n", variant.name, record));
             }
-            None => out.push_str(&format!("    /// {} without a payload.\n    {name},\n", variant.name)),
+            None => out.push_str(&format!("    /// `{}` without a payload.\n    {name},\n", variant.name)),
         }
     }
     out.push_str("}\n\n");

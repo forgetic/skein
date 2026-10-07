@@ -23,33 +23,33 @@ pub const CEILINGS: Limits = Limits {
 /// A field or tag that caused a codec problem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Path {
-    /// The name field of Field.
+    /// The `name` field of `Field`.
     FieldName,
-    /// The value field of Field.
+    /// The `value` field of `Field`.
     FieldValue,
-    /// Bytes after Field.
+    /// Bytes after `Field`.
     FieldTail,
-    /// The tag of Effect.
+    /// The tag of `Effect`.
     EffectTag,
-    /// The title field of Report.
+    /// The `title` field of `Report`.
     ReportTitle,
-    /// The fields field of Report.
+    /// The `fields` field of `Report`.
     ReportFields,
-    /// The effect field of Report.
+    /// The `effect` field of `Report`.
     ReportEffect,
-    /// The present field of Report.
+    /// The `present` field of `Report`.
     ReportPresent,
-    /// The nonce field of Report.
+    /// The `nonce` field of `Report`.
     ReportNonce,
-    /// The age field of Report.
+    /// The `age` field of `Report`.
     ReportAge,
-    /// The version of Report.
+    /// The version of `Report`.
     ReportVersion,
-    /// Bytes after Report.
+    /// Bytes after `Report`.
     ReportTail,
-    /// The tag of Choice.
+    /// The tag of `Choice`.
     ChoiceTag,
-    /// Bytes after Marker.
+    /// Bytes after `Marker`.
     MarkerTail,
 }
 
@@ -60,16 +60,16 @@ pub struct Problem {
     pub reason: skein_codec::Reason,
 }
 
-/// Movable fields of Field.
+/// Movable fields of `Field`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FieldParts {
-    /// The name field.
+    /// The `name` field.
     pub name: Box<[u8]>,
-    /// The value field.
+    /// The `value` field.
     pub value: Box<[u8]>,
 }
 
-/// Field in this codec family.
+/// `Field` in this codec family.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Field {
     name: Box<[u8]>,
@@ -85,11 +85,11 @@ impl Field {
         Ok(value)
     }
 
-    /// Reads the name field.
+    /// Reads the `name` field.
     #[must_use]
     pub fn name(&self) -> &[u8] { &self.name }
 
-    /// Reads the value field.
+    /// Reads the `value` field.
     #[must_use]
     pub fn value(&self) -> &[u8] { &self.value }
 
@@ -109,12 +109,12 @@ impl Field {
     }
 }
 
-/// Effect in this codec family.
+/// `Effect` in this codec family.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Effect {
-    /// read without a payload.
+    /// `read` without a payload.
     Read,
-    /// write without a payload.
+    /// `write` without a payload.
     Write,
 }
 
@@ -137,24 +137,24 @@ impl Effect {
     }
 }
 
-/// Movable fields of Report.
+/// Movable fields of `Report`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ReportParts {
-    /// The title field.
+    /// The `title` field.
     pub title: Box<[u8]>,
-    /// The fields field.
+    /// The `fields` field.
     pub fields: List<Field>,
-    /// The effect field.
+    /// The `effect` field.
     pub effect: Effect,
-    /// The present field.
+    /// The `present` field.
     pub present: Option<bool>,
-    /// The nonce field.
+    /// The `nonce` field.
     pub nonce: [u8; 2],
-    /// The age field.
+    /// The `age` field.
     pub age: skein_lib::Duration,
 }
 
-/// Report in this codec family.
+/// `Report` in this codec family.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Report {
     title: Box<[u8]>,
@@ -174,27 +174,27 @@ impl Report {
         Ok(value)
     }
 
-    /// Reads the title field.
+    /// Reads the `title` field.
     #[must_use]
     pub fn title(&self) -> &[u8] { &self.title }
 
-    /// Reads the fields field.
+    /// Reads the `fields` field.
     #[must_use]
     pub fn fields(&self) -> &List<Field> { &self.fields }
 
-    /// Reads the effect field.
+    /// Reads the `effect` field.
     #[must_use]
     pub fn effect(&self) -> &Effect { &self.effect }
 
-    /// Reads the present field.
+    /// Reads the `present` field.
     #[must_use]
     pub fn present(&self) -> &Option<bool> { &self.present }
 
-    /// Reads the nonce field.
+    /// Reads the `nonce` field.
     #[must_use]
     pub fn nonce(&self) -> &[u8; 2] { &self.nonce }
 
-    /// Reads the age field.
+    /// Reads the `age` field.
     #[must_use]
     pub fn age(&self) -> skein_lib::Duration { self.age }
 
@@ -218,12 +218,12 @@ impl Report {
     }
 }
 
-/// Choice in this codec family.
+/// `Choice` in this codec family.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Choice {
-    /// report carrying Report.
+    /// `report` carrying `Report`.
     Report(Report),
-    /// empty without a payload.
+    /// `empty` without a payload.
     Empty,
 }
 
@@ -247,12 +247,12 @@ impl Choice {
     }
 }
 
-/// Movable fields of Marker.
+/// Movable fields of `Marker`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MarkerParts {
 }
 
-/// Marker in this codec family.
+/// `Marker` in this codec family.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Marker {
 }
@@ -271,7 +271,7 @@ impl Marker {
     pub fn into_parts(self) -> MarkerParts { MarkerParts {  } }
 
     fn check(&self, limits: &Limits) -> Result<(), Problem> {
-        let Self {} = self;
+        let Self { .. } = self;
         if limits.field_name > CEILINGS.field_name { return Err(Problem { path: Path::FieldName, reason: skein_codec::Reason::Bound }); }
         if limits.field_value > CEILINGS.field_value { return Err(Problem { path: Path::FieldValue, reason: skein_codec::Reason::Bound }); }
         if limits.report_title > CEILINGS.report_title { return Err(Problem { path: Path::ReportTitle, reason: skein_codec::Reason::Bound }); }

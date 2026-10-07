@@ -4,6 +4,7 @@
 mod tests {
 
     use skein_codec::Reason;
+    use skein_codec_tests::lints::{CEILINGS as LINT_CEILINGS, HostTool, HostToolParts};
     use skein_codec_tests::scalars::{CEILINGS as SCALAR_CEILINGS, Flag, Scalars, ScalarsParts};
     use skein_codec_tests::v1::{CEILINGS, Choice, Effect, Field, FieldParts, Path, Report, ReportParts};
     use skein_lib::{Duration, List, Reader, Writer};
@@ -123,5 +124,22 @@ mod tests {
         let mut writer = Writer::new(1);
         empty.encode(&mut writer).expect("one byte");
         assert_eq!(&*writer.finish(), &[1]);
+    }
+
+    #[test]
+    fn grouped_boolean_fields_keep_their_wire_order() {
+        let parts =
+            HostToolParts { skein_bools: [true, false, true, false], max_tokens: 7, payload: Box::from(&b"x"[..]) };
+        let value = HostTool::new(&LINT_CEILINGS, parts).expect("within limits");
+        assert!(value.inspect());
+        assert!(!value.modify());
+        assert!(value.shell());
+        assert!(!value.agents());
+        let wire = [1, 0, 1, 0, 0, 0, 0, 7, 0, 0, 0, 1, b'x'];
+        let mut writer = Writer::new(wire.len());
+        value.encode(&mut writer).expect("measured room");
+        assert_eq!(writer.finish().as_ref(), wire);
+        let decoded = HostTool::decode(&LINT_CEILINGS, &mut Reader::new(&wire)).expect("canonical bytes");
+        assert_eq!(decoded.into_parts().skein_bools, [true, false, true, false]);
     }
 }

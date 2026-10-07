@@ -35,6 +35,18 @@ pub(crate) fn pascal(name: &str) -> String {
     out
 }
 
+pub(crate) fn literal(value: impl ToString) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && digits.len().checked_sub(index).expect("index within digits").is_multiple_of(3) {
+            grouped.push('_');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
 pub(crate) fn bound_names(schema: &Schema) -> Vec<(String, u32)> {
     let mut result = Vec::new();
     for declaration in &schema.declarations {
@@ -89,6 +101,8 @@ pub(crate) fn emit(schema: &Schema, out: &mut String) {
     let bounds = bound_names(schema);
     if bounds.is_empty() {
         out.push_str("/// The family has no adjustable bounds.\n#[derive(Clone, Debug, PartialEq, Eq, Hash)]\npub struct Limits {\n");
+    } else if bounds.len() <= 2 {
+        out.push_str("/// The family's adjustable limits, each no larger than its ceiling.\n#[derive(Clone, Debug, PartialEq, Eq, Hash)]\npub struct Limits {\n");
     } else {
         out.push_str("/// The family's adjustable limits, each no larger than its ceiling.\n#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]\npub struct Limits {\n");
     }
@@ -97,7 +111,7 @@ pub(crate) fn emit(schema: &Schema, out: &mut String) {
     }
     out.push_str("}\n\n/// The schema's maximum limits.\npub const CEILINGS: Limits = Limits {\n");
     for (name, bound) in &bounds {
-        out.push_str(&format!("    {name}: {bound},\n"));
+        out.push_str(&format!("    {name}: {},\n", literal(*bound)));
     }
     out.push_str("};\n\n/// A field or tag that caused a codec problem.\n#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]\npub enum Path {\n");
     for declaration in &schema.declarations {
@@ -105,15 +119,18 @@ pub(crate) fn emit(schema: &Schema, out: &mut String) {
             Declaration::Record(record) => {
                 for field in &record.fields {
                     let variant = format!("{}{}", record.name, pascal(&field.name));
-                    out.push_str(&format!("    /// The {} field of {}.\n    {variant},\n", field.name, record.name));
+                    out.push_str(&format!(
+                        "    /// The `{}` field of `{}`.\n    {variant},\n",
+                        field.name, record.name
+                    ));
                 }
                 if record.versioned {
-                    out.push_str(&format!("    /// The version of {}.\n    {}Version,\n", record.name, record.name));
+                    out.push_str(&format!("    /// The version of `{}`.\n    {}Version,\n", record.name, record.name));
                 }
-                out.push_str(&format!("    /// Bytes after {}.\n    {}Tail,\n", record.name, record.name));
+                out.push_str(&format!("    /// Bytes after `{}`.\n    {}Tail,\n", record.name, record.name));
             }
             Declaration::Enum(enumeration) => {
-                out.push_str(&format!("    /// The tag of {}.\n    {}Tag,\n", enumeration.name, enumeration.name));
+                out.push_str(&format!("    /// The tag of `{}`.\n    {}Tag,\n", enumeration.name, enumeration.name));
             }
         }
     }

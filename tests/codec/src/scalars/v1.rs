@@ -13,27 +13,27 @@ pub const CEILINGS: Limits = Limits {
 /// A field or tag that caused a codec problem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Path {
-    /// Bytes after Empty.
+    /// Bytes after `Empty`.
     EmptyTail,
-    /// The tag of Flag.
+    /// The tag of `Flag`.
     FlagTag,
-    /// The a field of Scalars.
+    /// The `a` field of `Scalars`.
     ScalarsA,
-    /// The b field of Scalars.
+    /// The `b` field of `Scalars`.
     ScalarsB,
-    /// The c field of Scalars.
+    /// The `c` field of `Scalars`.
     ScalarsC,
-    /// The d field of Scalars.
+    /// The `d` field of `Scalars`.
     ScalarsD,
-    /// The e field of Scalars.
+    /// The `e` field of `Scalars`.
     ScalarsE,
-    /// The f field of Scalars.
+    /// The `f` field of `Scalars`.
     ScalarsF,
-    /// The g field of Scalars.
+    /// The `g` field of `Scalars`.
     ScalarsG,
-    /// The h field of Scalars.
+    /// The `h` field of `Scalars`.
     ScalarsH,
-    /// Bytes after Scalars.
+    /// Bytes after `Scalars`.
     ScalarsTail,
 }
 
@@ -44,12 +44,12 @@ pub struct Problem {
     pub reason: skein_codec::Reason,
 }
 
-/// Movable fields of Empty.
+/// Movable fields of `Empty`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EmptyParts {
 }
 
-/// Empty in this codec family.
+/// `Empty` in this codec family.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Empty {
 }
@@ -68,12 +68,12 @@ impl Empty {
 
 }
 
-/// Flag in this codec family.
+/// `Flag` in this codec family.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Flag {
-    /// off without a payload.
+    /// `off` without a payload.
     Off,
-    /// on without a payload.
+    /// `on` without a payload.
     On,
 }
 
@@ -83,28 +83,28 @@ impl Flag {
     pub fn new(_limits: &Limits, value: Self) -> Self { value }
 }
 
-/// Movable fields of Scalars.
+/// Movable fields of `Scalars`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ScalarsParts {
-    /// The a field.
+    /// The `a` field.
     pub a: u8,
-    /// The b field.
+    /// The `b` field.
     pub b: u16,
-    /// The c field.
+    /// The `c` field.
     pub c: u32,
-    /// The d field.
+    /// The `d` field.
     pub d: u64,
-    /// The e field.
+    /// The `e` field.
     pub e: bool,
-    /// The f field.
+    /// The `f` field.
     pub f: skein_lib::Duration,
-    /// The g field.
+    /// The `g` field.
     pub g: [u8; 2],
-    /// The h field.
+    /// The `h` field.
     pub h: Flag,
 }
 
-/// Scalars in this codec family.
+/// `Scalars` in this codec family.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Scalars {
     a: u8,
@@ -125,35 +125,35 @@ impl Scalars {
         Self { a, b, c, d, e, f, g, h }
     }
 
-    /// Reads the a field.
+    /// Reads the `a` field.
     #[must_use]
     pub fn a(&self) -> u8 { self.a }
 
-    /// Reads the b field.
+    /// Reads the `b` field.
     #[must_use]
     pub fn b(&self) -> u16 { self.b }
 
-    /// Reads the c field.
+    /// Reads the `c` field.
     #[must_use]
     pub fn c(&self) -> u32 { self.c }
 
-    /// Reads the d field.
+    /// Reads the `d` field.
     #[must_use]
     pub fn d(&self) -> u64 { self.d }
 
-    /// Reads the e field.
+    /// Reads the `e` field.
     #[must_use]
     pub fn e(&self) -> bool { self.e }
 
-    /// Reads the f field.
+    /// Reads the `f` field.
     #[must_use]
     pub fn f(&self) -> skein_lib::Duration { self.f }
 
-    /// Reads the g field.
+    /// Reads the `g` field.
     #[must_use]
     pub fn g(&self) -> &[u8; 2] { &self.g }
 
-    /// Reads the h field.
+    /// Reads the `h` field.
     #[must_use]
     pub fn h(&self) -> &Flag { &self.h }
 

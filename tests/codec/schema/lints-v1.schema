@@ -1,0 +1,14 @@
+family lint-fixture 1
+
+record HostTool {
+    inspect: bool
+    modify: bool
+    shell: bool
+    agents: bool
+    max_tokens: u32
+    payload: bytes 10000
+}
+
+record Boundless {
+    count: u32
+}

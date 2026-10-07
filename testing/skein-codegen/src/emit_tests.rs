@@ -2,7 +2,7 @@
 
 //! Fixed-rule golden values and generated round trips (codec.md, section 6).
 
-use crate::{Declaration, Enumeration, Golden, Record, Schema, Type, Variant, emit_limits, uses_box};
+use crate::{Declaration, Enumeration, Golden, Record, Schema, Type, Variant, emit_limits, emit_types, uses_box};
 
 fn declaration<'a>(schema: &'a Schema, name: &str) -> &'a Declaration {
     schema
@@ -94,7 +94,7 @@ fn value_expr(ty: &Type, full: bool, schema: &Schema) -> String {
         Type::U64 => if full { "u64::MAX" } else { "0_u64" }.into(),
         Type::Bool => full.to_string(),
         Type::Duration => format!("skein_lib::Duration::from_nanos({})", if full { "u64::MAX" } else { "0_u64" }),
-        Type::Fixed(bound) => format!("[{}_u8; {bound}]", if full { 0xa5_u8 } else { 0_u8 }),
+        Type::Fixed(bound) => format!("[{}_u8; {}]", if full { 0xa5_u8 } else { 0_u8 }, emit_limits::literal(*bound)),
         Type::Bytes(bound) | Type::Text(bound) => {
             let bytes = if full { pattern(*bound, matches!(ty, Type::Text(_))) } else { Vec::new() };
             let elements = bytes.iter().map(|byte| format!("{byte}_u8")).collect::<Vec<_>>().join(", ");
@@ -128,12 +128,23 @@ fn value_expr(ty: &Type, full: bool, schema: &Schema) -> String {
 }
 
 fn record_expr(record: &Record, full: bool, schema: &Schema) -> String {
-    let fields = record
+    let mut fields = record
         .fields
         .iter()
+        .filter(|field| !emit_types::grouped_bools(record) || !matches!(field.ty, Type::Bool))
         .map(|field| format!("{}: {}", field.name, value_expr(&field.ty, full, schema)))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
+    if emit_types::grouped_bools(record) {
+        let bools = record
+            .fields
+            .iter()
+            .filter(|field| matches!(field.ty, Type::Bool))
+            .map(|field| value_expr(&field.ty, full, schema))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fields.insert(0, format!("skein_bools: [{bools}]"));
+    }
+    let fields = fields.join(", ");
     let call = format!("{}::new(&CEILINGS, {}Parts {{ {fields} }})", record.name, record.name);
     if emit_limits::bound_names(schema).is_empty() {
         call
@@ -197,7 +208,7 @@ fn bound_test(record: &Record, field_index: usize, schema: &Schema, out: &mut St
     let name = format!("bound_{}_{}", emit_limits::snake(&record.name), field.name);
     let path = format!("{}{}", record.name, emit_limits::pascal(&field.name));
     let item_length = if is_list { item.len() } else { 1 };
-    out.push_str(&format!("    #[test]\n    fn {name}() {{\n        fn wire(count: u32, payload: bool) -> Box<[u8]> {{\n            let body = usize::try_from(count).expect(\"u32 fits usize\").checked_mul({item_length}).expect(\"schema ceiling\");\n            let header = {}_usize.checked_add(4).expect(\"header size\");\n            let total = if payload {{ let with_body = header.checked_add(body).expect(\"body size\"); with_body.checked_add({}_usize).expect(\"wire size\") }} else {{ header }};\n            let mut writer = skein_lib::Writer::new(total);\n            writer.put({}).expect(\"prefix room\");\n            writer.put(&count.to_be_bytes()).expect(\"length room\");\n            if payload {{\n", prefix.len(), suffix.len(), bytes_literal(&prefix)));
+    out.push_str(&format!("    #[test]\n    fn {name}() {{\n        fn wire(count: u32, payload: bool) -> Box<[u8]> {{\n            let body = usize::try_from(count).expect(\"u32 fits usize\").checked_mul({}).expect(\"schema ceiling\");\n            let header = {}_usize.checked_add(4).expect(\"header size\");\n            let total = if payload {{ let with_body = header.checked_add(body).expect(\"body size\"); with_body.checked_add({}_usize).expect(\"wire size\") }} else {{ header }};\n            let mut writer = skein_lib::Writer::new(total);\n            writer.put({}).expect(\"prefix room\");\n            writer.put(&count.to_be_bytes()).expect(\"length room\");\n            if payload {{\n", emit_limits::literal(item_length), emit_limits::literal(prefix.len()), emit_limits::literal(suffix.len()), bytes_literal(&prefix)));
     if is_list {
         out.push_str(&format!(
             "                for _item in 0_u32..count {{ writer.put({}).expect(\"item room\"); }}\n",
@@ -206,7 +217,7 @@ fn bound_test(record: &Record, field_index: usize, schema: &Schema, out: &mut St
     } else {
         out.push_str("                writer.put(&skein_lib::bytes::zeroed(body)).expect(\"body room\");\n");
     }
-    out.push_str(&format!("                writer.put({}).expect(\"suffix room\");\n            }}\n            writer.finish()\n        }}\n        {record}::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire({bound}, true))).expect(\"field at ceiling\");\n        let problem = {record}::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire({over}, false))).expect_err(\"field past ceiling\");\n        assert_eq!((problem.path, problem.reason), (Path::{path}, skein_codec::Reason::Bound));\n    }}\n\n", bytes_literal(&suffix), record = record.name));
+    out.push_str(&format!("                writer.put({}).expect(\"suffix room\");\n            }}\n            writer.finish()\n        }}\n        {record}::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire({}, true))).expect(\"field at ceiling\");\n        let problem = {record}::decode(&CEILINGS, &mut skein_lib::Reader::new(&wire({}, false))).expect_err(\"field past ceiling\");\n        assert_eq!((problem.path, problem.reason), (Path::{path}, skein_codec::Reason::Bound));\n    }}\n\n", bytes_literal(&suffix), emit_limits::literal(bound), emit_limits::literal(over), record = record.name));
 }
 
 pub(crate) fn emit(schema: &Schema, out: &mut String) -> Vec<Golden> {

@@ -84,6 +84,7 @@ fn reserved_field_name(name: &str) -> bool {
     matches!(
         name,
         "new"
+            | "skein_bools"
             | "check"
             | "measure"
             | "encode"
