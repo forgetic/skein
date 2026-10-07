@@ -3,7 +3,8 @@
 use std::collections::VecDeque;
 
 use skein_channel::generic::{
-    Direction, Event, Kind, Limits, Lower, LowerEvent, Machine, Request, Role, Schema, Version, frame_writer,
+    Direction, Event, Kind, Limits, Lower, LowerEvent, Machine, Request, Role, Schema, StreamMode, Version,
+    frame_writer,
 };
 use skein_lib::{List, Queue, Token, stream};
 
@@ -52,19 +53,25 @@ struct Peer {
     ready: bool,
     received: Option<(u16, Box<[u8]>)>,
     drained: u32,
+    output_failed: bool,
 }
 
 impl Peer {
-    fn new(role: Role, schema: Schema, limits: Limits) -> Peer {
+    fn new(role: Role, schema: Schema, limits: Limits, mode: Mode) -> Peer {
+        let stream_mode = match mode {
+            Mode::Socket => StreamMode::One,
+            Mode::Pipes => StreamMode::Two,
+        };
         Peer {
             role,
-            machine: Machine::new(schema, role, limits).expect("checked schema"),
+            machine: Machine::with_mode(schema, role, limits, stream_mode).expect("checked schema"),
             above: Queue::with_capacity(16),
             below: Queue::with_capacity(16),
             pending: None,
             ready: false,
             received: None,
             drained: 0,
+            output_failed: false,
         }
     }
 
@@ -90,6 +97,7 @@ impl Peer {
                 Lower::Write(stream::OutputDown::Send { bytes, .. }) => {
                     wire.outgoing(self.role).extend(bytes.iter().copied());
                 }
+                Lower::FinishWrite => {}
                 record => panic!("unexpected lower record: {record:?}"),
             }
         }
@@ -112,6 +120,7 @@ impl Peer {
                 Event::Opening { .. } => self.down(Request::Accept { version: 1 }),
                 Event::Ready { version: 1, .. } => self.ready = true,
                 Event::Drained => self.drained = self.drained.checked_add(1).expect("bounded count"),
+                Event::OutputFailed => self.output_failed = true,
                 Event::Sent { .. } => {}
                 Event::Body { kind, body } => self.received = Some((kind, body)),
                 event => panic!("unexpected owner event: {event:?}"),
@@ -137,8 +146,8 @@ fn limits() -> Limits {
 fn both_directions_progress_over_socket_and_pipes() {
     for mode in [Mode::Socket, Mode::Pipes] {
         let mut wire = Wire::new(mode);
-        let mut initiator = Peer::new(Role::Initiator, schema(), limits());
-        let mut responder = Peer::new(Role::Responder, schema(), limits());
+        let mut initiator = Peer::new(Role::Initiator, schema(), limits(), mode);
+        let mut responder = Peer::new(Role::Responder, schema(), limits(), mode);
         initiator.down(Request::Open { credential: Box::from([]) });
         for _ in 0_u32..80_u32 {
             initiator.step(&mut wire);
@@ -172,4 +181,43 @@ fn both_directions_progress_over_socket_and_pipes() {
         assert_eq!(initiator.drained, 3);
         assert_eq!(responder.drained, 3);
     }
+}
+
+#[test]
+fn a_last_word_reaches_the_peer_after_the_writer_pipe_fails() {
+    let mut wire = Wire::new(Mode::Pipes);
+    let mut reader = Peer::new(Role::Initiator, schema(), limits(), Mode::Pipes);
+    let mut writer = Peer::new(Role::Responder, schema(), limits(), Mode::Pipes);
+    reader.down(Request::Open { credential: Box::from([]) });
+    for _ in 0_u32..80_u32 {
+        reader.step(&mut wire);
+        writer.step(&mut wire);
+        if reader.ready && writer.ready {
+            break;
+        }
+    }
+    assert!(reader.ready && writer.ready);
+    reader.down(Request::Read);
+    let mut frame = frame_writer(0x0101, 9).expect("measured last word");
+    frame.put(b"last word").expect("body fits");
+    writer.down(Request::Send { token: Token::new(91), frame: frame.finish().expect("frame") });
+    for _ in 0_u32..5_u32 {
+        writer.step(&mut wire);
+        if writer.drained == 3 {
+            break;
+        }
+    }
+    assert_eq!(writer.drained, 3);
+    writer.machine.up(LowerEvent::WriteFailed(stream::Fault::Reset), &mut writer.above, &mut writer.below);
+    writer.step(&mut wire);
+    assert!(writer.output_failed);
+    for _ in 0_u32..20_u32 {
+        reader.step(&mut wire);
+        if reader.received.is_some() {
+            break;
+        }
+    }
+    let (kind, body) = reader.received.expect("last word reached the peer");
+    assert_eq!(kind, 0x0101);
+    assert_eq!(&*body, b"last word");
 }

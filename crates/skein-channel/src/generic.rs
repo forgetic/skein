@@ -19,6 +19,7 @@ pub use frame::{
     Control, Frame, FrameError, FrameWriter, Header, Term, control_frame, decode_control, frame_writer, parse_header,
 };
 pub use machine::Machine;
+pub use machine::StreamMode;
 pub use schema::{Direction, Kind, Limits, Role, Schema, SchemaError, Version};
 
 #[cfg(test)]

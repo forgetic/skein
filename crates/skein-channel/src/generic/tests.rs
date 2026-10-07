@@ -7,7 +7,7 @@ use skein_lib::{List, Queue, Token, stream};
 
 use super::{
     Control, Direction, Event, FrameError, Kind, Limits, Lower, LowerEvent, Machine, Request, Role, Room, Schema,
-    SchemaError, Term, Unsent, Version, control_frame, decode_control, frame_writer, parse_header,
+    SchemaError, StreamMode, Term, Unsent, Version, control_frame, decode_control, frame_writer, parse_header,
 };
 
 fn limits() -> Limits {
@@ -100,8 +100,12 @@ struct Peer {
 
 impl Peer {
     fn new(role: Role) -> Peer {
+        Peer::new_mode(role, StreamMode::One)
+    }
+
+    fn new_mode(role: Role, mode: StreamMode) -> Peer {
         Peer {
-            machine: Machine::new(schema(), role, limits()).expect("checked schema"),
+            machine: Machine::with_mode(schema(), role, limits(), mode).expect("checked schema"),
             events: Queue::with_capacity(64),
             below: Queue::with_capacity(64),
             pending: None,
@@ -120,7 +124,8 @@ impl Peer {
                 Lower::Read(stream::Down::Demand { read: stream::Read::Fill(count), room: 0 }) => {
                     self.pending = Some(usize::try_from(count).expect("bounded count"));
                 }
-                Lower::Read(stream::Down::Demand { read: stream::Read::Nothing, room: 0 } | stream::Down::Finish) => {}
+                Lower::Read(stream::Down::Demand { read: stream::Read::Nothing, room: 0 } | stream::Down::Finish)
+                | Lower::FinishWrite => {}
                 Lower::Read(_) => panic!("unexpected classic lower request"),
                 Lower::Write(stream::OutputDown::Room { right, .. }) => {
                     self.machine.up(
@@ -281,10 +286,14 @@ fn opening_refusal_reasons_cover_magic_range_version_and_owner() {
     assert!(saw_refusal);
 }
 
-#[expect(clippy::wildcard_enum_match_arm, reason = "the test fails on unexpected opening events")]
 fn ready_pair() -> (Peer, Peer) {
-    let mut initiator = Peer::new(Role::Initiator);
-    let mut responder = Peer::new(Role::Responder);
+    ready_pair_mode(StreamMode::One)
+}
+
+#[expect(clippy::wildcard_enum_match_arm, reason = "the test fails on unexpected opening events")]
+fn ready_pair_mode(mode: StreamMode) -> (Peer, Peer) {
+    let mut initiator = Peer::new_mode(Role::Initiator, mode);
+    let mut responder = Peer::new_mode(Role::Responder, mode);
     initiator.down(Request::Open { credential: Box::from([]) });
     let mut first_ready = false;
     let mut second_ready = false;
@@ -383,7 +392,7 @@ fn wrong_direction_and_oversized_headers_refuse_before_body() {
         }
         let mut refused = false;
         while let Some(event) = target.events.pop() {
-            if let Event::Closed { why: super::Closed::RefusedHere(3) } = event {
+            if let Event::Closed { why: super::Closed::Framing } = event {
                 refused = true;
             }
         }
@@ -507,4 +516,301 @@ fn measured_frame_moves_between_two_peers_while_read_and_output_progress() {
     assert_eq!(drained, 1);
     assert_eq!(received, 1);
     assert_eq!(responder.machine.room(), Room { bytes: 1024, frames: 4 });
+}
+
+#[test]
+fn refusal_cancels_a_pending_right_and_finishes_after_its_last_word() {
+    let (_, mut responder) = ready_pair();
+    let mut writer = frame_writer(0x0101, 4).expect("measured frame");
+    writer.put(b"drop").expect("body fits");
+    responder.down(Request::Send { token: Token::new(1), frame: writer.finish().expect("frame") });
+    match responder.events.pop() {
+        Some(Event::Sent { token }) => assert_eq!(token, Token::new(1)),
+        event => panic!("expected admission: {event:?}"),
+    }
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    let old_right = match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Room { right, .. })) => right,
+        record => panic!("expected output request: {record:?}"),
+    };
+    responder.down(Request::Refuse { reason: 256, text: Box::from(*b"bye") });
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Cancel { right })) => assert_eq!(right, old_right),
+        record => panic!("expected named cancellation: {record:?}"),
+    }
+    responder.machine.up(
+        LowerEvent::Write(stream::OutputUp::Settled { right: old_right, outcome: stream::OutputOutcome::Cancelled }),
+        &mut responder.events,
+        &mut responder.below,
+    );
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    let refuse_right = match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Room { right, .. })) => right,
+        record => panic!("expected Refuse room: {record:?}"),
+    };
+    assert_ne!(refuse_right, old_right);
+    responder.machine.up(
+        LowerEvent::Write(stream::OutputUp::Settled { right: refuse_right, outcome: stream::OutputOutcome::Granted }),
+        &mut responder.events,
+        &mut responder.below,
+    );
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    let bytes = match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Send { bytes, .. })) => bytes,
+        record => panic!("expected Refuse send: {record:?}"),
+    };
+    let header = parse_header(bytes.get(..8).expect("header")).expect("framed refusal");
+    assert_eq!(header.kind, 3);
+    match responder.below.pop() {
+        Some(Lower::Read(stream::Down::Finish)) => {}
+        record => panic!("expected stream Finish: {record:?}"),
+    }
+    match responder.events.pop() {
+        Some(Event::Drained) => {}
+        event => panic!("expected drain: {event:?}"),
+    }
+    match responder.events.pop() {
+        Some(Event::Closed { why: super::Closed::RefusedHere(256) }) => {}
+        event => panic!("expected refusal terminal: {event:?}"),
+    }
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    assert!(responder.events.is_empty());
+}
+
+#[test]
+fn close_releases_a_grant_that_beat_cancellation() {
+    let (_, mut responder) = ready_pair();
+    let mut writer = frame_writer(0x0101, 1).expect("measured frame");
+    writer.put(b"x").expect("body fits");
+    responder.down(Request::Send { token: Token::new(2), frame: writer.finish().expect("frame") });
+    drop(responder.events.pop());
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    let right = match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Room { right, .. })) => right,
+        record => panic!("expected room: {record:?}"),
+    };
+    responder.down(Request::Close);
+    match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Cancel { right: cancelled })) => assert_eq!(cancelled, right),
+        record => panic!("expected Cancel: {record:?}"),
+    }
+    responder.machine.up(
+        LowerEvent::Write(stream::OutputUp::Settled { right, outcome: stream::OutputOutcome::Granted }),
+        &mut responder.events,
+        &mut responder.below,
+    );
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Release { right: released })) => assert_eq!(released, right),
+        record => panic!("expected Release: {record:?}"),
+    }
+    match responder.events.pop() {
+        Some(Event::Closed { why: super::Closed::Owner }) => {}
+        event => panic!("expected owner terminal: {event:?}"),
+    }
+    assert!(responder.events.is_empty());
+}
+
+#[test]
+fn one_stream_finish_waits_for_read_but_two_pipes_finish_independently() {
+    let (mut one, _) = ready_pair_mode(StreamMode::One);
+    one.down(Request::Read);
+    one.machine.poll(&mut one.events, &mut one.below);
+    match one.below.pop() {
+        Some(Lower::Read(stream::Down::Demand { read: stream::Read::Fill(1), room: 0 })) => {}
+        record => panic!("expected first header byte: {record:?}"),
+    }
+    one.down(Request::Finish);
+    one.machine.poll(&mut one.events, &mut one.below);
+    assert!(one.below.is_empty());
+    one.machine.up(LowerEvent::Read(stream::Up::End), &mut one.events, &mut one.below);
+    one.machine.poll(&mut one.events, &mut one.below);
+    match one.below.pop() {
+        Some(Lower::Read(stream::Down::Demand { read: stream::Read::Nothing, room: 0 })) => {}
+        record => panic!("expected crossed-read withdrawal: {record:?}"),
+    }
+    match one.below.pop() {
+        Some(Lower::Read(stream::Down::Finish)) => {}
+        record => panic!("expected delayed Finish: {record:?}"),
+    }
+
+    let (mut two, mut peer) = ready_pair_mode(StreamMode::Two);
+    two.down(Request::Read);
+    two.machine.poll(&mut two.events, &mut two.below);
+    drop(two.below.pop());
+    two.pending = Some(1);
+    two.down(Request::Finish);
+    two.machine.poll(&mut two.events, &mut two.below);
+    match two.below.pop() {
+        Some(Lower::FinishWrite) => {}
+        record => panic!("expected independent write finish: {record:?}"),
+    }
+    let mut frame = frame_writer(0x0101, 3).expect("measured frame");
+    frame.put(b"end").expect("body fits");
+    two.input.extend(frame.finish().expect("frame").bytes().iter().copied());
+    for _ in 0_u32..20_u32 {
+        two.step(&mut peer);
+    }
+    match two.events.pop() {
+        Some(Event::Body { kind: 0x0101, body }) => assert_eq!(&*body, b"end"),
+        event => panic!("expected last body after finish: {event:?}"),
+    }
+}
+
+#[test]
+fn one_stream_finish_follows_the_in_flight_read_answer() {
+    let (mut channel, _) = ready_pair_mode(StreamMode::One);
+    channel.down(Request::Read);
+    channel.machine.poll(&mut channel.events, &mut channel.below);
+    match channel.below.pop() {
+        Some(Lower::Read(stream::Down::Demand { read: stream::Read::Fill(1), room: 0 })) => {}
+        record => panic!("expected first header byte: {record:?}"),
+    }
+    channel.down(Request::Finish);
+    channel.machine.poll(&mut channel.events, &mut channel.below);
+    assert!(channel.below.is_empty());
+    channel.machine.up(LowerEvent::Read(stream::Up::Bytes(Box::from([0_u8]))), &mut channel.events, &mut channel.below);
+    channel.machine.poll(&mut channel.events, &mut channel.below);
+    match channel.below.pop() {
+        Some(Lower::Read(stream::Down::Demand { read: stream::Read::Fill(7), room: 0 })) => {}
+        record => panic!("expected rest of header: {record:?}"),
+    }
+    channel.machine.up(
+        LowerEvent::Read(stream::Up::Bytes(Box::from([5_u8, 0, 0, 0, 0, 0, 0]))),
+        &mut channel.events,
+        &mut channel.below,
+    );
+    channel.machine.poll(&mut channel.events, &mut channel.below);
+    match channel.events.pop() {
+        Some(Event::Ping) => {}
+        event => panic!("expected in-flight read answer: {event:?}"),
+    }
+    match channel.below.pop() {
+        Some(Lower::Read(stream::Down::Finish)) => {}
+        record => panic!("expected Finish after answer: {record:?}"),
+    }
+}
+
+#[test]
+fn two_pipes_keep_reading_after_write_failure_and_drain_after_read_failure() {
+    let (mut initiator, mut responder) = ready_pair_mode(StreamMode::Two);
+    let mut writer = frame_writer(0x0101, 1).expect("measured frame");
+    writer.put(b"x").expect("body fits");
+    responder.down(Request::Send { token: Token::new(3), frame: writer.finish().expect("frame") });
+    drop(responder.events.pop());
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    let right = match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Room { right, .. })) => right,
+        record => panic!("expected write room: {record:?}"),
+    };
+    responder.machine.up(
+        LowerEvent::Write(stream::OutputUp::Settled {
+            right,
+            outcome: stream::OutputOutcome::Failed(stream::Fault::Other),
+        }),
+        &mut responder.events,
+        &mut responder.below,
+    );
+    match responder.events.pop() {
+        Some(Event::OutputFailed) => {}
+        event => panic!("expected output failure: {event:?}"),
+    }
+    responder.down(Request::Read);
+    let ping = control_frame(&Control::Ping, &limits()).expect("Ping frame");
+    responder.input.extend(ping.bytes().iter().copied());
+    for _ in 0_u32..10_u32 {
+        responder.step(&mut initiator);
+    }
+    match responder.events.pop() {
+        Some(Event::Ping) => {}
+        event => panic!("reading should continue after output failure: {event:?}"),
+    }
+
+    let (_, mut responder) = ready_pair_mode(StreamMode::Two);
+    let mut writer = frame_writer(0x0101, 1).expect("measured frame");
+    writer.put(b"z").expect("body fits");
+    responder.down(Request::Send { token: Token::new(4), frame: writer.finish().expect("frame") });
+    drop(responder.events.pop());
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    let right = match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Room { right, .. })) => right,
+        record => panic!("expected write room: {record:?}"),
+    };
+    responder.machine.up(
+        LowerEvent::Read(stream::Up::Failed(stream::Fault::Other)),
+        &mut responder.events,
+        &mut responder.below,
+    );
+    assert!(responder.events.is_empty(), "queued output still needs its grant");
+    responder.machine.up(
+        LowerEvent::Write(stream::OutputUp::Settled { right, outcome: stream::OutputOutcome::Granted }),
+        &mut responder.events,
+        &mut responder.below,
+    );
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Send { bytes, .. })) => assert_eq!(bytes.get(8..), Some(&b"z"[..])),
+        record => panic!("queued last word should drain: {record:?}"),
+    }
+    match responder.events.pop() {
+        Some(Event::Drained) => {}
+        event => panic!("expected drain: {event:?}"),
+    }
+    match responder.events.pop() {
+        Some(Event::Closed { why: super::Closed::Stream }) => {}
+        event => panic!("expected stream terminal: {event:?}"),
+    }
+}
+
+#[test]
+fn one_stream_failure_cancels_output_and_closes_once() {
+    let (_, mut responder) = ready_pair_mode(StreamMode::One);
+    let mut writer = frame_writer(0x0101, 1).expect("measured frame");
+    writer.put(b"x").expect("body fits");
+    responder.down(Request::Send { token: Token::new(5), frame: writer.finish().expect("frame") });
+    drop(responder.events.pop());
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    let right = match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Room { right, .. })) => right,
+        record => panic!("expected write room: {record:?}"),
+    };
+    responder.machine.up(
+        LowerEvent::Read(stream::Up::Failed(stream::Fault::Reset)),
+        &mut responder.events,
+        &mut responder.below,
+    );
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    match responder.below.pop() {
+        Some(Lower::Write(stream::OutputDown::Cancel { right: cancelled })) => assert_eq!(cancelled, right),
+        record => panic!("expected cancellation: {record:?}"),
+    }
+    responder.machine.up(
+        LowerEvent::Write(stream::OutputUp::Settled { right, outcome: stream::OutputOutcome::Cancelled }),
+        &mut responder.events,
+        &mut responder.below,
+    );
+    match responder.events.pop() {
+        Some(Event::Closed { why: super::Closed::Stream }) => {}
+        event => panic!("expected one stream terminal: {event:?}"),
+    }
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    assert!(responder.events.is_empty());
+}
+
+#[test]
+fn write_failure_during_refusal_reports_stream_terminal() {
+    let (_, mut responder) = ready_pair_mode(StreamMode::Two);
+    responder.down(Request::Refuse { reason: 256, text: Box::from(*b"bye") });
+    responder.machine.up(LowerEvent::WriteFailed(stream::Fault::Reset), &mut responder.events, &mut responder.below);
+    match responder.events.pop() {
+        Some(Event::OutputFailed) => {}
+        event => panic!("expected output failure: {event:?}"),
+    }
+    match responder.events.pop() {
+        Some(Event::Closed { why: super::Closed::Stream }) => {}
+        event => panic!("expected stream terminal: {event:?}"),
+    }
+    responder.machine.poll(&mut responder.events, &mut responder.below);
+    assert!(responder.below.is_empty());
 }

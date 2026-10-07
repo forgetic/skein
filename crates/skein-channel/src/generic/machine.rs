@@ -35,22 +35,26 @@ enum Phase {
     WaitAccept,
     WaitTerms { version: u16 },
     Ready { version: u16 },
-    Refusing { reason: u16 },
-    Finished,
+    Refusing { reason: u16, framing: bool },
+    Finished { version: u16 },
     Closed,
 }
 
 impl Phase {
     fn may_ping(&self) -> bool {
         match self {
-            Phase::WaitOwner { .. } | Phase::WaitAccept | Phase::WaitTerms { .. } | Phase::Ready { .. } => true,
-            Phase::Idle | Phase::WaitOpen | Phase::Refusing { .. } | Phase::Finished | Phase::Closed => false,
+            Phase::WaitOwner { .. }
+            | Phase::WaitAccept
+            | Phase::WaitTerms { .. }
+            | Phase::Ready { .. }
+            | Phase::Finished { .. } => true,
+            Phase::Idle | Phase::WaitOpen | Phase::Refusing { .. } | Phase::Closed => false,
         }
     }
 
     fn may_end_input(&self) -> bool {
         match self {
-            Phase::Ready { .. } | Phase::Finished | Phase::Closed => true,
+            Phase::Ready { .. } | Phase::Finished { .. } | Phase::Closed => true,
             Phase::Idle
             | Phase::WaitOpen
             | Phase::WaitOwner { .. }
@@ -69,7 +73,7 @@ impl Phase {
             | Phase::WaitAccept
             | Phase::WaitTerms { .. }
             | Phase::Ready { .. }
-            | Phase::Finished
+            | Phase::Finished { .. }
             | Phase::Closed => false,
         }
     }
@@ -99,12 +103,22 @@ enum QueueTag {
     Application,
 }
 
+/// Whether read and write share one stream or use a pipe in each direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamMode {
+    /// Both directions use one socket-like stream.
+    One,
+    /// The machine reads one pipe and writes the other.
+    Two,
+}
+
 /// One channel machine over a read stream and independent output stream.
 #[derive(Debug)]
 #[expect(clippy::struct_excessive_bools, reason = "each boolean tracks a separate lower obligation or one-time event")]
 pub struct Machine {
     schema: Schema,
     role: Role,
+    mode: StreamMode,
     limits: Limits,
     phase: Phase,
     read: ReadState,
@@ -114,6 +128,8 @@ pub struct Machine {
     output: Queue<Queued>,
     output_right: Option<Token>,
     output_granted: bool,
+    cancel_requested: bool,
+    cancel_sent: bool,
     next_right: u64,
     used_bytes: u32,
     used_frames: u32,
@@ -123,11 +139,18 @@ pub struct Machine {
     peer_terms: Option<List<Term>>,
     finish_sent: bool,
     closed_sent: bool,
+    terminal_why: Option<Closed>,
+    write_failed: bool,
 }
 
 impl Machine {
     /// Checks the schema before keeping its bounded tables.
     pub fn new(schema: Schema, role: Role, limits: Limits) -> Result<Machine, SchemaError> {
+        Self::with_mode(schema, role, limits, StreamMode::One)
+    }
+
+    /// Checks a channel with an explicit one-stream or two-pipe topology.
+    pub fn with_mode(schema: Schema, role: Role, limits: Limits, mode: StreamMode) -> Result<Machine, SchemaError> {
         schema.check(&limits)?;
         let output_capacity = limits.output_frames.checked_add(3).ok_or(SchemaError::InvalidLimit)?;
         let (phase, read) = match role {
@@ -137,6 +160,7 @@ impl Machine {
         Ok(Machine {
             schema,
             role,
+            mode,
             limits,
             phase,
             read,
@@ -146,6 +170,8 @@ impl Machine {
             output: Queue::with_capacity(output_capacity),
             output_right: None,
             output_granted: false,
+            cancel_requested: false,
+            cancel_sent: false,
             next_right: 1,
             used_bytes: 0,
             used_frames: 0,
@@ -155,6 +181,8 @@ impl Machine {
             peer_terms: None,
             finish_sent: false,
             closed_sent: false,
+            terminal_why: None,
+            write_failed: false,
         })
     }
 
@@ -170,6 +198,7 @@ impl Machine {
             Request::Finish => self.finish(),
             Request::Close => self.close(up, below),
         }
+        self.maybe_terminal(up);
     }
 
     /// Handles exactly one lower event; `poll` afterwards progresses both sides.
@@ -177,12 +206,15 @@ impl Machine {
         match event {
             LowerEvent::Read(event) => self.read_event(event, above),
             LowerEvent::Write(event) => self.write_event(event, above),
+            LowerEvent::WriteFailed(_) => self.output_failure(above),
         }
+        self.maybe_terminal(above);
     }
 
     /// Emits the current read demand and a separate output reservation or send.
     pub fn poll(&mut self, above: &mut Queue<Event>, below: &mut Queue<Lower>) {
         self.flush_unsupported();
+        self.cancel_output(below);
         if self.read_outstanding {
             match self.read {
                 ReadState::Ended => {
@@ -195,7 +227,8 @@ impl Machine {
         self.emit_read(below);
         self.emit_output(above, below);
         self.maybe_ready(above);
-        self.maybe_finish(above, below);
+        self.maybe_finish(below);
+        self.maybe_terminal(above);
     }
 
     /// The owner-visible waits for deadlines.
@@ -203,10 +236,10 @@ impl Machine {
     pub fn waiting(&self) -> Waiting {
         let read = match self.phase {
             Phase::WaitOpen | Phase::WaitAccept | Phase::WaitTerms { .. } => ReadWait::Opening,
-            Phase::Ready { .. } if self.read_credit => ReadWait::Frame,
+            Phase::Ready { .. } | Phase::Finished { .. } if self.read_credit => ReadWait::Frame,
             Phase::Idle
             | Phase::WaitOwner { .. }
-            | Phase::Finished
+            | Phase::Finished { .. }
             | Phase::Closed
             | Phase::Ready { .. }
             | Phase::Refusing { .. } => ReadWait::Nothing,
@@ -220,14 +253,13 @@ impl Machine {
     #[must_use]
     pub fn version(&self) -> Option<u16> {
         match self.phase {
-            Phase::Ready { version } => Some(version),
+            Phase::Ready { version } | Phase::Finished { version } => Some(version),
             Phase::Idle
             | Phase::WaitOpen
             | Phase::WaitOwner { .. }
             | Phase::WaitAccept
             | Phase::WaitTerms { .. }
             | Phase::Refusing { .. }
-            | Phase::Finished
             | Phase::Closed => None,
         }
     }
@@ -266,7 +298,7 @@ impl Machine {
             | Phase::WaitTerms { .. }
             | Phase::Ready { .. }
             | Phase::Refusing { .. }
-            | Phase::Finished
+            | Phase::Finished { .. }
             | Phase::Closed => false,
         };
         if !allowed {
@@ -286,17 +318,35 @@ impl Machine {
         if self.phase == Phase::Closed || self.phase.refusing() {
             return;
         }
+        if self.write_failed {
+            self.phase = Phase::Closed;
+            self.read = ReadState::Idle;
+            self.terminal_why = Some(Closed::Stream);
+            return;
+        }
         assert!(text.len() <= 256, "refusal text is at most 256 bytes");
-        self.output = Queue::with_capacity(self.output.capacity());
+        self.clear_output();
         let control = Control::Refuse { reason, text };
         let frame = control_frame(&control, &self.limits).expect("bounded Refuse fits");
         self.queue(frame, QueueTag::Control);
-        self.phase = Phase::Refusing { reason };
+        self.phase = Phase::Refusing { reason, framing: false };
         self.read = ReadState::Idle;
+        self.cancel_requested = self.output_right.is_some();
     }
 
     fn read(&mut self, above: &mut Queue<Event>) {
-        if self.version().is_none() || self.read_credit {
+        let may_read = match self.phase {
+            Phase::Ready { .. } => true,
+            Phase::Finished { .. } => self.mode == StreamMode::Two,
+            Phase::Idle
+            | Phase::WaitOpen
+            | Phase::WaitOwner { .. }
+            | Phase::WaitAccept
+            | Phase::WaitTerms { .. }
+            | Phase::Refusing { .. }
+            | Phase::Closed => false,
+        };
+        if !may_read || self.read_credit {
             return;
         }
         match self.read {
@@ -312,7 +362,11 @@ impl Machine {
     }
 
     fn ping(&mut self) {
-        if self.phase.may_ping() && !self.ping_queued {
+        let may_send = match self.phase {
+            Phase::WaitOwner { .. } | Phase::WaitAccept | Phase::WaitTerms { .. } | Phase::Ready { .. } => true,
+            Phase::Idle | Phase::WaitOpen | Phase::Refusing { .. } | Phase::Finished { .. } | Phase::Closed => false,
+        };
+        if may_send && !self.ping_queued && !self.write_failed {
             let frame = control_frame(&Control::Ping, &self.limits).expect("fixed Ping fits");
             self.queue(frame, QueueTag::Ping);
             self.ping_queued = true;
@@ -321,14 +375,15 @@ impl Machine {
 
     fn send(&mut self, token: Token, frame: Frame, above: &mut Queue<Event>) {
         let version = match self.phase {
-            Phase::Ready { version } => version,
+            Phase::Ready { version } if !self.write_failed => version,
             Phase::Idle
             | Phase::WaitOpen
             | Phase::WaitOwner { .. }
             | Phase::WaitAccept
             | Phase::WaitTerms { .. }
             | Phase::Refusing { .. }
-            | Phase::Finished
+            | Phase::Ready { .. }
+            | Phase::Finished { .. }
             | Phase::Closed => {
                 above.push(Event::Unsent { token, why: Unsent::Closed });
                 return;
@@ -347,27 +402,82 @@ impl Machine {
     }
 
     fn finish(&mut self) {
-        if self.version().is_some() {
-            self.phase = Phase::Finished;
+        match self.phase {
+            Phase::Ready { version } => self.phase = Phase::Finished { version },
+            Phase::Idle
+            | Phase::WaitOpen
+            | Phase::WaitOwner { .. }
+            | Phase::WaitAccept
+            | Phase::WaitTerms { .. }
+            | Phase::Refusing { .. }
+            | Phase::Finished { .. }
+            | Phase::Closed => {}
         }
     }
 
     fn close(&mut self, above: &mut Queue<Event>, below: &mut Queue<Lower>) {
-        if self.phase == Phase::Closed {
+        if self.closed_sent || self.phase == Phase::Closed {
             return;
         }
         self.phase = Phase::Closed;
         self.read = ReadState::Idle;
-        self.output = Queue::with_capacity(self.output.capacity());
+        self.clear_output();
+        self.terminal_why = Some(Closed::Owner);
+        self.cancel_requested = self.output_right.is_some();
         if self.read_outstanding {
             below.push(Lower::Read(stream::Down::Demand { read: stream::Read::Nothing, room: 0 }));
             self.read_outstanding = false;
         }
-        if let Some(right) = self.output_right {
-            below.push(Lower::Write(stream::OutputDown::Cancel { right }));
-        } else {
+        self.cancel_output(below);
+        self.maybe_terminal(above);
+    }
+
+    fn clear_output(&mut self) {
+        for _ in 0..self.output.capacity() {
+            match self.output.pop() {
+                Some(item) => drop(item),
+                None => break,
+            }
+        }
+        self.used_bytes = 0;
+        self.used_frames = 0;
+        self.ping_queued = false;
+        self.unsupported_queued = false;
+        self.pending_unsupported = None;
+    }
+
+    fn cancel_output(&mut self, below: &mut Queue<Lower>) {
+        if !self.cancel_requested {
+            return;
+        }
+        match self.output_right {
+            Some(right) if self.output_granted => {
+                below.push(Lower::Write(stream::OutputDown::Release { right }));
+                self.output_right = None;
+                self.output_granted = false;
+                self.cancel_requested = false;
+                self.cancel_sent = false;
+            }
+            Some(right) if !self.cancel_sent => {
+                below.push(Lower::Write(stream::OutputDown::Cancel { right }));
+                self.cancel_sent = true;
+            }
+            Some(_) => {}
+            None => {
+                self.cancel_requested = false;
+                self.cancel_sent = false;
+            }
+        }
+    }
+
+    fn maybe_terminal(&mut self, above: &mut Queue<Event>) {
+        if self.closed_sent || !self.output.is_empty() || self.output_right.is_some() {
+            return;
+        }
+        if let Some(why) = self.terminal_why {
+            self.phase = Phase::Closed;
             self.closed_sent = true;
-            above.push(Event::Closed { why: Closed::Owner });
+            above.push(Event::Closed { why });
         }
     }
 
@@ -400,6 +510,9 @@ impl Machine {
     }
 
     fn emit_output(&mut self, above: &mut Queue<Event>, below: &mut Queue<Lower>) {
+        if self.write_failed || self.cancel_requested {
+            return;
+        }
         if self.output_granted {
             let right = self.output_right.take().expect("grant has named right");
             let item = self.output.pop().expect("grant has a queued frame");
@@ -439,18 +552,47 @@ impl Machine {
                     stream::OutputOutcome::Granted => {
                         self.output_granted = true;
                     }
-                    stream::OutputOutcome::Cancelled | stream::OutputOutcome::Failed(_) => {
+                    stream::OutputOutcome::Cancelled => {
                         self.output_right = None;
-                        self.output = Queue::with_capacity(self.output.capacity());
-                        if self.phase == Phase::Closed && !self.closed_sent {
-                            self.closed_sent = true;
-                            above.push(Event::Closed { why: Closed::Owner });
+                        if self.cancel_requested {
+                            self.cancel_requested = false;
+                            self.cancel_sent = false;
                         } else {
-                            above.push(Event::OutputFailed);
+                            self.output_failure(above);
                         }
+                    }
+                    stream::OutputOutcome::Failed(_) => {
+                        self.output_right = None;
+                        self.cancel_requested = false;
+                        self.cancel_sent = false;
+                        self.output_failure(above);
                     }
                 }
             }
+        }
+    }
+
+    fn output_failure(&mut self, above: &mut Queue<Event>) {
+        if self.write_failed || self.closed_sent {
+            return;
+        }
+        self.write_failed = true;
+        self.clear_output();
+        if self.terminal_why.is_some() {
+            return;
+        }
+        if self.phase.refusing() {
+            self.phase = Phase::Closed;
+            self.read = ReadState::Idle;
+            self.terminal_why = Some(Closed::Stream);
+        }
+        match self.mode {
+            StreamMode::One => {
+                self.phase = Phase::Closed;
+                self.read = ReadState::Idle;
+                self.terminal_why = Some(Closed::Stream);
+            }
+            StreamMode::Two => above.push(Event::OutputFailed),
         }
     }
 
@@ -458,9 +600,14 @@ impl Machine {
         match event {
             stream::Up::Bytes(bytes) => {
                 self.read_outstanding = false;
-                self.read_bytes(bytes, above);
+                if self.phase != Phase::Closed {
+                    self.read_bytes(bytes, above);
+                }
             }
             stream::Up::End => {
+                if self.phase == Phase::Closed {
+                    return;
+                }
                 let between_frames = match &self.read {
                     ReadState::Header { first: None } | ReadState::Idle | ReadState::Ended => true,
                     ReadState::Header { first: Some(_) } | ReadState::Body { .. } | ReadState::Skip { .. } => false,
@@ -471,16 +618,32 @@ impl Machine {
                         self.read_credit = false;
                         above.push(Event::Ended);
                     }
+                    if self.write_failed {
+                        self.phase = Phase::Closed;
+                        self.terminal_why = Some(Closed::Stream);
+                    }
                 } else {
                     self.phase = Phase::Closed;
                     self.read = ReadState::Idle;
-                    above.push(Event::Closed { why: Closed::Truncated });
+                    self.terminal_why = Some(Closed::Truncated);
+                    if self.mode == StreamMode::One {
+                        self.clear_output();
+                        self.cancel_requested = self.output_right.is_some();
+                    }
                 }
             }
             stream::Up::Failed(_) => {
+                if self.phase == Phase::Closed {
+                    return;
+                }
                 self.phase = Phase::Closed;
                 self.read = ReadState::Idle;
-                above.push(Event::Closed { why: Closed::Stream });
+                self.read_outstanding = false;
+                self.terminal_why = Some(Closed::Stream);
+                if self.mode == StreamMode::One {
+                    self.clear_output();
+                    self.cancel_requested = self.output_right.is_some();
+                }
             }
             stream::Up::Room => unreachable!("the channel only sends read-only demands"),
         }
@@ -549,14 +712,15 @@ impl Machine {
 
     fn begin_body(&mut self, header: Header, above: &mut Queue<Event>) {
         let kind = match self.phase {
-            Phase::Ready { version } => classify(&self.schema, self.role, &self.limits, version, header),
+            Phase::Ready { version } | Phase::Finished { version } => {
+                classify(&self.schema, self.role, &self.limits, version, header)
+            }
             Phase::Idle
             | Phase::WaitOpen
             | Phase::WaitOwner { .. }
             | Phase::WaitAccept
             | Phase::WaitTerms { .. }
             | Phase::Refusing { .. }
-            | Phase::Finished
             | Phase::Closed => {
                 if self.header_allowed(header) {
                     Some(ReadKind::Control)
@@ -653,7 +817,7 @@ impl Machine {
                 | Phase::WaitTerms { .. }
                 | Phase::Ready { .. }
                 | Phase::Refusing { .. }
-                | Phase::Finished
+                | Phase::Finished { .. }
                 | Phase::Closed => {
                     self.framing_error();
                 }
@@ -671,11 +835,9 @@ impl Machine {
                 above.push(Event::Refused { reason, text });
                 self.phase = Phase::Closed;
                 self.read = ReadState::Idle;
-                self.output = Queue::with_capacity(self.output.capacity());
-                if self.output_right.is_none() && !self.closed_sent {
-                    above.push(Event::Closed { why: Closed::RefusedPeer(reason) });
-                    self.closed_sent = true;
-                }
+                self.clear_output();
+                self.cancel_requested = self.output_right.is_some();
+                self.terminal_why = Some(Closed::RefusedPeer(reason));
             }
             Control::Terms { entries } => {
                 let version = match self.phase {
@@ -686,7 +848,7 @@ impl Machine {
                     | Phase::WaitAccept
                     | Phase::Ready { .. }
                     | Phase::Refusing { .. }
-                    | Phase::Finished
+                    | Phase::Finished { .. }
                     | Phase::Closed => {
                         self.framing_error();
                         return;
@@ -708,11 +870,11 @@ impl Machine {
                 if self.phase.may_ping() {
                     above.push(Event::Ping);
                     match self.phase {
-                        Phase::Ready { .. } => self.read_credit = false,
+                        Phase::Ready { .. } | Phase::Finished { .. } => self.read_credit = false,
                         Phase::WaitOwner { .. } | Phase::WaitAccept | Phase::WaitTerms { .. } => {
                             self.read = ReadState::Header { first: None };
                         }
-                        Phase::Idle | Phase::WaitOpen | Phase::Refusing { .. } | Phase::Finished | Phase::Closed => {
+                        Phase::Idle | Phase::WaitOpen | Phase::Refusing { .. } | Phase::Closed => {
                             unreachable!("may_ping checked the phase")
                         }
                     }
@@ -721,7 +883,7 @@ impl Machine {
                 }
             }
             Control::Unsupported { kind } => match self.phase {
-                Phase::Ready { .. } => {
+                Phase::Ready { .. } | Phase::Finished { .. } => {
                     self.read_credit = false;
                     above.push(Event::Unsupported { kind });
                 }
@@ -731,7 +893,6 @@ impl Machine {
                 | Phase::WaitAccept
                 | Phase::WaitTerms { .. }
                 | Phase::Refusing { .. }
-                | Phase::Finished
                 | Phase::Closed => self.framing_error(),
             },
         }
@@ -739,6 +900,9 @@ impl Machine {
 
     fn auto_refuse(&mut self, reason: u16) {
         self.refuse(reason, Box::from([]));
+        if reason == 3 {
+            self.phase = Phase::Refusing { reason, framing: true };
+        }
     }
 
     fn framing_error(&mut self) {
@@ -757,7 +921,7 @@ impl Machine {
             | Phase::WaitAccept
             | Phase::Ready { .. }
             | Phase::Refusing { .. }
-            | Phase::Finished
+            | Phase::Finished { .. }
             | Phase::Closed => return,
         };
         if let Some(terms) = self.peer_terms.as_ref() {
@@ -767,26 +931,30 @@ impl Machine {
         }
     }
 
-    fn maybe_finish(&mut self, above: &mut Queue<Event>, below: &mut Queue<Lower>) {
+    fn maybe_finish(&mut self, below: &mut Queue<Lower>) {
         if self.finish_sent || !self.output.is_empty() || self.output_right.is_some() {
             return;
         }
         match self.phase {
-            Phase::Refusing { reason } => {
+            Phase::Refusing { reason, framing } => {
                 if self.read_outstanding {
                     below.push(Lower::Read(stream::Down::Demand { read: stream::Read::Nothing, room: 0 }));
                     self.read_outstanding = false;
                 }
-                below.push(Lower::Read(stream::Down::Finish));
-                self.finish_sent = true;
-                if !self.closed_sent {
-                    above.push(Event::Closed { why: Closed::RefusedHere(reason) });
-                    self.closed_sent = true;
+                match self.mode {
+                    StreamMode::One => below.push(Lower::Read(stream::Down::Finish)),
+                    StreamMode::Two => below.push(Lower::FinishWrite),
                 }
+                self.finish_sent = true;
+                self.terminal_why = Some(if framing { Closed::Framing } else { Closed::RefusedHere(reason) });
+                self.phase = Phase::Closed;
             }
-            Phase::Finished => {
-                if !self.read_outstanding {
-                    below.push(Lower::Read(stream::Down::Finish));
+            Phase::Finished { .. } => {
+                if self.mode == StreamMode::Two || (!self.read_outstanding && !self.read_credit) {
+                    match self.mode {
+                        StreamMode::One => below.push(Lower::Read(stream::Down::Finish)),
+                        StreamMode::Two => below.push(Lower::FinishWrite),
+                    }
                     self.finish_sent = true;
                 }
             }

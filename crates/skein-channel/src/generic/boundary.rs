@@ -107,6 +107,8 @@ pub enum Lower {
     Read(stream::Down),
     /// A named independent output operation on the write stream.
     Write(stream::OutputDown),
+    /// Finish the write pipe after its queued output drains.
+    FinishWrite,
 }
 
 /// One response from the read or independent write stream.
@@ -116,6 +118,8 @@ pub enum LowerEvent {
     Read(stream::Up),
     /// The named output reservation settled.
     Write(stream::OutputUp),
+    /// The write stream failed after or without a pending output right.
+    WriteFailed(stream::Fault),
 }
 
 /// What the read side currently needs.
