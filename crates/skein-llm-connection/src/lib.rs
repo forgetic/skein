@@ -15,6 +15,7 @@ extern crate alloc;
 mod boundary;
 mod call;
 mod component;
+mod deadlines;
 mod endpoint;
 mod limits;
 #[cfg(test)]

@@ -177,6 +177,9 @@ fn codex_calls_complete_and_reuse_one_tls_connection() {
     assert_eq!(completed, 2);
     assert!(fragments > 0);
 
+    component.down(&env, Request::Cancel { call: Token::new(8) }, &mut up, &mut io);
+    assert!(up.is_empty() && io.is_empty(), "a cancel after completion is inert");
+
     let later = Env { now: Time::from_nanos(11_000_000_000), wall: pki::VALID, limits: limits() };
     component.fire(&later, &mut up, &mut io);
     let mut closed = false;

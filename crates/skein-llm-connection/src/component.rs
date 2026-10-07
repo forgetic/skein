@@ -93,8 +93,8 @@ impl Component {
     /// Takes an owner's call or demand. Reserve [`MAX_OUT`] first.
     pub fn down(&mut self, env: &Env<Limits>, request: Request, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
         match request {
-            Request::Start { call, endpoint, prompt, credential, deadlines: _ } => {
-                self.start(env, call, endpoint, prompt, credential, up, io);
+            Request::Start { call, endpoint, prompt, credential, deadlines } => {
+                self.start(env, call, endpoint, prompt, credential, deadlines, up, io);
             }
             Request::Next { call } => {
                 for slot in &self.slots {
@@ -203,11 +203,20 @@ impl Component {
             match self.slots.get(index) {
                 Some(Some(id)) => match self.connections.get_mut(*id) {
                     Some(connection) => {
-                        match connection.idle_at {
-                            Some(then) if env.now >= then.saturating_add(env.limits.idle_keep) => {
-                                connection.close_idle(env);
-                            }
-                            Some(_) | None => {}
+                        match connection.deadlines.due(env.now) {
+                            Some(
+                                crate::deadlines::Due::Connect
+                                | crate::deadlines::Due::Handshake
+                                | crate::deadlines::Due::Head
+                                | crate::deadlines::Due::Idle
+                                | crate::deadlines::Due::Whole,
+                            ) => connection.timeout(env),
+                            None => match connection.idle_at {
+                                Some(then) if env.now >= then.saturating_add(env.limits.idle_keep) => {
+                                    connection.close_idle(env);
+                                }
+                                Some(_) | None => {}
+                            },
                         }
                         connection.route(env, id.token(), up, io);
                         break;
@@ -234,6 +243,36 @@ impl Component {
         false
     }
 
+    /// The first call or idle-connection deadline for the owning loop.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<skein_lib::Time> {
+        let mut earliest: Option<skein_lib::Time> = None;
+        for slot in &self.slots {
+            match slot {
+                Some(id) => match self.connections.get(*id) {
+                    Some(connection) => {
+                        let next = match connection.idle_at {
+                            Some(then) if connection.phase == Phase::Idle => {
+                                Some(then.saturating_add(self.limits.idle_keep))
+                            }
+                            Some(_) | None => connection.deadlines.next(),
+                        };
+                        earliest = match earliest {
+                            Some(prior) => match next {
+                                Some(next) => Some(prior.min(next)),
+                                None => Some(prior),
+                            },
+                            None => next,
+                        };
+                    }
+                    None => {}
+                },
+                None => {}
+            }
+        }
+        earliest
+    }
+
     /// Releases settled connection slots at the owning loop's reclaim point.
     pub fn reclaim(&mut self) {
         self.connections.reclaim();
@@ -247,6 +286,7 @@ impl Component {
         endpoint: u32,
         prompt: Prompt,
         credential: Credential,
+        deadlines: crate::Deadlines,
         up: &mut Queue<Event>,
         io: &mut Queue<IoRequest>,
     ) {
@@ -270,6 +310,9 @@ impl Component {
                                         connection.call = Some(call);
                                         connection.phase = Phase::Calling;
                                         connection.idle_at = None;
+                                        connection.deadlines = crate::deadlines::Table::new(deadlines, env.now);
+                                        connection.deadlines.connected(env.now);
+                                        connection.deadlines.ready();
                                         connection.start_call(env, id.token(), up, io);
                                         return;
                                     }
@@ -293,7 +336,7 @@ impl Component {
         }
         let destination = self.endpoints.get(endpoint).expect("the endpoint was checked by admission");
         let tls = tls::Client::new(&destination.trust, destination.server_name.clone(), &self.limits.tls);
-        let connection = Connection::new(endpoint, call, tls, prepared);
+        let connection = Connection::new(endpoint, call, tls, prepared, deadlines, env.now);
         let id = match self.connections.insert(connection) {
             Ok(id) => id,
             Err(_) => unreachable!("the pool was checked"),

@@ -211,3 +211,105 @@ fn cancel_while_connecting_waits_for_socket_settlement() {
     assert!(up.is_empty());
     component.reclaim();
 }
+
+#[test]
+fn connect_and_whole_deadlines_fail_unsent_calls_once() {
+    for timed in [
+        Deadlines { connect: Some(Duration::from_secs(1)), ..Deadlines::none() },
+        Deadlines { whole: Some(Duration::from_secs(1)), ..Deadlines::none() },
+    ] {
+        let mut component = component();
+        let mut up = Queue::with_capacity(MAX_OUT.above);
+        let mut io = Queue::with_capacity(MAX_OUT.below);
+        let start = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits() };
+        component.down(
+            &start,
+            Request::Start {
+                call: Token::new(7),
+                endpoint: 0,
+                prompt: prompt(),
+                credential: credential(),
+                deadlines: timed,
+            },
+            &mut up,
+            &mut io,
+        );
+        let owner = match io.pop() {
+            Some(Lower::Connect { owner, .. }) => owner,
+            other => panic!("expected connect, got {other:?}"),
+        };
+        assert_eq!(component.next_deadline(), Some(Time::from_nanos(1_000_000_000)));
+        let fire = Env { now: Time::from_nanos(1_000_000_000), wall: Wall::EPOCH, limits: limits() };
+        component.fire(&fire, &mut up, &mut io);
+        match up.pop() {
+            Some(Event::Failed { call, failure, evidence, .. }) => {
+                assert_eq!(call, Token::new(7));
+                assert_eq!(failure, skein_llm::Failure::TimedOut);
+                assert_eq!(evidence, skein_llm::client::Evidence::Unsent);
+            }
+            other => panic!("expected timeout, got {other:?}"),
+        }
+        assert_eq!(component.next_deadline(), None);
+        component.up(&fire, LowerEvent::Connecting { owner, socket: Token::new(19) }, &mut up, &mut io);
+        component.up(&fire, LowerEvent::Closed { owner }, &mut up, &mut io);
+        assert!(up.is_empty(), "late settlement cannot repeat a timeout");
+        component.reclaim();
+    }
+}
+
+#[test]
+fn a_handshake_failure_has_one_unsent_terminal() {
+    let mut component = component();
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    let owner = start(&mut component, &mut up, &mut io);
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits() };
+    component.up(&env, LowerEvent::Connecting { owner, socket: Token::new(19) }, &mut up, &mut io);
+    component.up(&env, LowerEvent::Connected { owner }, &mut up, &mut io);
+    component.up(
+        &env,
+        LowerEvent::Stream { owner, up: skein_lib::stream::Up::Failed(skein_lib::stream::Fault::Reset) },
+        &mut up,
+        &mut io,
+    );
+    match up.pop() {
+        Some(Event::Failed { call, failure, evidence, .. }) => {
+            assert_eq!(call, Token::new(7));
+            assert_eq!(failure, skein_llm::Failure::Unavailable);
+            assert_eq!(evidence, skein_llm::client::Evidence::Unsent);
+        }
+        other => panic!("expected handshake failure, got {other:?}"),
+    }
+    component.down(&env, Request::Cancel { call: Token::new(7) }, &mut up, &mut io);
+    component.up(&env, LowerEvent::Closed { owner }, &mut up, &mut io);
+    assert!(up.is_empty());
+    component.reclaim();
+}
+
+#[test]
+fn a_full_pool_refuses_the_second_call() {
+    let mut component = component();
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    let _owner = start(&mut component, &mut up, &mut io);
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits() };
+    component.down(
+        &env,
+        Request::Start {
+            call: Token::new(8),
+            endpoint: 0,
+            prompt: prompt(),
+            credential: credential(),
+            deadlines: Deadlines::none(),
+        },
+        &mut up,
+        &mut io,
+    );
+    match up.pop() {
+        Some(Event::Refused { call, why }) => {
+            assert_eq!(call, Token::new(8));
+            assert_eq!(why, Refusal::Pool);
+        }
+        other => panic!("expected pool refusal, got {other:?}"),
+    }
+}

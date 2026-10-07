@@ -147,6 +147,7 @@ pub struct Client {
     close_sent: bool,
     sse_closed: bool,
     evidence: Evidence,
+    activity: u64,
 }
 
 impl Client {
@@ -212,12 +213,27 @@ impl Client {
             close_sent: false,
             sse_closed: false,
             evidence: Evidence::Unsent,
+            activity: 0,
         })
     }
 
     #[must_use]
     pub const fn owner(&self) -> Token {
         self.owner
+    }
+
+    /// The number of complete SSE messages read for this call, including
+    /// provider pings and extension events that consume no `Next` demand.
+    #[must_use]
+    pub const fn activity(&self) -> u64 {
+        self.activity
+    }
+
+    /// The response head has arrived, whether or not the caller demanded its
+    /// first output. The connection owner clears its head deadline here.
+    #[must_use]
+    pub fn response_received(&self) -> bool {
+        self.evidence == Evidence::Response
     }
 
     /// True only for runnable work, never for output blocked on `Next`.
@@ -619,6 +635,7 @@ fn sse_event(
     }
     match event {
         sse::Event::Message(message) => {
+            client.activity = client.activity.checked_add(1).expect("an SSE message count fits u64");
             let decoder = client.decoder.as_mut().expect("the streaming state has its decoder");
             let parsed =
                 decoder.event(&message, &env.limits.dialect, env.wall, client.status, client.rate, &mut client.outputs);

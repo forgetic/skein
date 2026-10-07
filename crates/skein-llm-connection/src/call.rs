@@ -19,7 +19,8 @@ use skein_lib::{Env, Queue, Time, Token};
 use skein_llm::client as llm;
 use skein_tls::client as tls;
 
-use crate::boundary::Event;
+use crate::boundary::{Deadlines, Event};
+use crate::deadlines::Table;
 use crate::limits::Limits;
 
 /// The physical stream's lifecycle, independent of the call's terminal.
@@ -43,6 +44,8 @@ pub(crate) struct Connection {
     pub(crate) idle_at: Option<Time>,
     pub(crate) tls_closed: bool,
     pub(crate) socket_close_sent: bool,
+    pub(crate) deadlines: Table,
+    activity: u64,
     llm_events: Queue<llm::Event>,
     plain_down: Queue<Down>,
     tls_events: Queue<tls::Event>,
@@ -58,7 +61,14 @@ impl Connection {
             || (self.phase == Phase::Calling && self.llm.has_work())
     }
 
-    pub(crate) fn new(endpoint: u32, call: Token, tls: tls::Client, llm: llm::Client) -> Connection {
+    pub(crate) fn new(
+        endpoint: u32,
+        call: Token,
+        tls: tls::Client,
+        llm: llm::Client,
+        deadlines: Deadlines,
+        now: Time,
+    ) -> Connection {
         Connection {
             endpoint,
             call: Some(call),
@@ -69,6 +79,8 @@ impl Connection {
             idle_at: None,
             tls_closed: false,
             socket_close_sent: false,
+            deadlines: Table::new(deadlines, now),
+            activity: 0,
             llm_events: Queue::with_capacity(64),
             plain_down: Queue::with_capacity(256),
             tls_events: Queue::with_capacity(64),
@@ -84,6 +96,7 @@ impl Connection {
         io: &mut Queue<IoRequest>,
     ) {
         self.phase = Phase::Handshaking;
+        self.deadlines.connected(env.now);
         let tls_env = Env { now: env.now, wall: env.wall, limits: env.limits.tls };
         tls::down(&mut self.tls, &tls_env, tls::Request::Handshake, &mut self.tls_events, &mut self.cipher_down);
         self.route(env, owner, up, io);
@@ -172,6 +185,13 @@ impl Connection {
         }
     }
 
+    pub(crate) fn timeout(&mut self, env: &Env<Limits>) {
+        self.deadlines.terminal();
+        let llm_env = Env { now: env.now, wall: env.wall, limits: env.limits.llm };
+        llm::abort(&mut self.llm, &llm_env, skein_llm::Failure::TimedOut, &mut self.llm_events, &mut self.plain_down);
+    }
+
+    #[expect(clippy::too_many_lines, reason = "the bounded routing pass covers both child machines")]
     pub(crate) fn route(&mut self, env: &Env<Limits>, _owner: Token, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
         let llm_env = Env { now: env.now, wall: env.wall, limits: env.limits.llm };
         let tls_env = Env { now: env.now, wall: env.wall, limits: env.limits.tls };
@@ -183,14 +203,17 @@ impl Connection {
                     llm::Event::Completed { owner: call, completion } => {
                         up.push(Event::Completed { call, completion });
                         self.call = None;
+                        self.deadlines.terminal();
                     }
                     llm::Event::Failed { owner: call, failure, evidence, detail } => {
                         up.push(Event::Failed { call, failure, evidence, detail });
                         self.call = None;
+                        self.deadlines.terminal();
                     }
                     llm::Event::Cancelled { owner: call } => {
                         up.push(Event::Cancelled { call });
                         self.call = None;
+                        self.deadlines.terminal();
                     }
                     llm::Event::Reusable => {
                         self.phase = Phase::Idle;
@@ -214,6 +237,10 @@ impl Connection {
                 }
             } else if let Some(down) = self.plain_down.pop() {
                 if self.phase == Phase::Calling || self.phase == Phase::Idle {
+                    match &down {
+                        Down::Send(bytes) if !bytes.is_empty() => self.deadlines.sent(env.now),
+                        Down::Send(_) | Down::Demand { .. } | Down::Finish => {}
+                    }
                     tls::down(
                         &mut self.tls,
                         &tls_env,
@@ -226,6 +253,7 @@ impl Connection {
                 match event {
                     tls::Event::Ready(_) => {
                         self.phase = Phase::Calling;
+                        self.deadlines.ready();
                         llm::down(
                             &mut self.llm,
                             &llm_env,
@@ -261,6 +289,14 @@ impl Connection {
             } else {
                 break;
             }
+        }
+        if self.call.is_some() && self.llm.response_received() {
+            self.deadlines.response(env.now);
+        }
+        let activity = self.llm.activity();
+        if self.call.is_some() && activity != self.activity {
+            self.activity = activity;
+            self.deadlines.activity(env.now);
         }
     }
 }
