@@ -12,3 +12,22 @@ record HostTool {
 record Boundless {
     count: u32
 }
+
+record Payload {
+    data: bytes 4
+}
+
+record OtherPayload {
+    value: u8
+}
+
+enum Shared {
+    first: Payload
+    second: Payload
+    other: OtherPayload
+    empty
+}
+
+record OneByteItems {
+    items: list 4 Shared
+}

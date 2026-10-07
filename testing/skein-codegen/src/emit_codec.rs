@@ -180,10 +180,13 @@ fn decode_type(ty: &Type, schema: &Schema, bound_name: &str, path: &str, depth: 
             );
             let list_name = format!("items_{depth}");
             let minimum = min_bytes(item, schema);
-            let precheck = if minimum == 0 {
-                String::new()
-            } else {
-                format!("if count > reader.remaining() / {} {{ return Err({short}); }} ", emit_limits::literal(minimum))
+            let precheck = match minimum {
+                0 => String::new(),
+                1 => format!("if count > reader.remaining() {{ return Err({short}); }} "),
+                _ => format!(
+                    "if count > reader.remaining() / {} {{ return Err({short}); }} ",
+                    emit_limits::literal(minimum)
+                ),
             };
             format!(
                 "{{ let count = match skein_codec::read_count(reader, limits.{bound_name}.min(CEILINGS.{bound_name})) {{ Ok(count) => count, Err(reason) => return Err(Problem {{ path: Path::{path}, reason }}), }}; {precheck}let mut {list_name} = List::with_capacity(count); for _index in 0_u32..count {{ let item = {item_expr}; {list_name}.push(item).expect(\"count within capacity\"); }} {list_name} }}"
@@ -299,9 +302,23 @@ fn emit_enum(schema: &Schema, enumeration: &Enumeration, out: &mut String) {
         .map(|variant| format!("Self::{}", emit_limits::pascal(&variant.name)))
         .collect::<Vec<_>>();
     for variant in &enumeration.variants {
-        let name = emit_limits::pascal(&variant.name);
-        if variant.record.is_some() {
-            out.push_str(&format!("            Self::{name}(record) => 1_u32.checked_add(record.measure()).expect(\"schema ceilings fit u32\"),\n"));
+        if let Some(record) = &variant.record {
+            if enumeration
+                .variants
+                .iter()
+                .take_while(|earlier| *earlier != variant)
+                .any(|earlier| earlier.record.as_ref() == Some(record))
+            {
+                continue;
+            }
+            let patterns = enumeration
+                .variants
+                .iter()
+                .filter(|candidate| candidate.record.as_ref() == Some(record))
+                .map(|candidate| format!("Self::{}(record)", emit_limits::pascal(&candidate.name)))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            out.push_str(&format!("            {patterns} => 1_u32.checked_add({record}::measure(record)).expect(\"schema ceilings fit u32\"),\n"));
         }
     }
     if !unit_variants.is_empty() {

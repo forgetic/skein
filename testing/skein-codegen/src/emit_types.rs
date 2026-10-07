@@ -216,7 +216,7 @@ fn emit_enum(schema: &Schema, enumeration: &Enumeration, out: &mut String) {
     }
     out.push_str(&format!("impl {} {{\n    /// Checks the payload against the given limits.\n    pub fn new(limits: &Limits, value: Self) -> Result<Self, Problem> {{\n        value.check(limits)?;\n        Ok(value)\n    }}\n\n", enumeration.name));
     out.push_str("    fn check(&self, limits: &Limits) -> Result<(), Problem> {\n        match self {\n");
-    // Every arm is explicit; payload-free variants can share one arm.
+    // Variants with the same record type share a binding and one arm.
     let unit_variants = enumeration
         .variants
         .iter()
@@ -224,9 +224,23 @@ fn emit_enum(schema: &Schema, enumeration: &Enumeration, out: &mut String) {
         .map(|variant| format!("Self::{}", emit_limits::pascal(&variant.name)))
         .collect::<Vec<_>>();
     for variant in &enumeration.variants {
-        let name = emit_limits::pascal(&variant.name);
-        if variant.record.is_some() {
-            out.push_str(&format!("            Self::{name}(record) => record.check(limits),\n"));
+        if let Some(record) = &variant.record {
+            if enumeration
+                .variants
+                .iter()
+                .take_while(|earlier| *earlier != variant)
+                .any(|earlier| earlier.record.as_ref() == Some(record))
+            {
+                continue;
+            }
+            let patterns = enumeration
+                .variants
+                .iter()
+                .filter(|candidate| candidate.record.as_ref() == Some(record))
+                .map(|candidate| format!("Self::{}(record)", emit_limits::pascal(&candidate.name)))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            out.push_str(&format!("            {patterns} => {record}::check(record, limits),\n"));
         }
     }
     if !unit_variants.is_empty() {

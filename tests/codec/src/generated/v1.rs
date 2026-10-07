@@ -236,7 +236,7 @@ impl Choice {
 
     fn check(&self, limits: &Limits) -> Result<(), Problem> {
         match self {
-            Self::Report(record) => record.check(limits),
+            Self::Report(record) => Report::check(record, limits),
             Self::Empty => Ok(()),
         }?;
         if limits.field_name > CEILINGS.field_name { return Err(Problem { path: Path::FieldName, reason: skein_codec::Reason::Bound }); }
@@ -434,7 +434,7 @@ impl Choice {
     #[must_use]
     pub fn measure(&self) -> u32 {
         match self {
-            Self::Report(record) => 1_u32.checked_add(record.measure()).expect("schema ceilings fit u32"),
+            Self::Report(record) => 1_u32.checked_add(Report::measure(record)).expect("schema ceilings fit u32"),
             Self::Empty => 1,
         }
     }
