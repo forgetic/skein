@@ -96,7 +96,9 @@ fn observe(event: &Event) -> Event {
         Event::Output { owner, up } => Event::Output { owner: *owner, up: *up },
         Event::Failed { owner, error } => Event::Failed { owner: *owner, error: *error },
         Event::Closed { owner } => Event::Closed { owner: *owner },
-        Event::Spawned { .. } | Event::Exited { .. } => panic!("socket observation owns no child records"),
+        Event::Spawned { .. } | Event::Exited { .. } | Event::Shutdown { .. } => {
+            panic!("socket observation owns no child records")
+        }
     }
 }
 
@@ -210,7 +212,9 @@ impl Driver {
                 }
             }
             Event::Failed { owner, error } => panic!("positive native owner {owner:?} failed: {error:?}"),
-            Event::Spawned { .. } | Event::Exited { .. } => panic!("socket conversation owns no child"),
+            Event::Spawned { .. } | Event::Exited { .. } | Event::Shutdown { .. } => {
+                panic!("socket conversation owns no child")
+            }
         }
     }
 

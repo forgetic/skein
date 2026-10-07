@@ -178,6 +178,7 @@ impl World {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
             | Op::Cancel { .. } => panic!("a send hands back its own record"),

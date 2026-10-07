@@ -65,6 +65,7 @@ pub(crate) fn spawn(io: &mut Io, owner: Token, spawn: Spawn, subs: &mut Queue<Su
     io.tables.submit(subs, id, Purpose::Spawn, Op::Spawn { spawn: Box::new(spawn) });
 }
 
+#[expect(clippy::too_many_lines, reason = "one exhaustive child completion table includes every kernel result")]
 pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &mut Queue<Submit>) {
     let Landed { entity: id, purpose, result, kind, .. } = landed;
     match purpose {
@@ -115,7 +116,8 @@ pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &
                     | Done::Accepted { .. }
                     | Done::Bound(_)
                     | Done::Stat(_)
-                    | Done::Exit(_),
+                    | Done::Exit(_)
+                    | Done::ServiceSignal(_),
                 ) => {
                     unreachable!("a spawn answers with a pidfd and pipes")
                 }
@@ -133,7 +135,8 @@ pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &
                     | Done::Accepted { .. }
                     | Done::Bound(_)
                     | Done::Stat(_)
-                    | Done::Spawned { .. },
+                    | Done::Spawned { .. }
+                    | Done::ServiceSignal(_),
                 ) => {
                     unreachable!("a wait answers with an exit")
                 }
@@ -159,6 +162,7 @@ pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &
         | Purpose::Send
         | Purpose::Shutdown
         | Purpose::Discard
+        | Purpose::ReadSignal
         | Purpose::PipeRead
         | Purpose::PipeWrite
         | Purpose::Cancel(_) => unreachable!("a child only spawns, waits, signals and closes"),
@@ -195,7 +199,8 @@ pub(crate) fn release(io: &mut Io, id: Id<Entity>, subs: &mut Queue<Submit>) {
     for pipe in &child.pipes {
         match io.entities.get(*pipe) {
             Some(Entity::Pipe(pipe)) if !pipe.is_closed() => return,
-            Some(Entity::Pipe(_) | Entity::Listener(_) | Entity::Stream(_) | Entity::Child(_)) | None => {}
+            Some(Entity::Pipe(_) | Entity::Listener(_) | Entity::Stream(_) | Entity::Child(_) | Entity::Signals(_))
+            | None => {}
         }
     }
     let Some(fd) = child.pidfd else {

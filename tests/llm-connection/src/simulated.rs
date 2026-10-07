@@ -367,7 +367,9 @@ impl World {
                     self.listener_closed = true;
                 }
             }
-            IoEvent::Spawned { .. } | IoEvent::Exited { .. } => panic!("no child process in this world"),
+            IoEvent::Spawned { .. } | IoEvent::Exited { .. } | IoEvent::Shutdown { .. } => {
+                panic!("no child process or service signal in this world")
+            }
         }
     }
 

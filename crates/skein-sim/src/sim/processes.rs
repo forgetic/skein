@@ -65,6 +65,14 @@ impl Sim {
                     self.fail(pid, &format!("a second Wait on {fd:?}"));
                 }
             }
+            Summary::ReadSignal { .. } => {
+                let Some(source) = process.signal_fds.get(&fd) else {
+                    self.fail(pid, &format!("{kind:?} on {fd:?}, which is not a signalfd"));
+                };
+                if source.read.is_some() {
+                    self.fail(pid, &format!("a second signal read on {fd:?}"));
+                }
+            }
             Summary::PipeRead { .. } | Summary::PipeWrite { .. } | Summary::Close { .. } => {
                 if let Some(end) = process.pipe_fds.get(&fd) {
                     let pipe = &process.children[&end.child].pipes[end.index];
@@ -82,7 +90,9 @@ impl Sim {
                             self.fail(pid, &format!("{kind:?} beside {:?} on {fd:?}", flight.kind));
                         }
                     }
-                } else if matches!(kind, Summary::Close { .. }) && process.pidfds.contains_key(&fd) {
+                } else if matches!(kind, Summary::Close { .. })
+                    && (process.pidfds.contains_key(&fd) || process.signal_fds.contains_key(&fd))
+                {
                     for flight in process.flights.values() {
                         if flight.kind.fd() == Some(fd) {
                             self.fail(pid, &format!("a Close beside {:?} on {fd:?}", flight.kind));
@@ -145,6 +155,15 @@ impl Sim {
                 }
                 self.complete(pid, token, Op::Signal { pidfd, signal }, Ok(Done::Nothing));
             }
+            Op::ReadSignal { fd } => {
+                let source = self.process_mut(pid).signal_fds.get_mut(&fd).expect("checked signalfd");
+                if let Some(signal) = source.pending.pop_front() {
+                    self.complete(pid, token, Op::ReadSignal { fd }, Ok(Done::ServiceSignal(signal)));
+                } else {
+                    source.read = Some(token);
+                    self.park(pid, token, Op::ReadSignal { fd });
+                }
+            }
             Op::PipeRead { fd, .. } => self.recv_pipe(pid, token, op, fd),
             Op::PipeWrite { fd, .. } => self.send_pipe(pid, token, op, fd),
             Op::Close { fd } => {
@@ -156,6 +175,8 @@ impl Sim {
                     if pipe.spec.way == Way::In {
                         self.end_input(pid, end);
                     }
+                } else if self.process_mut(pid).signal_fds.remove(&fd).is_some() {
+                    // All reads settled before closing this source.
                 } else {
                     let child_id = self.process_mut(pid).pidfds.remove(&fd).expect("a pidfd");
                     self.process_mut(pid).children.get_mut(&child_id).expect("pidfd names child").pidfd_open = false;
@@ -357,10 +378,46 @@ impl Sim {
 
 #[cfg(test)]
 mod tests {
-    use skein_io::kernel::{Done, Exit, Op, Pipe, Signal, Spawn, Submit, Way};
+    use skein_io::kernel::{Done, Error, Exit, Op, Pipe, ServiceSignal, Signal, Spawn, Submit, Way};
     use skein_lib::{Queue, Token};
 
     use crate::{Answer, Ask, Config, Handle, Program, Reply, Sim};
+
+    #[test]
+    fn signal_source_delivers_and_cancels_a_pending_read() {
+        let mut sim = Sim::new(2, Config::calm());
+        let pid = sim.spawn_process();
+        let fd = sim.open_signal_source(pid);
+        let mut submits = Queue::with_capacity(2);
+        submits.push(Submit { op: Token::new(1), kind: Op::ReadSignal { fd } });
+        sim.submit(pid, &mut submits);
+        sim.deliver_service_signal(pid, fd, ServiceSignal::Interrupt);
+        let mut completes = Queue::with_capacity(3);
+        sim.reap(pid, &mut completes);
+        assert_eq!(completes.pop().expect("signal read").result, Ok(Done::ServiceSignal(ServiceSignal::Interrupt)));
+
+        submits.push(Submit { op: Token::new(2), kind: Op::ReadSignal { fd } });
+        sim.submit(pid, &mut submits);
+        submits.push(Submit { op: Token::new(3), kind: Op::Cancel { target: Token::new(2) } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+        let mut results = [None, None];
+        while let Some(complete) = completes.pop() {
+            match complete.op.raw() {
+                2 => results[0] = Some(complete.result),
+                3 => results[1] = Some(complete.result),
+                _ => unreachable!("only the pending read and cancel complete"),
+            }
+        }
+        assert_eq!(results[0], Some(Err(Error::Cancelled)));
+        assert_eq!(results[1], Some(Ok(Done::Nothing)));
+
+        submits.push(Submit { op: Token::new(4), kind: Op::Close { fd } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+        assert_eq!(completes.pop().expect("closed signal source").result, Ok(Done::Nothing));
+        sim.assert_no_open_fds(pid);
+    }
 
     #[test]
     fn terminating_a_child_wakes_each_waiting_output_pipe_once() {

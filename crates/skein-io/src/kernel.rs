@@ -330,6 +330,7 @@ pub struct Complete {
 /// | `Spawn` | `Done::Spawned`, pidfd and parent pipe ends |
 /// | `Wait` | `Done::Exit`, exit code or signal |
 /// | `Signal` | `Done::Nothing` |
+/// | `ReadSignal` | `Done::ServiceSignal`, one blocked termination signal |
 /// | `PipeRead`, `PipeWrite` | `Done::Count`, bytes read or written |
 /// | `Cancel` | `Done::Nothing`, the target was found in flight |
 #[derive(PartialEq, Eq, Hash, Debug)]
@@ -450,6 +451,11 @@ pub enum Op {
         pidfd: Fd,
         signal: Signal,
     },
+    /// Reads one termination signal from the signalfd opened at startup
+    /// (io.md, section 7; shell.md, section 6).
+    ReadSignal {
+        fd: Fd,
+    },
     /// Reads from the parent's end of a child pipe.
     PipeRead {
         fd: Fd,
@@ -496,6 +502,15 @@ pub enum Way {
 pub enum Signal {
     Terminate,
     Kill,
+}
+
+/// A termination signal delivered to the service by its signalfd.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ServiceSignal {
+    /// An interrupt request (`SIGINT`).
+    Interrupt,
+    /// A termination request (`SIGTERM`).
+    Terminate,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -622,6 +637,8 @@ pub enum Done {
         pipes: Box<[Fd]>,
     },
     Exit(Exit),
+    /// One service termination signal read from a signalfd.
+    ServiceSignal(ServiceSignal),
 }
 
 /// The kinds of [`Done`], by which an operation's success value is checked
@@ -636,6 +653,7 @@ pub enum Shape {
     Stat,
     Spawned,
     Exit,
+    ServiceSignal,
 }
 
 /// The errors io handles by name. Each backend maps its kernel's error numbers
@@ -867,6 +885,7 @@ impl Op {
             | Op::Stat { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::Cancel { .. } => true,
         }
     }
@@ -895,6 +914,7 @@ impl Op {
             Op::Stat { .. } => Shape::Stat,
             Op::Spawn { .. } => Shape::Spawned,
             Op::Wait { .. } => Shape::Exit,
+            Op::ReadSignal { .. } => Shape::ServiceSignal,
             Op::Listen { .. }
             | Op::Connect { .. }
             | Op::Shutdown { .. }
@@ -932,6 +952,7 @@ impl Op {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
             | Op::Cancel { .. } => None,
@@ -981,6 +1002,7 @@ impl Done {
             Done::Stat(_) => Shape::Stat,
             Done::Spawned { .. } => Shape::Spawned,
             Done::Exit(_) => Shape::Exit,
+            Done::ServiceSignal(_) => Shape::ServiceSignal,
         }
     }
 }
@@ -1194,7 +1216,7 @@ fn fits(op: &Op, done: &Done) -> bool {
             };
             pipes.len() == spawn.pipes.len()
         }
-        Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Exit(_) => true,
+        Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Exit(_) | Done::ServiceSignal(_) => true,
     }
 }
 
@@ -1229,6 +1251,7 @@ fn binds(op: &Op, bound: &Addr) -> bool {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
         | Op::Cancel { .. } => false,
@@ -1266,6 +1289,7 @@ fn counts(op: &Op, n: usize) -> bool {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::Cancel { .. } => false,
     }
 }

@@ -706,6 +706,7 @@ fn write_finished(complete: &Complete) -> bool {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
         | Op::Cancel { .. } => false,

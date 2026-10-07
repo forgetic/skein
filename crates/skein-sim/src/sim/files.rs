@@ -109,6 +109,7 @@ impl Sim {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
             | Op::Cancel { .. } => false,
@@ -155,6 +156,7 @@ impl Sim {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
             | Op::Cancel { .. } => self.bug("only an operation on files can fail as a file's"),
@@ -229,6 +231,7 @@ impl Sim {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
             | Op::Cancel { .. } => self.bug("only an operation on files is asked of the machine"),

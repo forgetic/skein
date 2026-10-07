@@ -173,6 +173,7 @@ impl Rig {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. } => panic!("the client uses only socket operations"),
         };

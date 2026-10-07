@@ -140,6 +140,7 @@ impl Component {
             | IoEvent::Output { owner, .. }
             | IoEvent::Spawned { owner, .. }
             | IoEvent::Exited { owner, .. } => *owner,
+            IoEvent::Shutdown { .. } => return,
         };
         let id = Id::<Connection>::from_token(owner);
         match event {
@@ -188,7 +189,8 @@ impl Component {
             | IoEvent::Accepted { .. }
             | IoEvent::Output { .. }
             | IoEvent::Spawned { .. }
-            | IoEvent::Exited { .. } => {}
+            | IoEvent::Exited { .. }
+            | IoEvent::Shutdown { .. } => {}
         }
     }
 

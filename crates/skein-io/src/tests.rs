@@ -12,6 +12,7 @@ mod layer;
 mod listener;
 mod output;
 mod process;
+mod signals;
 mod store;
 mod stream;
 
@@ -74,6 +75,7 @@ pub(crate) fn buffer(op: &Op) -> (&[u8], u32) {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
         | Op::Cancel { .. } => panic!("no buffer in {op:?}"),
@@ -96,6 +98,7 @@ pub(crate) enum Kind {
     Spawn,
     Wait,
     Signal,
+    ReadSignal,
     PipeRead,
     PipeWrite,
 }
@@ -115,6 +118,7 @@ pub(crate) const fn kind(op: &Op) -> Kind {
         Op::Spawn { .. } => Kind::Spawn,
         Op::Wait { .. } => Kind::Wait,
         Op::Signal { .. } => Kind::Signal,
+        Op::ReadSignal { .. } => Kind::ReadSignal,
         Op::PipeRead { .. } => Kind::PipeRead,
         Op::PipeWrite { .. } => Kind::PipeWrite,
         Op::Open { .. }

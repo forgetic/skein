@@ -104,6 +104,7 @@ impl Driver {
                 | Event::Stream { .. }
                 | Event::Spawned { .. }
                 | Event::Exited { .. }
+                | Event::Shutdown { .. }
                 | Event::Failed { .. }
                 | Event::Closed { .. }) => {
                     drop(other);
@@ -233,6 +234,7 @@ fn succeed(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. } => panic!("this memory world exercises only socket operations"),
     }
@@ -259,6 +261,7 @@ fn stopped(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
         | Op::Cancel { .. } => succeed(op, fd),

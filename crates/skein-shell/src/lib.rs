@@ -5,6 +5,7 @@
 //!   (`skein_io::kernel`; shell.md, 3), opened once, then submitted to
 //!   and reaped from once per iteration.
 //! - [`open_root`]: a directory opened at startup as a root for io's files.
+//! - [`open_termination_signals`]: the blocked SIGINT/SIGTERM source io adopts.
 //! - [`Clock`]: monotonic and wall time, read together once per iteration.
 //! - [`seed`]: the random seed, from `getrandom`, once at startup.
 //!
@@ -22,5 +23,5 @@ mod seed;
 mod tests;
 
 pub use clock::{Clock, Now};
-pub use ring::{Config, Kernel, OpenError, Wait, open_root};
+pub use ring::{Config, Kernel, OpenError, Wait, open_root, open_termination_signals};
 pub use seed::seed;

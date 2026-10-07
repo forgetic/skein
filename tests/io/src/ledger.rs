@@ -142,7 +142,7 @@ impl Ledger {
             | Event::Stream { owner, .. }
             | Event::Failed { owner, .. }
             | Event::Closed { owner } => *owner,
-            Event::Output { .. } | Event::Spawned { .. } | Event::Exited { .. } => {
+            Event::Output { .. } | Event::Spawned { .. } | Event::Exited { .. } | Event::Shutdown { .. } => {
                 unreachable!("the socket world spawns no child")
             }
         };
@@ -204,7 +204,7 @@ impl Ledger {
                 told.failed = true;
             }
             Event::Closed { .. } => told.closed = true,
-            Event::Output { .. } | Event::Spawned { .. } | Event::Exited { .. } => {
+            Event::Output { .. } | Event::Spawned { .. } | Event::Exited { .. } | Event::Shutdown { .. } => {
                 unreachable!("the socket world spawns no child")
             }
         }

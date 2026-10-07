@@ -73,6 +73,7 @@ pub enum Summary {
     Spawn { root: Fd, program: Text, pipes: usize },
     Wait { pidfd: Fd },
     Signal { pidfd: Fd, signal: u32 },
+    ReadSignal { fd: Fd },
     PipeRead { fd: Fd, len: usize },
     PipeWrite { fd: Fd, len: usize, from: u32 },
     Cancel { target: Token },
@@ -148,6 +149,7 @@ impl Summary {
                     Signal::Kill => 9,
                 },
             },
+            Op::ReadSignal { fd } => Summary::ReadSignal { fd: *fd },
             Op::PipeRead { fd, buf } => Summary::PipeRead { fd: *fd, len: buf.len() },
             Op::PipeWrite { fd, bytes, from } => Summary::PipeWrite { fd: *fd, len: bytes.len(), from: *from },
             Op::Cancel { target } => Summary::Cancel { target: *target },
@@ -178,6 +180,7 @@ impl Summary {
             Summary::Spawn { .. }
             | Summary::Wait { .. }
             | Summary::Signal { .. }
+            | Summary::ReadSignal { .. }
             | Summary::PipeRead { .. }
             | Summary::PipeWrite { .. }
             | Summary::Socket { .. }
@@ -221,6 +224,7 @@ impl Summary {
             | Summary::Sync { .. }
             | Summary::Wait { .. }
             | Summary::PipeRead { .. }
+            | Summary::ReadSignal { .. }
             | Summary::PipeWrite { .. } => true,
         }
     }
@@ -249,6 +253,7 @@ impl Summary {
             | Summary::Spawn { root: fd, .. }
             | Summary::Wait { pidfd: fd }
             | Summary::Signal { pidfd: fd, .. }
+            | Summary::ReadSignal { fd }
             | Summary::PipeRead { fd, .. }
             | Summary::PipeWrite { fd, .. } => [Some(*fd), None],
             Summary::Rename { from_dir, to_dir, .. } => [Some(*from_dir), Some(*to_dir)],

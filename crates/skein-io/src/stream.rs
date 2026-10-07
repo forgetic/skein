@@ -657,7 +657,8 @@ fn decode(landed: Landed) -> Happened {
                 | Done::Bound(_)
                 | Done::Stat(_)
                 | Done::Spawned { .. }
-                | Done::Exit(_),
+                | Done::Exit(_)
+                | Done::ServiceSignal(_),
             ) => {
                 unreachable!("a socket answers with its descriptor")
             }
@@ -686,6 +687,7 @@ fn decode(landed: Landed) -> Happened {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
             | Op::Cancel { .. } => unreachable!("a completion hands back its own operation"),
@@ -712,6 +714,7 @@ fn decode(landed: Landed) -> Happened {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
             | Op::Cancel { .. } => unreachable!("a completion hands back its own operation"),
@@ -727,6 +730,7 @@ fn decode(landed: Landed) -> Happened {
         | Purpose::Spawn
         | Purpose::Wait
         | Purpose::Signal
+        | Purpose::ReadSignal
         | Purpose::PipeRead
         | Purpose::PipeWrite => {
             unreachable!("a stream never binds, listens or accepts")
@@ -745,7 +749,8 @@ fn nothing(result: Result<Done, kernel::Error>) -> Result<(), kernel::Error> {
             | Done::Bound(_)
             | Done::Stat(_)
             | Done::Spawned { .. }
-            | Done::Exit(_),
+            | Done::Exit(_)
+            | Done::ServiceSignal(_),
         ) => {
             unreachable!("a connect or a shutdown answers with nothing")
         }
@@ -764,7 +769,8 @@ fn counted(result: Result<Done, kernel::Error>) -> Result<u32, kernel::Error> {
             | Done::Bound(_)
             | Done::Stat(_)
             | Done::Spawned { .. }
-            | Done::Exit(_),
+            | Done::Exit(_)
+            | Done::ServiceSignal(_),
         ) => {
             unreachable!("a receive or a send answers with a count")
         }

@@ -488,7 +488,8 @@ pub(super) fn stopped(
             | Done::Accepted { .. }
             | Done::Bound(_)
             | Done::Spawned { .. }
-            | Done::Exit(_),
+            | Done::Exit(_)
+            | Done::ServiceSignal(_),
         )
         | Err(_) => {}
     }
@@ -530,7 +531,8 @@ fn done_fd(done: Done) -> Fd {
         | Done::Bound(_)
         | Done::Stat(_)
         | Done::Spawned { .. }
-        | Done::Exit(_) => unreachable!("an open returns a descriptor"),
+        | Done::Exit(_)
+        | Done::ServiceSignal(_) => unreachable!("an open returns a descriptor"),
     }
 }
 
@@ -543,7 +545,8 @@ fn done_stat(done: Done) -> crate::kernel::Stat {
         | Done::Accepted { .. }
         | Done::Bound(_)
         | Done::Spawned { .. }
-        | Done::Exit(_) => unreachable!("a stat returns metadata"),
+        | Done::Exit(_)
+        | Done::ServiceSignal(_) => unreachable!("a stat returns metadata"),
     }
 }
 
@@ -556,7 +559,8 @@ fn done_count(done: Done) -> u32 {
         | Done::Bound(_)
         | Done::Stat(_)
         | Done::Spawned { .. }
-        | Done::Exit(_) => unreachable!("a transfer returns a count"),
+        | Done::Exit(_)
+        | Done::ServiceSignal(_) => unreachable!("a transfer returns a count"),
     }
 }
 
@@ -569,7 +573,8 @@ fn done_nothing(done: Done) {
         | Done::Bound(_)
         | Done::Stat(_)
         | Done::Spawned { .. }
-        | Done::Exit(_) => unreachable!("this operation returns nothing"),
+        | Done::Exit(_)
+        | Done::ServiceSignal(_) => unreachable!("this operation returns nothing"),
     }
 }
 
@@ -596,6 +601,7 @@ fn write_parts(kind: Op) -> (Fd, Box<[u8]>, u32, u64) {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
         | Op::Cancel { .. } => unreachable!("a store write completes a write"),
@@ -625,6 +631,7 @@ fn read_buffer(kind: Op) -> Box<[u8]> {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
         | Op::Cancel { .. } => unreachable!("a version read completes a read"),

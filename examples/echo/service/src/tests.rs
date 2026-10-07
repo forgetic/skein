@@ -155,6 +155,7 @@ impl Rig {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. } => panic!("the echo uses only socket operations"),
         };

@@ -294,7 +294,8 @@ pub fn up(proto: &mut Protocol, env: &Env<Limits>, event: Told, up: &mut Queue<C
         | Told::Connecting { .. }
         | Told::Connected { .. }
         | Told::Spawned { .. }
-        | Told::Exited { .. } => {
+        | Told::Exited { .. }
+        | Told::Shutdown { .. } => {
             unreachable!("the echo connects to no one and spawns no child")
         }
         Told::Stream { owner, up: event } => {

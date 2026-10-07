@@ -103,7 +103,8 @@ impl Driver {
                 | Event::Listening { .. }
                 | Event::Accepted { .. }
                 | Event::Connecting { .. }
-                | Event::Connected { .. } => panic!("unexpected event in {what}: {event:?}"),
+                | Event::Connected { .. }
+                | Event::Shutdown { .. } => panic!("unexpected event in {what}: {event:?}"),
             }
         }
         self.most = self.most.max(self.meter.check(measured, self.bound, &what));

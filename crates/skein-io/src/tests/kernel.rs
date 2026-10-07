@@ -37,7 +37,7 @@ fn complete(kind: Op, result: Result<Done, Error>) -> Complete {
 
 /// One of every operation, valid. A new operation makes the match in
 /// `documented` fail to build until it is added there, and here.
-fn every_op() -> [Op; 19] {
+fn every_op() -> [Op; 20] {
     [
         Op::Socket { family: Family::Ipv4 },
         Op::Bind { fd: FD, addr: v4() },
@@ -57,6 +57,7 @@ fn every_op() -> [Op; 19] {
         Op::Remove { dir: FD, name: name(b"a"), directory: false },
         Op::MakeDirectory { dir: FD, name: name(b"a") },
         list(2),
+        Op::ReadSignal { fd: FD },
         Op::Cancel { target: Token::new(2) },
     ]
 }
@@ -78,6 +79,7 @@ fn documented(op: &Op) -> Done {
         Op::Stat { .. } => Done::Stat(STAT),
         Op::Spawn { .. } => Done::Spawned { pidfd: NEW, pipes: Box::default() },
         Op::Wait { .. } => Done::Exit(crate::kernel::Exit::Code(0)),
+        Op::ReadSignal { .. } => Done::ServiceSignal(crate::kernel::ServiceSignal::Terminate),
         Op::Listen { .. }
         | Op::Connect { .. }
         | Op::Shutdown { .. }
@@ -100,6 +102,7 @@ fn every_operation_succeeds_with_its_documented_shape_and_no_other() {
         Done::Accepted { fd: NEW, peer: v4() },
         Done::Bound(v4()),
         Done::Stat(STAT),
+        Done::ServiceSignal(crate::kernel::ServiceSignal::Terminate),
     ];
     for op in every_op() {
         assert!(op.is_valid(), "the examples are valid: {op:?}");
@@ -139,12 +142,14 @@ fn the_shapes_are_as_the_table_on_op_says() {
         remove,
         make_directory,
         list,
+        read_signal,
         cancel,
     ] = every_op();
     assert_eq!((socket.shape(), open.shape()), (Shape::Fd, Shape::Fd));
     assert_eq!(accept.shape(), Shape::Accepted);
     assert_eq!(bind.shape(), Shape::Bound);
     assert_eq!(stat.shape(), Shape::Stat);
+    assert_eq!(read_signal.shape(), Shape::ServiceSignal);
     for op in [recv, send, read, write, list] {
         assert_eq!(op.shape(), Shape::Count);
     }
@@ -314,6 +319,7 @@ fn named(op: &Op) -> &'static [Error] {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
         | Op::Cancel { .. } => &[],
@@ -341,6 +347,7 @@ fn cancellable(op: &Op) -> bool {
         | Op::List { .. }
         | Op::Spawn { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::Cancel { .. } => false,
         Op::Open { .. }
         | Op::Read { .. }

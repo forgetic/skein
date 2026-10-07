@@ -6,7 +6,7 @@
 //!
 //! Built for sockets (io.md, 3), child and inherited one-way pipe streams
 //! (io.md, 3 and 6), and bounded file operations (io.md, 5). Service
-//! termination signals come later.
+//! Termination signals arrive through an adopted signalfd (io.md, 7).
 //!
 //! # Driving it
 //!
@@ -40,6 +40,7 @@ mod output;
 mod pipe;
 mod process;
 mod records;
+mod signals;
 mod stream;
 #[cfg(test)]
 mod tests;

@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::net::SocketAddr;
 
-use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, OpenHow, Submit};
+use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, OpenHow, ServiceSignal, Submit};
 use skein_lib::{Duration, Queue, Rng, Time, Token, Wall};
 
 use crate::config::Config;
@@ -63,6 +63,7 @@ struct Process {
     files: BTreeMap<Fd, File>,
     pipe_fds: BTreeMap<Fd, PipeEnd>,
     pidfds: BTreeMap<Fd, u64>,
+    signal_fds: BTreeMap<Fd, SignalSource>,
     children: BTreeMap<u64, Child>,
     /// `Open`s the machine has yet to answer: each holds a descriptor's
     /// place against the limit.
@@ -76,6 +77,12 @@ struct Process {
     /// Sockets whose waiting operations may now proceed, poked while the
     /// process was not in the kernel: decided when it next enters.
     deferred: VecDeque<SocketId>,
+}
+
+#[derive(Debug)]
+struct SignalSource {
+    pending: VecDeque<ServiceSignal>,
+    read: Option<Token>,
 }
 
 /// An operation in flight, until its completion is reaped.
@@ -195,6 +202,7 @@ impl Sim {
             files: BTreeMap::new(),
             pipe_fds: BTreeMap::new(),
             pidfds: BTreeMap::new(),
+            signal_fds: BTreeMap::new(),
             children: BTreeMap::new(),
             opening: 0,
             spawning: 0,
@@ -203,6 +211,36 @@ impl Sim {
             deferred: VecDeque::new(),
         });
         pid
+    }
+
+    /// Installs a simulated signalfd before a service loop starts.
+    pub fn open_signal_source(&mut self, pid: Pid) -> Fd {
+        assert!(!self.fds_full(pid), "a signal source needs a descriptor slot");
+        let process = self.process_mut(pid);
+        let fd = Fd::new(process.next_fd);
+        process.next_fd = process.next_fd.checked_add(1).expect("descriptor numbers fit i32");
+        process.signal_fds.insert(fd, SignalSource { pending: VecDeque::new(), read: None });
+        fd
+    }
+
+    /// Delivers a termination signal to the process's signalfd, in order.
+    pub fn deliver_service_signal(&mut self, pid: Pid, fd: Fd, signal: ServiceSignal) {
+        let Some(source) = self.process_mut(pid).signal_fds.get_mut(&fd) else {
+            self.fail(pid, "a service signal needs an open signalfd");
+        };
+        source.pending.push_back(signal);
+        if let Some(token) = source.read.take() {
+            let op = self.unpark(pid, token);
+            let signal = self
+                .process_mut(pid)
+                .signal_fds
+                .get_mut(&fd)
+                .expect("open signalfd")
+                .pending
+                .pop_front()
+                .expect("one signal queued");
+            self.complete(pid, token, op, Ok(Done::ServiceSignal(signal)));
+        }
     }
 
     /// Takes every record in `submissions`, in order, as the shell's `Kernel`
@@ -278,6 +316,7 @@ impl Sim {
             .checked_add(process.files.len())
             .and_then(|n| n.checked_add(process.pipe_fds.len()))
             .and_then(|n| n.checked_add(process.pidfds.len()))
+            .and_then(|n| n.checked_add(process.signal_fds.len()))
             .expect("fewer than usize::MAX descriptors");
         u32::try_from(open).expect("fewer than 2^32 descriptors")
     }
@@ -366,6 +405,9 @@ impl Sim {
         if let Some((fd, _)) = process.pidfds.first_key_value() {
             self.fail(pid, &format!("{} pidfds open, the first {fd:?}", process.pidfds.len()));
         }
+        if let Some((fd, _)) = process.signal_fds.first_key_value() {
+            self.fail(pid, &format!("{} signal descriptors open, the first {fd:?}", process.signal_fds.len()));
+        }
     }
 
     /// Every submission and every completion reaped so far.
@@ -430,9 +472,12 @@ impl Sim {
             | Op::Remove { .. }
             | Op::MakeDirectory { .. }
             | Op::List { .. } => self.bug("an operation on files is the machine's"),
-            Op::Spawn { .. } | Op::Wait { .. } | Op::Signal { .. } | Op::PipeRead { .. } | Op::PipeWrite { .. } => {
-                self.bug("a process operation was routed to sockets")
-            }
+            Op::Spawn { .. }
+            | Op::Wait { .. }
+            | Op::Signal { .. }
+            | Op::ReadSignal { .. }
+            | Op::PipeRead { .. }
+            | Op::PipeWrite { .. } => self.bug("a process operation was routed to sockets"),
         }
     }
 
@@ -457,10 +502,11 @@ impl Sim {
             Summary::Spawn { .. }
                 | Summary::Wait { .. }
                 | Summary::Signal { .. }
+                | Summary::ReadSignal { .. }
                 | Summary::PipeRead { .. }
                 | Summary::PipeWrite { .. }
         ) || matches!(kind, Summary::Close { fd }
-                if process.pipe_fds.contains_key(&fd) || process.pidfds.contains_key(&fd))
+                if process.pipe_fds.contains_key(&fd) || process.pidfds.contains_key(&fd) || process.signal_fds.contains_key(&fd))
         {
             self.check_process(pid, kind);
             return On::Process;
@@ -542,6 +588,7 @@ impl Sim {
             Summary::Spawn { .. }
             | Summary::Wait { .. }
             | Summary::Signal { .. }
+            | Summary::ReadSignal { .. }
             | Summary::PipeRead { .. }
             | Summary::PipeWrite { .. } => self.bug("a process operation passed socket checks"),
         };
@@ -609,6 +656,7 @@ impl Sim {
             Summary::Spawn { .. }
             | Summary::Wait { .. }
             | Summary::Signal { .. }
+            | Summary::ReadSignal { .. }
             | Summary::PipeRead { .. }
             | Summary::PipeWrite { .. } => self.bug("a process operation passed file checks"),
         };
@@ -931,6 +979,10 @@ impl Sim {
             self.process_mut(pid).children.get_mut(&child_id).expect("pidfd names a child").wait = None;
             return;
         }
+        if let Op::ReadSignal { fd } = op {
+            self.process_mut(pid).signal_fds.get_mut(fd).expect("signal read keeps its descriptor open").read = None;
+            return;
+        }
         if let Op::PipeRead { fd, .. } | Op::PipeWrite { fd, .. } = op {
             let end = *self.process(pid).pipe_fds.get(fd).expect("a pipe operation keeps its descriptor open");
             self.process_mut(pid)
@@ -964,6 +1016,7 @@ impl Sim {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
             | Op::Cancel { .. } => self.bug("only accepts, connects, receives and sends wait"),
@@ -1349,7 +1402,8 @@ impl Sim {
             .len()
             .checked_add(process.files.len())
             .and_then(|n| n.checked_add(process.pipe_fds.len()))
-            .and_then(|n| n.checked_add(process.pidfds.len()));
+            .and_then(|n| n.checked_add(process.pidfds.len()))
+            .and_then(|n| n.checked_add(process.signal_fds.len()));
         match open.and_then(|open| u32::try_from(open).ok()) {
             Some(open) => open.saturating_add(process.opening).saturating_add(process.spawning) >= self.config.max_fds,
             None => true,

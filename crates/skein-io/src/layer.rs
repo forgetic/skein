@@ -12,6 +12,7 @@ use crate::listener::{self, Listener};
 use crate::pipe::{self, Pipe};
 use crate::process::{self, Child};
 use crate::records::{Error, Event, Request};
+use crate::signals::{self, Signals};
 use crate::stream::{self, Stream};
 
 /// io's state: every socket and every operation in flight.
@@ -28,6 +29,7 @@ pub(crate) enum Entity {
     Stream(Stream),
     Pipe(Pipe),
     Child(Child),
+    Signals(Signals),
 }
 
 /// What io keeps beside its entities, which the handlers of an entity touch
@@ -70,6 +72,7 @@ pub(crate) enum Purpose {
     Spawn,
     Wait,
     Signal,
+    ReadSignal,
     PipeRead,
     PipeWrite,
     Cancel(Id<Flight>),
@@ -143,6 +146,20 @@ impl Io {
 
     fn adopt_pipe(&mut self, fd: Fd, way: Way) -> Result<Token, Fd> {
         match self.entities.insert(Entity::Pipe(Pipe::inherited(fd, way))) {
+            Ok(id) => {
+                self.tables.ready.mark(id);
+                Ok(id.token())
+            }
+            Err(_) => Err(fd),
+        }
+    }
+
+    /// Takes the signalfd opened after blocking termination signals at
+    /// startup (shell.md, section 6). Each read becomes `Event::Shutdown`;
+    /// `Close` or `Abort` on the returned token settles the read and closes
+    /// the descriptor. On a full slab the caller retains the descriptor.
+    pub fn adopt_signals(&mut self, fd: Fd) -> Result<Token, Fd> {
+        match self.entities.insert(Entity::Signals(Signals::new(fd))) {
             Ok(id) => {
                 self.tables.ready.mark(id);
                 Ok(id.token())
@@ -320,6 +337,7 @@ pub fn resume(io: &mut Io, env: &Env<Limits>, up: &mut Queue<Event>, subs: &mut 
         Entity::Stream(stream) => stream::resume(stream, id, env, &mut io.tables, up, subs),
         Entity::Pipe(pipe) => pipe::resume(pipe, id, env, &mut io.tables, up, subs),
         Entity::Child(_) => {}
+        Entity::Signals(signals) => signals::resume(signals, id, &mut io.tables, subs),
     }
 }
 
@@ -345,6 +363,10 @@ pub fn up(io: &mut Io, env: &Env<Limits>, complete: Complete, up: &mut Queue<Eve
             pipe::landed(pipe, landed, env, &mut io.tables, up, subs);
         }
         Entity::Child(_) => process::landed(io, landed, up, subs),
+        Entity::Signals(_) => {
+            let Entity::Signals(signals) = io.entities.get_mut(entity).expect("live") else { unreachable!() };
+            signals::landed(signals, entity, landed, &mut io.tables, up, subs);
+        }
     }
     conclude(io, entity, subs);
 }
@@ -366,7 +388,9 @@ pub fn fire(io: &mut Io, env: &Env<Limits>, up: &mut Queue<Event>, subs: &mut Qu
             Timer::Retry => listener::retried(listener, id, room, env, &mut io.tables, subs),
             Timer::Close => unreachable!("only a stream closes gracefully"),
         },
-        Entity::Pipe(_) | Entity::Child(_) => unreachable!("processes have no io deadline"),
+        Entity::Pipe(_) | Entity::Child(_) | Entity::Signals(_) => {
+            unreachable!("processes and signals have no io deadline")
+        }
     }
     conclude(io, id, subs);
 }
@@ -419,7 +443,7 @@ fn answer(io: &mut Io, env: &Env<Limits>, socket: Token, owner: Option<Token>, s
     };
     let stream = match entity {
         Entity::Stream(stream) => stream,
-        Entity::Listener(_) | Entity::Pipe(_) | Entity::Child(_) => {
+        Entity::Listener(_) | Entity::Pipe(_) | Entity::Child(_) | Entity::Signals(_) => {
             unreachable!("an answer names a socket announced to its owner")
         }
     };
@@ -429,7 +453,7 @@ fn answer(io: &mut Io, env: &Env<Limits>, socket: Token, owner: Option<Token>, s
         Some(Entity::Listener(listening)) => {
             listener::answered(listening, listener, id, room, env, &mut io.tables, subs);
         }
-        Some(Entity::Stream(_) | Entity::Pipe(_) | Entity::Child(_)) => {
+        Some(Entity::Stream(_) | Entity::Pipe(_) | Entity::Child(_) | Entity::Signals(_)) => {
             unreachable!("a handle names the kind of entity it was made for")
         }
         // Closed and reclaimed since it announced the socket.
@@ -445,7 +469,7 @@ fn stream_request(io: &mut Io, env: &Env<Limits>, token: Token, down: Down, subs
     match entity {
         Entity::Stream(stream) => stream::request(stream, id, down, env, &mut io.tables, subs),
         Entity::Pipe(pipe) => pipe::request(pipe, id, down, env, &mut io.tables, subs),
-        Entity::Listener(_) | Entity::Child(_) => unreachable!("a stream request names a stream"),
+        Entity::Listener(_) | Entity::Child(_) | Entity::Signals(_) => unreachable!("a stream request names a stream"),
     }
 }
 
@@ -455,7 +479,7 @@ fn output_request(io: &mut Io, env: &Env<Limits>, token: Token, down: OutputDown
     match entity {
         Entity::Stream(stream) => stream::output_request(stream, id, down, env, &mut io.tables, subs),
         Entity::Pipe(pipe) => pipe::output_request(pipe, id, down, env, &mut io.tables, subs),
-        Entity::Listener(_) | Entity::Child(_) => {}
+        Entity::Listener(_) | Entity::Child(_) | Entity::Signals(_) => {}
     }
 }
 
@@ -473,6 +497,7 @@ fn close(io: &mut Io, env: &Env<Limits>, token: Token, abort: bool, subs: &mut Q
         Entity::Stream(stream) => stream::close(stream, id, abort, env, &mut io.tables, subs),
         Entity::Pipe(pipe) => pipe::close(pipe, id, abort, &mut io.tables, subs),
         Entity::Child(_) => unreachable!("handled above"),
+        Entity::Signals(signals) => signals::close(signals, id, &mut io.tables, subs),
     }
 }
 
@@ -484,6 +509,7 @@ pub(crate) fn conclude(io: &mut Io, id: Id<Entity>, subs: &mut Queue<Submit>) {
         Some(Entity::Stream(stream)) => stream.is_closed(),
         Some(Entity::Pipe(pipe)) => pipe.is_closed(),
         Some(Entity::Child(child)) => child.is_closed(),
+        Some(Entity::Signals(signals)) => signals.is_closed(),
         None => false,
     };
     if !closed {
@@ -516,7 +542,8 @@ pub(crate) fn unsubmitted(result: Result<Done, kernel::Error>) -> bool {
             | Done::Bound(_)
             | Done::Stat(_)
             | Done::Spawned { .. }
-            | Done::Exit(_),
+            | Done::Exit(_)
+            | Done::ServiceSignal(_),
         ) => {
             unreachable!("a cancel answers with nothing")
         }

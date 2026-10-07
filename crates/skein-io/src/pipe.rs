@@ -194,7 +194,8 @@ pub(crate) fn landed(
                         | Done::Bound(_)
                         | Done::Stat(_)
                         | Done::Spawned { .. }
-                        | Done::Exit(_),
+                        | Done::Exit(_)
+                        | Done::ServiceSignal(_),
                     ) => unreachable!("a pipe read answers with a count"),
                 }
             }
@@ -229,6 +230,7 @@ pub(crate) fn landed(
                     | Done::Stat(_)
                     | Done::Spawned { .. }
                     | Done::Exit(_)
+                    | Done::ServiceSignal(_)
                     | Done::Count(_),
                 ) => unreachable!("a pipe write counts positive bytes"),
             }
@@ -252,7 +254,8 @@ pub(crate) fn landed(
         | Purpose::Discard
         | Purpose::Spawn
         | Purpose::Wait
-        | Purpose::Signal => unreachable!("a pipe only reads, writes, cancels and closes"),
+        | Purpose::Signal
+        | Purpose::ReadSignal => unreachable!("a pipe only reads, writes, cancels and closes"),
     }
     progress(pipe, id, env, tables, up, subs);
 }

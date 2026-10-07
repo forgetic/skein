@@ -121,6 +121,7 @@ impl<'b, B: Backend> Run<'b, B> {
             | Op::List { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
             | Op::Cancel { .. } => None,
@@ -297,7 +298,18 @@ impl<'b, B: Backend> Run<'b, B> {
                 }
                 None
             }
-            (_, Ok(Done::Nothing | Done::Count(_) | Done::Bound(_) | Done::Stat(_) | Done::Exit(_)) | Err(_)) => None,
+            (
+                _,
+                Ok(
+                    Done::Nothing
+                    | Done::Count(_)
+                    | Done::Bound(_)
+                    | Done::Stat(_)
+                    | Done::Exit(_)
+                    | Done::ServiceSignal(_),
+                )
+                | Err(_),
+            ) => None,
         };
         if let Some(fd) = opened {
             assert!(self.open.insert((process, fd)), "a new descriptor is not one already open in its process");
@@ -685,6 +697,7 @@ enum Summary {
     Spawn { root: Fd, program: usize, args: usize, env: usize, dir: usize, pipes: usize },
     Wait { pidfd: Fd },
     Signal { pidfd: Fd, signal: skein_io::kernel::Signal },
+    ReadSignal { fd: Fd },
     PipeRead { fd: Fd, len: usize },
     PipeWrite { fd: Fd, len: usize, from: u32 },
     Cancel { target: Token },
@@ -725,6 +738,7 @@ impl Summary {
             },
             Op::Wait { pidfd } => Summary::Wait { pidfd: *pidfd },
             Op::Signal { pidfd, signal } => Summary::Signal { pidfd: *pidfd, signal: *signal },
+            Op::ReadSignal { fd } => Summary::ReadSignal { fd: *fd },
             Op::PipeRead { fd, buf } => Summary::PipeRead { fd: *fd, len: buf.len() },
             Op::PipeWrite { fd, bytes, from } => Summary::PipeWrite { fd: *fd, len: bytes.len(), from: *from },
             Op::Cancel { target } => Summary::Cancel { target: *target },
@@ -769,6 +783,7 @@ fn boxes_of(op: &Op) -> Vec<&[u8]> {
         | Op::Stat { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::Cancel { .. } => Vec::new(),
     }
 }
@@ -797,6 +812,7 @@ fn entries_of(op: &Op) -> Option<&[Entry]> {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
         | Op::Cancel { .. } => None,
@@ -817,7 +833,8 @@ fn handed_back<P>(flight: &Flight<P>, complete: &Complete) {
             | Done::Bound(_)
             | Done::Stat(_)
             | Done::Spawned { .. }
-            | Done::Exit(_),
+            | Done::Exit(_)
+            | Done::ServiceSignal(_),
         )
         | Err(_) => None,
     };

@@ -11,7 +11,7 @@
 //! anything is in flight, so a slot's address is fixed for the life of the
 //! [`Kernel`]. A slot holds the [`Submit`] record and the kernel structures
 //! its operation needs (a socket address and its length, an `open_how`, a
-//! `statx` buffer, and a path or two as the NUL-terminated strings the
+//! `statx` buffer, a `signalfd_siginfo`, and a path or two as the NUL-terminated strings the
 //! kernel reads); those structures never leave this module, and a record's
 //! buffers are pointed at in place, inside the record's own `Box`.
 //!
@@ -23,7 +23,8 @@
 //! # The `unsafe`, and why it is sound
 //!
 //! - **Pushing an entry** hands the kernel pointers into the slot (an
-//!   address and its length, an `open_how`, a `statx` buffer), into the
+//!   address and its length, an `open_how`, a `statx` buffer, a signal
+//!   record), into the
 //!   slot's paths, and into the record's buffers. All stay valid and
 //!   unmoved until the entry's completion is reaped: the slot is not freed
 //!   or moved until then, and no Rust code reads or writes it (only its
@@ -81,8 +82,14 @@ use std::ptr;
 
 use io_uring::{EnterFlags, IoUring, Probe, opcode, squeue, types};
 use process::{signal_child, spawn};
+
+/// Blocks the service's termination signals and opens their signalfd for io
+/// to adopt before the loop starts (shell.md, section 6; io.md, section 7).
+pub fn open_termination_signals() -> Result<Fd, i32> {
+    process::open_termination_signals()
+}
 use skein_io::kernel::{
-    Addr, Complete, Done, Entry, Error, Exit, Family, Fd, Kind, Op, OpenHow, PERMISSIONS, Stat, Submit,
+    Addr, Complete, Done, Entry, Error, Exit, Family, Fd, Kind, Op, OpenHow, PERMISSIONS, ServiceSignal, Stat, Submit,
 };
 use skein_lib::{Queue, Time, Token};
 
@@ -220,6 +227,8 @@ struct Flight {
     statx: UnsafeCell<libc::statx>,
     /// `WaitId` writes this while its ring entry is in flight.
     siginfo: UnsafeCell<libc::siginfo_t>,
+    /// One signalfd record read by the ring, decoded before crossing the kernel boundary.
+    signal_info: UnsafeCell<libc::signalfd_siginfo>,
     /// How many times an `Open` was submitted again after `EAGAIN`.
     again: u32,
     /// The result, for an operation the adapter completed itself.
@@ -572,6 +581,8 @@ impl Flight {
             // SAFETY: siginfo_t is an integer-bearing C output structure;
             // waitid fills it before decode reads its fields.
             siginfo: UnsafeCell::new(unsafe { mem::zeroed() }),
+            // SAFETY: signalfd_siginfo is a plain output structure, filled by Read.
+            signal_info: UnsafeCell::new(unsafe { mem::zeroed() }),
             again: 0,
             ready: None,
         }
@@ -591,7 +602,7 @@ fn prepare(
     cancelled: &mut BTreeSet<Token>,
     listing: &mut [u8],
 ) -> Prepared {
-    let Flight { kind, addr, addr_len, path, to: to_path, open_how, statx, siginfo, .. } = flight;
+    let Flight { kind, addr, addr_len, path, to: to_path, open_how, statx, siginfo, signal_info, .. } = flight;
     let entry = match kind {
         Op::Socket { family } => {
             let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
@@ -688,6 +699,13 @@ fn prepare(
         }
         Op::Spawn { spawn: command } => return Prepared::Done(spawn(command)),
         Op::Signal { pidfd, signal } => return Prepared::Done(signal_child(*pidfd, *signal)),
+        Op::ReadSignal { fd } => opcode::Read::new(
+            types::Fd(fd.raw()),
+            signal_info.get().cast(),
+            u32::try_from(size_of::<libc::signalfd_siginfo>()).expect("signal record fits u32"),
+        )
+        .offset(u64::MAX)
+        .build(),
         Op::Wait { pidfd } => {
             opcode::WaitId::new(libc::P_PIDFD, u32::try_from(pidfd.raw()).expect("a pidfd is positive"), libc::WEXITED)
                 .infop(siginfo.get().cast_const())
@@ -710,7 +728,7 @@ fn prepare(
 /// `IPV6_V6ONLY` on every IPv6 socket, before io can bind it. A `Bind` reads
 /// the address bound back with `getsockname`.
 fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error> {
-    let Flight { kind, addr, addr_len, statx, siginfo, .. } = flight;
+    let Flight { kind, addr, addr_len, statx, siginfo, signal_info, .. } = flight;
     let (addr, addr_len) = (addr.get_mut(), addr_len.get_mut());
     if res < 0 {
         return Err(error(kind, 0_i32.saturating_sub(res), cancelled));
@@ -773,6 +791,17 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
                 _ => Err(Error::Other(libc::ECHILD)),
             }
         }
+        Op::ReadSignal { .. } => {
+            if usize::try_from(res).expect("non-negative result") != size_of::<libc::signalfd_siginfo>() {
+                return Err(Error::Other(libc::EIO));
+            }
+            let signal = match signal_info.get_mut().ssi_signo {
+                value if value == u32::try_from(libc::SIGINT).expect("positive signal") => ServiceSignal::Interrupt,
+                value if value == u32::try_from(libc::SIGTERM).expect("positive signal") => ServiceSignal::Terminate,
+                _ => return Err(Error::Other(libc::EINVAL)),
+            };
+            Ok(Done::ServiceSignal(signal))
+        }
         Op::Listen { .. }
         | Op::Connect { .. }
         | Op::Shutdown { .. }
@@ -815,6 +844,12 @@ fn error(kind: &Op, errno: i32, cancelled: bool) -> Error {
             other => file_error(kind, other),
         },
         Op::Spawn { .. } | Op::Signal { .. } => Error::Other(errno),
+        Op::ReadSignal { .. } => match errno {
+            libc::ECANCELED => Error::Cancelled,
+            libc::EINTR if cancelled => Error::Cancelled,
+            libc::EINVAL => Error::InvalidArgument,
+            other => Error::Other(other),
+        },
         Op::Wait { .. } => match errno {
             libc::ECANCELED | libc::EINTR if cancelled => Error::Cancelled,
             libc::ENOBUFS | libc::ENOMEM => Error::NoBufferSpace,
@@ -896,6 +931,7 @@ fn operation_error(kind: &Op, errno: i32) -> Error {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::Cancel { .. } => unreachable!("an operation on files' errors, and a Cancel's, are mapped apart"),
     };
     named.unwrap_or(Error::Other(errno))
@@ -990,6 +1026,7 @@ fn file_error(kind: &Op, errno: i32) -> Error {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::ReadSignal { .. }
         | Op::Cancel { .. } => unreachable!("only an operation on files' errors are mapped here"),
     };
     named.unwrap_or(Error::Other(errno))
@@ -1409,5 +1446,55 @@ pub(crate) fn random() -> Result<u64, i32> {
         // A read of up to 256 bytes is never short once it starts.
         Ok(_) => Err(libc::EIO),
         Err(_) => Err(last_errno()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use skein_io::kernel::{Done, Op, ServiceSignal, Submit};
+    use skein_lib::{Duration, Queue, Token};
+
+    use super::{Config, Kernel, Wait, open_termination_signals};
+    use crate::Clock;
+
+    #[test]
+    fn blocked_termination_signal_arrives_through_the_ring() {
+        let fd = open_termination_signals().expect("block the signals and open signalfd");
+        let mut kernel = Kernel::open(Config { operations: 2 }).expect("open the ring");
+        let mut submits = Queue::with_capacity(1);
+        submits.push(Submit { op: Token::new(1), kind: Op::ReadSignal { fd } });
+        kernel.submit(&mut submits, Wait::No);
+
+        // SAFETY: pthread_self returns this live test thread's identifier.
+        let thread = unsafe { libc::pthread_self() };
+        // SAFETY: SIGTERM is blocked on this thread, so pthread_kill queues
+        // it for the signalfd instead of invoking its default action.
+        assert_eq!(unsafe { libc::pthread_kill(thread, libc::SIGTERM) }, 0);
+        let deadline = Clock::new().now().now.saturating_add(Duration::from_secs(1));
+        let mut answers = Queue::with_capacity(1);
+        for _ in 0..3 {
+            kernel.submit(&mut submits, Wait::Until(deadline));
+            kernel.reap(&mut answers);
+            if !answers.is_empty() {
+                break;
+            }
+        }
+        let answer = answers.pop().expect("the signal read completed");
+        assert_eq!(answer.kind, Op::ReadSignal { fd });
+        assert_eq!(answer.result, Ok(Done::ServiceSignal(ServiceSignal::Terminate)));
+
+        submits.push(Submit { op: Token::new(2), kind: Op::Close { fd } });
+        kernel.submit(&mut submits, Wait::No);
+        let deadline = Clock::new().now().now.saturating_add(Duration::from_secs(1));
+        for _ in 0..3 {
+            kernel.submit(&mut submits, Wait::Until(deadline));
+            kernel.reap(&mut answers);
+            if !answers.is_empty() {
+                break;
+            }
+        }
+        let answer = answers.pop().expect("the signal descriptor closed");
+        assert_eq!(answer.kind, Op::Close { fd });
+        assert_eq!(answer.result, Ok(Done::Nothing));
     }
 }

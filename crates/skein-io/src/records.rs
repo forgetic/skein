@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use skein_lib::Token;
 use skein_lib::stream::{self, Fault};
 
-use crate::kernel::{self, Addr, Exit, Signal, Spawn};
+use crate::kernel::{self, Addr, Exit, ServiceSignal, Signal, Spawn};
 
 /// What the layer above asks of io. Each names an entity by a token: its
 /// owner's, for an entity it asks io to make, and io's (from `Listening`,
@@ -106,6 +106,12 @@ pub enum Event {
     Exited {
         owner: Token,
         exit: Exit,
+    },
+    /// A blocked termination signal delivered through the service's signalfd
+    /// (io.md, section 7). It names no entity owner: the service itself
+    /// handles the shutdown request.
+    Shutdown {
+        signal: ServiceSignal,
     },
     // Files, processes and signals go here when a user pulls them:
     // File { owner, result }, Spawned { owner, child, pipes },

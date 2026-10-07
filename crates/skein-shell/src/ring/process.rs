@@ -54,6 +54,39 @@ pub(super) fn block_sigpipe() -> Result<(), i32> {
     action(unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, ptr::from_ref(&set), ptr::null_mut()) })
 }
 
+/// Blocks SIGINT and SIGTERM on the service thread and opens the signalfd
+/// that io adopts (shell.md, section 6; io.md, section 7). The caller owns
+/// the returned descriptor until io adopts it. Call before opening the ring
+/// and before starting other threads.
+pub(super) fn open_termination_signals() -> Result<Fd, i32> {
+    // SAFETY: sigemptyset initializes this plain C signal set.
+    let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: each call writes only within the live signal set.
+    if unsafe { libc::sigemptyset(ptr::from_mut(&mut set)) } != 0 {
+        return Err(super::last_errno());
+    }
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        // SAFETY: set is initialized and writable.
+        if unsafe { libc::sigaddset(ptr::from_mut(&mut set), signal) } != 0 {
+            return Err(super::last_errno());
+        }
+    }
+    // SAFETY: sigset_t is a plain C signal set, initialized below by pthread_sigmask.
+    let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: pthread_sigmask writes the prior mask into old and changes
+    // only this thread's mask. The child spawn path clears its mask.
+    action(unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, ptr::from_ref(&set), ptr::from_mut(&mut old)) })?;
+    // SAFETY: signalfd reads the initialized mask and returns a new owned fd.
+    let raw = unsafe { libc::signalfd(-1, ptr::from_ref(&set), libc::SFD_CLOEXEC) };
+    if raw < 0 {
+        let errno = super::last_errno();
+        // SAFETY: restore the prior mask after failing to create a source.
+        let _restored = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, ptr::from_ref(&old), ptr::null_mut()) };
+        return Err(errno);
+    }
+    Ok(Fd::new(raw))
+}
+
 fn directory(command: &Spawn) -> Result<OwnedFd, i32> {
     let name = if command.dir.is_empty() { b".".as_slice() } else { command.dir.as_ref() };
     let path = cstring(name)?;

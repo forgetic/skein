@@ -539,7 +539,9 @@ impl Driver {
                     "positive actual IO owner failed: {owner:?} {error:?}"
                 );
             }
-            IoEvent::Spawned { .. } | IoEvent::Exited { .. } => panic!("TLS socket world owns no process"),
+            IoEvent::Spawned { .. } | IoEvent::Exited { .. } | IoEvent::Shutdown { .. } => {
+                panic!("TLS socket world owns no process or service signals")
+            }
         }
     }
 
