@@ -46,6 +46,40 @@ fn read(io: &mut FileIo, submit: Submit, bytes: &[u8], events: &mut Queue<Event>
     );
 }
 
+fn listed(
+    io: &mut FileIo,
+    submit: Submit,
+    names_to_list: &[&[u8]],
+    events: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    let Op::List { fd, mut entries, mut names } = submit.kind else { panic!("a list") };
+    let mut offset = 0_usize;
+    for (index, name) in names_to_list.iter().enumerate() {
+        let end = offset.checked_add(name.len()).expect("test names fit");
+        for (position, byte) in name.iter().enumerate() {
+            let at = offset.checked_add(position).expect("test name position fits");
+            names[at] = *byte;
+        }
+        entries[index] = crate::kernel::Entry {
+            kind: Kind::File,
+            start: u32::try_from(offset).expect("small test offset"),
+            len: u32::try_from(name.len()).expect("small test name"),
+        };
+        offset = end;
+    }
+    file_layer::up(
+        io,
+        Complete {
+            op: submit.op,
+            kind: Op::List { fd, entries, names },
+            result: Ok(Done::Count(u32::try_from(names_to_list.len()).expect("small test batch"))),
+        },
+        events,
+        subs,
+    );
+}
+
 #[test]
 fn adopted_root_and_open_directory_keep_tokens_inside_io() {
     let mut io = io();
@@ -178,7 +212,7 @@ fn a_whole_load_refuses_a_file_over_its_bound_after_closing() {
     );
     assert!(events.is_empty());
     complete(&mut io, subs.pop().expect("close"), Ok(Done::Nothing), &mut events, &mut subs);
-    assert_eq!(events.pop(), Some(Event::TooLarge { owner: OWNER }));
+    assert_eq!(events.pop(), Some(Event::TooLarge { owner: OWNER, size: 4 }));
 }
 
 #[test]
@@ -191,7 +225,7 @@ fn a_whole_scan_returns_entries_or_a_bound_refusal_after_close() {
         file_layer::down(
             &mut io,
             Time::ZERO,
-            Request::Scan { owner: OWNER, root, path: Box::from(&b"dir"[..]), max, no_follow: true },
+            Request::Scan { owner: OWNER, root, path: Box::from(&b"dir"[..]), max, max_bytes: 100, no_follow: true },
             &mut events,
             &mut subs,
         );
@@ -209,23 +243,84 @@ fn a_whole_scan_returns_entries_or_a_bound_refusal_after_close() {
             &mut events,
             &mut subs,
         );
-        if max == 1 {
-            complete(&mut io, subs.pop().expect("end listing"), Ok(Done::Count(0)), &mut events, &mut subs);
-        }
+        complete(&mut io, subs.pop().expect("end listing"), Ok(Done::Count(0)), &mut events, &mut subs);
         assert!(events.is_empty());
         complete(&mut io, subs.pop().expect("close"), Ok(Done::Nothing), &mut events, &mut subs);
-        if max == 0 {
-            assert_eq!(events.pop(), Some(Event::TooManyEntries { owner: OWNER }));
+        let entries = if max == 0 {
+            Box::from([])
         } else {
-            assert_eq!(
-                events.pop(),
-                Some(Event::Scanned {
-                    owner: OWNER,
-                    entries: Box::new([crate::file::Entry { name: Box::from(&b"f"[..]), kind: Kind::File }])
-                })
-            );
-        }
+            Box::from([crate::file::Entry { name: Box::from(&b"f"[..]), kind: Kind::File }])
+        };
+        assert_eq!(events.pop(), Some(Event::Scanned { owner: OWNER, entries, more: u64::from(max == 0) }));
     }
+}
+
+#[test]
+fn a_scan_keeps_the_name_order_prefix_across_batches_and_counts_omissions() {
+    let mut io = io();
+    let root = io.adopt_root(ROOT).expect("room for root");
+    let mut events = Queue::with_capacity(2);
+    let mut subs = Queue::with_capacity(2);
+    let entry_bytes = u64::try_from(size_of::<crate::file::Entry>()).expect("entry cell fits u64");
+    file_layer::down(
+        &mut io,
+        Time::ZERO,
+        Request::Scan {
+            owner: OWNER,
+            root,
+            path: Box::from(&b"dir"[..]),
+            max: 3,
+            max_bytes: entry_bytes.checked_mul(2).expect("two cells fit").checked_add(2).expect("two names fit"),
+            no_follow: true,
+        },
+        &mut events,
+        &mut subs,
+    );
+    complete(&mut io, subs.pop().expect("open"), Ok(Done::Fd(CHILD)), &mut events, &mut subs);
+    listed(&mut io, subs.pop().expect("first batch"), &[b"z", b"c"], &mut events, &mut subs);
+    listed(&mut io, subs.pop().expect("second batch"), &[b"b", b"a"], &mut events, &mut subs);
+    listed(&mut io, subs.pop().expect("end"), &[], &mut events, &mut subs);
+    assert!(events.is_empty());
+    complete(&mut io, subs.pop().expect("close"), Ok(Done::Nothing), &mut events, &mut subs);
+    assert_eq!(
+        events.pop(),
+        Some(Event::Scanned {
+            owner: OWNER,
+            entries: Box::from([
+                crate::file::Entry { name: Box::from(&b"a"[..]), kind: Kind::File },
+                crate::file::Entry { name: Box::from(&b"b"[..]), kind: Kind::File },
+            ]),
+            more: 2,
+        })
+    );
+}
+
+#[test]
+fn an_unfit_first_scan_entry_makes_the_prefix_empty() {
+    let mut io = io();
+    let root = io.adopt_root(ROOT).expect("room for root");
+    let mut events = Queue::with_capacity(2);
+    let mut subs = Queue::with_capacity(2);
+    let entry_bytes = u64::try_from(size_of::<crate::file::Entry>()).expect("entry cell fits u64");
+    file_layer::down(
+        &mut io,
+        Time::ZERO,
+        Request::Scan {
+            owner: OWNER,
+            root,
+            path: Box::from(&b"dir"[..]),
+            max: 2,
+            max_bytes: entry_bytes + 1,
+            no_follow: true,
+        },
+        &mut events,
+        &mut subs,
+    );
+    complete(&mut io, subs.pop().expect("open"), Ok(Done::Fd(CHILD)), &mut events, &mut subs);
+    listed(&mut io, subs.pop().expect("batch"), &[b"b", b"aa"], &mut events, &mut subs);
+    listed(&mut io, subs.pop().expect("end"), &[], &mut events, &mut subs);
+    complete(&mut io, subs.pop().expect("close"), Ok(Done::Nothing), &mut events, &mut subs);
+    assert_eq!(events.pop(), Some(Event::Scanned { owner: OWNER, entries: Box::from([]), more: 2 }));
 }
 
 #[test]

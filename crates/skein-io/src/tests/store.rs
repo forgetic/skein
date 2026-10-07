@@ -162,8 +162,35 @@ fn a_changed_file_refuses_the_store_and_removes_its_temporary() {
     let close = rig.take();
     assert_eq!(close.kind, Op::Close { fd: PARENT });
     rig.complete(close, Ok(Done::Nothing));
-    assert_eq!(rig.events.pop(), Some(Event::Conflict { owner: OWNER }));
+    assert_eq!(rig.events.pop(), Some(Event::Conflict { owner: OWNER, now: Some(digest(b"bad")) }));
     assert!(rig.events.is_empty() && rig.subs.is_empty());
+}
+
+#[test]
+fn an_existing_large_file_conflicts_with_expected_absence_and_reports_its_digest() {
+    let mut rig = Rig::new();
+    rig.store(None);
+    rig.parent_and_absent_old();
+    rig.make_and_sync_temp();
+    let check = rig.take();
+    rig.complete(check, Ok(Done::Fd(CHECK)));
+    let stat = rig.take();
+    rig.complete(stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 17, mode: 0o644 })));
+    let content = b"abcdefghijklmnopq";
+    for chunk in content.chunks(2) {
+        let read = rig.take();
+        rig.read(read, chunk);
+    }
+    let end = rig.take();
+    rig.read(end, b"");
+    let close = rig.take();
+    rig.complete(close, Ok(Done::Nothing));
+    let remove = rig.take();
+    let Op::Remove { .. } = remove.kind else { panic!("remove temporary") };
+    rig.complete(remove, Ok(Done::Nothing));
+    let close = rig.take();
+    rig.complete(close, Ok(Done::Nothing));
+    assert_eq!(rig.events.pop(), Some(Event::Conflict { owner: OWNER, now: Some(digest(content)) }));
 }
 
 #[test]

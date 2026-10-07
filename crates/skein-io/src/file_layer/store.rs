@@ -5,16 +5,13 @@
 //! `start`, `up`, and `timed_out` are called only by the file layer. A
 //! terminal follows the cleanup of every descriptor and temporary entry.
 
-#![expect(clippy::disallowed_types, reason = "the version check holds at most FileIo's whole-file limit")]
-
 use alloc::boxed::Box;
-use alloc::vec;
 use alloc::vec::Vec;
 
 use skein_lib::{Queue, Token};
 
 use super::{FileIo, Pending};
-use crate::digest::{Digest, digest};
+use crate::digest::{Digest, DigestState, digest};
 use crate::file::Event;
 use crate::kernel::{Complete, Done, Error, Fd, Kind, Op, OpenHow, Submit, is_name};
 
@@ -49,7 +46,7 @@ enum Phase {
 #[derive(Clone, Copy, Debug)]
 enum Failure {
     Kernel(Error),
-    Conflict,
+    Conflict { now: Option<Digest> },
 }
 
 #[derive(Debug)]
@@ -69,7 +66,8 @@ pub(super) struct Store {
     no_follow: bool,
     mode: u32,
     attempts: u8,
-    seen: Vec<u8>,
+    seen_bytes: u64,
+    seen_digest: DigestState,
     failure: Option<Failure>,
 }
 
@@ -169,7 +167,8 @@ pub(super) fn start(
         no_follow,
         mode: 0o666,
         attempts: 0,
-        seen: Vec::new(),
+        seen_bytes: 0,
+        seen_digest: DigestState::new(),
         failure: None,
     };
     let how = if no_follow { OpenHow::DirectoryNoFollow } else { OpenHow::Directory };
@@ -244,26 +243,22 @@ fn rename(io: &mut FileIo, mut store: Store, subs: &mut Queue<Submit>) {
 }
 
 fn read_check(io: &mut FileIo, mut store: Store, subs: &mut Queue<Submit>) {
-    let used = u32::try_from(store.seen.len()).expect("bounded version check");
-    let left = io.max_file.checked_sub(used).expect("bounded version check");
-    let asked = io.max_read.min(left.saturating_add(1));
-    let buffer = vec![0_u8; usize::try_from(asked).expect("u32 fits usize")].into_boxed_slice();
+    let buffer = alloc::vec![0_u8; usize::try_from(io.max_read).expect("u32 fits usize")].into_boxed_slice();
     let fd = store.check.expect("the checked file is open");
     store.phase = Phase::CheckReading;
-    let op = Op::read(fd, buffer, u64::from(used)).expect("positive bounded read");
+    let op = Op::read(fd, buffer, store.seen_bytes).expect("positive bounded read");
     issue(io, store, op, subs);
 }
 
 fn terminal(store: Store, events: &mut Queue<Event>) {
     match store.failure.expect("cleanup has a failure") {
         Failure::Kernel(error) => events.push(Event::Failed { owner: store.owner, error }),
-        Failure::Conflict => events.push(Event::Conflict { owner: store.owner }),
+        Failure::Conflict { now } => events.push(Event::Conflict { owner: store.owner, now }),
     }
 }
 
 fn cleanup(io: &mut FileIo, mut store: Store, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
     store.bytes = None;
-    store.seen = Vec::new();
     if let Some(fd) = store.check {
         store.phase = Phase::CleanupCheck;
         issue(io, store, Op::Close { fd }, subs);
@@ -385,7 +380,7 @@ fn failed_operation(
             if error == Error::NotFound {
                 match store.expected {
                     None => rename(io, store, subs),
-                    Some(_) => fail(io, store, Failure::Conflict, events, subs),
+                    Some(_) => fail(io, store, Failure::Conflict { now: None }, events, subs),
                 }
             } else {
                 fail(io, store, Failure::Kernel(error), events, subs);
@@ -685,46 +680,37 @@ fn success(
         Phase::CheckOpening => {
             let fd = done_fd(done);
             store.check = Some(fd);
-            if store.expected.is_none() {
-                store.failure = Some(Failure::Conflict);
-                io.deadline = None;
-                store.phase = Phase::CheckClosing;
-                issue(io, store, Op::Close { fd }, subs);
-            } else {
-                store.phase = Phase::CheckStating;
-                issue(io, store, Op::Stat { fd }, subs);
-            }
+            store.phase = Phase::CheckStating;
+            issue(io, store, Op::Stat { fd }, subs);
         }
         Phase::CheckStating => {
             let stat = done_stat(done);
-            if stat.kind != Kind::File || stat.size > u64::from(io.max_file) {
-                store.failure = Some(Failure::Conflict);
+            if stat.kind == Kind::File {
+                read_check(io, store, subs);
+            } else {
+                store.failure = Some(Failure::Kernel(Error::IsADirectory));
                 io.deadline = None;
                 store.phase = Phase::CheckClosing;
                 let fd = store.check.expect("checked file is open");
                 issue(io, store, Op::Close { fd }, subs);
-            } else {
-                let capacity =
-                    usize::try_from(io.max_file).expect("u32 fits usize").checked_add(1).expect("one more byte fits");
-                store.seen = Vec::with_capacity(capacity);
-                read_check(io, store, subs);
             }
         }
         Phase::CheckReading => {
             let count = done_count(done);
             let buf = read_buffer(kind);
             let n = usize::try_from(count).expect("u32 fits usize");
-            store.seen.extend_from_slice(buf.get(..n).expect("read count within buffer"));
-            if store.seen.len() > usize::try_from(io.max_file).expect("u32 fits usize")
-                || (count == 0 && Some(digest(&store.seen)) != store.expected)
-            {
-                store.failure = Some(Failure::Conflict);
+            store.seen_digest.update(buf.get(..n).expect("read count within buffer"));
+            store.seen_bytes = store.seen_bytes.checked_add(u64::from(count)).expect("file length fits u64");
+            if count == 0 {
+                let now = core::mem::replace(&mut store.seen_digest, DigestState::new()).finish();
+                if Some(now) != store.expected {
+                    store.failure = Some(Failure::Conflict { now: Some(now) });
+                }
             }
             if store.failure.is_some() || count == 0 {
                 if store.failure.is_some() {
                     io.deadline = None;
                 }
-                store.seen = Vec::new();
                 store.phase = Phase::CheckClosing;
                 let fd = store.check.expect("checked file is open");
                 issue(io, store, Op::Close { fd }, subs);

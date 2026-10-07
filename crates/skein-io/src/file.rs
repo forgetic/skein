@@ -49,12 +49,14 @@ pub enum Request {
         max: u32,
         no_follow: bool,
     },
-    /// Scans one directory through a root token, refusing more than `max` entries.
+    /// Scans a directory, retaining its first entries in name order within both bounds.
     Scan {
         owner: Token,
         root: Token,
         path: Box<[u8]>,
         max: u32,
+        /// Maximum owned bytes of entry cells and names in the result.
+        max_bytes: u64,
         no_follow: bool,
     },
     /// Replaces one file after rechecking its content version, through a synced temporary.
@@ -130,10 +132,11 @@ pub enum Event {
         owner: Token,
         bytes: Box<[u8]>,
     },
-    /// A directory scanned within its requested entry bound.
+    /// The first bounded directory entries in name order, and the number omitted.
     Scanned {
         owner: Token,
         entries: Box<[Entry]>,
+        more: u64,
     },
     /// A whole-file replacement is durable and has this content digest.
     Stored {
@@ -143,14 +146,12 @@ pub enum Event {
     /// The target did not have the expected content version at the recheck.
     Conflict {
         owner: Token,
+        now: Option<Digest>,
     },
-    /// A load exceeded its requested byte bound.
+    /// A load exceeded its requested byte bound; `size` is the observed size.
     TooLarge {
         owner: Token,
-    },
-    /// A scan exceeded its requested entry bound.
-    TooManyEntries {
-        owner: Token,
+        size: u64,
     },
     /// Metadata of the open file or directory.
     Stated {
@@ -194,9 +195,8 @@ impl Event {
             | Event::Loaded { owner, .. }
             | Event::Scanned { owner, .. }
             | Event::Stored { owner, .. }
-            | Event::Conflict { owner }
-            | Event::TooLarge { owner }
-            | Event::TooManyEntries { owner }
+            | Event::Conflict { owner, .. }
+            | Event::TooLarge { owner, .. }
             | Event::Stated { owner, .. }
             | Event::Written { owner }
             | Event::Read { owner, .. }

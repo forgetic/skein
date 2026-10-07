@@ -6,10 +6,12 @@
 //! interpret a file's content or version. `down` accepts one request while
 //! `takes` is true; `up` handles one completion; `expire` settles a deadline.
 //! Each admitted request produces one terminal event after owned descriptors
-//! are closed. Whole loads and scans refuse content beyond their stated caps.
+//! are closed. Loads refuse excess bytes; scans retain a name-order prefix
+//! within their entry and byte caps and count all omitted entries.
 
 #![expect(clippy::disallowed_types, reason = "read and directory buffers are bounded by FileIo's limits")]
 #![expect(clippy::disallowed_macros, reason = "fixed and limit-sized kernel buffers need initialized storage")]
+#![expect(clippy::large_enum_variant, reason = "FileIo holds one pending store without a separate allocation")]
 
 use crate::file::{Entry, Event, Request};
 use crate::kernel::{Complete, Done, Error, Fd, Op, OpenHow, Submit};
@@ -22,30 +24,103 @@ mod store;
 
 #[derive(Debug)]
 enum Pending {
-    Create { owner: Token },
-    OpenRead { owner: Token },
-    OpenDirectory { owner: Token },
-    Stat { owner: Token, fd: Fd },
-    Stating { owner: Token },
-    Cleanup { owner: Token, error: Error },
-    Write { owner: Token },
-    Read { owner: Token, fd: Fd, offset: u64, max: u32, bytes: Vec<u8> },
-    Sync { owner: Token },
-    Close { owner: Token },
-    Rename { owner: Token },
-    Remove { owner: Token },
-    ListOpening { owner: Token },
-    List { owner: Token, fd: Fd, entries: Vec<Entry> },
-    ListClosing { owner: Token, entries: Vec<Entry> },
-    LoadOpening { owner: Token, max: u32 },
-    LoadStating { owner: Token, fd: Fd, max: u32 },
-    LoadReading { owner: Token, fd: Fd, max: u32, bytes: Vec<u8> },
-    LoadClosing { owner: Token, bytes: Vec<u8> },
-    LoadTooLargeClosing { owner: Token },
-    ScanOpening { owner: Token, max: u32 },
-    ScanListing { owner: Token, fd: Fd, max: u32, entries: Vec<Entry> },
-    ScanClosing { owner: Token, entries: Vec<Entry> },
-    ScanTooManyClosing { owner: Token },
+    Create {
+        owner: Token,
+    },
+    OpenRead {
+        owner: Token,
+    },
+    OpenDirectory {
+        owner: Token,
+    },
+    Stat {
+        owner: Token,
+        fd: Fd,
+    },
+    Stating {
+        owner: Token,
+    },
+    Cleanup {
+        owner: Token,
+        error: Error,
+    },
+    Write {
+        owner: Token,
+    },
+    Read {
+        owner: Token,
+        fd: Fd,
+        offset: u64,
+        max: u32,
+        bytes: Vec<u8>,
+    },
+    Sync {
+        owner: Token,
+    },
+    Close {
+        owner: Token,
+    },
+    Rename {
+        owner: Token,
+    },
+    Remove {
+        owner: Token,
+    },
+    ListOpening {
+        owner: Token,
+    },
+    List {
+        owner: Token,
+        fd: Fd,
+        entries: Vec<Entry>,
+    },
+    ListClosing {
+        owner: Token,
+        entries: Vec<Entry>,
+    },
+    LoadOpening {
+        owner: Token,
+        max: u32,
+    },
+    LoadStating {
+        owner: Token,
+        fd: Fd,
+        max: u32,
+    },
+    LoadReading {
+        owner: Token,
+        fd: Fd,
+        max: u32,
+        bytes: Vec<u8>,
+    },
+    LoadClosing {
+        owner: Token,
+        bytes: Vec<u8>,
+    },
+    LoadTooLargeClosing {
+        owner: Token,
+        size: u64,
+    },
+    ScanOpening {
+        owner: Token,
+        max: u32,
+        max_bytes: u64,
+    },
+    ScanListing {
+        owner: Token,
+        fd: Fd,
+        max: u32,
+        max_bytes: u64,
+        entries: Vec<Entry>,
+        bytes: u64,
+        cutoff: Option<Box<[u8]>>,
+        total: u64,
+    },
+    ScanClosing {
+        owner: Token,
+        entries: Vec<Entry>,
+        more: u64,
+    },
     Store(store::Store),
 }
 
@@ -74,8 +149,7 @@ impl Pending {
             | Pending::LoadClosing { .. }
             | Pending::LoadTooLargeClosing { .. }
             | Pending::ScanListing { .. }
-            | Pending::ScanClosing { .. }
-            | Pending::ScanTooManyClosing { .. } => false,
+            | Pending::ScanClosing { .. } => false,
             Pending::Store(store) => store.can_cancel(),
         }
     }
@@ -250,7 +324,7 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
             let how = if no_follow { OpenHow::ReadNoFollow } else { OpenHow::Read };
             io.issue(Op::Open { root: fd, path, how }, subs);
         }
-        Request::Scan { owner, root, path, max, no_follow } => {
+        Request::Scan { owner, root, path, max, max_bytes, no_follow } => {
             let Some(fd) = io.file(root) else {
                 events.push(Event::Failed { owner, error: Error::NotFound });
                 return;
@@ -259,7 +333,7 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
                 events.push(Event::Failed { owner, error: Error::InvalidArgument });
                 return;
             }
-            io.pending = Some(Pending::ScanOpening { owner, max });
+            io.pending = Some(Pending::ScanOpening { owner, max, max_bytes });
             let how = if no_follow { OpenHow::DirectoryNoFollow } else { OpenHow::Directory };
             io.issue(Op::Open { root: fd, path, how }, subs);
         }
@@ -476,8 +550,7 @@ fn timed_out(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, sub
         | Pending::LoadTooLargeClosing { .. }
         | Pending::ScanOpening { .. }
         | Pending::ScanListing { .. }
-        | Pending::ScanClosing { .. }
-        | Pending::ScanTooManyClosing { .. }) => other,
+        | Pending::ScanClosing { .. }) => other,
     };
     let owner = match &pending {
         Pending::Create { owner }
@@ -499,11 +572,10 @@ fn timed_out(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, sub
         | Pending::LoadStating { owner, .. }
         | Pending::LoadReading { owner, .. }
         | Pending::LoadClosing { owner, .. }
-        | Pending::LoadTooLargeClosing { owner }
+        | Pending::LoadTooLargeClosing { owner, .. }
         | Pending::ScanOpening { owner, .. }
         | Pending::ScanListing { owner, .. }
-        | Pending::ScanClosing { owner, .. }
-        | Pending::ScanTooManyClosing { owner } => *owner,
+        | Pending::ScanClosing { owner, .. } => *owner,
         Pending::Store(_) => unreachable!("store completion is handled separately"),
     };
     let fd = match (pending, complete.result) {
@@ -531,6 +603,48 @@ fn timed_out(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, sub
         io.issue(Op::Close { fd }, subs);
     } else {
         events.push(Event::Failed { owner, error: Error::TimedOut });
+    }
+}
+
+/// Retains a name-order prefix under both scan bounds. `cutoff` is the
+/// smallest omitted name seen so far; a later entry cannot cross it.
+fn retain_scan_entry(
+    entries: &mut Vec<Entry>,
+    bytes: &mut u64,
+    cutoff: &mut Option<Box<[u8]>>,
+    max: u32,
+    max_bytes: u64,
+    name: &[u8],
+    kind: crate::kernel::Kind,
+) {
+    match cutoff {
+        Some(first_omitted) if name >= first_omitted.as_ref() => return,
+        Some(_) | None => {}
+    }
+    let mut at = 0_usize;
+    for entry in entries.iter() {
+        if entry.name.as_ref() >= name {
+            break;
+        }
+        at = at.checked_add(1).expect("bounded retained entries");
+    }
+    let cost = u64::try_from(size_of::<Entry>())
+        .expect("entry cell fits u64")
+        .checked_add(u64::try_from(name.len()).expect("kernel name fits u64"))
+        .expect("entry cost fits u64");
+    entries.insert(at, Entry { name: Box::from(name), kind });
+    *bytes = bytes.checked_add(cost).expect("bounded scan bytes fit u64");
+    for _ in 0..entries.len() {
+        if entries.len() <= usize::try_from(max).expect("u32 fits usize") && *bytes <= max_bytes {
+            break;
+        }
+        let removed = entries.pop().expect("overfull scan has a last entry");
+        let removed_cost = u64::try_from(size_of::<Entry>())
+            .expect("entry cell fits u64")
+            .checked_add(u64::try_from(removed.name.len()).expect("kernel name fits u64"))
+            .expect("entry cost fits u64");
+        *bytes = bytes.checked_sub(removed_cost).expect("removed entry was counted");
+        *cutoff = Some(removed.name);
     }
 }
 
@@ -564,8 +678,7 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
         | Pending::LoadTooLargeClosing { .. }
         | Pending::ScanOpening { .. }
         | Pending::ScanListing { .. }
-        | Pending::ScanClosing { .. }
-        | Pending::ScanTooManyClosing { .. }) => other,
+        | Pending::ScanClosing { .. }) => other,
     };
     if let Err(error) = complete.result {
         let owner = match pending {
@@ -596,10 +709,9 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             | Pending::ListClosing { owner, .. }
             | Pending::LoadOpening { owner, .. }
             | Pending::LoadClosing { owner, .. }
-            | Pending::LoadTooLargeClosing { owner }
+            | Pending::LoadTooLargeClosing { owner, .. }
             | Pending::ScanOpening { owner, .. }
-            | Pending::ScanClosing { owner, .. }
-            | Pending::ScanTooManyClosing { owner } => owner,
+            | Pending::ScanClosing { owner, .. } => owner,
             Pending::Store(_) => unreachable!("store completion is handled separately"),
         };
         events.push(Event::Failed { owner, error });
@@ -649,7 +761,7 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
                 io.pending = Some(Pending::Cleanup { owner, error: Error::IsADirectory });
                 io.issue(Op::Close { fd }, subs);
             } else if stat.size > u64::from(max) {
-                io.pending = Some(Pending::LoadTooLargeClosing { owner });
+                io.pending = Some(Pending::LoadTooLargeClosing { owner, size: stat.size });
                 io.issue(Op::Close { fd }, subs);
             } else {
                 let capacity =
@@ -661,7 +773,8 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             let n = usize::try_from(count).expect("u32 fits usize");
             bytes.extend_from_slice(buf.get(..n).expect("read count is within buffer"));
             if bytes.len() > usize::try_from(max).expect("u32 fits usize") {
-                io.pending = Some(Pending::LoadTooLargeClosing { owner });
+                let size = u64::try_from(bytes.len()).expect("loaded bytes fit u64");
+                io.pending = Some(Pending::LoadTooLargeClosing { owner, size });
                 io.issue(Op::Close { fd }, subs);
             } else if count == 0 {
                 io.pending = Some(Pending::LoadClosing { owner, bytes });
@@ -673,47 +786,50 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
         (Pending::LoadClosing { owner, bytes }, Op::Close { .. }, Done::Nothing) => {
             events.push(Event::Loaded { owner, bytes: bytes.into_boxed_slice() });
         }
-        (Pending::LoadTooLargeClosing { owner }, Op::Close { .. }, Done::Nothing) => {
-            events.push(Event::TooLarge { owner });
+        (Pending::LoadTooLargeClosing { owner, size }, Op::Close { .. }, Done::Nothing) => {
+            events.push(Event::TooLarge { owner, size });
         }
-        (Pending::ScanOpening { owner, max }, Op::Open { .. }, Done::Fd(fd)) => {
+        (Pending::ScanOpening { owner, max, max_bytes }, Op::Open { .. }, Done::Fd(fd)) => {
+            let cell = u64::try_from(size_of::<Entry>()).expect("entry cell fits u64");
+            let by_bytes = max_bytes.checked_div(cell).expect("entry cell is nonzero");
+            let capacity = u64::from(max).min(by_bytes).checked_add(1).expect("one transient entry fits");
             io.pending = Some(Pending::ScanListing {
                 owner,
                 fd,
                 max,
-                entries: Vec::with_capacity(usize::try_from(max).expect("u32 fits usize")),
+                max_bytes,
+                entries: Vec::with_capacity(usize::try_from(capacity).expect("scan capacity fits usize")),
+                bytes: 0,
+                cutoff: None,
+                total: 0,
             });
             io.list(fd, subs);
         }
         (
-            Pending::ScanListing { owner, fd, max, mut entries },
+            Pending::ScanListing { owner, fd, max, max_bytes, mut entries, mut bytes, mut cutoff, mut total },
             Op::List { entries: records, names, .. },
             Done::Count(count),
         ) => {
             let count = usize::try_from(count).expect("u32 fits usize");
             if count == 0 {
-                io.pending = Some(Pending::ScanClosing { owner, entries });
-                io.issue(Op::Close { fd }, subs);
-                return;
-            }
-            let total = entries.len().checked_add(count).expect("bounded directory entries");
-            if total > usize::try_from(max).expect("u32 fits usize") {
-                io.pending = Some(Pending::ScanTooManyClosing { owner });
+                let kept = u64::try_from(entries.len()).expect("entry count fits u64");
+                let more = total.checked_sub(kept).expect("retained entries were counted");
+                io.pending = Some(Pending::ScanClosing { owner, entries, more });
                 io.issue(Op::Close { fd }, subs);
                 return;
             }
             for record in records.get(..count).expect("list count is within buffer") {
                 let name = record.name(&names).expect("a listed entry names bytes");
-                entries.push(Entry { name: Box::from(name), kind: record.kind });
+                if name != b"." && name != b".." {
+                    total = total.checked_add(1).expect("directory entry count fits u64");
+                    retain_scan_entry(&mut entries, &mut bytes, &mut cutoff, max, max_bytes, name, record.kind);
+                }
             }
-            io.pending = Some(Pending::ScanListing { owner, fd, max, entries });
+            io.pending = Some(Pending::ScanListing { owner, fd, max, max_bytes, entries, bytes, cutoff, total });
             io.list(fd, subs);
         }
-        (Pending::ScanClosing { owner, entries }, Op::Close { .. }, Done::Nothing) => {
-            events.push(Event::Scanned { owner, entries: entries.into_boxed_slice() });
-        }
-        (Pending::ScanTooManyClosing { owner }, Op::Close { .. }, Done::Nothing) => {
-            events.push(Event::TooManyEntries { owner });
+        (Pending::ScanClosing { owner, entries, more }, Op::Close { .. }, Done::Nothing) => {
+            events.push(Event::Scanned { owner, entries: entries.into_boxed_slice(), more });
         }
         (Pending::Write { owner }, Op::Write { fd, bytes, from, at }, Done::Count(count)) => {
             let next = from.checked_add(count).expect("write count fits");
