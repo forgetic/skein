@@ -42,6 +42,10 @@ impl Frame {
         &self.bytes
     }
 
+    pub(super) fn into_bytes(self) -> Box<[u8]> {
+        self.bytes
+    }
+
     /// The validated kind in the header.
     #[must_use]
     pub const fn kind(&self) -> u16 {
