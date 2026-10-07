@@ -164,6 +164,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-codec-tests"
+version = "0.0.0"
+dependencies = [
+ "skein-codec",
+ "skein-codegen",
+ "skein-heap",
+ "skein-lib",
+]
+
+[[package]]
 name = "skein-codegen"
 version = "0.0.0"
 

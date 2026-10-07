@@ -1,0 +1,18 @@
+[package]
+name = "skein-codec-tests"
+description = "Generated sample codec and its world tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-codec = { path = "../../crates/skein-codec" }
+skein-lib.workspace = true
+
+[dev-dependencies]
+skein-codegen = { path = "../../testing/skein-codegen" }
+skein-heap.workspace = true
+
+[lints]
+workspace = true

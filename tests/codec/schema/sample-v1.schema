@@ -1,0 +1,17 @@
+family sample 1
+
+record Field {
+    name: text 4
+    value: bytes 4
+}
+
+enum Effect { read, write }
+
+versioned record Report {
+    title: text 8
+    fields: list 2 Field
+    effect: Effect
+    present: option bool
+    nonce: fixed 2
+    age: duration
+}

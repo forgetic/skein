@@ -4,6 +4,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::hash::{Hash, Hasher};
 use core::mem::size_of;
 use core::slice;
 
@@ -114,5 +115,27 @@ impl<'a, T> IntoIterator for &'a List<T> {
 
     fn into_iter(self) -> slice::Iter<'a, T> {
         self.items.iter()
+    }
+}
+
+impl<T: Clone> Clone for List<T> {
+    fn clone(&self) -> List<T> {
+        let mut items = Vec::with_capacity(usize::try_from(self.capacity).expect("a u32 fits in usize"));
+        items.extend_from_slice(&self.items);
+        List { items, capacity: self.capacity }
+    }
+}
+
+impl<T: PartialEq> PartialEq for List<T> {
+    fn eq(&self, other: &List<T>) -> bool {
+        self.items == other.items
+    }
+}
+
+impl<T: Eq> Eq for List<T> {}
+
+impl<T: Hash> Hash for List<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.items.hash(state);
     }
 }

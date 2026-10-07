@@ -57,7 +57,7 @@ pub fn read_count(reader: &mut Reader<'_>, limit: u32) -> Result<u32, Reason> {
 pub fn read_text(reader: &mut Reader<'_>, limit: u32) -> Result<Box<[u8]>, Reason> {
     let length = read_len(reader, limit)?;
     let bytes = reader.bytes(length).ok_or(Reason::Short)?;
-    if !valid_utf8(bytes) {
+    if !text_is_valid(bytes) {
         return Err(Reason::Utf8);
     }
     Ok(Box::from(bytes))
@@ -69,8 +69,9 @@ pub fn version_of(bytes: &[u8]) -> Result<u16, Reason> {
     reader.u16().ok_or(Reason::Short)
 }
 
-/// Validates a complete UTF-8 field (RFC 3629, section 4).
-fn valid_utf8(bytes: &[u8]) -> bool {
+/// Reports whether a complete text field is UTF-8 (RFC 3629, section 4).
+#[must_use]
+pub fn text_is_valid(bytes: &[u8]) -> bool {
     let mut more = 0_u8;
     let mut low = 0_u8;
     let mut high = 0_u8;

@@ -9,5 +9,9 @@ publish.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "skein-codegen"
+path = "src/main.rs"
+
 [lints]
 workspace = true

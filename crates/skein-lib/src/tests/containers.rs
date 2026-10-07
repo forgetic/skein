@@ -19,6 +19,24 @@ fn a_list_refuses_past_its_capacity() {
 }
 
 #[test]
+fn list_value_derives_compare_and_hash_items() {
+    use core::hash::BuildHasher;
+
+    let mut first = List::with_capacity(2);
+    first.push(7_u8).expect("room");
+    let cloned = first.clone();
+    assert_eq!(cloned.capacity(), 2);
+    assert_eq!(cloned, first);
+
+    let mut same_items_with_more_room = List::with_capacity(3);
+    same_items_with_more_room.push(7_u8).expect("room");
+    assert_eq!(first, same_items_with_more_room);
+
+    let state = std::collections::hash_map::RandomState::new();
+    assert_eq!(state.hash_one(&first), state.hash_one(&same_items_with_more_room));
+}
+
+#[test]
 fn slots_pushed_in_order_are_filled_in_any_order() {
     let mut results = List::with_capacity(3);
     for _ in 0_u32..3 {
