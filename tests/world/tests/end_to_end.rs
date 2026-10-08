@@ -169,3 +169,14 @@ fn invalid_binary_reports_a_startup_failure() {
         Err(StartError::Child(skein_io::kernel::Error::NotFound))
     ));
 }
+
+#[test]
+fn an_abandoned_binary_is_reaped_and_its_untransferred_descriptors_are_closed() {
+    let binary = Binary::start(command("read value"), Mode::Pipes, 1024).expect("the binary starts");
+    let descriptors = binary.descriptors();
+    drop(binary);
+    for descriptor in descriptors {
+        let path = format!("/proc/self/fd/{}", descriptor.raw());
+        assert!(std::fs::metadata(path).is_err(), "abandonment closes every owned descriptor");
+    }
+}

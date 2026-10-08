@@ -1,4 +1,6 @@
 [package]
+# The shipped-binary test is registered by examples/echo/shell.
+autotests = false
 name = "skein-echo-world"
 description = "The echo's simulated worlds and its real loop: the echo and fake clients as processes, a referee beside them, under tiny limits and every fault"
 version.workspace = true
@@ -36,3 +38,15 @@ allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 disallowed_types = "deny"
 disallowed_methods = "deny"
+
+[[test]]
+name = "scenarios"
+path = "tests/scenarios.rs"
+
+[[test]]
+name = "fuzzy_scenarios"
+path = "tests/fuzzy_scenarios.rs"
+
+[[test]]
+name = "real"
+path = "tests/real.rs"

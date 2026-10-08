@@ -26,3 +26,18 @@ fn signal_source_rearms_and_settles_its_read_before_close() {
     assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner: source }]);
     rig.empty();
 }
+
+#[test]
+fn signal_failure_and_close_echo_the_service_binding_instead_of_its_io_handle() {
+    let mut rig = Rig::new(Limits { sockets: 1, ..limits() });
+    let owner = super::owner(9);
+    let source = rig.io.adopt_signals_for(Fd::new(50), owner).expect("one entity slot");
+    assert_ne!(source, owner, "the io handle and the service binding are independent");
+    assert_eq!(rig.io.adopt_signals_for(Fd::new(51), owner), Err(Fd::new(51)));
+    let read = rig.next().take(Kind::ReadSignal);
+    let mut out = rig.complete(read, Err(Error::Permission));
+    assert_eq!(out.events, [Event::Failed { owner, error: crate::Error::Other }]);
+    let close = out.take(Kind::Close);
+    assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner }]);
+    rig.empty();
+}

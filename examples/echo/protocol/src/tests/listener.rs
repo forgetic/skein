@@ -104,8 +104,8 @@ fn a_listener_whose_accept_stops_is_closed() {
 fn shutdown_is_told_the_domain_and_its_stop_closes_the_listener() {
     let mut rig = Rig::new();
     rig.listen();
-    rig.proto.shutdown();
-    rig.proto.shutdown();
+    rig.up(Told::Shutdown { signal: skein_io::kernel::ServiceSignal::Terminate }).nothing();
+    rig.up(Told::Shutdown { signal: skein_io::kernel::ServiceSignal::Interrupt }).nothing();
     assert!(rig.proto.is_ready());
     let out = rig.resume();
     assert_eq!(out.calls, [Call::Shutdown], "told once, from the ready list");

@@ -78,9 +78,8 @@ enum Listener {
 /// its transitions (programming-model.md, 5.4).
 const CLOSED: Listener = Listener::Closed { error: None };
 
-/// The service's shutdown, standing in for io's `Shutdown` event, which is
-/// not built (io.md, 7): asked of the layer, told the domain from the ready
-/// list.
+/// The service's shutdown from io or a lower-tier world (io.md, section 7),
+/// told to the domain once from the ready list.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Shutdown {
     Running,
@@ -294,10 +293,10 @@ pub fn up(proto: &mut Protocol, env: &Env<Limits>, event: Told, up: &mut Queue<C
         | Told::Connecting { .. }
         | Told::Connected { .. }
         | Told::Spawned { .. }
-        | Told::Exited { .. }
-        | Told::Shutdown { .. } => {
+        | Told::Exited { .. } => {
             unreachable!("the echo connects to no one and spawns no child")
         }
+        Told::Shutdown { signal: _ } => proto.shutdown(),
         Told::Stream { owner, up: event } => {
             let id = Id::<Conn>::from_token(owner);
             let Protocol { conns, tables, .. } = proto;

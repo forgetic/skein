@@ -43,9 +43,12 @@ use protocol::Protocol;
 // though both name io's and lib's, which every role may.
 pub use skein_echo_domain as domain;
 pub use skein_echo_protocol as protocol;
-use skein_io::kernel::{Addr, Complete, Submit};
+use skein_io::kernel::{Addr, Complete, Fd, Submit};
 use skein_io::{self as io, Io};
-use skein_lib::{Env, Queue, Time, Wall};
+use skein_lib::{Env, Queue, Time, Token, Wall};
+
+/// A service binding distinct from the protocol's listener and connections.
+const SIGNALS: Token = Token::new(u64::MAX - 1);
 
 /// The limits of every layer, and of the queues between them: the
 /// configuration a shell reads (programming-model.md, 7).
@@ -170,6 +173,9 @@ pub struct Service {
     calls: Queue<domain::Event>,
     /// The domain's replies and requests, for the protocol layer.
     answers: Queue<domain::Request>,
+    /// The adopted signal source stays named until io reports its close.
+    signals: Option<Token>,
+    signals_closing: bool,
 }
 
 impl Service {
@@ -192,6 +198,24 @@ impl Service {
             asked: Queue::with_capacity(limits.queue),
             calls: Queue::with_capacity(limits.queue),
             answers: Queue::with_capacity(limits.queue),
+            signals: None,
+            signals_closing: false,
+        }
+    }
+
+    /// Adopts the shell's blocked termination signalfd at startup (io.md,
+    /// section 7), retaining ownership until every connection settles. If
+    /// there is no io slot or a source was already adopted, the caller keeps it.
+    pub fn adopt_signals(&mut self, descriptor: Fd) -> Result<(), Fd> {
+        if self.signals.is_some() {
+            return Err(descriptor);
+        }
+        match self.io.adopt_signals_for(descriptor, SIGNALS) {
+            Ok(source) => {
+                self.signals = Some(source);
+                Ok(())
+            }
+            Err(descriptor) => Err(descriptor),
         }
     }
 
@@ -237,8 +261,8 @@ impl Service {
 
     /// Shuts the service down: the domain is told `Shutdown` in the next
     /// iteration, admits no one more and stops the listener; the connections
-    /// it has run to their end. It stands in for io's `Shutdown` event,
-    /// which is not built (io.md, 7).
+    /// it has run to their end. Lower-tier worlds use this entry point; the
+    /// binary receives io's real `Shutdown` event (io.md, section 7).
     pub fn shutdown(&mut self) {
         self.protocol.shutdown();
     }
@@ -294,6 +318,16 @@ pub fn iterate(svc: &mut Service, now: Time, wall: Wall) {
     domain_stage(svc);
     // The down pass.
     protocol_down(svc);
+    // The service owns its startup signal source, while the protocol owns
+    // the sockets. Close the source only once the protocol has settled.
+    if svc.protocol.is_empty()
+        && !svc.signals_closing
+        && svc.asked.room() > 0
+        && let Some(entity) = svc.signals
+    {
+        svc.signals_closing = true;
+        svc.asked.push(io::Request::Close { entity });
+    }
     io_down(svc);
     // The reclaim point.
     svc.io.reclaim();
@@ -369,7 +403,26 @@ fn protocol_up(svc: &mut Service, now: Time) {
             break;
         };
         let marks = protocol_marks(svc);
-        protocol::up(&mut svc.protocol, &svc.protocol_env, event, &mut svc.calls, &mut svc.asked);
+        match &event {
+            io::Event::Closed { owner } if *owner == SIGNALS => svc.signals = None,
+            io::Event::Failed { owner, error: _ } if *owner == SIGNALS => {
+                svc.signals_closing = true;
+                svc.protocol.shutdown();
+            }
+            io::Event::Listening { .. }
+            | io::Event::Accepted { .. }
+            | io::Event::Connecting { .. }
+            | io::Event::Connected { .. }
+            | io::Event::Stream { .. }
+            | io::Event::Output { .. }
+            | io::Event::Spawned { .. }
+            | io::Event::Exited { .. }
+            | io::Event::Shutdown { .. }
+            | io::Event::Failed { .. }
+            | io::Event::Closed { .. } => {
+                protocol::up(&mut svc.protocol, &svc.protocol_env, event, &mut svc.calls, &mut svc.asked);
+            }
+        }
         protocol_within(svc, marks, protocol::MAX_OUT_UP);
     }
     if !svc.told.is_empty() {

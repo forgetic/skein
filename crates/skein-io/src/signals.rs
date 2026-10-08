@@ -14,7 +14,7 @@
 //! | Settling | read and cancel completed | Closing: submit `Close` |
 //! | Closing | close completed | Closed: `Closed` |
 
-use skein_lib::{Id, Queue};
+use skein_lib::{Id, Queue, Token};
 
 use crate::kernel::{Done, Fd, Op, Submit};
 use crate::layer::{Entity, Flight, Landed, Purpose, Tables};
@@ -23,6 +23,7 @@ use crate::records::{Error, Event};
 #[derive(Debug)]
 pub(crate) struct Signals {
     fd: Option<Fd>,
+    owner: Option<Token>,
     read: Option<Id<Flight>>,
     close: Option<Id<Flight>>,
     cancels: u32,
@@ -31,8 +32,8 @@ pub(crate) struct Signals {
 }
 
 impl Signals {
-    pub(crate) fn new(fd: Fd) -> Signals {
-        Signals { fd: Some(fd), read: None, close: None, cancels: 0, closing: false, closed: false }
+    pub(crate) fn new(fd: Fd, owner: Option<Token>) -> Signals {
+        Signals { fd: Some(fd), owner, read: None, close: None, cancels: 0, closing: false, closed: false }
     }
 
     pub(crate) const fn is_closed(&self) -> bool {
@@ -65,7 +66,7 @@ pub(crate) fn landed(
                         resume(signals, id, tables, subs);
                     }
                     Err(_) => {
-                        up.push(Event::Failed { owner: id.token(), error: Error::Other });
+                        up.push(Event::Failed { owner: signals.owner.unwrap_or(id.token()), error: Error::Other });
                         signals.closing = true;
                     }
                     Ok(_) => unreachable!("a signal read answers with a service signal"),
@@ -78,7 +79,7 @@ pub(crate) fn landed(
         Purpose::Close => {
             assert!(signals.close.take() == Some(landed.flight), "the signal close flight matches");
             signals.closed = true;
-            up.push(Event::Closed { owner: id.token() });
+            up.push(Event::Closed { owner: signals.owner.unwrap_or(id.token()) });
         }
         Purpose::Socket
         | Purpose::Bind

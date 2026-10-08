@@ -159,12 +159,25 @@ impl Io {
     /// `Close` or `Abort` on the returned token settles the read and closes
     /// the descriptor. On a full slab the caller retains the descriptor.
     pub fn adopt_signals(&mut self, fd: Fd) -> Result<Token, Fd> {
-        match self.entities.insert(Entity::Signals(Signals::new(fd))) {
+        match self.entities.insert(Entity::Signals(Signals::new(fd, None))) {
             Ok(id) => {
                 self.tables.ready.mark(id);
                 Ok(id.token())
             }
             Err(_) => Err(fd),
+        }
+    }
+
+    /// Adopts a signalfd with the service's own binding token echoed on
+    /// `Failed` and `Closed` (programming-model.md, section 4.2). Shutdown
+    /// remains an event for the service; the returned token addresses close.
+    pub fn adopt_signals_for(&mut self, descriptor: Fd, owner: Token) -> Result<Token, Fd> {
+        match self.entities.insert(Entity::Signals(Signals::new(descriptor, Some(owner)))) {
+            Ok(id) => {
+                self.tables.ready.mark(id);
+                Ok(id.token())
+            }
+            Err(_) => Err(descriptor),
         }
     }
 

@@ -102,6 +102,12 @@ pub fn start_binary(command: &mut skein_io::kernel::Spawn, terminal: bool) -> Re
     process::start_binary(command, terminal)
 }
 
+/// Reaps and releases an external child abandoned by a failing test. Normal
+/// end-to-end settlement uses the ring (testing-strategy.md, section 2.9).
+pub fn abandon_binary(pidfd: Option<Fd>, descriptors: &[Fd]) {
+    process::abandon_binary(pidfd, descriptors);
+}
+
 /// Sends a signal record to a hosted service's signal pipe (examples.md, section 6).
 pub fn write_service_signal(writer: Fd, signal: ServiceSignal) -> Result<(), Error> {
     process::write_signal(writer, signal)

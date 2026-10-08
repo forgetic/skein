@@ -244,10 +244,13 @@ dependencies = [
 name = "skein-echo-shell"
 version = "0.0.0"
 dependencies = [
+ "skein-echo-client",
  "skein-echo-service",
+ "skein-echo-world",
  "skein-io",
  "skein-lib",
  "skein-shell",
+ "skein-world",
 ]
 
 [[package]]

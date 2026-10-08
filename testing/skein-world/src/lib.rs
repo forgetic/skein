@@ -21,6 +21,9 @@
 //!   shared ring, hosting spawns over real pipes with per-service signals,
 //!   on the real clock (testing-strategy.md, 2.8).
 //!
+//! [`end_to_end`] starts shipped binaries on pipes or a controlling terminal,
+//! captures stderr and exposes their shared-ring exit and signal operations.
+//!
 //! [`domain`] supplies the reusable harness for domain-only worlds: a
 //! delivery schedule, output-pressure stages, terminal ledgers, boundary
 //! traces and an observation referee. Services keep their own fakes and

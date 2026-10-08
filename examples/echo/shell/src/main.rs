@@ -7,9 +7,9 @@
 //! ```
 //!
 //! It listens at `ADDRESS` (127.0.0.1:7007 unless given; port 0 picks one)
-//! and answers each line with itself. Signals to the service are not built
-//! (io.md, 7), so it runs until it is killed; it stops by itself only when
-//! its listener fails, as when the address is in use, and then says why.
+//! and answers each line with itself. SIGINT and SIGTERM arrive through
+//! io (io.md, section 7): it stops admitting clients, drains its sessions
+//! and exits successfully. A listener failure exits with a diagnostic.
 
 use std::env;
 use std::net::SocketAddr;
@@ -87,7 +87,7 @@ fn configure(mut args: impl Iterator<Item = String>) -> Result<Configuration, St
 const fn limits() -> Limits {
     Limits {
         io: skein_io::Limits {
-            sockets: 1024 + 1 + 64,
+            sockets: 1024 + 1 + 64 + 1,
             refusals: 1,
             intake: 4096,
             receive: 4096,
@@ -110,21 +110,22 @@ const fn limits() -> Limits {
     }
 }
 
-/// Startup, then the loop, until the service holds nothing: which, with no
-/// signals to the service, happens only when its listener fails.
+/// Startup, then the loop, until a shutdown or listener failure settles.
 fn run(configuration: &Configuration) -> Result<(), String> {
     let worst = startup(configuration)?;
     let limits = &configuration.limits;
+    // 3. Block termination signals before opening the ring, then adopt their
+    // source into io (shell.md, section 6; io.md, section 7).
+    let signals = skein_shell::open_termination_signals()
+        .map_err(|errno| format!("cannot open termination signals (errno {errno})"))?;
     // 7. The seed, and the kernel, which probes the ring for the floor.
     let seed = skein_shell::seed().map_err(|errno| format!("the kernel refused a seed (errno {errno})"))?;
     let operations = service::operations(limits).ok_or("the ring's size is past a u32")?;
     let mut kernel = Kernel::open(Config { operations }).map_err(|error| error.to_string())?;
     let clock = Clock::new();
     let mut svc = Service::new(limits, configuration.addr, seed);
-    eprintln!(
-        "skein-echo: at most {worst} bytes of {} configured; signals to the service are not built, so it runs until it is killed",
-        configuration.memory
-    );
+    svc.adopt_signals(signals).map_err(|_| "the configured io has no slot for termination signals")?;
+    eprintln!("skein-echo: at most {worst} bytes of {} configured", configuration.memory);
     let mut told = false;
     let mut short = false;
     loop {
@@ -142,7 +143,6 @@ fn run(configuration: &Configuration) -> Result<(), String> {
                 None => Wait::Forever,
             }
         };
-        kernel.submit(svc.submissions(), wait);
         if !told && let Some(addr) = svc.listening() {
             eprintln!("skein-echo: listening at {addr}");
             told = true;
@@ -154,6 +154,7 @@ fn run(configuration: &Configuration) -> Result<(), String> {
             );
         }
         short = svc.retrying().is_some() || (short && !told);
+        kernel.submit(svc.submissions(), wait);
     }
     match svc.failure() {
         Some(error) => Err(format!("the listener at {} failed: {error:?}", configuration.addr)),
@@ -174,7 +175,7 @@ fn startup(configuration: &Configuration) -> Result<u64, String> {
     if worst > configuration.memory {
         return Err(format!("the worst case, {worst} bytes, is past the memory configured, {}", configuration.memory));
     }
-    // 3. Blocking the termination signals: not built (io.md, 7).
+    // 3. Termination signals are blocked and adopted in run, before the ring.
     // 4. Roots for io's files: the echo opens none.
     // 5. Peer names: the echo dials no one; its address is given as one.
     // 6. TLS: none.

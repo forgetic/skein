@@ -235,6 +235,18 @@ impl Binary {
     }
 }
 
+// Ordinary test code may unwind (programming-model.md, section 10.2).
+// A failed scenario must not leave a shipped service running after its
+// observer is discarded; a normally settled observer owns no descriptors.
+impl Drop for Binary {
+    fn drop(&mut self) {
+        let descriptors = self.descriptors();
+        if !descriptors.is_empty() {
+            skein_shell::abandon_binary(self.pidfd.take(), &descriptors);
+        }
+    }
+}
+
 impl Host for Binary {
     fn iterate(&mut self, _now: Time, _wall: Wall) {
         while let Some(complete) = self.completions.pop() {

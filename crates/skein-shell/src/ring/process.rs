@@ -414,3 +414,29 @@ fn open_terminal() -> Result<(OwnedFd, CString), i32> {
     let end = name.iter().position(|byte| *byte == 0).ok_or(libc::ENAMETOOLONG)?;
     Ok((master, cstring(name.get(..end).expect("the terminator is within the terminal name"))?))
 }
+
+/// Failure-path cleanup for a test that abandons a binary observer. Normal
+/// exit, waits and descriptor closure still go through the shared ring.
+pub(super) fn abandon_binary(pidfd: Option<Fd>, descriptors: &[Fd]) {
+    if let Some(pidfd) = pidfd {
+        let _signalled = signal_child(pidfd, Signal::Kill);
+        // SAFETY: siginfo_t is an integer C record initialized for waitid.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: the uniquely owned pidfd identifies this observer's child,
+        // and info is writable for the whole synchronous cleanup call. A
+        // concurrent ring wait may already have reaped it (ECHILD is harmless).
+        let _waited = unsafe {
+            libc::waitid(
+                libc::P_PIDFD,
+                u32::try_from(pidfd.raw()).expect("a positive pidfd"),
+                ptr::from_mut(&mut info),
+                libc::WEXITED,
+            )
+        };
+    }
+    for descriptor in descriptors {
+        // SAFETY: these are the observer's remaining owned descriptors,
+        // taken out of normal use by its failure-path destructor.
+        let _closed = unsafe { libc::close(descriptor.raw()) };
+    }
+}
