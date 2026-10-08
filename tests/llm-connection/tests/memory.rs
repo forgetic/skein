@@ -40,8 +40,10 @@ fn full_pool_stays_within_its_checked_bound() {
     endpoints
         .push(Endpoint {
             address: Addr::from((Ipv4Addr::LOCALHOST, 443)),
-            server_name: skein_tls::Name::new("skein.test").expect("name"),
-            trust: pki::client(&[]),
+            transport: skein_llm_connection::Transport::Tls {
+                server_name: skein_tls::Name::new("skein.test").expect("name"),
+                trust: pki::client(&[]),
+            },
             llm: skein_llm::Endpoint::codex(),
         })
         .expect("one endpoint");

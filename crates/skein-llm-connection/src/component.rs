@@ -16,7 +16,7 @@ use skein_tls::client as tls;
 
 use crate::boundary::{Event, Refusal, Request};
 use crate::call::{Connection, Phase};
-use crate::endpoint::{Endpoint, EndpointError};
+use crate::endpoint::{Endpoint, EndpointError, Transport};
 use crate::limits::{Limits, worst_case};
 
 /// Configured endpoints and bounds, with no live calls or retry policy.
@@ -50,12 +50,28 @@ impl Component {
         if worst_case(limits).is_none() || limits.per_endpoint > limits.connections {
             return Err(EndpointError::Limits);
         }
-        if llm::client::largest_read(&limits.llm) > limits.tls.read
-            || llm::client::largest_room(&limits.llm) > limits.tls.send
-            || skein_tls::client::LARGEST_READ > limits.io.largest_read()
-            || skein_tls::client::largest_room(&limits.tls) > limits.io.largest_room()
-        {
-            return Err(EndpointError::Stream);
+        for destination in &endpoints {
+            match &destination.transport {
+                Transport::Tls { .. } => {
+                    if llm::client::largest_read(&limits.llm) > limits.tls.read
+                        || llm::client::largest_room(&limits.llm) > limits.tls.send
+                        || skein_tls::client::LARGEST_READ > limits.io.largest_read()
+                        || skein_tls::client::largest_room(&limits.tls) > limits.io.largest_room()
+                    {
+                        return Err(EndpointError::Stream);
+                    }
+                }
+                Transport::Plaintext => {
+                    if !destination.address.ip().is_loopback() {
+                        return Err(EndpointError::PlaintextAddress);
+                    }
+                    if llm::client::largest_read(&limits.llm) > limits.io.largest_read()
+                        || llm::client::largest_room(&limits.llm) > limits.io.largest_room()
+                    {
+                        return Err(EndpointError::Stream);
+                    }
+                }
+            }
         }
         Ok(Component {
             endpoints,
@@ -156,7 +172,7 @@ impl Component {
             IoEvent::Connected { .. } => match self.connections.get_mut(id) {
                 Some(connection) => {
                     if connection.phase == Phase::Connecting {
-                        connection.start_tls(env, owner, up, io);
+                        connection.connected(env, owner, up, io);
                     } else {
                         connection.close_socket(io);
                     }
@@ -215,7 +231,7 @@ impl Component {
                             ) => connection.timeout(env),
                             None => match connection.idle_at {
                                 Some(then) if env.now >= then.saturating_add(env.limits.idle_keep) => {
-                                    connection.close_idle(env);
+                                    connection.close_idle(env, io);
                                 }
                                 Some(_) | None => {}
                             },
@@ -313,7 +329,6 @@ impl Component {
                                         connection.phase = Phase::Calling;
                                         connection.idle_at = None;
                                         connection.deadlines = crate::deadlines::Table::new(deadlines, env.now);
-                                        connection.deadlines.connected(env.now);
                                         connection.deadlines.ready();
                                         connection.start_call(env, id.token(), up, io);
                                         return;
@@ -337,7 +352,12 @@ impl Component {
             return;
         }
         let destination = self.endpoints.get(endpoint).expect("the endpoint was checked by admission");
-        let tls = tls::Client::new(&destination.trust, destination.server_name.clone(), &self.limits.tls);
+        let tls = match &destination.transport {
+            Transport::Tls { server_name, trust } => {
+                Some(tls::Client::new(trust, server_name.clone(), &self.limits.tls))
+            }
+            Transport::Plaintext => None,
+        };
         let connection = Connection::new(endpoint, call, tls, prepared, deadlines, env.now);
         let id = match self.connections.insert(connection) {
             Ok(id) => id,

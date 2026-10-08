@@ -53,8 +53,10 @@ fn endpoint() -> Endpoint {
         .expect("fixture root");
     Endpoint {
         address: Addr::from((Ipv4Addr::LOCALHOST, 443)),
-        server_name: skein_tls::Name::new("example.test").expect("valid test name"),
-        trust: skein_tls::Config::new(roots, &[]).expect("valid test trust"),
+        transport: Transport::Tls {
+            server_name: skein_tls::Name::new("example.test").expect("valid test name"),
+            trust: skein_tls::Config::new(roots, &[]).expect("valid test trust"),
+        },
         llm: skein_llm::Endpoint::codex(),
     }
 }
@@ -119,7 +121,9 @@ fn invalid_and_oversized_requests_are_refused() {
 fn startup_rejects_impossible_limits() {
     let mut config = limits();
     config.io.intake = 1;
-    assert_eq!(Component::new(List::with_capacity(0), &config).err(), Some(EndpointError::Stream));
+    let mut endpoints = List::with_capacity(1);
+    endpoints.push(endpoint()).expect("one endpoint fits");
+    assert_eq!(Component::new(endpoints, &config).err(), Some(EndpointError::Stream));
     let mut config = limits();
     config.connections = 0;
     assert_eq!(Component::new(List::with_capacity(0), &config).err(), Some(EndpointError::Limits));
@@ -312,4 +316,96 @@ fn a_full_pool_refuses_the_second_call() {
         }
         other => panic!("expected pool refusal, got {other:?}"),
     }
+}
+
+#[test]
+#[expect(clippy::disallowed_methods, reason = "test fixtures parse literal socket addresses outside step code")]
+fn plaintext_admission_checks_the_exact_loopback_ranges() {
+    for (address, admitted) in [
+        ("127.0.0.1:80", true),
+        ("127.0.0.0:80", true),
+        ("127.255.255.255:80", true),
+        ("126.255.255.255:80", false),
+        ("128.0.0.0:80", false),
+        ("0.0.0.0:80", false),
+        ("[::1]:80", true),
+        ("[::]:80", false),
+        ("[::2]:80", false),
+        ("[::ffff:127.0.0.1]:80", false),
+    ] {
+        let mut endpoints = List::with_capacity(1);
+        endpoints
+            .push(Endpoint {
+                address: address.parse().expect("test address"),
+                transport: Transport::Plaintext,
+                llm: skein_llm::Endpoint::codex(),
+            })
+            .expect("one endpoint");
+        assert_eq!(
+            Component::new(endpoints, &limits()).err(),
+            if admitted { None } else { Some(EndpointError::PlaintextAddress) },
+            "{address}"
+        );
+    }
+}
+
+#[test]
+fn plaintext_connect_starts_http_and_never_arms_a_handshake_deadline() {
+    let mut endpoints = List::with_capacity(1);
+    endpoints
+        .push(Endpoint {
+            address: Addr::from((Ipv4Addr::LOCALHOST, 80)),
+            transport: Transport::Plaintext,
+            llm: skein_llm::Endpoint::codex(),
+        })
+        .expect("one endpoint");
+    let mut config = limits();
+    // These capacities fit HTTP directly, but cannot fit TLS ciphertext.
+    config.io.intake = 4096;
+    config.io.output = 4096;
+    let mut component = Component::new(endpoints, &config).expect("plaintext only needs HTTP capacities");
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: config };
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    component.down(
+        &env,
+        Request::Start {
+            call: Token::new(7),
+            endpoint: 0,
+            prompt: prompt(),
+            credential: credential(),
+            deadlines: Deadlines {
+                connect: Some(Duration::from_secs(2)),
+                handshake: Some(Duration::from_secs(1)),
+                ..Deadlines::none()
+            },
+        },
+        &mut up,
+        &mut io,
+    );
+    let owner = match io.pop() {
+        Some(Lower::Connect { owner, .. }) => owner,
+        other => panic!("expected connect, got {other:?}"),
+    };
+    component.up(&env, LowerEvent::Connecting { owner, socket: Token::new(19) }, &mut up, &mut io);
+    component.up(&env, LowerEvent::Connected { owner }, &mut up, &mut io);
+    assert_eq!(component.next_deadline(), None);
+    let room = match io.pop() {
+        Some(Lower::Stream { down: skein_lib::stream::Down::Demand { read, room }, .. }) => {
+            assert_eq!(read, skein_lib::stream::Read::Nothing);
+            room
+        }
+        other => panic!("expected HTTP output demand, got {other:?}"),
+    };
+    assert!(room > 0);
+    component.up(&env, LowerEvent::Stream { owner, up: skein_lib::stream::Up::Room }, &mut up, &mut io);
+    match io.pop() {
+        Some(Lower::Stream { down: skein_lib::stream::Down::Send(bytes), .. }) => {
+            assert!(bytes.starts_with(b"POST /"), "the first bytes are HTTP, without a TLS flight");
+        }
+        other => panic!("expected HTTP request bytes, got {other:?}"),
+    }
+    let fire = Env { now: Time::from_nanos(3_000_000_000), ..env };
+    component.fire(&fire, &mut up, &mut io);
+    assert!(up.is_empty(), "the configured TLS deadline never fires on plaintext");
 }

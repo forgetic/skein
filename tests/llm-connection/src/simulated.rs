@@ -186,8 +186,10 @@ impl World {
         endpoints
             .push(Endpoint {
                 address: addr,
-                server_name: skein_tls::Name::new("skein.test").expect("test name"),
-                trust: pki::client(&[]),
+                transport: skein_llm_connection::Transport::Tls {
+                    server_name: skein_tls::Name::new("skein.test").expect("test name"),
+                    trust: pki::client(&[]),
+                },
                 llm: call.endpoint,
             })
             .expect("one endpoint");

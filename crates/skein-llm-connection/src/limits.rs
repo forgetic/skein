@@ -30,7 +30,10 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(routes)?
         .checked_add(u64::from(limits.llm.dialect.answer_bytes).checked_mul(64)?)?
         .checked_add(u64::from(limits.llm.http.request.max(limits.llm.http.send)).checked_mul(256)?)?
-        .checked_add(u64::from(skein_tls::client::largest_room(&limits.tls)).checked_mul(256)?)?;
+        .checked_add(
+            u64::from(skein_tls::client::largest_room(&limits.tls).max(skein_llm::client::largest_room(&limits.llm)))
+                .checked_mul(256)?,
+        )?;
     let pool = each.checked_mul(u64::from(limits.connections))?;
     pool.checked_add(Slab::<Connection>::worst_case(limits.connections)?)?
         .checked_add(List::<Option<Id<Connection>>>::worst_case(limits.connections)?)?

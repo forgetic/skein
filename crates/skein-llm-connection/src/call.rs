@@ -1,7 +1,7 @@
 //! One physical connection and its current call (llm-connection.md, sections
-//! 4 and 5). A connection keeps its socket name, TLS and LLM machines, and
+//! 4 and 5). A connection keeps its socket name, optional TLS and LLM machines, and
 //! their bounded routing queues. It never knows the owner's domain or retry
-//! policy. `route` advances the classic TLS stream and the LLM client.
+//! policy. `route` advances the selected transport and the LLM client.
 //!
 //! | State | Input | Next | Emits |
 //! | --- | --- | --- | --- |
@@ -39,7 +39,7 @@ pub(crate) struct Connection {
     pub(crate) call: Option<Token>,
     pub(crate) socket: Option<Token>,
     pub(crate) phase: Phase,
-    pub(crate) tls: tls::Client,
+    pub(crate) tls: Option<tls::Client>,
     pub(crate) llm: llm::Client,
     pub(crate) idle_at: Option<Time>,
     pub(crate) tls_closed: bool,
@@ -64,7 +64,7 @@ impl Connection {
     pub(crate) fn new(
         endpoint: u32,
         call: Token,
-        tls: tls::Client,
+        tls: Option<tls::Client>,
         llm: llm::Client,
         deadlines: Deadlines,
         now: Time,
@@ -88,18 +88,27 @@ impl Connection {
         }
     }
 
-    pub(crate) fn start_tls(
+    pub(crate) fn connected(
         &mut self,
         env: &Env<Limits>,
         owner: Token,
         up: &mut Queue<Event>,
         io: &mut Queue<IoRequest>,
     ) {
-        self.phase = Phase::Handshaking;
-        self.deadlines.connected(env.now);
-        let tls_env = Env { now: env.now, wall: env.wall, limits: env.limits.tls };
-        tls::down(&mut self.tls, &tls_env, tls::Request::Handshake, &mut self.tls_events, &mut self.cipher_down);
-        self.route(env, owner, up, io);
+        match &mut self.tls {
+            Some(client) => {
+                self.deadlines.connected(env.now);
+                self.phase = Phase::Handshaking;
+                let tls_env = Env { now: env.now, wall: env.wall, limits: env.limits.tls };
+                tls::down(client, &tls_env, tls::Request::Handshake, &mut self.tls_events, &mut self.cipher_down);
+                self.route(env, owner, up, io);
+            }
+            None => {
+                self.phase = Phase::Calling;
+                self.deadlines.ready();
+                self.start_call(env, owner, up, io);
+            }
+        }
     }
 
     pub(crate) fn start_call(
@@ -150,7 +159,13 @@ impl Connection {
         io: &mut Queue<IoRequest>,
     ) {
         let tls_env = Env { now: env.now, wall: env.wall, limits: env.limits.tls };
-        tls::up(&mut self.tls, &tls_env, event, &mut self.tls_events, &mut self.cipher_down);
+        match &mut self.tls {
+            Some(client) => tls::up(client, &tls_env, event, &mut self.tls_events, &mut self.cipher_down),
+            None => {
+                let llm_env = Env { now: env.now, wall: env.wall, limits: env.limits.llm };
+                llm::up(&mut self.llm, &llm_env, event, &mut self.llm_events, &mut self.plain_down);
+            }
+        }
         self.route(env, owner, up, io);
     }
 
@@ -177,11 +192,23 @@ impl Connection {
         self.phase = Phase::Closing;
     }
 
-    pub(crate) fn close_idle(&mut self, env: &Env<Limits>) {
+    fn close_transport(&mut self, env: &Env<Limits>, io: &mut Queue<IoRequest>) {
+        match &mut self.tls {
+            Some(client) => {
+                let tls_env = Env { now: env.now, wall: env.wall, limits: env.limits.tls };
+                tls::down(client, &tls_env, tls::Request::Close, &mut self.tls_events, &mut self.cipher_down);
+                self.phase = Phase::Closing;
+            }
+            None => {
+                self.tls_closed = true;
+                self.close_socket(io);
+            }
+        }
+    }
+
+    pub(crate) fn close_idle(&mut self, env: &Env<Limits>, io: &mut Queue<IoRequest>) {
         if self.phase == Phase::Idle {
-            let tls_env = Env { now: env.now, wall: env.wall, limits: env.limits.tls };
-            tls::down(&mut self.tls, &tls_env, tls::Request::Close, &mut self.tls_events, &mut self.cipher_down);
-            self.phase = Phase::Closing;
+            self.close_transport(env, io);
         }
     }
 
@@ -221,14 +248,7 @@ impl Connection {
                     }
                     llm::Event::Close => match self.phase {
                         Phase::Handshaking | Phase::Calling | Phase::Idle => {
-                            tls::down(
-                                &mut self.tls,
-                                &tls_env,
-                                tls::Request::Close,
-                                &mut self.tls_events,
-                                &mut self.cipher_down,
-                            );
-                            self.phase = Phase::Closing;
+                            self.close_transport(env, io);
                         }
                         Phase::Connecting => self.close_socket(io),
                         Phase::Closing => {}
@@ -241,13 +261,16 @@ impl Connection {
                         Down::Send(bytes) if !bytes.is_empty() => self.deadlines.sent(env.now),
                         Down::Send(_) | Down::Demand { .. } | Down::Finish => {}
                     }
-                    tls::down(
-                        &mut self.tls,
-                        &tls_env,
-                        tls::Request::Stream(down),
-                        &mut self.tls_events,
-                        &mut self.cipher_down,
-                    );
+                    match &mut self.tls {
+                        Some(client) => tls::down(
+                            client,
+                            &tls_env,
+                            tls::Request::Stream(down),
+                            &mut self.tls_events,
+                            &mut self.cipher_down,
+                        ),
+                        None => self.cipher_down.push(down),
+                    }
                 }
             } else if let Some(event) = self.tls_events.pop() {
                 match event {

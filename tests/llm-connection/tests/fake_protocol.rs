@@ -78,8 +78,10 @@ fn run(dialect: Provider) {
     endpoints
         .push(Endpoint {
             address: Addr::from((Ipv4Addr::LOCALHOST, 443)),
-            server_name: skein_tls::Name::new("skein.test").expect("test name"),
-            trust: pki::client(&[]),
+            transport: skein_llm_connection::Transport::Tls {
+                server_name: skein_tls::Name::new("skein.test").expect("test name"),
+                trust: pki::client(&[]),
+            },
             llm: call.endpoint,
         })
         .expect("one endpoint");

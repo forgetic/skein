@@ -50,6 +50,7 @@ impl Table {
     }
 
     pub(crate) fn ready(&mut self) {
+        self.connect = None;
         self.handshake = None;
     }
 
