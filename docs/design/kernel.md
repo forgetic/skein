@@ -101,6 +101,11 @@ error means the operation did nothing usable: a failed `Socket` or
   - The backend's `unsafe` is the other half. It takes addresses only
     from records it holds, and gives a record back only after the
     operation's completion. It never drops, copies or replaces a `Box`.
+  - **The backend allocates nothing that goes up.** A `Spawn` comes back
+    with the parent's end of each requested pipe written into its own
+    pipe table, and its completion carries only the child's descriptor.
+    What a process owns is then always allocated within its own calls
+    (simulator.md, 5).
 - **Kernel structures belong to the backend.** A socket address, a
   `statx` buffer, a `siginfo` and an `open_how` live in the backend's
   in-flight table, beside the record. They are decoded into plain values
