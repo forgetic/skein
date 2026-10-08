@@ -40,6 +40,8 @@ pub enum Request {
 /// Why a Start was refused before an accepted call existed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Refusal {
+    /// The owner closed the pool; no new call is accepted.
+    Closed,
     /// The endpoint index does not name configured endpoint.
     Endpoint,
     /// Neither a free nor reusable connection is available.

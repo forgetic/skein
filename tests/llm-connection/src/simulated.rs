@@ -56,10 +56,12 @@ pub struct Client {
     received: Vec<Event>,
     calls: u32,
     input_bytes: usize,
+    close_on_completion: bool,
+    completed: u32,
 }
 
 impl Client {
-    fn new(transport: Transport, calls: u32, input_bytes: usize) -> Self {
+    fn new(transport: Transport, calls: u32, input_bytes: usize, close_on_completion: bool) -> Self {
         let limits = limits(calls);
         Self {
             io: io::Io::new(&limits.io),
@@ -75,6 +77,8 @@ impl Client {
             received: Vec::with_capacity(32),
             calls,
             input_bytes,
+            close_on_completion,
+            completed: 0,
         }
     }
 
@@ -184,7 +188,12 @@ impl Host for Client {
                         &mut self.requests,
                     );
                 }
-                Event::Completed { .. } => {}
+                Event::Completed { .. } => {
+                    self.completed += 1;
+                    if self.close_on_completion && self.completed == self.calls {
+                        self.component.as_mut().expect("started component").close();
+                    }
+                }
                 Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
                     panic!("positive call failed: {event:?}")
                 }
@@ -317,6 +326,7 @@ struct Judge {
     passed: bool,
     query_times: std::collections::BTreeMap<Token, Time>,
     input_bytes: usize,
+    close_owner: bool,
 }
 
 impl Referee<Process> for Judge {
@@ -328,11 +338,13 @@ impl Referee<Process> for Judge {
         if address.is_some() {
             self.activated = true;
         }
+        let client_empty =
+            processes.iter().any(|process| matches!(process, Process::Client(client) if client.is_empty()));
         for process in processes {
             match process {
                 Process::Client(client) => client.address = address,
                 Process::Peer(peer) => {
-                    if self.passed {
+                    if self.passed && (!self.close_owner || client_empty) {
                         peer.shutdown();
                     }
                 }
@@ -444,6 +456,25 @@ pub fn run_with_input(
     memory: Memory,
     input_bytes: usize,
 ) -> Outcome<Process> {
+    run_configured(seed, faulted, transport, large, memory, input_bytes, false)
+}
+
+/// Closes all owner bindings as soon as the last call completes; the fake
+/// stays live until the client's physical io settles.
+#[must_use]
+pub fn run_with_shutdown(seed: u64, transport: Transport, memory: Memory) -> Outcome<Process> {
+    run_configured(seed, false, transport, true, memory, 0, true)
+}
+
+fn run_configured(
+    seed: u64,
+    faulted: bool,
+    transport: Transport,
+    large: bool,
+    memory: Memory,
+    input_bytes: usize,
+    close_owner: bool,
+) -> Outcome<Process> {
     let calls = if large { 2 } else { 1 };
     let answer = if large { vec![b'x'; 2048] } else { b"simulated answer".to_vec() };
     let judge = Judge {
@@ -453,6 +484,7 @@ pub fn run_with_input(
         passed: false,
         query_times: std::collections::BTreeMap::new(),
         input_bytes,
+        close_owner,
     };
     let mut config = Config::calm();
     config.wall = skein_tls_world::pki::VALID;
@@ -516,7 +548,7 @@ pub fn run_with_input(
         .expect("bounded independent process");
         Process::Peer(Box::new(peer))
     });
-    world.spawn(|| Process::Client(Box::new(Client::new(transport, calls, input_bytes))));
+    world.spawn(|| Process::Client(Box::new(Client::new(transport, calls, input_bytes, close_owner))));
     world.run()
 }
 

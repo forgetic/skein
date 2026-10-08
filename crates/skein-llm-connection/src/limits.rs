@@ -38,5 +38,6 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     pool.checked_add(Slab::<Connection>::worst_case(limits.connections)?)?
         .checked_add(List::<Option<Id<Connection>>>::worst_case(limits.connections)?)?
         .checked_add(List::<crate::Endpoint>::worst_case(limits.endpoints)?)?
+        .checked_add(u64::try_from(size_of::<crate::Component>()).ok()?)?
         .checked_add(skein_io::worst_case(&limits.io)?)
 }

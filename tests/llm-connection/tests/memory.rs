@@ -142,3 +142,22 @@ fn bounded_request_batches_preserve_exact_upload_latency_replay_and_separate_hea
     let heap = first.heap.as_ref().unwrap();
     assert!(heap.iter().all(|(peak, bound)| *peak > 0 && peak <= bound));
 }
+
+#[test]
+fn owner_shutdown_settles_live_plaintext_and_tls_peers_and_releases_both_heaps() {
+    use skein_fake_peers::Transport;
+    use skein_llm_connection_world::simulated::{assert_replay, run_with_shutdown};
+    use skein_world::Memory;
+
+    for transport in [Transport::Plaintext, Transport::Tls] {
+        let first = run_with_shutdown(41, transport, Memory::Checked);
+        assert!(first.end < Time::from_nanos(1_000_000_000), "owner close must beat the idle keep deadline");
+        assert!(first.procs.iter().all(skein_world::Host::is_empty));
+        assert!(first.heap.as_ref().expect("separate measured heaps").iter().all(|(peak, bound)| peak <= bound));
+        if transport == Transport::Plaintext {
+            let second = run_with_shutdown(41, transport, Memory::Checked);
+            assert_replay(&first, &second);
+            assert_eq!(first.heap, second.heap);
+        }
+    }
+}

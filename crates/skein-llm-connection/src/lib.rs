@@ -3,7 +3,9 @@
 //! connections, live calls and bounded routing work. It never knows the
 //! service's domain, credential store or retry policy. [`Component::down`]
 //! takes calls; [`Component::up`] takes io events by the component's token;
-//! [`Component::fire`] drains ready work and closes idle bindings. The owner
+//! [`Component::fire`] drains ready work and closes idle bindings;
+//! [`Component::close`] permanently closes the pool at its owner's request.
+//! Physical bindings remain owned until io reports settlement. The owner
 //! calls [`Component::reclaim`] at its iteration's reclaim point. Each entry
 //! reserves [`MAX_OUT`] in both output queues first.
 

@@ -409,3 +409,96 @@ fn plaintext_connect_starts_http_and_never_arms_a_handshake_deadline() {
     component.fire(&fire, &mut up, &mut io);
     assert!(up.is_empty(), "the configured TLS deadline never fires on plaintext");
 }
+
+#[test]
+fn close_refuses_new_calls_without_touching_io() {
+    let mut component = component();
+    component.close();
+    component.close();
+    assert_eq!(component.admit(0, Token::new(7), 0, prompt(), credential()).err(), Some(Refusal::Closed));
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits() };
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    component.down(
+        &env,
+        Request::Start {
+            call: Token::new(8),
+            endpoint: 0,
+            prompt: prompt(),
+            credential: credential(),
+            deadlines: Deadlines::none(),
+        },
+        &mut up,
+        &mut io,
+    );
+    match up.pop() {
+        Some(Event::Refused { call, why }) => {
+            assert_eq!(call, Token::new(8));
+            assert_eq!(why, Refusal::Closed);
+        }
+        other => panic!("expected closed refusal, got {other:?}"),
+    }
+    component.fire(&env, &mut up, &mut io);
+    assert!(up.is_empty() && io.is_empty() && !component.has_work());
+}
+
+#[test]
+fn close_starts_one_binding_per_fire_and_waits_for_physical_settlement() {
+    let mut limits = limits();
+    limits.connections = 2;
+    limits.per_endpoint = 2;
+    limits.io.sockets = 2;
+    let mut endpoints = List::with_capacity(1);
+    endpoints.push(endpoint()).expect("one endpoint");
+    let mut component = Component::new(endpoints, &limits).expect("two bounded bindings");
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    let mut owners = List::with_capacity(2);
+    for number in 7..9 {
+        component.down(
+            &env,
+            Request::Start {
+                call: Token::new(number),
+                endpoint: 0,
+                prompt: prompt(),
+                credential: credential(),
+                deadlines: Deadlines::none(),
+            },
+            &mut up,
+            &mut io,
+        );
+        let Some(Lower::Connect { owner, .. }) = io.pop() else { panic!("one connect") };
+        owners.push(owner).expect("two connection owners");
+        component.up(&env, LowerEvent::Connecting { owner, socket: Token::new(number + 100) }, &mut up, &mut io);
+    }
+    component.close();
+    component.close();
+    assert!(component.has_work());
+    for number in 7..9 {
+        component.fire(&env, &mut up, &mut io);
+        match io.pop() {
+            Some(Lower::Abort { entity }) => assert_eq!(entity, Token::new(number + 100)),
+            other => panic!("expected abort, got {other:?}"),
+        }
+        assert!(io.is_empty(), "one fire starts only one binding's close");
+        assert!(up.is_empty(), "active cancellation waits for physical settlement");
+    }
+    assert!(!component.has_work(), "closing bindings await io without spinning");
+    assert!(component.next_deadline().is_none(), "physical closing belongs to io's deadlines");
+    component.fire(&env, &mut up, &mut io);
+    assert!(up.is_empty() && io.is_empty());
+    for (index, owner) in owners.iter().enumerate() {
+        component.up(&env, LowerEvent::Closed { owner: *owner }, &mut up, &mut io);
+        match up.pop() {
+            Some(Event::Cancelled { call }) => {
+                assert_eq!(call, Token::new(u64::try_from(index).expect("two indices") + 7));
+            }
+            other => panic!("expected cancellation, got {other:?}"),
+        }
+        component.reclaim();
+        component.up(&env, LowerEvent::Closed { owner: *owner }, &mut up, &mut io);
+        assert!(up.is_empty(), "a stale settlement gives no second terminal");
+    }
+    assert!(!component.has_work() && component.next_deadline().is_none());
+}

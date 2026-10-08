@@ -83,6 +83,7 @@ The owner names an endpoint by its index in that configuration.
 
 - **Admission is at the entrance.** A call is refused at once in these
   cases:
+  - the owner has closed the pool;
   - the pool is full and no connection may be opened;
   - the endpoint is unknown;
   - skein's client refuses the request's size.
@@ -99,6 +100,11 @@ The owner names an endpoint by its index in that configuration.
   pool needs the room for another endpoint.
 - **Closing** follows io's and TLS's lifecycles. A connection is gone only
   once its socket has settled.
+- **Owner shutdown:** `Component::close` permanently refuses new calls and
+  schedules the whole pool to close, including reusable idle connections.
+  Each `fire` starts at most one binding's close. Active calls end once as
+  cancelled; completed calls get no second terminal. Repeated closes are
+  inert, and the owner continues routing io answers through settlement.
 
 ## 6. Deadlines
 
@@ -143,6 +149,7 @@ and the component's own state.
   - a truncated body;
   - cancels racing terminals;
   - reuse after drain;
+  - owner shutdown before drain and while idle, without another terminal;
   - a pool at its limit.
 - **A simulated world** (testing-strategy.md, 2.7), with io over the
   simulator and the fake peer as a simulated server.

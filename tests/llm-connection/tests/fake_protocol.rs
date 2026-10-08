@@ -38,8 +38,15 @@ fn limits() -> Limits {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shutdown {
+    IdleExpiry,
+    Completed,
+    Idle,
+}
+
 #[expect(clippy::too_many_lines, reason = "the protocol story drives the component, io and fake peer")]
-fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
+fn run(dialect: Provider, seed: u64, shutdown: Shutdown) -> (Vec<String>, (u32, u32)) {
     let mut call = skein_llm_world::call(7);
     match dialect {
         Provider::OpenAiCodex => {}
@@ -101,6 +108,8 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
     let mut owner = None;
     let mut completed = 0_u32;
     let mut fragments = 0_u32;
+    let mut closed = false;
+    let mut closing = false;
     provider::start(&mut peer, &mut service, &peer_credential, &peer_env, &mut peer_up, &mut peer_down);
     component.down(
         &env,
@@ -127,6 +136,11 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
                     assert_eq!(call, Token::new(7));
                     assert!(!completion.content.is_empty());
                     completed += 1;
+                    if shutdown == Shutdown::Completed {
+                        component.close();
+                        component.close();
+                        closing = true;
+                    }
                 }
                 Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
                     panic!("unexpected component event: {event:?}");
@@ -146,6 +160,9 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
                 }
                 IoRequest::Close { entity } | IoRequest::Abort { entity } => {
                     assert_eq!(entity, Token::new(100));
+                    assert!(!closed, "one physical close");
+                    closed = true;
+                    wire.trace.push("owner closes physical binding".to_owned());
                     component.up(&env, IoEvent::Closed { owner: owner.expect("connected owner") }, &mut up, &mut io);
                 }
                 other @ (IoRequest::Listen { .. }
@@ -225,21 +242,44 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
             component.fire(&env, &mut up, &mut io);
         }
         if completed == 1 && !component.has_work() && io.is_empty() && up.is_empty() && !peer.has_work() {
-            break;
+            match shutdown {
+                Shutdown::IdleExpiry => break,
+                Shutdown::Completed => {
+                    if closed {
+                        break;
+                    }
+                }
+                Shutdown::Idle => {
+                    if closed {
+                        break;
+                    }
+                    if !closing {
+                        component.close();
+                        component.close();
+                        closing = true;
+                    }
+                }
+            }
         }
     }
     assert_eq!(service.count(), 1, "the independent fake decoded the call");
     assert_eq!(completed, 1);
     assert!(fragments > 0);
-    let later = Env { now: Time::from_nanos(11_000_000_000), ..env };
-    component.fire(&later, &mut up, &mut io);
-    match io.pop() {
-        Some(IoRequest::Close { entity }) => {
-            assert_eq!(entity, Token::new(100));
-            component.up(&later, IoEvent::Closed { owner: owner.expect("owner") }, &mut up, &mut io);
-            component.reclaim();
+    if shutdown == Shutdown::IdleExpiry {
+        let later = Env { now: Time::from_nanos(11_000_000_000), ..env };
+        component.fire(&later, &mut up, &mut io);
+        match io.pop() {
+            Some(IoRequest::Close { entity }) => {
+                assert_eq!(entity, Token::new(100));
+                component.up(&later, IoEvent::Closed { owner: owner.expect("owner") }, &mut up, &mut io);
+                component.reclaim();
+            }
+            other => panic!("expected idle close, got {other:?}"),
         }
-        other => panic!("expected idle close, got {other:?}"),
+    } else {
+        assert!(closed, "owner shutdown settles without advancing the idle clock");
+        assert!(component.next_deadline().is_none());
+        component.reclaim();
     }
     provider::closed(&mut peer, &mut service, &peer_env, &mut peer_up, &mut peer_down);
     service.reclaim();
@@ -250,10 +290,30 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
 
 #[test]
 fn codex_fake_peer_over_plaintext_replays() {
-    assert_replays(7, 8, |seed| run(Provider::OpenAiCodex, seed));
+    assert_replays(7, 8, |seed| run(Provider::OpenAiCodex, seed, Shutdown::IdleExpiry));
 }
 
 #[test]
 fn anthropic_fake_peer_over_plaintext_replays() {
-    assert_replays(7, 8, |seed| run(Provider::Anthropic, seed));
+    assert_replays(7, 8, |seed| run(Provider::Anthropic, seed, Shutdown::IdleExpiry));
+}
+
+#[test]
+fn close_after_codex_completion_replays_without_a_second_terminal() {
+    assert_replays(7, 8, |seed| run(Provider::OpenAiCodex, seed, Shutdown::Completed));
+}
+
+#[test]
+fn close_after_anthropic_completion_replays_without_a_second_terminal() {
+    assert_replays(7, 8, |seed| run(Provider::Anthropic, seed, Shutdown::Completed));
+}
+
+#[test]
+fn close_idle_codex_binding_replays_before_the_keep_deadline() {
+    assert_replays(7, 8, |seed| run(Provider::OpenAiCodex, seed, Shutdown::Idle));
+}
+
+#[test]
+fn close_idle_anthropic_binding_replays_before_the_keep_deadline() {
+    assert_replays(7, 8, |seed| run(Provider::Anthropic, seed, Shutdown::Idle));
 }

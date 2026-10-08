@@ -1,6 +1,7 @@
-//! Endpoint configuration and admission (llm-connection.md, sections 3, 4
-//! and 7). An admitted client owns its credential and is handed to the pool
-//! when the connection machine starts it. No network traffic occurs here.
+//! Endpoint configuration and admission (llm-connection.md, sections 3 to 5
+//! and 7). The pool keeps configured endpoints, physical bindings and a
+//! permanent closing flag. It never knows its owner's shutdown policy.
+//! Admission prepares calls; `close` schedules bounded physical settlement.
 
 #![expect(
     clippy::single_match,
@@ -19,7 +20,7 @@ use crate::call::{Connection, Phase};
 use crate::endpoint::{Endpoint, EndpointError, Transport};
 use crate::limits::{Limits, worst_case};
 
-/// Configured endpoints and bounds, with no live calls or retry policy.
+/// The owner's bounded call pool, settled through io after `close`.
 #[expect(missing_debug_implementations, reason = "live calls retain bearer credentials")]
 pub struct Component {
     endpoints: List<Endpoint>,
@@ -27,6 +28,7 @@ pub struct Component {
     connections: Slab<Connection>,
     slots: List<Option<Id<Connection>>>,
     cursor: u32,
+    closing: bool,
 }
 
 /// The most owner events and io requests from one component entrance.
@@ -79,6 +81,7 @@ impl Component {
             connections: Slab::with_capacity(limits.connections),
             slots: List::with_capacity(limits.connections),
             cursor: 0,
+            closing: false,
         })
     }
 
@@ -93,6 +96,9 @@ impl Component {
         prompt: Prompt,
         credential: Credential,
     ) -> Result<llm::client::Client, Refusal> {
+        if self.closing {
+            return Err(Refusal::Closed);
+        }
         let Some(destination) = self.endpoints.get(endpoint) else {
             return Err(Refusal::Endpoint);
         };
@@ -104,6 +110,13 @@ impl Component {
             Ok(client) => Ok(client),
             Err(error) => Err(Refusal::Client(error)),
         }
+    }
+
+    /// Refuses future calls and schedules every retained binding to close.
+    /// Repeated requests are inert. Each `fire` starts at most one binding's
+    /// close; io answers continue through `up` until physical settlement.
+    pub fn close(&mut self) {
+        self.closing = true;
     }
 
     /// Takes an owner's call or demand. Reserve [`MAX_OUT`] first.
@@ -210,7 +223,7 @@ impl Component {
         }
     }
 
-    /// Runs buffered child work and closes idle bindings after their keep time.
+    /// Runs one binding's buffered work, idle deadline or requested close.
     pub fn fire(&mut self, env: &Env<Limits>, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
         for _ in 0..self.slots.len() {
             let index = self.cursor;
@@ -221,6 +234,14 @@ impl Component {
             match self.slots.get(index) {
                 Some(Some(id)) => match self.connections.get_mut(*id) {
                     Some(connection) => {
+                        if self.closing && connection.phase != Phase::Closing {
+                            connection.deadlines.terminal();
+                            connection.cancel(env, id.token(), up, io);
+                            break;
+                        }
+                        if self.closing && !connection.has_work() {
+                            continue;
+                        }
                         match connection.deadlines.due(env.now) {
                             Some(
                                 crate::deadlines::Due::Connect
@@ -252,7 +273,11 @@ impl Component {
         for slot in &self.slots {
             match slot {
                 Some(id) => match self.connections.get(*id) {
-                    Some(connection) if connection.has_work() => return true,
+                    Some(connection)
+                        if connection.has_work() || (self.closing && connection.phase != Phase::Closing) =>
+                    {
+                        return true;
+                    }
                     Some(_) | None => {}
                 },
                 None => {}
