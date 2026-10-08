@@ -24,7 +24,7 @@ mod tests;
 
 pub use clock::{Clock, Now};
 pub use ring::{
-    Config, HostedPipes, Kernel, OpenError, Wait, hosted_pipes, open_root, open_termination_signals,
-    write_service_signal,
+    Config, HostedPipes, Kernel, OpenError, Wait, hosted_pipes, open_root, open_signal_pipe, open_termination_signals,
+    signal_current_thread, write_service_signal,
 };
 pub use seed::seed;

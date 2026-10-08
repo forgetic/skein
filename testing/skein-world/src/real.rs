@@ -6,7 +6,9 @@
 //! only when every process is idle. It does not replay.
 
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -47,6 +49,26 @@ pub struct Killed {
     pub exit: Exit,
 }
 
+/// Signal requests the referee injects between iterations, addressed by stable host id.
+#[derive(Clone, Debug)]
+pub struct Controls {
+    signals: Rc<RefCell<Queue<(usize, ServiceSignal)>>>,
+}
+
+impl Controls {
+    /// Delivers a signal to the named root or hosted child in the next turn.
+    /// Root ids come from `spawn`; hosted ids follow them in admission order.
+    pub fn signal(&self, host: usize, signal: ServiceSignal) {
+        self.signals.borrow_mut().push((host, signal));
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SignalSource {
+    Pipe(Fd),
+    Real,
+}
+
 /// A real world built by the scenario, with factories shared with simulated worlds.
 #[derive(Debug)]
 pub struct World<P, R> {
@@ -54,13 +76,51 @@ pub struct World<P, R> {
     referee: R,
     programs: Vec<HostedProgram<P>>,
     inherited: Vec<Vec<Fd>>,
+    controls: Controls,
+    signals: BTreeMap<usize, SignalSource>,
+    signalfd: bool,
 }
 
 impl<P: Host, R: Referee<P>> World<P, R> {
     /// Starts an empty real world with its observation referee.
     #[must_use]
     pub fn new(referee: R) -> Self {
-        Self { procs: Vec::new(), referee, programs: Vec::new(), inherited: Vec::new() }
+        Self::new_controlled(|_| referee)
+    }
+
+    /// Constructs a referee with a handle for injecting signals into this world.
+    #[must_use]
+    pub fn new_controlled<F: FnOnce(Controls) -> R>(make_referee: F) -> Self {
+        let controls = Controls { signals: Rc::new(RefCell::new(Queue::with_capacity(256))) };
+        let referee = make_referee(controls.clone());
+        Self {
+            procs: Vec::new(),
+            referee,
+            programs: Vec::new(),
+            inherited: Vec::new(),
+            controls,
+            signals: BTreeMap::new(),
+            signalfd: false,
+        }
+    }
+
+    /// Adds a service whose signal records arrive through its own real pipe.
+    pub fn spawn_signals<F: FnOnce(Fd) -> P>(&mut self, make: F) -> usize {
+        let (reader, writer) = skein_shell::open_signal_pipe().expect("open the service signal pipe");
+        let host = self.spawn_with_fds(vec![reader], || make(reader));
+        self.signals.insert(host, SignalSource::Pipe(writer));
+        host
+    }
+
+    /// Adds the one service that owns this process's blocked termination signalfd.
+    /// Construct and run the world on the same thread.
+    pub fn spawn_signalfd<F: FnOnce(Fd) -> P>(&mut self, make: F) -> usize {
+        assert!(!self.signalfd, "only one service reads the process signalfd");
+        let reader = skein_shell::open_termination_signals().expect("block termination signals and open signalfd");
+        let host = self.spawn_with_fds(vec![reader], || make(reader));
+        self.signals.insert(host, SignalSource::Real);
+        self.signalfd = true;
+        host
     }
 
     /// Registers a program and its maximum simultaneous instances before execution.
@@ -163,6 +223,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
             let Now { now, wall } = clock.now();
             assert!(now < deadline, "the real loop settles within {} ms", patience.as_nanos().div_euclid(1_000_000));
             self.world.referee.act(now, &mut self.world.procs);
+            self.signals();
             self.reap();
             let mut at = 0;
             while at < self.world.procs.len() {
@@ -196,9 +257,13 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                 self.world.referee.observe(now, &self.world.procs);
             }
             self.settle_children();
+            self.settle_root_signals();
             self.submit_cleanup();
             self.ring.enter(Wait::No);
-            if self.world.procs.iter().any(|proc| proc.work_pending(now)) || self.ring.has_ready() {
+            if self.world.procs.iter().any(|proc| proc.work_pending(now))
+                || self.ring.has_ready()
+                || !self.world.controls.signals.borrow().is_empty()
+            {
                 continue;
             }
             if self.world.procs.iter().all(Host::is_empty)
@@ -226,6 +291,40 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                 until = until.min(at);
             }
             self.ring.enter(Wait::Until(until));
+        }
+    }
+
+    fn signals(&mut self) {
+        loop {
+            let Some((host, signal)) = self.world.controls.signals.borrow_mut().pop() else { break };
+            assert!(
+                self.processes.get(&host).expect("a signal names an admitted host").exit.is_none(),
+                "a signal names a running service"
+            );
+            match self.world.signals.get(&host).expect("a service declares its signal source") {
+                SignalSource::Pipe(writer) => {
+                    skein_shell::write_service_signal(*writer, signal).expect("deliver the referee signal");
+                }
+                SignalSource::Real => {
+                    skein_shell::signal_current_thread(signal).expect("deliver the real termination signal");
+                }
+            }
+        }
+    }
+
+    fn settle_root_signals(&mut self) {
+        let finished: Vec<usize> = self
+            .ids
+            .iter()
+            .zip(&self.world.procs)
+            .filter_map(|(host, proc)| {
+                (proc.is_empty() && self.ring.count(*host) == 0 && !self.children.contains_key(host)).then_some(*host)
+            })
+            .collect();
+        for host in finished {
+            if let Some(SignalSource::Pipe(writer)) = self.world.signals.remove(&host) {
+                self.cleanup.push_back((host, Op::Close { fd: writer }));
+            }
         }
     }
 
@@ -394,6 +493,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                         cleaned: false,
                     },
                 );
+                self.world.signals.insert(child, SignalSource::Pipe(pipes.signal_writer));
                 self.placeholders.insert(pipes.pidfd, child);
                 self.children.insert(
                     child,
@@ -467,6 +567,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
             }
             let child = self.children.values_mut().find(|child| child.host == host).expect("registered child");
             child.exit = Some(exit);
+            self.world.signals.remove(&host);
             let waiters = core::mem::take(&mut child.waiters);
             for waiter in waiters {
                 self.synthetic(waiter, Ok(Done::Exit(exit)));

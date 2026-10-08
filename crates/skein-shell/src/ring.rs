@@ -101,6 +101,17 @@ pub fn write_service_signal(writer: Fd, signal: ServiceSignal) -> Result<(), Err
     process::write_signal(writer, signal)
 }
 
+/// Opens a signal-record pipe, returning its reader and writer (examples.md, section 6).
+pub fn open_signal_pipe() -> Result<(Fd, Fd), Error> {
+    process::signal_pipe()
+}
+
+/// Sends to this thread's blocked termination signalfd (io.md, section 7).
+/// Call only after `open_termination_signals` on the same thread.
+pub fn signal_current_thread(signal: ServiceSignal) -> Result<(), Error> {
+    process::signal_current_thread(signal)
+}
+
 use skein_io::kernel::{
     Addr, Complete, Done, Entry, Error, Exit, Family, Fd, Kind, Op, OpenHow, PERMISSIONS, ServiceSignal, Stat, Submit,
 };

@@ -340,3 +340,23 @@ pub(super) fn write_signal(writer: Fd, signal: skein_io::kernel::ServiceSignal) 
         unsafe { libc::write(writer.raw(), ptr::from_ref(&record).cast(), size_of::<libc::signalfd_siginfo>()) };
     if wrote < 0 { Err(map_error(super::last_errno())) } else { Ok(()) }
 }
+
+/// Makes a signal-record pipe for a second service in the same real loop.
+pub(super) fn signal_pipe() -> Result<(Fd, Fd), Error> {
+    let (reader, writer) = signal_pipe_inner().map_err(map_error)?;
+    Ok((Fd::new(reader.into_raw_fd()), Fd::new(writer.into_raw_fd())))
+}
+
+/// Queues a termination signal for this thread's already-opened signalfd.
+pub(super) fn signal_current_thread(signal: skein_io::kernel::ServiceSignal) -> Result<(), Error> {
+    let number = match signal {
+        skein_io::kernel::ServiceSignal::Interrupt => libc::SIGINT,
+        skein_io::kernel::ServiceSignal::Terminate => libc::SIGTERM,
+    };
+    // SAFETY: pthread_self returns the live calling thread's identifier.
+    let thread = unsafe { libc::pthread_self() };
+    // SAFETY: the caller opened its termination signalfd before sending,
+    // so this signal is blocked on the live thread.
+    let result = unsafe { libc::pthread_kill(thread, number) };
+    action(result).map_err(map_error)
+}
