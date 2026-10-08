@@ -88,6 +88,19 @@ use process::{signal_child, spawn};
 pub fn open_termination_signals() -> Result<Fd, i32> {
     process::open_termination_signals()
 }
+/// Pipe descriptors for a spawned service hosted in the real loop (examples.md, section 6).
+pub use process::HostedPipes;
+
+/// Makes a hosted spawn's real pipes and identity placeholder, without exec.
+pub fn hosted_pipes(command: &mut skein_io::kernel::Spawn) -> Result<HostedPipes, Error> {
+    process::hosted_pipes(command)
+}
+
+/// Sends a signal record to a hosted service's signal pipe (examples.md, section 6).
+pub fn write_service_signal(writer: Fd, signal: ServiceSignal) -> Result<(), Error> {
+    process::write_signal(writer, signal)
+}
+
 use skein_io::kernel::{
     Addr, Complete, Done, Entry, Error, Exit, Family, Fd, Kind, Op, OpenHow, PERMISSIONS, ServiceSignal, Stat, Submit,
 };

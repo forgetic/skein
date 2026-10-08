@@ -271,3 +271,72 @@ fn map_error(errno: i32) -> Error {
         other => Error::Other(other),
     }
 }
+
+/// Descriptors made for a service hosted by a real-world harness.
+#[derive(Debug)]
+pub struct HostedPipes {
+    pub pidfd: Fd,
+    pub pipes: Vec<(u32, Fd)>,
+    pub signal: Fd,
+    pub signal_writer: Fd,
+}
+
+/// Makes the same parent/child pipe pairs as spawn, without executing a program.
+pub(super) fn hosted_pipes(command: &mut Spawn) -> Result<HostedPipes, Error> {
+    hosted_pipes_inner(command).map_err(map_error)
+}
+
+fn hosted_pipes_inner(command: &mut Spawn) -> Result<HostedPipes, i32> {
+    let (_dir, parents, children, _nulls) = prepare(command)?;
+    let (signal, signal_writer) = signal_pipe_inner()?;
+    // SAFETY: eventfd makes a separate CLOEXEC descriptor used only as an
+    // identity placeholder; the harness intercepts wait, signal and close.
+    let placeholder = fd(unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) })?;
+    let pipes =
+        command.pipes.iter().zip(children).map(|(pipe, child)| (pipe.child, Fd::new(child.into_raw_fd()))).collect();
+    for (pipe, parent) in command.pipes.iter_mut().zip(parents) {
+        pipe.parent = Some(Fd::new(parent.into_raw_fd()));
+    }
+    Ok(HostedPipes {
+        pidfd: Fd::new(placeholder.into_raw_fd()),
+        pipes,
+        signal: Fd::new(signal.into_raw_fd()),
+        signal_writer: Fd::new(signal_writer.into_raw_fd()),
+    })
+}
+
+fn signal_pipe_inner() -> Result<(OwnedFd, OwnedFd), i32> {
+    let mut pair = [0_i32; 2];
+    // SAFETY: pair has two writable descriptor slots.
+    if unsafe { libc::pipe2(pair.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(super::last_errno());
+    }
+    // SAFETY: pipe2 returned two separately owned descriptors.
+    let read = unsafe { OwnedFd::from_raw_fd(pair[0]) };
+    // SAFETY: pipe2 made this separate writing descriptor.
+    let write = unsafe { OwnedFd::from_raw_fd(pair[1]) };
+    // Keep a referee sending repeated signals from blocking this one loop.
+    // SAFETY: write is open, and these are integer status flags.
+    action(if unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
+        super::last_errno()
+    } else {
+        0
+    })?;
+    Ok((read, write))
+}
+
+/// A harness signal uses the same record that a signalfd read returns.
+pub(super) fn write_signal(writer: Fd, signal: skein_io::kernel::ServiceSignal) -> Result<(), Error> {
+    // SAFETY: signalfd_siginfo is a plain C integer record; zero is valid.
+    let mut record: libc::signalfd_siginfo = unsafe { std::mem::zeroed() };
+    record.ssi_signo = u32::try_from(match signal {
+        skein_io::kernel::ServiceSignal::Interrupt => libc::SIGINT,
+        skein_io::kernel::ServiceSignal::Terminate => libc::SIGTERM,
+    })
+    .expect("positive signal");
+    // SAFETY: the pointer names one initialized record, alive for this call.
+    // Its size is below PIPE_BUF, so a successful write is atomic and whole.
+    let wrote =
+        unsafe { libc::write(writer.raw(), ptr::from_ref(&record).cast(), size_of::<libc::signalfd_siginfo>()) };
+    if wrote < 0 { Err(map_error(super::last_errno())) } else { Ok(()) }
+}
