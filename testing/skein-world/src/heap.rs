@@ -85,6 +85,21 @@ impl Heap {
         result
     }
 
+    /// Drops a terminated process under its own span and removes its meter.
+    pub(crate) fn release<T>(&mut self, at: usize, proc: T) -> (u64, u64) {
+        let held = self.procs.remove(at);
+        let span = Span::start();
+        drop(proc);
+        let freed = span.end().net.checked_neg().expect("a heap within an i64");
+        if freed != held.now {
+            crate::fail(&format!(
+                "terminated process {at} freed {freed} bytes, not the {} it held of its own: a leak, or heap made or freed outside its calls",
+                held.now
+            ));
+        }
+        (u64::try_from(held.most).expect("a nonnegative peak"), u64::try_from(held.bound).expect("a nonnegative bound"))
+    }
+
     fn check(&mut self, at: usize, grown: Grown) {
         let held = self.procs.get_mut(at).expect("a process admitted");
         let most = held.now.checked_add(grown.peak).expect("a heap within an i64");

@@ -1,4 +1,8 @@
-//! Child programs and their parent-owned pipe and pid descriptors.
+//! Child programs, pipe buffers, pid descriptors and inherited service bindings.
+//! It never knows service state or heap. `bind_service` and `finish_service`
+//! join a hosted child to its parent; `reap_exited_service` hands its records
+//! back before a metered drop, and `close_exited_service` closes its descriptors
+//! (kernel.md, section 4; simulator.md, sections 3 and 5).
 #![expect(
     clippy::indexing_slicing,
     clippy::wildcard_enum_match_arm,
@@ -110,6 +114,86 @@ impl Sim {
     pub fn service_running(&self, pid: Pid) -> bool {
         let (parent, child) = self.process(pid).parent.expect("a bound service process");
         self.process(parent).children[&child].exit.is_none()
+    }
+
+    /// The hosted child's externally visible terminal, if it has exited.
+    #[must_use]
+    pub fn service_exit(&self, pid: Pid) -> Option<Exit> {
+        let (parent, child) = self.process(pid).parent.expect("a bound service process");
+        self.process(parent).children[&child].exit
+    }
+
+    /// Hands a terminated hosted child's outstanding records back before
+    /// its world drops the process (kernel.md, section 4; simulator.md,
+    /// section 5). Undecided operations are interrupted; already decided
+    /// completions keep their results and are delivered immediately.
+    pub fn reap_exited_service(&mut self, pid: Pid, completions: &mut skein_lib::Queue<skein_io::kernel::Complete>) {
+        assert!(!self.service_running(pid), "only a terminated hosted service is reclaimed");
+        self.deliver_exited(pid);
+        let waiting: Vec<_> = self
+            .process(pid)
+            .flights
+            .iter()
+            .filter_map(|(&token, flight)| flight.held.as_ref().map(|_| token))
+            .collect();
+        for token in waiting {
+            let op = self.unpark(pid, token);
+            if !matches!(op, Op::Cancel { .. }) {
+                self.withdraw(pid, token, &op);
+            }
+            self.complete(pid, token, op, Err(Error::Other(4)));
+        }
+        self.deliver_exited(pid);
+        self.reap(pid, completions);
+    }
+
+    fn deliver_exited(&mut self, pid: Pid) {
+        let due: Vec<_> = self
+            .schedule
+            .iter()
+            .filter_map(|(&key, due)| {
+                let owner = match due {
+                    super::Due::Post { pid, .. } | super::Due::Land { pid, .. } | super::Due::Expire { pid, .. } => {
+                        *pid
+                    }
+                };
+                (owner == pid).then_some(key)
+            })
+            .collect();
+        for key in due {
+            match self.schedule.remove(&key).expect("a scheduled event") {
+                super::Due::Post { complete, .. } => self.process_mut(pid).ready.push_back(complete),
+                super::Due::Land { .. } | super::Due::Expire { .. } => {}
+            }
+        }
+    }
+
+    /// Closes all of a terminated service's descriptors after its original
+    /// records have been returned. File closes still cross the machine seam
+    /// and must be answered by the world before its final reap.
+    pub fn close_exited_service(&mut self, pid: Pid) {
+        assert!(!self.service_running(pid), "only a terminated hosted service is reclaimed");
+        self.assert_quiescent(pid);
+        let process = self.process(pid);
+        let descriptors: Vec<_> = process
+            .fds
+            .keys()
+            .chain(process.files.keys())
+            .chain(process.pipe_fds.keys())
+            .chain(process.pidfds.keys())
+            .chain(process.signal_fds.keys())
+            .copied()
+            .chain(process.inherited_pipes.iter().filter_map(|(&fd, pipe)| pipe.process_open.then_some(fd)))
+            .collect();
+        let mut submits =
+            skein_lib::Queue::with_capacity(u32::try_from(descriptors.len()).expect("descriptor count fits"));
+        for (at, fd) in descriptors.into_iter().enumerate() {
+            submits.push(skein_io::kernel::Submit {
+                op: Token::new(u64::try_from(at).expect("descriptor count fits")),
+                kind: Op::Close { fd },
+            });
+        }
+        self.submit(pid, &mut submits);
     }
 
     /// Checks a parent's hosted children have exited and their output pipes

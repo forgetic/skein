@@ -107,3 +107,59 @@ fn a_hosted_child_without_a_terminal_does_not_settle() {
 fn closing_a_hosted_childs_output_without_reading_its_end_does_not_settle() {
     let _outcome = simple(leaky_child, &[Act::Spawn, Act::Wait]);
 }
+
+#[test]
+fn a_parent_kills_a_hosted_child_mid_exchange() {
+    use skein_world_tests::hosted::{Story, check_story, story};
+    let outcome = story(7, Story::Kill);
+    check_story(Story::Kill, &outcome);
+}
+
+#[test]
+fn a_hosted_child_exits_before_its_parent_writes() {
+    use skein_world_tests::hosted::{Story, check_story, story};
+    let outcome = story(7, Story::EarlyExit);
+    check_story(Story::EarlyExit, &outcome);
+}
+
+#[test]
+fn a_parents_termination_signal_reaches_its_hosted_child() {
+    use skein_world_tests::hosted::{Story, check_story, story};
+    let outcome = story(7, Story::Terminate);
+    check_story(Story::Terminate, &outcome);
+}
+
+#[test]
+fn a_hosted_child_reaches_its_worst_case_and_still_frees_exactly_what_it_held() {
+    use skein_world_tests::hosted::{Story, check_story, story};
+    let outcome = story(7, Story::Memory);
+    check_story(Story::Memory, &outcome);
+}
+
+#[test]
+fn every_hosted_story_replays_under_its_own_memory_meter() {
+    use skein_world_tests::hosted::{Story, check_story, story};
+    for scenario in [Story::Exchange, Story::Kill, Story::EarlyExit, Story::Terminate, Story::Memory] {
+        let first = story(19, scenario);
+        let second = story(19, scenario);
+        check_story(scenario, &first);
+        check_story(scenario, &second);
+        assert_eq!(first.trace, second.trace, "the hosted story replays its records");
+        assert_eq!(first.heap, second.heap, "the hosted story replays its surviving process peaks");
+    }
+}
+
+fn leaky_killed_child(_spawn: &Spawn, inherited: &Inherited) -> Script {
+    let _leaked = Box::leak(Box::new([0; 64]));
+    Script::child(inherited, &[Act::Read(0), Act::Write(1, b"reply"), Act::Read(0)])
+}
+
+#[test]
+#[should_panic(expected = "terminated process 1 freed")]
+fn a_killed_childs_leak_is_checked_when_it_is_dropped() {
+    use skein_io::kernel::Signal;
+    drop(simple(
+        leaky_killed_child,
+        &[Act::Spawn, Act::Write(0, b"hello"), Act::Read(1), Act::Signal(Signal::Kill), Act::Read(1), Act::Wait],
+    ));
+}

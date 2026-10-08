@@ -43,7 +43,7 @@ pub use heap::Memory;
 pub use host::Host;
 pub use program::{HostedProgram, Inherited, Machine, NoMachine};
 pub use referee::{Expectation, Expectations, Referee};
-pub use world::{Outcome, World};
+pub use world::{Killed, Outcome, World};
 
 /// Fails the world, loudly, with what it found: a world fails its test as
 /// the simulator does (simulator.md, 5).

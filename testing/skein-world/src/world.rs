@@ -13,7 +13,7 @@ use core::fmt::{self, Debug, Write};
 use std::thread;
 
 use skein_heap::Span;
-use skein_io::kernel::{Done, Fd, Op};
+use skein_io::kernel::{Done, Exit, Fd, Op};
 use skein_lib::{Queue, Time};
 use skein_sim::{Answer, Ask, Config, Entry, Handle, Pid, Program, Reply, Sim};
 
@@ -41,6 +41,7 @@ pub struct World<P, R, M = NoMachine> {
     hosted: Vec<Option<usize>>,
     finished: Vec<bool>,
     machine: M,
+    killed: Vec<Killed>,
     calls: Queue<skein_sim::Call>,
     answers: Queue<Answer>,
 }
@@ -50,6 +51,15 @@ impl<P, R, M> Debug for World<P, R, M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("World").field("seed", &self.seed).field("procs", &self.procs.len()).finish_non_exhaustive()
     }
+}
+
+/// A terminated hosted child, reported by the world after its resources settle.
+#[derive(Debug)]
+pub struct Killed {
+    pub pid: Pid,
+    pub exit: Exit,
+    /// Its separate peak and worst case, after exact ownership was checked on drop.
+    pub heap: Option<(u64, u64)>,
 }
 
 /// What a run left, for a test to look at by reference.
@@ -62,11 +72,14 @@ impl<P, R, M> Debug for World<P, R, M> {
 pub struct Outcome<P, M = NoMachine> {
     /// The fake machine after every non-hosted call has been answered.
     pub machine: M,
+    /// Terminated children already dropped under their own memory spans.
+    pub killed: Vec<Killed>,
     pub seed: u64,
     /// Every submission and completion, and every fault drawn: what the same
     /// seed replays to.
     pub trace: Vec<Entry>,
-    /// The processes as the run left them, settled.
+    /// Surviving processes in admission order, settled; killed children are
+    /// reported separately in `killed` after their metered drop.
     pub procs: Vec<P>,
     pub iterations: u32,
     /// When the world settled.
@@ -123,6 +136,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             hosted: Vec::new(),
             finished: Vec::new(),
             machine: NoMachine,
+            killed: Vec::new(),
             calls: Queue::with_capacity(256),
             answers: Queue::with_capacity(256),
         }
@@ -141,6 +155,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             hosted: self.hosted,
             finished: self.finished,
             machine,
+            killed: self.killed,
             calls: self.calls,
             answers: self.answers,
         }
@@ -199,8 +214,17 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
             let now = self.sim.now();
             let wall = self.sim.wall();
             self.referee.act(now, &mut self.procs);
-            for at in 0..self.procs.len() {
-                self.turn(at, now, wall);
+            let mut at = 0;
+            while at < self.procs.len() {
+                if self.hosted.get(at).expect("a status per process").is_some()
+                    && !*self.finished.get(at).expect("a status per process")
+                    && !self.sim.service_running(self.pids.get(at).copied().expect("a pid per process"))
+                {
+                    self.drop_killed(at);
+                } else {
+                    self.turn(at, now, wall);
+                    at = at.checked_add(1).expect("a bounded process count");
+                }
                 self.referee.observe(now, &self.procs);
             }
             if self.busy(now) {
@@ -233,6 +257,7 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
         }
         Outcome {
             machine: self.machine,
+            killed: self.killed,
             seed: self.seed,
             trace: self.sim.trace().to_vec(),
             end: self.sim.now(),
@@ -297,6 +322,49 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
             *self.finished.get_mut(at).expect("a status per process") = true;
         }
         self.serve_machine();
+    }
+
+    fn drop_killed(&mut self, at: usize) {
+        let pid = *self.pids.get(at).expect("a pid per process");
+        let exit = self.sim.service_exit(pid).expect("the child terminated");
+        while self.sim.in_flight(pid) > 0 {
+            let proc = self.procs.get_mut(at).expect("a process per index");
+            self.sim.reap_exited_service(pid, proc.completions());
+            if self.sim.in_flight(pid) > 0 {
+                // Free returned records inside a call on the process's own
+                // queue, metered as part of its destruction.
+                let mut discard = || {
+                    while let Some(complete) = proc.completions().pop() {
+                        drop(complete);
+                    }
+                };
+                match &mut self.heap {
+                    Some(heap) => heap.around(at, discard),
+                    None => discard(),
+                }
+            }
+        }
+        let proc = self.procs.remove(at);
+        let heap = match &mut self.heap {
+            Some(heap) => Some(heap.release(at, proc)),
+            None => {
+                drop(proc);
+                None
+            }
+        };
+        self.pids.remove(at);
+        self.hosted.remove(at);
+        self.finished.remove(at);
+        self.sim.close_exited_service(pid);
+        self.serve_machine();
+        let mut closed = Queue::with_capacity(self.sim.in_flight(pid));
+        self.sim.reap_exited_service(pid, &mut closed);
+        while let Some(complete) = closed.pop() {
+            assert!(matches!(complete.kind, Op::Close { .. }), "teardown creates only buffer-free close records");
+        }
+        self.sim.assert_quiescent(pid);
+        self.sim.assert_no_open_fds(pid);
+        self.killed.push(Killed { pid, exit, heap });
     }
 
     fn serve_machine(&mut self) {
