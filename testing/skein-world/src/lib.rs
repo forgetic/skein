@@ -33,6 +33,7 @@
 extern crate alloc;
 
 pub mod domain;
+pub mod end_to_end;
 mod heap;
 mod host;
 mod program;

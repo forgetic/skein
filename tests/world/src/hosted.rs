@@ -105,6 +105,14 @@ impl Script {
         script
     }
 
+    /// Adopts scripted pipe or terminal descriptors opened by the binary kit.
+    #[must_use]
+    pub fn pipes(fds: Vec<Fd>, acts: &[Act]) -> Self {
+        let mut script = Self::new(acts);
+        script.fds = fds;
+        script
+    }
+
     fn submit(&mut self, kind: Op) {
         self.submissions.push(Submit { op: Token::new(self.next), kind });
         self.next += 1;

@@ -96,6 +96,12 @@ pub fn hosted_pipes(command: &mut skein_io::kernel::Spawn) -> Result<HostedPipes
     process::hosted_pipes(command)
 }
 
+/// Starts a shipped binary on pipes or a controlling pseudo-terminal for
+/// an end-to-end world; stderr is always separate (examples.md, section 6).
+pub fn start_binary(command: &mut skein_io::kernel::Spawn, terminal: bool) -> Result<(Fd, Option<Fd>), Error> {
+    process::start_binary(command, terminal)
+}
+
 /// Sends a signal record to a hosted service's signal pipe (examples.md, section 6).
 pub fn write_service_signal(writer: Fd, signal: ServiceSignal) -> Result<(), Error> {
     process::write_signal(writer, signal)

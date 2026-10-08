@@ -155,6 +155,10 @@ pub(super) fn spawn(command: &mut Spawn) -> Result<Done, Error> {
 }
 
 fn spawn_inner(command: &mut Spawn) -> Result<Done, i32> {
+    spawn_prepared(command, None)
+}
+
+fn spawn_prepared(command: &mut Spawn, terminal: Option<&CString>) -> Result<Done, i32> {
     let path = cstring(&command.program)?;
     let (dir, parents, children, nulls) = prepare(command)?;
     let argv = std::iter::once(&command.program)
@@ -181,7 +185,19 @@ fn spawn_inner(command: &mut Spawn) -> Result<Done, i32> {
                 libc::posix_spawn_file_actions_adddup2(ptr::from_mut(&mut actions), child.as_raw_fd(), to)
             })?;
         }
+        if let Some(name) = terminal {
+            // SAFETY: the child opens the slave after setsid, acquiring its
+            // controlling terminal. The name and initialized actions remain live.
+            action(unsafe {
+                libc::posix_spawn_file_actions_addopen(ptr::from_mut(&mut actions), 0, name.as_ptr(), libc::O_RDWR, 0)
+            })?;
+            // SAFETY: action zero opened stdin before this duplication.
+            action(unsafe { libc::posix_spawn_file_actions_adddup2(ptr::from_mut(&mut actions), 0, 1) })?;
+        }
         for (to, maybe_null) in nulls.iter().enumerate() {
+            if terminal.is_some() && to < 2 {
+                continue;
+            }
             if let Some(null) = maybe_null {
                 // SAFETY: the /dev/null descriptor is valid.
                 action(unsafe {
@@ -210,11 +226,19 @@ fn spawn_inner(command: &mut Spawn) -> Result<Done, i32> {
             action(unsafe { libc::sigemptyset(ptr::from_mut(&mut empty)) })?;
             // SAFETY: the initialized attributes receive a copy of the mask.
             action(unsafe { libc::posix_spawnattr_setsigmask(ptr::from_mut(&mut attributes), ptr::from_ref(&empty)) })?;
-            // SAFETY: the initialized attributes accept the flag.
+            let group_flag = if terminal.is_some() {
+                i32::from(libc::POSIX_SPAWN_SETSID)
+            } else {
+                // SAFETY: the initialized attributes receive zero, requesting
+                // a new process group whose leader is the child (io.md, 6).
+                action(unsafe { libc::posix_spawnattr_setpgroup(ptr::from_mut(&mut attributes), 0) })?;
+                libc::POSIX_SPAWN_SETPGROUP
+            };
+            // SAFETY: the initialized attributes accept the flags.
             action(unsafe {
                 libc::posix_spawnattr_setflags(
                     ptr::from_mut(&mut attributes),
-                    i16::try_from(libc::POSIX_SPAWN_SETSIGMASK).expect("spawn flag fits i16"),
+                    i16::try_from(libc::POSIX_SPAWN_SETSIGMASK | group_flag).expect("spawn flag fits i16"),
                 )
             })?;
             let mut pidfd = -1_i32;
@@ -359,4 +383,34 @@ pub(super) fn signal_current_thread(signal: skein_io::kernel::ServiceSignal) -> 
     // so this signal is blocked on the live thread.
     let result = unsafe { libc::pthread_kill(thread, number) };
     action(result).map_err(map_error)
+}
+
+/// Starts an external binary for the end-to-end harness. A terminal owns
+/// stdin/stdout; stderr remains a separate requested pipe (examples.md, 6).
+pub(super) fn start_binary(command: &mut Spawn, terminal: bool) -> Result<(Fd, Option<Fd>), Error> {
+    let terminal = if terminal { Some(open_terminal().map_err(map_error)?) } else { None };
+    if terminal.is_some() && command.pipes.iter().any(|pipe| pipe.child < 2) {
+        return Err(Error::InvalidArgument);
+    }
+    let done = spawn_prepared(command, terminal.as_ref().map(|(_, name)| name)).map_err(map_error)?;
+    let Done::Spawned { pidfd } = done else { unreachable!("a spawn returns a pidfd") };
+    Ok((pidfd, terminal.map(|(master, _)| Fd::new(master.into_raw_fd()))))
+}
+
+fn open_terminal() -> Result<(OwnedFd, CString), i32> {
+    // SAFETY: posix_openpt makes a uniquely owned master descriptor.
+    let master = fd(unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_CLOEXEC) })?;
+    // SAFETY: master is an open pseudo-terminal master.
+    if unsafe { libc::grantpt(master.as_raw_fd()) } != 0 {
+        return Err(super::last_errno());
+    }
+    // SAFETY: grantpt succeeded on the live master.
+    if unsafe { libc::unlockpt(master.as_raw_fd()) } != 0 {
+        return Err(super::last_errno());
+    }
+    let mut name = [0_u8; 128];
+    // SAFETY: the writable buffer and its actual size are supplied together.
+    action(unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr().cast(), name.len()) })?;
+    let end = name.iter().position(|byte| *byte == 0).ok_or(libc::ENAMETOOLONG)?;
+    Ok((master, cstring(name.get(..end).expect("the terminator is within the terminal name"))?))
 }
