@@ -362,9 +362,5 @@ processes, each a host of an `iterate` (a service, or a fake client):
 ## 8. Not built yet
 
 - **The HTTP server and its client,** with `skein-http`.
-- **Signals to the service** (io.md, 7): `Shutdown` comes from the
-  service's `shutdown`, and `main` runs until it is killed.
-- **End to end** (section 6): the harness cannot yet start a binary under
-  a pseudo-terminal. The echo's binary is its first user.
 - **Domain worlds** for the echo's domain: it is one slab and a counter,
   and its step tests cover it.
