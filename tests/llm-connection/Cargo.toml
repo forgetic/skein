@@ -1,6 +1,6 @@
 [package]
 name = "skein-llm-connection-world"
-description = "In-memory TLS and fake LLM peer world for the connection component"
+description = "Plaintext replay and TLS handshake worlds for the connection component"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,7 @@ skein-tls-world = { path = "../tls" }
 skein-fake-llm-domain.workspace = true
 skein-fake-llm-protocol.workspace = true
 skein-sim.workspace = true
+skein-world.workspace = true
 
 [dev-dependencies]
 skein-heap.workspace = true

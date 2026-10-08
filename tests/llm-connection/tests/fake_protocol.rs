@@ -7,11 +7,13 @@ use skein_fake_llm_domain::{self as fake, api};
 use skein_fake_llm_protocol::{documents, provider};
 use skein_io::kernel::Addr;
 use skein_io::{Event as IoEvent, Request as IoRequest};
+use skein_lib::Wall;
 use skein_lib::stream::{Down, Read, Up};
 use skein_lib::{Duration, Env, Intake, List, Queue, Time, Token};
 use skein_llm::{Credential, Provider};
 use skein_llm_connection::{Component, Deadlines, Endpoint, Event, Limits, MAX_OUT, Request};
-use skein_tls_world::{drive::Wire, pki, server::Server};
+use skein_llm_connection_world::plaintext::Wire;
+use skein_world::domain::assert_replays;
 
 fn limits() -> Limits {
     Limits {
@@ -37,7 +39,7 @@ fn limits() -> Limits {
 }
 
 #[expect(clippy::too_many_lines, reason = "the protocol story drives the component, io and fake peer")]
-fn run(dialect: Provider) {
+fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
     let mut call = skein_llm_world::call(7);
     match dialect {
         Provider::OpenAiCodex => {}
@@ -78,17 +80,14 @@ fn run(dialect: Provider) {
     endpoints
         .push(Endpoint {
             address: Addr::from((Ipv4Addr::LOCALHOST, 443)),
-            transport: skein_llm_connection::Transport::Tls {
-                server_name: skein_tls::Name::new("skein.test").expect("test name"),
-                trust: pki::client(&[]),
-            },
+            transport: skein_llm_connection::Transport::Plaintext,
             llm: call.endpoint,
         })
         .expect("one endpoint");
     let mut component = Component::new(endpoints, &limits()).expect("component");
-    let env = Env { now: Time::ZERO, wall: pki::VALID, limits: limits() };
-    let peer_env = Env { now: Time::ZERO, wall: pki::VALID, limits: peer_limits };
-    let fake_env = Env { now: Time::ZERO, wall: pki::VALID, limits: fake_limits };
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits() };
+    let peer_env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: peer_limits };
+    let fake_env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: fake_limits };
     let mut up = Queue::with_capacity(MAX_OUT.above);
     let mut io = Queue::with_capacity(MAX_OUT.below);
     let mut peer_up = Queue::with_capacity(provider::MAX_UP);
@@ -97,7 +96,7 @@ fn run(dialect: Provider) {
     let mut to_peer = Intake::with_capacity(32768);
     let mut peer_demand: Option<(Read, u32)> = None;
     let mut grant: Option<u32> = None;
-    let mut wire = Wire::new(Server::new(pki::Server::plain().config()));
+    let mut wire = Wire::new(seed);
     let mut received = 0_usize;
     let mut owner = None;
     let mut completed = 0_u32;
@@ -118,6 +117,7 @@ fn run(dialect: Provider) {
     component.down(&env, Request::Next { call: Token::new(7) }, &mut up, &mut io);
     for _ in 0_u32..40_000 {
         if let Some(event) = up.pop() {
+            wire.trace.push(format!("owner {event:?}"));
             match event {
                 Event::Delta { call, .. } | Event::Block { call, .. } => {
                     fragments += 1;
@@ -156,9 +156,9 @@ fn run(dialect: Provider) {
                 | IoRequest::Signal { .. }) => panic!("unexpected io request: {other:?}"),
             }
         }
-        if wire.server.received.len() > received {
-            to_peer.append(&wire.server.received[received..]).expect("bounded request intake");
-            received = wire.server.received.len();
+        if wire.received.len() > received {
+            to_peer.append(&wire.received[received..]).expect("bounded request intake");
+            received = wire.received.len();
         }
         if let Some(answer) = wire.answer() {
             component.up(
@@ -188,10 +188,9 @@ fn run(dialect: Provider) {
                 }
                 Down::Send(bytes) => {
                     assert!(bytes.len() <= usize::try_from(grant.take().expect("room grant")).expect("room fits"));
-                    wire.server.write(&bytes);
-                    wire.pull();
+                    wire.write(&bytes);
                 }
-                Down::Finish => wire.server.close_notify(),
+                Down::Finish => wire.eof = true,
             }
         }
         if let Some((read, room)) = peer_demand {
@@ -232,14 +231,29 @@ fn run(dialect: Provider) {
     assert_eq!(service.count(), 1, "the independent fake decoded the call");
     assert_eq!(completed, 1);
     assert!(fragments > 0);
+    let later = Env { now: Time::from_nanos(11_000_000_000), ..env };
+    component.fire(&later, &mut up, &mut io);
+    match io.pop() {
+        Some(IoRequest::Close { entity }) => {
+            assert_eq!(entity, Token::new(100));
+            component.up(&later, IoEvent::Closed { owner: owner.expect("owner") }, &mut up, &mut io);
+            component.reclaim();
+        }
+        other => panic!("expected idle close, got {other:?}"),
+    }
+    provider::closed(&mut peer, &mut service, &peer_env, &mut peer_up, &mut peer_down);
+    service.reclaim();
+    domain.reclaim();
+    assert!(up.is_empty() && io.is_empty() && !component.has_work());
+    (wire.trace, (completed, fragments))
 }
 
 #[test]
-fn codex_fake_peer_over_tls() {
-    run(Provider::OpenAiCodex);
+fn codex_fake_peer_over_plaintext_replays() {
+    assert_replays(7, 8, |seed| run(Provider::OpenAiCodex, seed));
 }
 
 #[test]
-fn anthropic_fake_peer_over_tls() {
-    run(Provider::Anthropic);
+fn anthropic_fake_peer_over_plaintext_replays() {
+    assert_replays(7, 8, |seed| run(Provider::Anthropic, seed));
 }

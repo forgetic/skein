@@ -1,18 +1,17 @@
 //! One service loop over io and the simulator, with the scripted fake LLM
-//! peer as an accepted TLS server on the other socket (llm-connection.md, 8).
+//! peer as an accepted plaintext server on the other socket (llm-connection.md, 8).
 
-use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use skein_fake_llm_domain::{self as fake, api};
 use skein_fake_llm_protocol::{documents, provider};
 use skein_io::kernel::{Complete, Submit};
 use skein_io::{Event as IoEvent, Io, Request as IoRequest};
-use skein_lib::stream::{Down, OutputDown, OutputOutcome, OutputUp, Read, Up};
-use skein_lib::{Duration, Env, Intake, List, Queue, Token};
+use skein_lib::stream::Down;
+use skein_lib::{Duration, Env, List, Queue, Token};
 use skein_llm_connection::{Component, Deadlines, Endpoint, Event, Limits, Request};
 use skein_sim::{Config, Pid, Sim};
-use skein_tls_world::{pki, server::Server};
+use skein_world::domain::{Trace, assert_replays};
 
 const LISTENER: Token = Token::new(1000);
 const SERVER: Token = Token::new(1001);
@@ -43,7 +42,6 @@ fn limits() -> Limits {
     }
 }
 
-#[expect(clippy::struct_excessive_bools, reason = "the world records independent physical settlements")]
 struct World {
     sim: Sim,
     pid: Pid,
@@ -61,22 +59,13 @@ struct World {
     server_socket: Option<Token>,
     server_closed: bool,
     client_closed: bool,
-    server: Server,
-    record_body: bool,
-    record_read: Option<u32>,
-    server_output: VecDeque<u8>,
-    output_right: Option<(Token, u32)>,
-    next_right: u64,
+    trace: Trace,
     service: provider::Service,
     peer: provider::Server,
     peer_limits: provider::Limits,
     peer_credential: skein_llm::Credential,
     peer_up: Queue<provider::Event>,
     peer_down: Queue<Down>,
-    peer_input: Intake,
-    input_offset: usize,
-    peer_demand: Option<(Read, u32)>,
-    peer_grant: Option<u32>,
     domain: fake::Domain,
     fake_limits: fake::Config,
     replies: Queue<fake::Request>,
@@ -87,7 +76,7 @@ struct World {
 impl World {
     fn new(seed: u64, faulted: bool) -> World {
         let mut config = Config::calm();
-        config.wall = pki::VALID;
+
         config.buffer = 1024;
         if faulted {
             config.buffer = 256;
@@ -137,12 +126,7 @@ impl World {
             server_socket: None,
             server_closed: false,
             client_closed: false,
-            server: Server::new(pki::Server::plain().config()),
-            record_body: false,
-            record_read: None,
-            server_output: VecDeque::new(),
-            output_right: None,
-            next_right: 1,
+            trace: Trace::default(),
             service,
             peer,
             peer_limits,
@@ -152,10 +136,6 @@ impl World {
             },
             peer_up: Queue::with_capacity(ROOM),
             peer_down: Queue::with_capacity(ROOM),
-            peer_input: Intake::with_capacity(32768),
-            input_offset: 0,
-            peer_demand: None,
-            peer_grant: None,
             domain,
             fake_limits,
             replies: Queue::with_capacity(fake::MAX_OUT),
@@ -184,14 +164,7 @@ impl World {
         let call = skein_llm_world::call(CALL.raw());
         let mut endpoints = List::with_capacity(1);
         endpoints
-            .push(Endpoint {
-                address: addr,
-                transport: skein_llm_connection::Transport::Tls {
-                    server_name: skein_tls::Name::new("skein.test").expect("test name"),
-                    trust: pki::client(&[]),
-                },
-                llm: call.endpoint,
-            })
+            .push(Endpoint { address: addr, transport: skein_llm_connection::Transport::Plaintext, llm: call.endpoint })
             .expect("one endpoint");
         let mut component = Component::new(endpoints, &self.limits).expect("bounded component");
         let env = self.component_env();
@@ -213,47 +186,9 @@ impl World {
         self.component = Some(component);
     }
 
-    fn server_read(&mut self, count: u32) {
-        assert!(self.record_read.replace(count).is_none(), "one server record read");
-        self.requests.push(IoRequest::Stream {
-            stream: self.server_socket.expect("bound server socket"),
-            down: Down::Demand { read: Read::Fill(count), room: 0 },
-        });
-    }
-
-    fn server_room(&mut self) {
-        if self.output_right.is_none() && !self.server_output.is_empty() && !self.server_closed {
-            let count =
-                u32::try_from(self.server_output.len()).expect("bounded server output").min(self.limits.io.output);
-            let right = Token::new(self.next_right);
-            self.next_right += 1;
-            self.output_right = Some((right, count));
-            self.requests.push(IoRequest::Output {
-                stream: self.server_socket.expect("bound server socket"),
-                down: OutputDown::Room { right, bytes: count },
-            });
-        }
-    }
-
-    fn server_bytes(&mut self, bytes: &[u8]) {
-        assert_eq!(bytes.len(), usize::try_from(self.record_read.take().expect("record demand")).expect("u32 fits"));
-        let next = if self.record_body { 5 } else { u32::from(u16::from_be_bytes([bytes[3], bytes[4]])) };
-        self.record_body = !self.record_body;
-        self.server.receive(bytes);
-        assert!(self.server.failed.is_none(), "rustls server accepts component ciphertext");
-        self.server_output.extend(self.server.transmit());
-        self.server_room();
-        if !self.server_closed {
-            self.server_read(next);
-        }
-        if self.server.received.len() > self.input_offset {
-            self.peer_input.append(&self.server.received[self.input_offset..]).expect("bounded fake request intake");
-            self.input_offset = self.server.received.len();
-        }
-    }
-
     #[expect(clippy::too_many_lines, reason = "all io variants are routed in one exhaustive owner boundary")]
     fn io_event(&mut self, event: IoEvent) {
+        self.trace.log(self.sim.now(), format!("io {event:?}"));
         let env = self.component_env();
         match event {
             IoEvent::Listening { owner, listener, addr } => {
@@ -265,7 +200,6 @@ impl World {
                 assert_eq!(owner, LISTENER);
                 self.server_socket = Some(socket);
                 self.requests.push(IoRequest::Bind { socket, owner: SERVER });
-                self.server_read(5);
                 self.requests.push(IoRequest::Close { entity: self.listener.expect("listener") });
                 let peer_env = self.peer_env();
                 provider::start(
@@ -297,11 +231,16 @@ impl World {
             }
             IoEvent::Stream { owner, up } => {
                 if owner == SERVER {
-                    match up {
-                        Up::Bytes(bytes) => self.server_bytes(&bytes),
-                        Up::End | Up::Failed(_) => {}
-                        Up::Room => panic!("server read asks no classic room"),
-                    }
+                    let peer_env = self.peer_env();
+                    provider::up(
+                        &mut self.peer,
+                        &mut self.service,
+                        &self.peer_credential,
+                        &peer_env,
+                        up,
+                        &mut self.peer_up,
+                        &mut self.peer_down,
+                    );
                 } else {
                     assert_eq!(owner, CLIENT_IO);
                     self.component.as_mut().expect("component").up(
@@ -312,24 +251,7 @@ impl World {
                     );
                 }
             }
-            IoEvent::Output { owner, up } => {
-                assert_eq!(owner, SERVER);
-                let OutputUp::Settled { right, outcome } = up;
-                let (expected, cap) = self.output_right.take().expect("one server output right");
-                assert_eq!(right, expected);
-                match outcome {
-                    OutputOutcome::Granted => {
-                        let bytes: Vec<u8> =
-                            self.server_output.drain(..usize::try_from(cap).expect("output cap fits")).collect();
-                        self.requests.push(IoRequest::Output {
-                            stream: self.server_socket.expect("server socket"),
-                            down: OutputDown::Send { right, bytes: bytes.into() },
-                        });
-                        self.server_room();
-                    }
-                    OutputOutcome::Cancelled | OutputOutcome::Failed(_) => {}
-                }
-            }
+            IoEvent::Output { .. } => panic!("this peer uses the classic stream boundary"),
             IoEvent::Failed { owner, error } => {
                 if owner == CLIENT_IO {
                     self.component.as_mut().expect("component").up(
@@ -376,6 +298,7 @@ impl World {
     }
 
     fn owner_event(&mut self, event: Event) {
+        self.trace.log(self.sim.now(), format!("owner {event:?}"));
         match event {
             Event::Delta { call, .. } | Event::Block { call, .. } => {
                 self.fragments += 1;
@@ -422,44 +345,7 @@ impl World {
             );
         }
         if let Some(down) = self.peer_down.pop() {
-            match down {
-                Down::Demand { read: Read::Nothing, room: 0 } => self.peer_demand = None,
-                Down::Demand { read, room } => {
-                    assert!(self.peer_demand.is_none(), "one peer demand");
-                    self.peer_demand = Some((read, room));
-                }
-                Down::Send(bytes) => {
-                    assert!(
-                        bytes.len() <= usize::try_from(self.peer_grant.take().expect("peer room")).expect("room fits")
-                    );
-                    self.server.write(&bytes);
-                    self.server_output.extend(self.server.transmit());
-                    self.server_room();
-                }
-                Down::Finish => self.server.close_notify(),
-            }
-        }
-        if let Some((read, room)) = self.peer_demand {
-            let answer = match self.peer_input.meet(read) {
-                Some(bytes) => Some(Up::Bytes(bytes)),
-                None if room > 0 => {
-                    self.peer_grant = Some(room);
-                    Some(Up::Room)
-                }
-                None => None,
-            };
-            if let Some(answer) = answer {
-                self.peer_demand = None;
-                provider::up(
-                    &mut self.peer,
-                    &mut self.service,
-                    &self.peer_credential,
-                    &peer_env,
-                    answer,
-                    &mut self.peer_up,
-                    &mut self.peer_down,
-                );
-            }
+            self.requests.push(IoRequest::Stream { stream: self.server_socket.expect("bound peer"), down });
         }
         if self.peer.has_work() {
             provider::resume(
@@ -570,8 +456,13 @@ impl World {
     }
 }
 
-/// Run one complete owner/io/fake-peer service loop on a seeded simulator.
+/// Run and replay one complete owner/io/fake-peer loop on a seeded simulator.
 pub fn scenario(seed: u64, faulted: bool) {
-    let mut world = World::new(seed, faulted);
-    world.run();
+    assert_replays(seed, seed.wrapping_add(1), |seed| {
+        let mut world = World::new(seed, faulted);
+        world.run();
+        let mut trace = world.trace.lines().to_vec();
+        trace.extend(world.sim.render_trace().lines().map(str::to_owned));
+        (trace, (world.completed, world.fragments, world.service.count(), world.sim.now()))
+    });
 }

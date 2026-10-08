@@ -1,12 +1,14 @@
-//! The component and a sample owner over a cut in-memory TLS stream.
+//! The component and a sample owner over a seeded in-memory plaintext stream.
 
 use core::net::Ipv4Addr;
 
 use skein_io::kernel::Addr;
 use skein_io::{Event as IoEvent, Request as IoRequest};
+use skein_lib::Wall;
 use skein_lib::{Duration, Env, List, Queue, Time, Token};
 use skein_llm_connection::{Component, Deadlines, Endpoint, Event, Limits, MAX_OUT, Request};
-use skein_tls_world::{drive::Wire, pki, server::Server};
+use skein_llm_connection_world::plaintext::Wire;
+use skein_world::domain::assert_replays;
 
 fn limits() -> Limits {
     Limits {
@@ -57,25 +59,21 @@ fn complete_requests(bytes: &[u8]) -> usize {
     count
 }
 
-#[test]
 #[expect(clippy::too_many_lines, reason = "the story drives both calls through one connection")]
-fn codex_calls_complete_and_reuse_one_tls_connection() {
+fn run(seed: u64) -> (Vec<String>, (u32, u32, bool)) {
     let call = skein_llm_world::call(7);
     let mut endpoints = List::with_capacity(1);
     endpoints
         .push(Endpoint {
             address: Addr::from((Ipv4Addr::LOCALHOST, 443)),
-            transport: skein_llm_connection::Transport::Tls {
-                server_name: skein_tls::Name::new("skein.test").expect("test name"),
-                trust: pki::client(&[]),
-            },
+            transport: skein_llm_connection::Transport::Plaintext,
             llm: call.endpoint,
         })
         .expect("one endpoint");
     let mut component = Component::new(endpoints, &limits()).expect("valid component");
     let mut up = Queue::with_capacity(MAX_OUT.above);
     let mut io = Queue::with_capacity(MAX_OUT.below);
-    let env = Env { now: Time::ZERO, wall: pki::VALID, limits: limits() };
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits() };
     component.down(
         &env,
         Request::Start {
@@ -89,7 +87,7 @@ fn codex_calls_complete_and_reuse_one_tls_connection() {
         &mut io,
     );
     component.down(&env, Request::Next { call: Token::new(7) }, &mut up, &mut io);
-    let mut wire = Wire::new(Server::new(pki::Server::plain().config()));
+    let mut wire = Wire::new(seed);
     let response = skein_llm_world::text_response(false);
     let mut owner = None;
     let mut responded = 0_usize;
@@ -98,6 +96,7 @@ fn codex_calls_complete_and_reuse_one_tls_connection() {
     let mut fragments = 0_u32;
     for _ in 0_u32..20_000 {
         if let Some(event) = up.pop() {
+            wire.trace.push(format!("owner {event:?}"));
             match event {
                 Event::Delta { call, .. } | Event::Block { call, .. } => {
                     assert!(call == Token::new(7) || call == Token::new(8));
@@ -137,10 +136,9 @@ fn codex_calls_complete_and_reuse_one_tls_connection() {
                 | IoRequest::Signal { .. }) => panic!("unexpected io request: {other:?}"),
             }
         }
-        let requests = complete_requests(&wire.server.received);
-        if !wire.server.handshaking() && requests > responded {
-            wire.server.write(&response);
-            wire.pull();
+        let requests = complete_requests(&wire.received);
+        if requests > responded {
+            wire.write(&response);
             responded += 1;
         }
         if let Some(answer) = wire.answer() {
@@ -182,7 +180,7 @@ fn codex_calls_complete_and_reuse_one_tls_connection() {
     component.down(&env, Request::Cancel { call: Token::new(8) }, &mut up, &mut io);
     assert!(up.is_empty() && io.is_empty(), "a cancel after completion is inert");
 
-    let later = Env { now: Time::from_nanos(11_000_000_000), wall: pki::VALID, limits: limits() };
+    let later = Env { now: Time::from_nanos(11_000_000_000), wall: Wall::EPOCH, limits: limits() };
     component.fire(&later, &mut up, &mut io);
     let mut closed = false;
     for _ in 0_u32..1000 {
@@ -219,4 +217,10 @@ fn codex_calls_complete_and_reuse_one_tls_connection() {
         }
     }
     assert!(closed, "the idle connection closed after its keep time");
+    (wire.trace, (completed, fragments, closed))
+}
+
+#[test]
+fn codex_calls_complete_reuse_and_replay_one_plaintext_connection() {
+    assert_replays(7, 8, run);
 }

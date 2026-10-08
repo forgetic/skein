@@ -4,10 +4,13 @@ use core::net::Ipv4Addr;
 
 use skein_io::kernel::Addr;
 use skein_io::{Event as IoEvent, Request as IoRequest};
+use skein_lib::stream::{Down, Up};
 use skein_lib::{Duration, Env, List, Queue, Time, Token};
 use skein_llm::{Failure, client::Evidence};
 use skein_llm_connection::{Component, Deadlines, Endpoint, Event, Limits, MAX_OUT, Request};
-use skein_tls_world::{drive::Wire, pki, server::Server};
+use skein_llm_connection_world::plaintext::Wire;
+use skein_tls_world::{drive::Wire as TlsWire, pki, server::Server};
+use skein_world::domain::assert_replays;
 
 fn limits() -> Limits {
     Limits {
@@ -32,26 +35,79 @@ fn limits() -> Limits {
     }
 }
 
+enum TransportWire {
+    Plaintext(Wire),
+    Handshake(Box<TlsWire>),
+}
+
+impl TransportWire {
+    fn take(&mut self, down: Down) {
+        match self {
+            Self::Plaintext(wire) => wire.take(down),
+            Self::Handshake(wire) => wire.take(down),
+        }
+    }
+
+    fn answer(&mut self) -> Option<Up> {
+        match self {
+            Self::Plaintext(wire) => wire.answer(),
+            Self::Handshake(wire) => wire.answer(),
+        }
+    }
+
+    fn received(&self) -> &[u8] {
+        match self {
+            Self::Plaintext(wire) => &wire.received,
+            Self::Handshake(wire) => &wire.server.received,
+        }
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Plaintext(wire) => wire.write(bytes),
+            Self::Handshake(wire) => {
+                wire.server.write(bytes);
+                wire.pull();
+            }
+        }
+    }
+
+    fn end(&mut self) {
+        match self {
+            Self::Plaintext(wire) => wire.eof = true,
+            Self::Handshake(wire) => {
+                wire.server.close_notify();
+                wire.pull();
+            }
+        }
+    }
+}
+
 struct World {
     component: Component,
     up: Queue<Event>,
     io: Queue<IoRequest>,
-    wire: Wire,
+    wire: TransportWire,
     owner: Option<Token>,
     now: Time,
     terminals: Vec<Event>,
+    closed: bool,
 }
 
 impl World {
-    fn new(deadlines: Deadlines) -> World {
+    fn new(deadlines: Deadlines, seed: u64, handshake: bool) -> World {
         let call = skein_llm_world::call(7);
         let mut endpoints = List::with_capacity(1);
         endpoints
             .push(Endpoint {
                 address: Addr::from((Ipv4Addr::LOCALHOST, 443)),
-                transport: skein_llm_connection::Transport::Tls {
-                    server_name: skein_tls::Name::new("skein.test").expect("test name"),
-                    trust: pki::client(&[]),
+                transport: if handshake {
+                    skein_llm_connection::Transport::Tls {
+                        server_name: skein_tls::Name::new("skein.test").expect("test name"),
+                        trust: pki::client(&[]),
+                    }
+                } else {
+                    skein_llm_connection::Transport::Plaintext
                 },
                 llm: call.endpoint,
             })
@@ -60,10 +116,15 @@ impl World {
             component: Component::new(endpoints, &limits()).expect("component"),
             up: Queue::with_capacity(MAX_OUT.above),
             io: Queue::with_capacity(MAX_OUT.below),
-            wire: Wire::new(Server::new(pki::Server::plain().config())),
+            wire: if handshake {
+                TransportWire::Handshake(Box::new(TlsWire::new(Server::new(pki::Server::plain().config()))))
+            } else {
+                TransportWire::Plaintext(Wire::new(seed))
+            },
             owner: None,
             now: Time::ZERO,
             terminals: Vec::new(),
+            closed: false,
         };
         let env = world.env();
         world.component.down(
@@ -80,6 +141,23 @@ impl World {
         );
         world.component.down(&env, Request::Next { call: Token::new(7) }, &mut world.up, &mut world.io);
         world
+    }
+
+    fn report(mut self) -> (Vec<String>, Vec<String>) {
+        for _ in 0_u32..1000 {
+            self.tick();
+            if self.closed && self.io.is_empty() && self.up.is_empty() && !self.component.has_work() {
+                break;
+            }
+        }
+        assert!(self.closed, "the failed call settles its socket");
+        assert!(self.io.is_empty() && self.up.is_empty() && !self.component.has_work());
+        assert_eq!(self.terminals.len(), 1, "settlement cannot repeat the terminal");
+        let trace = match self.wire {
+            TransportWire::Plaintext(wire) => wire.trace,
+            TransportWire::Handshake(_) => panic!("TLS ciphertext never replays"),
+        };
+        (trace, self.terminals.iter().map(|event| format!("{event:?}")).collect())
     }
 
     fn env(&self) -> Env<Limits> {
@@ -112,6 +190,8 @@ impl World {
                 }
                 IoRequest::Stream { down, .. } => self.wire.take(down),
                 IoRequest::Close { .. } | IoRequest::Abort { .. } => {
+                    assert!(!self.closed, "one socket close");
+                    self.closed = true;
                     self.component.up(
                         &env,
                         IoEvent::Closed { owner: self.owner.expect("owner") },
@@ -144,7 +224,7 @@ impl World {
     fn run_until_request(&mut self) {
         for _ in 0_u32..20_000 {
             self.tick();
-            if complete_request(&self.wire.server.received) {
+            if complete_request(self.wire.received()) {
                 return;
             }
         }
@@ -204,9 +284,8 @@ fn assert_failure(world: &World, failure: Failure, evidence: Evidence) {
     }
 }
 
-#[test]
-fn slow_head_expires_after_first_request_byte() {
-    let mut world = World::new(Deadlines { head: Some(Duration::from_secs(1)), ..Deadlines::none() });
+fn run_slow_head_expires_after_first_request_byte(seed: u64) -> World {
+    let mut world = World::new(Deadlines { head: Some(Duration::from_secs(1)), ..Deadlines::none() }, seed, false);
     world.run_until_request();
     assert_eq!(world.component.next_deadline(), Some(Time::from_nanos(1_000_000_000)));
     world.at(Time::from_nanos(1_000_000_000));
@@ -217,20 +296,20 @@ fn slow_head_expires_after_first_request_byte() {
         world.tick();
     }
     assert_eq!(world.terminals.len(), 1, "a late cancel cannot replace a timeout");
+    world
 }
 
 #[test]
 fn handshake_deadline_expires_before_any_request_bytes() {
-    let mut world = World::new(Deadlines { handshake: Some(Duration::from_secs(1)), ..Deadlines::none() });
+    let mut world = World::new(Deadlines { handshake: Some(Duration::from_secs(1)), ..Deadlines::none() }, 7, true);
     world.tick();
     assert_eq!(world.component.next_deadline(), Some(Time::from_nanos(1_000_000_000)));
     world.at(Time::from_nanos(1_000_000_000));
     assert_failure(&world, Failure::TimedOut, Evidence::Unsent);
 }
 
-#[test]
-fn cancel_before_a_provider_terminal_waits_for_socket_close() {
-    let mut world = World::new(Deadlines::none());
+fn run_cancel_before_a_provider_terminal_waits_for_socket_close(seed: u64) -> World {
+    let mut world = World::new(Deadlines::none(), seed, false);
     world.run_until_request();
     let env = world.env();
     world.component.down(&env, Request::Cancel { call: Token::new(7) }, &mut world.up, &mut world.io);
@@ -250,39 +329,30 @@ fn cancel_before_a_provider_terminal_waits_for_socket_close() {
         | Event::Completed { .. }
         | Event::Failed { .. }) => panic!("expected cancellation, got {other:?}"),
     }
+    world
 }
 
-#[test]
-fn idle_stall_expires_after_response_head() {
-    let mut world = World::new(Deadlines { idle: Some(Duration::from_secs(1)), ..Deadlines::none() });
+fn run_idle_stall_expires_after_response_head(seed: u64) -> World {
+    let mut world = World::new(Deadlines { idle: Some(Duration::from_secs(1)), ..Deadlines::none() }, seed, false);
     world.run_until_request();
-    world
-        .wire
-        .server
-        .write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
-    world.wire.pull();
+    world.wire.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
     world.run_until_head();
     world.at(Time::from_nanos(1_000_000_000));
     assert_failure(&world, Failure::TimedOut, Evidence::Response);
+    world
 }
 
-#[test]
-fn a_provider_ping_rearms_idle_without_consuming_next() {
-    let mut world = World::new(Deadlines { idle: Some(Duration::from_secs(1)), ..Deadlines::none() });
+fn run_a_provider_ping_rearms_idle_without_consuming_next(seed: u64) -> World {
+    let mut world = World::new(Deadlines { idle: Some(Duration::from_secs(1)), ..Deadlines::none() }, seed, false);
     world.run_until_request();
-    world
-        .wire
-        .server
-        .write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
-    world.wire.pull();
+    world.wire.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
     world.run_until_head();
     world.now = Time::from_nanos(500_000_000);
     let ping = b"data: {\"type\":\"ping\"}\n\n";
     let chunk = format!("{:x}\r\n", ping.len());
-    world.wire.server.write(chunk.as_bytes());
-    world.wire.server.write(ping);
-    world.wire.server.write(b"\r\n");
-    world.wire.pull();
+    world.wire.write(chunk.as_bytes());
+    world.wire.write(ping);
+    world.wire.write(b"\r\n");
     let expected = Some(Time::from_nanos(1_500_000_000));
     for _ in 0_u32..20_000 {
         world.tick();
@@ -297,18 +367,14 @@ fn a_provider_ping_rearms_idle_without_consuming_next() {
     assert!(world.up.is_empty(), "a ping extends the idle interval");
     world.at(Time::from_nanos(1_500_000_000));
     assert_failure(&world, Failure::TimedOut, Evidence::Response);
+    world
 }
 
-#[test]
-fn truncated_response_has_one_failed_terminal() {
-    let mut world = World::new(Deadlines::none());
+fn run_truncated_response_has_one_failed_terminal(seed: u64) -> World {
+    let mut world = World::new(Deadlines::none(), seed, false);
     world.run_until_request();
-    world
-        .wire
-        .server
-        .write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 100\r\n\r\ndata: {}");
-    world.wire.server.close_notify();
-    world.wire.pull();
+    world.wire.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 100\r\n\r\ndata: {}");
+    world.wire.end();
     for _ in 0_u32..20_000 {
         world.tick();
         if !world.terminals.is_empty() {
@@ -324,4 +390,30 @@ fn truncated_response_has_one_failed_terminal() {
         | Event::Completed { .. }
         | Event::Cancelled { .. }) => panic!("expected truncation failure, got {other:?}"),
     }
+    world
+}
+
+#[test]
+fn slow_head_expires_after_first_request_byte() {
+    assert_replays(7, 8, |seed| run_slow_head_expires_after_first_request_byte(seed).report());
+}
+
+#[test]
+fn cancel_before_a_provider_terminal_waits_for_socket_close() {
+    assert_replays(7, 8, |seed| run_cancel_before_a_provider_terminal_waits_for_socket_close(seed).report());
+}
+
+#[test]
+fn idle_stall_expires_after_response_head() {
+    assert_replays(7, 8, |seed| run_idle_stall_expires_after_response_head(seed).report());
+}
+
+#[test]
+fn a_provider_ping_rearms_idle_without_consuming_next() {
+    assert_replays(7, 8, |seed| run_a_provider_ping_rearms_idle_without_consuming_next(seed).report());
+}
+
+#[test]
+fn truncated_response_has_one_failed_terminal() {
+    assert_replays(7, 8, |seed| run_truncated_response_has_one_failed_terminal(seed).report());
 }
