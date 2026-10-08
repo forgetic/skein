@@ -364,6 +364,9 @@ fn progress(
         let terminal = pipe.independent.grant();
         up.push(Event::Output { owner: id.token(), up: terminal });
     }
+    if pipe.finish {
+        maybe_close(pipe, id, tables, subs);
+    }
 }
 
 fn start_write(pipe: &mut Pipe, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) {
