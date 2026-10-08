@@ -42,7 +42,7 @@ mod world;
 
 pub use heap::Memory;
 pub use host::Host;
-pub use program::{HostedProgram, Inherited, Machine, NoMachine};
+pub use program::{HostedProgram, Inherited, Machine, NoMachine, StartupRoot, StartupRoots};
 pub use referee::{Expectation, Expectations, Referee};
 pub use world::{Killed, Outcome, World};
 

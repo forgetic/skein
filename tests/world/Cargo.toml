@@ -13,6 +13,8 @@ skein-sim.workspace = true
 skein-heap.workspace = true
 skein-world.workspace = true
 skein-shell.workspace = true
+skein-fake-machine.workspace = true
+skein-scratch.workspace = true
 
 # Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.
 # tests/clippy.toml bans what would make a run unrepeatable.

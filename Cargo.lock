@@ -596,9 +596,11 @@ dependencies = [
 name = "skein-world-tests"
 version = "0.0.0"
 dependencies = [
+ "skein-fake-machine",
  "skein-heap",
  "skein-io",
  "skein-lib",
+ "skein-scratch",
  "skein-shell",
  "skein-sim",
  "skein-world",

@@ -21,7 +21,8 @@ use skein_shell::{Clock, Config, Kernel, Now, Wait};
 
 use crate::host::Host;
 use crate::referee::Referee;
-use crate::{HostedProgram, Inherited};
+use crate::{HostedProgram, Inherited, StartupRoots};
+use std::os::unix::ffi::OsStrExt;
 
 /// What a real run left.
 #[derive(Debug)]
@@ -78,6 +79,7 @@ pub struct World<P, R> {
     procs: Vec<P>,
     referee: R,
     programs: Vec<HostedProgram<P>>,
+    startup: Vec<StartupRoots>,
     inherited: Vec<Vec<Fd>>,
     controls: Controls,
     signals: BTreeMap<usize, SignalSource>,
@@ -100,6 +102,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             procs: Vec::new(),
             referee,
             programs: Vec::new(),
+            startup: Vec::new(),
             inherited: Vec::new(),
             controls,
             signals: BTreeMap::new(),
@@ -128,9 +131,16 @@ impl<P: Host, R: Referee<P>> World<P, R> {
 
     /// Registers a program and its maximum simultaneous instances before execution.
     pub fn host(&mut self, program: HostedProgram<P>) {
+        self.host_roots(program, crate::program::no_roots);
+    }
+
+    /// Registers independently opened startup directories selected from each
+    /// spawn, shared with simulated scenarios (testing-strategy.md, section 2.8).
+    pub fn host_roots(&mut self, program: HostedProgram<P>, roots: StartupRoots) {
         assert!(program.instances > 0 && program.operations > 0, "a hosted program has room to run");
         assert!(!self.programs.iter().any(|entry| entry.program == program.program), "one factory per program");
         self.programs.push(program);
+        self.startup.push(roots);
     }
 
     /// Adds a root host; descriptors opened at startup may be declared with `spawn_with_fds`.
@@ -400,7 +410,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
         match &mut record.kind {
             Op::Spawn { spawn } => {
                 if let Some(program) = self.world.programs.iter().position(|entry| entry.program == spawn.program) {
-                    let result = self.spawn(program, spawn);
+                    let result = self.spawn(host, program, spawn);
                     self.synthetic(record, result);
                     return;
                 }
@@ -483,7 +493,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
         self.ring.submits.push(record);
     }
 
-    fn spawn(&mut self, program: usize, spawn: &mut Spawn) -> Result<Done, Error> {
+    fn spawn(&mut self, parent: usize, program: usize, spawn: &mut Spawn) -> Result<Done, Error> {
         let entry = self.world.programs.get(program).expect("a registered program");
         let active = self.children.values().filter(|child| child.program == program && child.exit.is_none()).count();
         assert!(
@@ -492,9 +502,31 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
         );
         let make = entry.make;
         let operations = entry.operations;
+        let declarations = self.world.startup.get(program).expect("startup selector per program")(spawn);
+        crate::program::check_roots(&declarations);
+        let mut roots = Vec::new();
+        for declaration in declarations {
+            let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&declaration.path));
+            match skein_shell::open_root(path) {
+                Ok(fd) => roots.push((declaration.name, fd)),
+                Err(errno) => {
+                    for (_, fd) in roots {
+                        self.cleanup.push_back((parent, Op::Close { fd }));
+                    }
+                    return Err(match errno {
+                        2 => Error::NotFound,
+                        13 => Error::Permission,
+                        20 => Error::NotADirectory,
+                        22 => Error::InvalidArgument,
+                        24 => Error::TooManyOpenFiles,
+                        _ => Error::Other(errno),
+                    });
+                }
+            }
+        }
         match skein_shell::hosted_pipes(spawn) {
             Ok(pipes) => {
-                let inherited = Inherited { pipes: pipes.pipes, signal: pipes.signal };
+                let inherited = Inherited { pipes: pipes.pipes, roots, signal: pipes.signal };
                 let proc = make(spawn, &inherited);
                 assert!(proc.operations() <= operations, "hosted operations fit their provision");
                 let child = self.ring.admit(proc.operations());
@@ -503,7 +535,13 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                 self.processes.insert(
                     child,
                     Process {
-                        fds: inherited.pipes.iter().map(|(_, fd)| *fd).chain([inherited.signal]).collect(),
+                        fds: inherited
+                            .pipes
+                            .iter()
+                            .map(|(_, fd)| *fd)
+                            .chain(inherited.roots.iter().map(|(_, fd)| *fd))
+                            .chain([inherited.signal])
+                            .collect(),
                         exit: None,
                         cleanup: 0,
                         cleaned: false,
@@ -524,7 +562,12 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                 );
                 Ok(Done::Spawned { pidfd: pipes.pidfd })
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                for (_, fd) in roots {
+                    self.cleanup.push_back((parent, Op::Close { fd }));
+                }
+                Err(error)
+            }
         }
     }
 

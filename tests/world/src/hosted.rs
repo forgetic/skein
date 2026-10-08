@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use skein_io::kernel::{Complete, Done, Exit, Fd, Op, Pipe, Signal, Spawn, Submit, Way};
+use skein_io::kernel::{Complete, Done, Exit, Fd, Op, OpenHow, Pipe, Signal, Spawn, Submit, Way};
 use skein_lib::{Queue, Time, Token, Wall};
 use skein_world::{Host, Inherited, Machine};
 
@@ -19,6 +19,14 @@ pub enum Act {
     Close(usize),
     /// The parent waits for its child to exit.
     Wait,
+    /// The script opens a file beneath its independently owned startup root.
+    OpenRoot(usize, &'static [u8], OpenHow),
+    /// The script writes a regular file at offset zero.
+    WriteFile(usize, &'static [u8]),
+    /// The script reads a regular file at offset zero.
+    ReadFile(usize),
+    /// The parent closes its launch root while the child retains its own roots.
+    CloseLaunch,
     /// The parent sends a termination or kill signal to its child.
     Signal(Signal),
     /// The child waits for a termination signal from its parent.
@@ -35,6 +43,8 @@ pub struct Script {
     signal: Option<Fd>,
     pidfd: Option<Fd>,
     root: Option<Fd>,
+    roots: Vec<Fd>,
+    pub args: Box<[Box<[u8]>]>,
     waiting: bool,
     next: u64,
     done: bool,
@@ -60,6 +70,8 @@ impl Script {
             signal: None,
             pidfd: None,
             root: None,
+            roots: Vec::new(),
+            args: Box::new([Box::from(&b"argument"[..])]),
             waiting: false,
             next: 1,
             done: false,
@@ -89,6 +101,7 @@ impl Script {
         let mut script = Self::new(acts);
         script.fds = inherited.pipes.iter().map(|(_, fd)| *fd).collect();
         script.signal = Some(inherited.signal);
+        script.roots = inherited.roots.iter().map(|(_, fd)| *fd).collect();
         script
     }
 
@@ -103,7 +116,7 @@ impl Script {
             Act::Spawn => Op::Spawn {
                 spawn: Box::new(Spawn {
                     program: Box::from(&b"hosted"[..]),
-                    args: Box::new([Box::from(&b"argument"[..])]),
+                    args: self.args.clone(),
                     env: Box::new([Box::from(&b"KEY=value"[..])]),
                     root: self.root.expect("parent root"),
                     dir: Box::new([]),
@@ -116,6 +129,10 @@ impl Script {
             Act::Write(at, bytes) => Op::PipeWrite { fd: self.fds[at], bytes: Box::from(bytes), from: 0 },
             Act::Read(at) => Op::PipeRead { fd: self.fds[at], buf: Box::new([0; 32]) },
             Act::Close(at) => Op::Close { fd: self.fds.remove(at) },
+            Act::OpenRoot(index, path, how) => Op::Open { root: self.roots[index], path: Box::from(path), how },
+            Act::WriteFile(index, bytes) => Op::Write { fd: self.fds[index], bytes: Box::from(bytes), at: 0, from: 0 },
+            Act::ReadFile(index) => Op::Read { fd: self.fds[index], buf: Box::new([0; 32]), at: 0 },
+            Act::CloseLaunch => Op::Close { fd: self.root.take().expect("launch root") },
             Act::Wait => Op::Wait { pidfd: self.pidfd.expect("spawned child") },
             Act::Signal(signal) => Op::Signal { pidfd: self.pidfd.expect("spawned child"), signal },
             Act::ReadSignal => Op::ReadSignal { fd: self.signal.expect("child signal source") },
@@ -143,13 +160,14 @@ impl Host for Script {
                     self.fds = spawn.pipes.iter().map(|pipe| pipe.parent.expect("parent pipe end")).collect();
                 }
                 Ok(Done::Count(count)) => {
-                    if let Op::PipeRead { buf, .. } = &complete.kind {
+                    if let Op::PipeRead { buf, .. } | Op::Read { buf, .. } = &complete.kind {
                         self.received.extend_from_slice(&buf[..usize::try_from(count).expect("small count")]);
                     }
                 }
                 Ok(Done::ServiceSignal(signal)) => self.signals.push(signal),
                 Ok(Done::Exit(exit)) => self.child_exit = Some(exit),
-                Ok(Done::Nothing | Done::Fd(_) | Done::Bound(_) | Done::Accepted { .. } | Done::Stat(_)) | Err(_) => {}
+                Ok(Done::Fd(fd)) => self.fds.push(fd),
+                Ok(Done::Nothing | Done::Bound(_) | Done::Accepted { .. } | Done::Stat(_)) | Err(_) => {}
             }
             self.results.push(complete.result);
         }
@@ -161,8 +179,13 @@ impl Host for Script {
             self.start(act);
             return;
         }
-        if let Some(fd) =
-            self.fds.pop().or_else(|| self.signal.take()).or_else(|| self.pidfd.take()).or_else(|| self.root.take())
+        if let Some(fd) = self
+            .fds
+            .pop()
+            .or_else(|| self.roots.pop())
+            .or_else(|| self.signal.take())
+            .or_else(|| self.pidfd.take())
+            .or_else(|| self.root.take())
         {
             self.submit(Op::Close { fd });
         } else {

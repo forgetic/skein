@@ -66,6 +66,18 @@ pub(super) struct InheritedPipe {
 }
 
 impl Sim {
+    /// The exact launch record and its owner while the machine selects a hosted
+    /// program (simulator.md, section 3). Borrowed bytes remain parent-owned.
+    #[must_use]
+    pub fn hosted_spawn(&self, ticket: Ticket) -> (Pid, Token, &skein_io::kernel::Spawn) {
+        let (pid, token) = *self.spawn_asked.get(&ticket).expect("a spawn call waiting");
+        let operation = self.process(pid).flights.get(&token).expect("a spawn in flight").held.as_ref();
+        match operation {
+            Some(Op::Spawn { spawn }) => (pid, token, spawn),
+            _ => self.bug("a spawn call holds its launch record"),
+        }
+    }
+
     /// Starts the service selected by a successful spawn. The returned
     /// descriptors are the child's inherited pipe table, keyed by the
     /// descriptor numbers requested in `Spawn`. The world hosts this process

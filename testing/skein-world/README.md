@@ -6,7 +6,25 @@ and scenario expectations; the harness knows none of its domain policy.
 
 The crate-root `World`, `Host` and process `Referee` drive processes through
 `iterate` on skein's simulator; `real` runs the same processes over the real
-ring. Their interfaces remain unchanged.
+ring.
+
+Both register `HostedProgram` factories with `host`. A child needing startup
+roots uses `host_roots(program, select_roots)` instead. The selector receives
+the exact `Spawn` and returns named `StartupRoot { name, path }` values;
+arguments and environment carry the scenario's configuration. The factory
+receives `Inherited.roots`, pairing these names with fresh child-owned
+`Fd`s, beside its pipes and signal source. It must copy any names it keeps
+inside its construction call, so per-process memory remains accounted.
+
+A simulated scenario implements `Machine::open_root(path)` to issue a fresh
+directory `Handle` in its filesystem namespace and `Machine::close_root` to
+roll back a partially successful startup. Normal child closes go through the
+machine seam. The real world opens those same paths through the shell and
+closes rollback descriptors on its shared ring. A failed root open refuses
+the spawn before the factory is called. The normal lifecycle closes the
+child's roots; a kill closes every descriptor still owned by the child.
+Parent and child may select the same directory, but never share descriptor
+ownership.
 
 The `domain` module is the domain-only world's shared machinery, extracted
 from temper's `tests/world` at `23d7caa` when smith became its second user:
