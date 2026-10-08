@@ -23,7 +23,7 @@ use crate::net::{
 };
 use crate::trace::{self, Entry, Event, Fault, Summary};
 use files::{Asked, File};
-use processes::{Child, PipeEnd};
+use processes::{Child, InheritedPipe, PipeEnd};
 
 /// A simulated process: a plain handle, from [`Sim::spawn_process`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -62,6 +62,7 @@ struct Process {
     /// the machine. They are counted with the sockets' against the limit.
     files: BTreeMap<Fd, File>,
     pipe_fds: BTreeMap<Fd, PipeEnd>,
+    inherited_pipes: BTreeMap<Fd, InheritedPipe>,
     pidfds: BTreeMap<Fd, u64>,
     signal_fds: BTreeMap<Fd, SignalSource>,
     children: BTreeMap<u64, Child>,
@@ -201,6 +202,7 @@ impl Sim {
             fds: BTreeMap::new(),
             files: BTreeMap::new(),
             pipe_fds: BTreeMap::new(),
+            inherited_pipes: BTreeMap::new(),
             pidfds: BTreeMap::new(),
             signal_fds: BTreeMap::new(),
             children: BTreeMap::new(),
@@ -315,6 +317,7 @@ impl Sim {
             .len()
             .checked_add(process.files.len())
             .and_then(|n| n.checked_add(process.pipe_fds.len()))
+            .and_then(|n| n.checked_add(process.inherited_pipes.values().filter(|pipe| pipe.process_open).count()))
             .and_then(|n| n.checked_add(process.pidfds.len()))
             .and_then(|n| n.checked_add(process.signal_fds.len()))
             .expect("fewer than usize::MAX descriptors");
@@ -401,6 +404,9 @@ impl Sim {
         }
         if let Some((fd, _)) = process.pipe_fds.first_key_value() {
             self.fail(pid, &format!("{} pipes open, the first {fd:?}", process.pipe_fds.len()));
+        }
+        if let Some((fd, _)) = process.inherited_pipes.iter().find(|(_, pipe)| pipe.process_open) {
+            self.fail(pid, &format!("an inherited pipe open, {fd:?}"));
         }
         if let Some((fd, _)) = process.pidfds.first_key_value() {
             self.fail(pid, &format!("{} pidfds open, the first {fd:?}", process.pidfds.len()));
@@ -506,7 +512,10 @@ impl Sim {
                 | Summary::PipeRead { .. }
                 | Summary::PipeWrite { .. }
         ) || matches!(kind, Summary::Close { fd }
-                if process.pipe_fds.contains_key(&fd) || process.pidfds.contains_key(&fd) || process.signal_fds.contains_key(&fd))
+                if process.pipe_fds.contains_key(&fd)
+                    || process.inherited_pipes.get(&fd).is_some_and(|pipe| pipe.process_open)
+                    || process.pidfds.contains_key(&fd)
+                    || process.signal_fds.contains_key(&fd))
         {
             self.check_process(pid, kind);
             return On::Process;
@@ -984,6 +993,10 @@ impl Sim {
             return;
         }
         if let Op::PipeRead { fd, .. } | Op::PipeWrite { fd, .. } = op {
+            if let Some(pipe) = self.process_mut(pid).inherited_pipes.get_mut(fd) {
+                pipe.waiting = None;
+                return;
+            }
             let end = *self.process(pid).pipe_fds.get(fd).expect("a pipe operation keeps its descriptor open");
             self.process_mut(pid)
                 .children
@@ -1402,6 +1415,7 @@ impl Sim {
             .len()
             .checked_add(process.files.len())
             .and_then(|n| n.checked_add(process.pipe_fds.len()))
+            .and_then(|n| n.checked_add(process.inherited_pipes.values().filter(|pipe| pipe.process_open).count()))
             .and_then(|n| n.checked_add(process.pidfds.len()))
             .and_then(|n| n.checked_add(process.signal_fds.len()));
         match open.and_then(|open| u32::try_from(open).ok()) {

@@ -41,7 +41,138 @@ pub(super) struct ChildPipe {
     pub waiting: Option<Token>,
 }
 
+/// One pipe inherited by a process, with the other end held by its world.
+#[derive(Debug)]
+pub(super) struct InheritedPipe {
+    pub readable: bool,
+    pub process_open: bool,
+    pub peer_open: bool,
+    pub bytes: VecDeque<u8>,
+    pub waiting: Option<Token>,
+}
+
 impl Sim {
+    /// Gives a process a pipe it can read; the world feeds and closes its writer.
+    pub fn open_inherited_read(&mut self, pid: Pid) -> Fd {
+        self.open_inherited(pid, true)
+    }
+
+    /// Gives a process a pipe it can write; the world drains and closes its reader.
+    pub fn open_inherited_write(&mut self, pid: Pid) -> Fd {
+        self.open_inherited(pid, false)
+    }
+
+    fn open_inherited(&mut self, pid: Pid, readable: bool) -> Fd {
+        assert!(!self.fds_full(pid), "an inherited pipe needs a descriptor slot");
+        let fd = self.new_process_fd(pid);
+        self.process_mut(pid).inherited_pipes.insert(
+            fd,
+            InheritedPipe { readable, process_open: true, peer_open: true, bytes: VecDeque::new(), waiting: None },
+        );
+        fd
+    }
+
+    /// Feeds at most the available buffer room to a process's inherited read pipe.
+    /// Returns zero when the process has closed its reader.
+    pub fn peer_feed(&mut self, pid: Pid, fd: Fd, bytes: &[u8]) -> usize {
+        let room = usize::try_from(self.config.buffer).expect("buffer fits");
+        let pipe = self.inherited_peer(pid, fd, true);
+        let count = if pipe.process_open { bytes.len().min(room.saturating_sub(pipe.bytes.len())) } else { 0 };
+        pipe.bytes.extend(bytes[..count].iter().copied());
+        self.wake_inherited(pid, fd);
+        count
+    }
+
+    /// Drains at most `most` bytes from a process's inherited write pipe.
+    pub fn peer_drain(&mut self, pid: Pid, fd: Fd, most: usize) -> Vec<u8> {
+        let pipe = self.inherited_peer(pid, fd, false);
+        let count = most.min(pipe.bytes.len());
+        let bytes = pipe.bytes.drain(..count).collect();
+        self.wake_inherited(pid, fd);
+        bytes
+    }
+
+    /// Closes the world's end of an inherited pipe. Buffered bytes can still
+    /// be read by the process when it is the world's writer.
+    pub fn peer_close(&mut self, pid: Pid, fd: Fd) {
+        let pipe = self.inherited_peer(pid, fd, self.process(pid).inherited_pipes[&fd].readable);
+        pipe.peer_open = false;
+        if !pipe.readable {
+            pipe.bytes.clear();
+        }
+        self.wake_inherited(pid, fd);
+    }
+
+    /// Whether the world's reader has reached end of stream after the
+    /// process closes its writer and all buffered bytes are drained.
+    #[must_use]
+    pub fn peer_eof(&self, pid: Pid, fd: Fd) -> bool {
+        let pipe = self.process(pid).inherited_pipes.get(&fd).expect("an inherited pipe");
+        assert!(!pipe.readable, "peer_eof needs an inherited write pipe");
+        !pipe.process_open && pipe.bytes.is_empty()
+    }
+
+    fn inherited_peer(&mut self, pid: Pid, fd: Fd, readable: bool) -> &mut InheritedPipe {
+        let pipe = self.process_mut(pid).inherited_pipes.get_mut(&fd).expect("an inherited pipe");
+        assert_eq!(pipe.readable, readable, "the wrong end of an inherited pipe");
+        assert!(pipe.peer_open, "the world's pipe end is closed");
+        pipe
+    }
+
+    fn wake_inherited(&mut self, pid: Pid, fd: Fd) {
+        let pipe = self.process(pid).inherited_pipes.get(&fd).expect("an inherited pipe");
+        let ready = if pipe.readable {
+            !pipe.bytes.is_empty() || !pipe.peer_open
+        } else {
+            !pipe.peer_open || pipe.bytes.len() < usize::try_from(self.config.buffer).expect("buffer fits")
+        };
+        if ready
+            && let Some(token) =
+                self.process_mut(pid).inherited_pipes.get_mut(&fd).expect("an inherited pipe").waiting.take()
+        {
+            let op = self.unpark(pid, token);
+            match op {
+                Op::PipeRead { .. } => self.recv_inherited(pid, token, op, fd),
+                Op::PipeWrite { .. } => self.send_inherited(pid, token, op, fd),
+                _ => self.bug("an inherited pipe waiter holds a pipe operation"),
+            }
+        }
+    }
+
+    fn recv_inherited(&mut self, pid: Pid, token: Token, mut op: Op, fd: Fd) {
+        let pipe = self.process_mut(pid).inherited_pipes.get_mut(&fd).expect("an inherited pipe");
+        let Op::PipeRead { ref mut buf, .. } = op else { self.bug("a pipe read holds a buffer") };
+        if pipe.bytes.is_empty() && pipe.peer_open {
+            pipe.waiting = Some(token);
+            self.park(pid, token, op);
+            return;
+        }
+        let count = buf.len().min(pipe.bytes.len());
+        for slot in buf.iter_mut().take(count) {
+            *slot = pipe.bytes.pop_front().expect("within buffered bytes");
+        }
+        self.complete(pid, token, op, Ok(Done::Count(u32::try_from(count).expect("a count"))));
+    }
+
+    fn send_inherited(&mut self, pid: Pid, token: Token, op: Op, fd: Fd) {
+        let room = usize::try_from(self.config.buffer).expect("buffer fits");
+        let pipe = self.process_mut(pid).inherited_pipes.get_mut(&fd).expect("an inherited pipe");
+        if !pipe.peer_open {
+            self.complete(pid, token, op, Err(Error::BrokenPipe));
+            return;
+        }
+        let Op::PipeWrite { ref bytes, from, .. } = op else { self.bug("a pipe write holds bytes") };
+        let left = &bytes[usize::try_from(from).expect("from fits")..];
+        let count = left.len().min(room.saturating_sub(pipe.bytes.len()));
+        if count == 0 && !left.is_empty() {
+            pipe.waiting = Some(token);
+            self.park(pid, token, op);
+            return;
+        }
+        pipe.bytes.extend(left[..count].iter().copied());
+        self.complete(pid, token, op, Ok(Done::Count(u32::try_from(count).expect("a count"))));
+    }
+
     pub(super) fn check_process(&self, pid: Pid, kind: Summary) {
         let process = self.process(pid);
         let fd = kind.fd().expect("a process operation names a descriptor");
@@ -74,7 +205,22 @@ impl Sim {
                 }
             }
             Summary::PipeRead { .. } | Summary::PipeWrite { .. } | Summary::Close { .. } => {
-                if let Some(end) = process.pipe_fds.get(&fd) {
+                if let Some(pipe) = process.inherited_pipes.get(&fd).filter(|pipe| pipe.process_open) {
+                    let valid = match kind {
+                        Summary::PipeRead { .. } => pipe.readable,
+                        Summary::PipeWrite { .. } => !pipe.readable,
+                        Summary::Close { .. } => true,
+                        _ => false,
+                    };
+                    if !valid {
+                        self.fail(pid, &format!("{kind:?} has the wrong direction on inherited pipe {fd:?}"));
+                    }
+                    for flight in process.flights.values() {
+                        if flight.kind.fd() == Some(fd) {
+                            self.fail(pid, &format!("{kind:?} beside {:?} on {fd:?}", flight.kind));
+                        }
+                    }
+                } else if let Some(end) = process.pipe_fds.get(&fd) {
                     let pipe = &process.children[&end.child].pipes[end.index];
                     let valid = match kind {
                         Summary::PipeRead { .. } => pipe.spec.way == Way::Out,
@@ -164,10 +310,27 @@ impl Sim {
                     self.park(pid, token, Op::ReadSignal { fd });
                 }
             }
-            Op::PipeRead { fd, .. } => self.recv_pipe(pid, token, op, fd),
-            Op::PipeWrite { fd, .. } => self.send_pipe(pid, token, op, fd),
+            Op::PipeRead { fd, .. } => {
+                if self.process(pid).inherited_pipes.contains_key(&fd) {
+                    self.recv_inherited(pid, token, op, fd);
+                } else {
+                    self.recv_pipe(pid, token, op, fd);
+                }
+            }
+            Op::PipeWrite { fd, .. } => {
+                if self.process(pid).inherited_pipes.contains_key(&fd) {
+                    self.send_inherited(pid, token, op, fd);
+                } else {
+                    self.send_pipe(pid, token, op, fd);
+                }
+            }
             Op::Close { fd } => {
-                if let Some(end) = self.process_mut(pid).pipe_fds.remove(&fd) {
+                if let Some(pipe) = self.process_mut(pid).inherited_pipes.get_mut(&fd) {
+                    pipe.process_open = false;
+                    if pipe.readable {
+                        pipe.bytes.clear();
+                    }
+                } else if let Some(end) = self.process_mut(pid).pipe_fds.remove(&fd) {
                     let pipe = &mut self.process_mut(pid).children.get_mut(&end.child).expect("pipe names child").pipes
                         [end.index];
                     pipe.open = false;
@@ -478,5 +641,106 @@ mod tests {
         }
         assert!(seen.into_iter().all(|completed| completed));
         assert_eq!(sim.in_flight(pid), 0);
+    }
+
+    #[test]
+    fn inherited_read_waits_for_peer_bytes_then_reaches_end_of_stream() {
+        let mut config = Config::calm();
+        config.buffer = 2;
+        let mut sim = Sim::new(3, config);
+        let pid = sim.spawn_process();
+        let fd = sim.open_inherited_read(pid);
+        let mut submits = Queue::with_capacity(2);
+        let mut completes = Queue::with_capacity(2);
+
+        submits.push(Submit { op: Token::new(1), kind: Op::PipeRead { fd, buf: Box::new([0; 3]) } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+        assert!(completes.is_empty());
+        assert_eq!(sim.peer_feed(pid, fd, b"abc"), 2);
+        sim.reap(pid, &mut completes);
+        let first = completes.pop().expect("the waiting read wakes");
+        assert_eq!(first.result, Ok(Done::Count(2)));
+        let Op::PipeRead { buf, .. } = first.kind else { unreachable!("the read returns its buffer") };
+        assert_eq!(&buf[..2], b"ab");
+
+        assert_eq!(sim.peer_feed(pid, fd, b"c"), 1);
+        sim.peer_close(pid, fd);
+        submits.push(Submit { op: Token::new(2), kind: Op::PipeRead { fd, buf: Box::new([0; 2]) } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+        let second = completes.pop().expect("buffered byte survives peer close");
+        assert_eq!(second.result, Ok(Done::Count(1)));
+        let Op::PipeRead { buf, .. } = second.kind else { unreachable!("the read returns its buffer") };
+        assert_eq!(buf[0], b'c');
+
+        submits.push(Submit { op: Token::new(3), kind: Op::PipeRead { fd, buf: Box::new([0; 1]) } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+        assert_eq!(completes.pop().expect("end of stream").result, Ok(Done::Count(0)));
+        submits.push(Submit { op: Token::new(4), kind: Op::Close { fd } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+        assert_eq!(completes.pop().expect("closed descriptor").result, Ok(Done::Nothing));
+        sim.assert_no_open_fds(pid);
+    }
+
+    #[test]
+    fn inherited_write_waits_for_peer_drain_and_survives_process_close() {
+        let mut config = Config::calm();
+        config.buffer = 2;
+        let mut sim = Sim::new(4, config);
+        let pid = sim.spawn_process();
+        let fd = sim.open_inherited_write(pid);
+        let mut submits = Queue::with_capacity(2);
+        let mut completes = Queue::with_capacity(2);
+
+        submits.push(Submit { op: Token::new(1), kind: Op::PipeWrite { fd, bytes: Box::from(&b"ab"[..]), from: 0 } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+        assert_eq!(completes.pop().expect("initial write").result, Ok(Done::Count(2)));
+
+        submits.push(Submit { op: Token::new(2), kind: Op::PipeWrite { fd, bytes: Box::from(&b"cd"[..]), from: 0 } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+        assert!(completes.is_empty());
+        assert_eq!(sim.peer_drain(pid, fd, 1), b"a");
+        sim.reap(pid, &mut completes);
+        assert_eq!(completes.pop().expect("write wakes after drain").result, Ok(Done::Count(1)));
+        assert_eq!(sim.peer_drain(pid, fd, 1), b"b");
+
+        submits.push(Submit { op: Token::new(3), kind: Op::Close { fd } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+        assert_eq!(completes.pop().expect("closed descriptor").result, Ok(Done::Nothing));
+        sim.assert_no_open_fds(pid);
+        assert!(!sim.peer_eof(pid, fd));
+        assert_eq!(sim.peer_drain(pid, fd, 8), b"c");
+        assert!(sim.peer_eof(pid, fd));
+    }
+
+    #[test]
+    fn inherited_pipe_peer_close_breaks_a_waiting_write() {
+        let mut config = Config::calm();
+        config.buffer = 1;
+        let mut sim = Sim::new(5, config);
+        let pid = sim.spawn_process();
+        let fd = sim.open_inherited_write(pid);
+        let mut submits = Queue::with_capacity(1);
+        let mut completes = Queue::with_capacity(1);
+        submits.push(Submit { op: Token::new(1), kind: Op::PipeWrite { fd, bytes: Box::from(&b"a"[..]), from: 0 } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+        completes.pop().expect("buffer filled");
+        submits.push(Submit { op: Token::new(2), kind: Op::PipeWrite { fd, bytes: Box::from(&b"b"[..]), from: 0 } });
+        sim.submit(pid, &mut submits);
+        sim.peer_close(pid, fd);
+        sim.reap(pid, &mut completes);
+        assert_eq!(completes.pop().expect("waiting write fails").result, Err(Error::BrokenPipe));
+        submits.push(Submit { op: Token::new(3), kind: Op::Close { fd } });
+        sim.submit(pid, &mut submits);
+        sim.reap(pid, &mut completes);
+        assert_eq!(completes.pop().expect("closed descriptor").result, Ok(Done::Nothing));
+        sim.assert_no_open_fds(pid);
     }
 }

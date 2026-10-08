@@ -30,6 +30,10 @@
 //!   directory, given to a process with [`Sim::root`].
 //! - A child spawn asks the machine which program it names; the simulator
 //!   keeps the child's pidfd, pipes, waiting and exit state.
+//! - A world hosting a process with inherited channel pipes opens them with
+//!   [`Sim::open_inherited_read`] and [`Sim::open_inherited_write`]. The
+//!   scripted peer moves bytes with [`Sim::peer_feed`] and [`Sim::peer_drain`],
+//!   and closes its ends with [`Sim::peer_close`].
 //! - [`Sim::assert_quiescent`] and [`Sim::assert_no_open_fds`] check a
 //!   process at the end; [`Sim::render_trace`] prints the run with its seed,
 //!   every fault drawn included.
