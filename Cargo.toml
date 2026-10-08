@@ -18,6 +18,7 @@ members = [
     "testing/skein-fake-checkout",
     "testing/skein-fake-llm-domain",
     "testing/skein-fake-llm-protocol",
+    "testing/skein-fake-peers",
     "testing/skein-heap",
     "testing/skein-scratch",
     "testing/skein-world",
@@ -61,6 +62,7 @@ skein-llm-connection = { path = "crates/skein-llm-connection" }
 skein-oauth = { path = "crates/skein-oauth" }
 skein-fake-llm-domain = { path = "testing/skein-fake-llm-domain" }
 skein-fake-llm-protocol = { path = "testing/skein-fake-llm-protocol" }
+skein-fake-peers = { path = "testing/skein-fake-peers" }
 skein-fake-oauth = { path = "testing/skein-fake-oauth" }
 skein-tls = { path = "crates/skein-tls" }
 skein-shell = { path = "crates/skein-shell" }

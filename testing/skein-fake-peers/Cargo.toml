@@ -1,0 +1,33 @@
+[package]
+name = "skein-fake-peers"
+description = "Bounded scripted LLM and OAuth peers hosted on loopback io"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+skein-lib.workspace = true
+skein-io.workspace = true
+skein-world.workspace = true
+skein-llm.workspace = true
+skein-fake-llm-domain.workspace = true
+skein-fake-llm-protocol.workspace = true
+rustls = { workspace = true, features = ["std"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+wildcard_enum_match_arm = "deny"
+unwrap_used = "deny"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+single_match_else = "allow"
+
+[dev-dependencies]
+skein-sim.workspace = true
+skein-llm-world = { path = "../../tests/llm" }
+skein-heap.workspace = true

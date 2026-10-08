@@ -313,6 +313,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-fake-peers"
+version = "0.0.0"
+dependencies = [
+ "rustls",
+ "skein-fake-llm-domain",
+ "skein-fake-llm-protocol",
+ "skein-heap",
+ "skein-io",
+ "skein-lib",
+ "skein-llm",
+ "skein-llm-world",
+ "skein-sim",
+ "skein-world",
+]
+
+[[package]]
 name = "skein-heap"
 version = "0.0.0"
 
