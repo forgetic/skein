@@ -1,8 +1,12 @@
-//! One bounded OAuth exchange. HTTP/TLS and persistence belong to the caller.
+//! One bounded OAuth exchange (oauth.md, sections 1 and 3). It keeps the
+//! registered endpoints, one exchange and its deadlines; it knows no provider
+//! identity or token store. `Client::step` emits visits, HTTP demands and one
+//! terminal. HTTP transport and persistence belong to the caller.
 
 use crate::{ClaimSelector, DecodeError, Failure, Json, Limits, OAuthError, RefreshState, SavedToken, TokenResponse};
 use crate::{classify, decode_error, decode_response, pkce, rotate};
 use alloc::boxed::Box;
+use core::str::FromStr;
 use skein_json::writer::Encoder;
 use skein_lib::{Duration, Queue, Time, Wall, Writer, bytes};
 
@@ -536,8 +540,7 @@ fn validate_registration(registration: &Registration, limits: &ClientLimits, sig
             return Err(Failure::Limit);
         }
     }
-    if !registration.authorization_url.starts_with(b"https://") || !registration.token_endpoint.starts_with(b"https://")
-    {
+    if !issuer_endpoint(&registration.authorization_url) || !issuer_endpoint(&registration.token_endpoint) {
         return Err(Failure::Malformed);
     }
     if sign_in {
@@ -562,16 +565,56 @@ fn validate_registration(registration: &Registration, limits: &ClientLimits, sig
     Ok(())
 }
 
-fn loopback(uri: &[u8]) -> bool {
-    let rest = if let Some(value) = uri.strip_prefix(b"http://127.0.0.1:") {
-        value
-    } else if let Some(value) = uri.strip_prefix(b"http://[::1]:") {
-        value
+// oauth.md, section 1 permits HTTP only when the issuer address itself is
+// loopback. Names are not resolved by this sans-IO client: a numeric host
+// proves the address, and userinfo or suffixes cannot change the authority.
+#[expect(clippy::disallowed_methods, reason = "the OAuth protocol machine validates bounded numeric URI hosts")]
+fn issuer_endpoint(uri: &[u8]) -> bool {
+    if uri.starts_with(b"https://") {
+        return true;
+    }
+    let Some(rest) = uri.strip_prefix(b"http://") else { return false };
+    let mut end = rest.len();
+    for separator in [b"/".as_slice(), b"?"] {
+        if let Some(at) = bytes::find(rest, separator) {
+            end = end.min(at);
+        }
+    }
+    let authority = rest.get(..end).expect("the separator is within the URI");
+    if let Some(rest) = authority.strip_prefix(b"[") {
+        let Some(end) = bytes::find(rest, b"]") else { return false };
+        let host = rest.get(..end).expect("the bracket is within the authority");
+        let suffix_at = end.checked_add(1).expect("the bracket is within the bounded URI");
+        let suffix = rest.get(suffix_at..).expect("the closing bracket fits");
+        let Ok(host) = core::str::from_utf8(host) else { return false };
+        match core::net::Ipv6Addr::from_str(host) {
+            Ok(address) => address.is_loopback() && endpoint_port(suffix),
+            Err(_) => false,
+        }
     } else {
-        return false;
-    };
-    let Some(path_at) = bytes::find(rest, b"/") else { return false };
-    let Some(port) = rest.get(..path_at) else { return false };
+        let end = match bytes::find(authority, b":") {
+            Some(end) => end,
+            None => authority.len(),
+        };
+        let host = authority.get(..end).expect("the port separator fits");
+        let suffix = authority.get(end..).expect("the port separator fits");
+        let Ok(host) = core::str::from_utf8(host) else { return false };
+        match core::net::Ipv4Addr::from_str(host) {
+            Ok(address) => address.is_loopback() && endpoint_port(suffix),
+            Err(_) => false,
+        }
+    }
+}
+
+fn endpoint_port(suffix: &[u8]) -> bool {
+    if suffix.is_empty() {
+        return true;
+    }
+    let Some(port) = suffix.strip_prefix(b":") else { return false };
+    port_number(port)
+}
+
+fn port_number(port: &[u8]) -> bool {
     if port.is_empty() || port.len() > 5 {
         return false;
     }
@@ -585,6 +628,19 @@ fn loopback(uri: &[u8]) -> bool {
         number = value;
     }
     number > 0 && u16::try_from(number).is_ok()
+}
+
+fn loopback(uri: &[u8]) -> bool {
+    let rest = if let Some(value) = uri.strip_prefix(b"http://127.0.0.1:") {
+        value
+    } else if let Some(value) = uri.strip_prefix(b"http://[::1]:") {
+        value
+    } else {
+        return false;
+    };
+    let Some(path_at) = bytes::find(rest, b"/") else { return false };
+    let Some(port) = rest.get(..path_at) else { return false };
+    port_number(port)
 }
 
 fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {

@@ -347,3 +347,118 @@ fn proved_unsent_attempt_retries_with_bounded_backoff() {
         panic!("tokens expected")
     };
 }
+
+#[test]
+fn issuer_http_endpoints_are_admitted_only_on_numeric_loopback() {
+    for (uri, admitted) in [
+        (b"http://127.0.0.1/issuer".as_slice(), true),
+        (b"http://127.0.0.0:1/issuer", true),
+        (b"http://127.255.255.255:65535/issuer", true),
+        (b"http://127.42.1.2/issuer?tenant=one", true),
+        (b"http://127.0.0.1", true),
+        (b"http://127.0.0.1?tenant=one", true),
+        (b"http://[::1]/issuer", true),
+        (b"http://[0:0:0:0:0:0:0:1]:80/issuer", true),
+        (b"http://[::1]:65535/issuer", true),
+        (b"http://126.255.255.255/issuer", false),
+        (b"http://128.0.0.0/issuer", false),
+        (b"http://0.0.0.0/issuer", false),
+        (b"http://192.168.1.1/issuer", false),
+        (b"http://[::]/issuer", false),
+        (b"http://[::2]/issuer", false),
+        (b"http://[::ffff:127.0.0.1]/issuer", false),
+        (b"http://issuer.example/issuer", false),
+        (b"http://localhost/issuer", false),
+        (b"http://127.0.0.1.evil/issuer", false),
+        (b"http://127.0.0.1@evil/issuer", false),
+        (b"http://user@127.0.0.1/issuer", false),
+        (b"http://[::1]@evil/issuer", false),
+        (b"http://127.0.0.1:80@evil/issuer", false),
+        (b"http://127.0.0.1:0/issuer", false),
+        (b"http://127.0.0.1:65536/issuer", false),
+        (b"http://127.0.0.1:/issuer", false),
+        (b"http://127.0.0.1:evil/issuer", false),
+        (b"http://[::1]:0/issuer", false),
+        (b"http://[::1]:65536/issuer", false),
+        (b"http://[::1]evil/issuer", false),
+        (b"http://[::1/issuer", false),
+        (b"http://127.1/issuer", false),
+        (b"http://2130706433/issuer", false),
+        (b"http://0x7f000001/issuer", false),
+        (b"http://127.00.0.1/issuer", false),
+        (b"ftp://127.0.0.1/issuer", false),
+    ] {
+        for authorization in [false, true] {
+            for public in [false, true] {
+                let mut configured = registration(public, WireFormat::Form);
+                if authorization {
+                    configured.authorization_url = boxed(uri);
+                } else {
+                    configured.token_endpoint = boxed(uri);
+                }
+                let expected_token = configured.token_endpoint.clone();
+                let mut client = Client::new(limits()).expect("limits");
+                let result = step(
+                    &mut client,
+                    Event::SignIn {
+                        registration: configured,
+                        key: 1,
+                        generation: 0,
+                        state: state(),
+                        verifier: if public { Some(verifier()) } else { None },
+                        now: time(1),
+                    },
+                );
+                if admitted {
+                    match result {
+                        Some(Request::Visit { url }) => {
+                            if authorization {
+                                assert!(url.starts_with(uri));
+                            }
+                        }
+                        other => panic!("expected Visit for {uri:?}, got {}", other.is_some()),
+                    }
+                    let http = request(step(
+                        &mut client,
+                        Event::Redirected {
+                            uri: if public {
+                                boxed(b"http://127.0.0.1:2345/callback")
+                            } else {
+                                boxed(b"https://web.example/callback")
+                            },
+                            state: state(),
+                            code: Some(boxed(b"grant")),
+                            error: None,
+                            now: time(2),
+                        },
+                    ));
+                    assert_eq!(http.endpoint, expected_token, "the endpoint binding survives the redirect");
+                } else {
+                    assert_eq!(failure(result), Failure::Malformed, "{uri:?}");
+                    assert!(client.is_done());
+                    assert!(step(&mut client, Event::Tick { now: time(2) }).is_none());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn refresh_keeps_its_admitted_http_loopback_endpoint() {
+    for (uri, admitted) in [
+        (b"http://127.1.2.3:9876/token".as_slice(), true),
+        (b"http://[::1]:9876/token", true),
+        (b"http://issuer.example/token", false),
+    ] {
+        let mut configured = registration(true, WireFormat::Form);
+        configured.token_endpoint = boxed(uri);
+        let prior = RefreshState { key: 7, generation: 1, refresh_token: boxed(b"refresh-old") };
+        let mut client = Client::new(limits()).expect("limits");
+        let result = step(&mut client, Event::Refresh { registration: configured, prior, now: time(1) });
+        if admitted {
+            assert_eq!(request(result).endpoint.as_ref(), uri);
+        } else {
+            assert_eq!(failure(result), Failure::Malformed);
+        }
+    }
+}
