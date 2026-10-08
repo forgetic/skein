@@ -72,20 +72,20 @@ pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &
         Purpose::Spawn => {
             let Op::Spawn { spawn } = kind else { unreachable!("a spawn completion returns its command") };
             match result {
-                Ok(Done::Spawned { pidfd, pipes }) => {
+                Ok(Done::Spawned { pidfd }) => {
                     let Some(Entity::Child(child)) = io.entities.get_mut(id) else {
                         unreachable!("a child owns spawn")
                     };
-                    assert_eq!(pipes.len(), child.pipes.len(), "a pipe per request");
+                    assert_eq!(spawn.pipes.len(), child.pipes.len(), "a pipe per request");
                     child.pidfd = Some(pidfd);
                     child.phase = Phase::Running;
                     let owner = child.owner;
                     let pipe_ids = child.pipes.clone();
                     let count = u32::try_from(pipe_ids.len()).expect("pipe count fits u32");
                     let mut tokens = List::with_capacity(count);
-                    for (at, fd) in pipes.into_iter().enumerate() {
+                    for (at, spec) in spawn.pipes.iter().enumerate() {
+                        let fd = spec.parent.expect("a successful spawn fills every parent end");
                         let pipe_id = *pipe_ids.get(at).expect("one id per fd");
-                        let spec = spawn.pipes.get(at).expect("one specification per fd");
                         let Some(Entity::Pipe(pipe)) = io.entities.get_mut(pipe_id) else {
                             unreachable!("the child owns its pipes")
                         };

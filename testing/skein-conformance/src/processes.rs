@@ -46,13 +46,10 @@ pub fn processes<B: Backend>(backend: &mut B, executable: &[u8]) -> Processes {
         executable,
         root,
         &[b"echo", b"7", b"9"],
-        &[Pipe { child: 7, way: Way::In }, Pipe { child: 9, way: Way::Out }],
+        &[Pipe { child: 7, way: Way::In, parent: None }, Pipe { child: 9, way: Way::Out, parent: None }],
     );
-    let (echo_pidfd, pipes) = match run.call(process, Op::Spawn { spawn: Box::new(spawn) }).result {
-        Ok(Done::Spawned { pidfd, pipes }) => (pidfd, pipes),
-        other => unexpected("an echo fixture spawned", &other),
-    };
-    let [input, output] = pipes.as_ref() else { unexpected("one parent descriptor per requested pipe", &pipes) };
+    let (echo_pidfd, pipes) = spawned(run.call(process, Op::Spawn { spawn: Box::new(spawn) }));
+    let [input, output] = pipes.as_slice() else { unexpected("one parent descriptor per requested pipe", &pipes) };
     pipe_write_all(&mut run, process, *input, MESSAGE);
     let echoed = pipe_read_exact(&mut run, process, *output, MESSAGE.len());
     run.close(process, *input);
@@ -61,20 +58,23 @@ pub fn processes<B: Backend>(backend: &mut B, executable: &[u8]) -> Processes {
     run.close(process, *output);
     run.close(process, echo_pidfd);
 
+    let mut missing = command(executable, root, &[b"exit", b"42"], &[Pipe { child: 1, way: Way::Out, parent: None }]);
+    missing.dir = Box::from(&b"missing-spawn-directory"[..]);
+    let failed = run.call(process, Op::Spawn { spawn: Box::new(missing) });
+    assert_eq!(
+        failed.result,
+        Err(Error::NotFound),
+        "a failed Spawn makes no usable descriptors (kernel.md, sections 3 and 4)"
+    );
+
     let status = command(executable, root, &[b"exit", b"42"], &[]);
-    let (status_pidfd, status_pipes) = match run.call(process, Op::Spawn { spawn: Box::new(status) }).result {
-        Ok(Done::Spawned { pidfd, pipes }) => (pidfd, pipes),
-        other => unexpected("an exit fixture spawned", &other),
-    };
+    let (status_pidfd, status_pipes) = spawned(run.call(process, Op::Spawn { spawn: Box::new(status) }));
     assert!(status_pipes.is_empty(), "no pipes were requested of the exit fixture");
     let status_exit = run.call(process, Op::Wait { pidfd: status_pidfd }).result;
     run.close(process, status_pidfd);
 
     let never = command(executable, root, &[b"never"], &[]);
-    let (never_pidfd, never_pipes) = match run.call(process, Op::Spawn { spawn: Box::new(never) }).result {
-        Ok(Done::Spawned { pidfd, pipes }) => (pidfd, pipes),
-        other => unexpected("a never fixture spawned", &other),
-    };
+    let (never_pidfd, never_pipes) = spawned(run.call(process, Op::Spawn { spawn: Box::new(never) }));
     assert!(never_pipes.is_empty(), "no pipes were requested of the never fixture");
     let waiting = run.start(process, Op::Wait { pidfd: never_pidfd });
     let never_waited = run.within(process, waiting, BRIEFLY).is_none();
@@ -85,6 +85,15 @@ pub fn processes<B: Backend>(backend: &mut B, executable: &[u8]) -> Processes {
     run.close(process, root);
     run.finish();
     Processes { echoed, eof, echo_exit, status_exit, never_waited, signalled, killed_exit }
+}
+
+fn spawned(complete: skein_io::kernel::Complete) -> (Fd, Vec<Fd>) {
+    match (complete.kind, complete.result) {
+        (Op::Spawn { spawn }, Ok(Done::Spawned { pidfd })) => {
+            (pidfd, spawn.pipes.iter().map(|pipe| pipe.parent.expect("parent pipe slot filled")).collect())
+        }
+        (_, other) => unexpected("a fixture spawned", &other),
+    }
 }
 
 fn command(executable: &[u8], root: Fd, args: &[&[u8]], pipes: &[Pipe]) -> Spawn {

@@ -291,9 +291,10 @@ impl<'b, B: Backend> Run<'b, B> {
                 None
             }
             (_, Ok(Done::Fd(fd) | Done::Accepted { fd, .. })) => Some(*fd),
-            (_, Ok(Done::Spawned { pidfd, pipes })) => {
+            (Op::Spawn { spawn }, Ok(Done::Spawned { pidfd })) => {
                 assert!(self.open.insert((process, *pidfd)), "a new pidfd is not already open");
-                for &fd in pipes.as_ref() {
+                for pipe in &spawn.pipes {
+                    let fd = pipe.parent.expect("every requested parent end is written");
                     assert!(self.open.insert((process, fd)), "a new pipe descriptor is not already open");
                 }
                 None
@@ -306,7 +307,8 @@ impl<'b, B: Backend> Run<'b, B> {
                     | Done::Bound(_)
                     | Done::Stat(_)
                     | Done::Exit(_)
-                    | Done::ServiceSignal(_),
+                    | Done::ServiceSignal(_)
+                    | Done::Spawned { .. },
                 )
                 | Err(_),
             ) => None,
@@ -856,7 +858,17 @@ fn handed_back<P>(flight: &Flight<P>, complete: &Complete) {
     }
     if let (Some((address, held)), Op::Spawn { spawn }) = (&flight.pipes, &complete.kind) {
         assert!(spawn.pipes.as_ptr().addr() == *address, "a Spawn's pipes come back in the Box they went down in");
-        assert_eq!(&spawn.pipes, held, "a Spawn's pipe specifications come back untouched");
+        assert_eq!(spawn.pipes.len(), held.len(), "a Spawn keeps its pipe table length");
+        for (before, after) in held.iter().zip(&spawn.pipes) {
+            assert_eq!(before.child, after.child, "a Spawn keeps each requested child descriptor");
+            assert_eq!(before.way, after.way, "a Spawn keeps each requested pipe direction");
+            assert!(before.parent.is_none(), "parent ends are empty on submission (kernel.md, section 4)");
+            assert_eq!(
+                after.parent.is_some(),
+                complete.result.is_ok(),
+                "only a successful Spawn fills its parent end slots (kernel.md, section 4)"
+            );
+        }
     }
 }
 

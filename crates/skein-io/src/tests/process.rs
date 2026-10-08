@@ -17,7 +17,7 @@ fn command(pipes: &[(u32, Way)]) -> Spawn {
         pipes: {
             let mut specs = skein_lib::List::with_capacity(u32::try_from(pipes.len()).expect("small test"));
             for (child, way) in pipes {
-                specs.push(Pipe { child: *child, way: *way }).expect("room for each pipe");
+                specs.push(Pipe { child: *child, way: *way, parent: None }).expect("room for each pipe");
             }
             specs.into_boxed()
         },
@@ -89,8 +89,9 @@ fn inherited_write_pipe_finishes_after_an_in_flight_short_write() {
 #[test]
 fn a_childs_output_is_a_stream_and_the_child_closes_after_its_pipe() {
     let mut rig = Rig::new(Limits { sockets: 3, ..limits() });
-    let spawn = rig.down(Request::Spawn { owner: owner(1), spawn: command(&[(9, Way::Out)]) }).take(Kind::Spawn);
-    let mut out = rig.complete(spawn, Ok(Done::Spawned { pidfd: Fd::new(11), pipes: Box::from([Fd::new(12)]) }));
+    let mut spawn = rig.down(Request::Spawn { owner: owner(1), spawn: command(&[(9, Way::Out)]) }).take(Kind::Spawn);
+    parent_ends(&mut spawn, &[Fd::new(12)]);
+    let mut out = rig.complete(spawn, Ok(Done::Spawned { pidfd: Fd::new(11) }));
     let wait = out.take(Kind::Wait);
     let (child, pipe) = match out.events.as_slice() {
         [Event::Spawned { owner: got, child, pipes }] if *got == owner(1) && pipes.len() == 1 => (*child, pipes[0]),
@@ -127,8 +128,9 @@ fn a_childs_output_is_a_stream_and_the_child_closes_after_its_pipe() {
 #[test]
 fn a_childs_input_grants_room_continues_short_writes_and_finishes() {
     let mut rig = Rig::new(Limits { sockets: 3, ..limits() });
-    let spawn = rig.down(Request::Spawn { owner: owner(2), spawn: command(&[(7, Way::In)]) }).take(Kind::Spawn);
-    let mut out = rig.complete(spawn, Ok(Done::Spawned { pidfd: Fd::new(21), pipes: Box::from([Fd::new(22)]) }));
+    let mut spawn = rig.down(Request::Spawn { owner: owner(2), spawn: command(&[(7, Way::In)]) }).take(Kind::Spawn);
+    parent_ends(&mut spawn, &[Fd::new(22)]);
+    let mut out = rig.complete(spawn, Ok(Done::Spawned { pidfd: Fd::new(21) }));
     let wait = out.take(Kind::Wait);
     let pipe = match out.events.as_slice() {
         [Event::Spawned { pipes, .. }] => pipes[0],
@@ -153,4 +155,12 @@ fn a_childs_input_grants_room_continues_short_writes_and_finishes() {
     assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner: owner(2) }]);
     rig.next().nothing();
     rig.empty();
+}
+
+pub(super) fn parent_ends(submit: &mut crate::kernel::Submit, ends: &[Fd]) {
+    let Op::Spawn { spawn } = &mut submit.kind else { panic!("spawn record") };
+    assert_eq!(spawn.pipes.len(), ends.len());
+    for (pipe, fd) in spawn.pipes.iter_mut().zip(ends) {
+        pipe.parent = Some(*fd);
+    }
 }

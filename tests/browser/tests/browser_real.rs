@@ -78,7 +78,7 @@ fn spawn(chromium: &Path, profile: &Path) -> (Spawn, kernel::Fd) {
             browser::command::Direction::Read => Way::In,
             browser::command::Direction::Write => Way::Out,
         };
-        pipes.push(Pipe { child: spec.descriptor, way });
+        pipes.push(Pipe { child: spec.descriptor, way, parent: None });
     }
     (
         Spawn {

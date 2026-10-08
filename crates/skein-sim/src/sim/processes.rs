@@ -445,8 +445,8 @@ impl Sim {
 
     pub(super) fn answered_spawn(&mut self, ticket: Ticket, result: Result<Reply, Error>) {
         let (pid, token) = self.spawn_asked.remove(&ticket).expect("a spawn call waiting");
-        let op = self.unpark(pid, token);
-        let Op::Spawn { ref spawn } = op else { self.bug("a spawn call holds Spawn") };
+        let mut op = self.unpark(pid, token);
+        let Op::Spawn { ref mut spawn } = op else { self.bug("a spawn call holds Spawn") };
         let reserved = u32::try_from(spawn.pipes.len()).unwrap_or(u32::MAX).saturating_add(1);
         self.process_mut(pid).spawning = self.process(pid).spawning.checked_sub(reserved).expect("reserved spawn fds");
         match result {
@@ -468,13 +468,12 @@ impl Sim {
                 );
                 let pidfd = self.new_process_fd(pid);
                 self.process_mut(pid).pidfds.insert(pidfd, child_id);
-                let mut parent = Vec::with_capacity(specs.len());
-                for index in 0..specs.len() {
+                for (index, pipe) in spawn.pipes.iter_mut().enumerate() {
                     let fd = self.new_process_fd(pid);
                     self.process_mut(pid).pipe_fds.insert(fd, PipeEnd { child: child_id, index });
-                    parent.push(fd);
+                    pipe.parent = Some(fd);
                 }
-                self.complete(pid, token, op, Ok(Done::Spawned { pidfd, pipes: parent.into_boxed_slice() }));
+                self.complete(pid, token, op, Ok(Done::Spawned { pidfd }));
             }
             Ok(reply) => self.machine(&format!("{reply:?} to a Spawn")),
             Err(error) => self.complete(pid, token, op, Err(error)),
@@ -756,9 +755,9 @@ mod tests {
                     root,
                     dir: Box::new([]),
                     pipes: Box::new([
-                        Pipe { child: 0, way: Way::In },
-                        Pipe { child: 1, way: Way::Out },
-                        Pipe { child: 2, way: Way::Out },
+                        Pipe { child: 0, way: Way::In, parent: None },
+                        Pipe { child: 1, way: Way::Out, parent: None },
+                        Pipe { child: 2, way: Way::Out, parent: None },
                     ]),
                 }),
             },
@@ -771,9 +770,10 @@ mod tests {
         answers.push(Answer { ticket: call.ticket, result: Ok(Reply::Program(Program::Service)) });
         sim.answer(&mut answers);
         sim.reap(parent, &mut completes);
-        let Ok(Done::Spawned { pidfd, pipes }) = completes.pop().expect("spawned").result else {
-            unreachable!("a service and three pipes")
-        };
+        let complete = completes.pop().expect("spawned");
+        let Op::Spawn { spawn } = complete.kind else { unreachable!("spawn record") };
+        let pipes: Vec<_> = spawn.pipes.iter().map(|pipe| pipe.parent.expect("parent end")).collect();
+        let Ok(Done::Spawned { pidfd }) = complete.result else { unreachable!("a service and three pipes") };
         let (child, inherited) = sim.bind_service(parent, pidfd);
         assert_eq!(inherited.len(), 3);
         assert_eq!([inherited[0].0, inherited[1].0, inherited[2].0], [0, 1, 2]);
@@ -920,7 +920,10 @@ mod tests {
                     env: Box::new([]),
                     root,
                     dir: Box::new([]),
-                    pipes: Box::new([Pipe { child: 1, way: Way::Out }, Pipe { child: 2, way: Way::Out }]),
+                    pipes: Box::new([
+                        Pipe { child: 1, way: Way::Out, parent: None },
+                        Pipe { child: 2, way: Way::Out, parent: None },
+                    ]),
                 }),
             },
         });
@@ -937,9 +940,9 @@ mod tests {
         let mut completes = Queue::with_capacity(4);
         sim.reap(pid, &mut completes);
         let spawned = completes.pop().expect("the spawn completion");
-        let Ok(Done::Spawned { pidfd, pipes }) = spawned.result else {
-            unreachable!("the child and its pipes are created")
-        };
+        let Op::Spawn { spawn } = spawned.kind else { unreachable!("spawn record") };
+        let pipes: Vec<_> = spawn.pipes.iter().map(|pipe| pipe.parent.expect("parent end")).collect();
+        let Ok(Done::Spawned { pidfd }) = spawned.result else { unreachable!("the child and its pipes are created") };
         assert_eq!(pipes.len(), 2);
 
         submits.push(Submit { op: Token::new(1), kind: Op::Wait { pidfd } });

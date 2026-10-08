@@ -121,12 +121,12 @@ impl Driver {
     }
 
     fn complete_spawn(&mut self) {
-        let Submit { op, kind } = self.flights.remove(0);
-        assert!(matches!(kind, Op::Spawn { .. }));
-        let result = Done::Spawned {
-            pidfd: Fd::new(40),
-            pipes: (0..PIPES).map(|i| Fd::new(41 + i32::try_from(i).expect("small pipe count"))).collect(),
-        };
+        let Submit { op, mut kind } = self.flights.remove(0);
+        let Op::Spawn { spawn } = &mut kind else { panic!("spawn record") };
+        for (index, pipe) in spawn.pipes.iter_mut().enumerate() {
+            pipe.parent = Some(Fd::new(41 + i32::try_from(index).expect("small pipe count")));
+        }
+        let result = Done::Spawned { pidfd: Fd::new(40) };
         self.meter.start();
         skein_io::up(
             &mut self.io,
@@ -177,8 +177,9 @@ fn a_child_with_pipes_stays_within_ios_memory_bound() {
         close_timeout: Duration::from_secs(1),
         retry: Duration::from_millis(10),
     };
-    let pipes: Box<[Pipe]> =
-        (0..PIPES).map(|i| Pipe { child: u32::try_from(i + 3).expect("small pipe count"), way: Way::Out }).collect();
+    let pipes: Box<[Pipe]> = (0..PIPES)
+        .map(|i| Pipe { child: u32::try_from(i + 3).expect("small pipe count"), way: Way::Out, parent: None })
+        .collect();
     let spawn = Spawn {
         program: Box::from(&b"/bin/true"[..]),
         args: Box::default(),
@@ -213,7 +214,7 @@ fn native_pipe_output_and_staged_close_terminals_fit_the_same_checked_bound_unti
         retry: Duration::from_millis(10),
     };
     let pipes: Box<[Pipe]> = (0..PIPES)
-        .map(|index| Pipe { child: u32::try_from(index).expect("bounded pipe count"), way: Way::In })
+        .map(|index| Pipe { child: u32::try_from(index).expect("bounded pipe count"), way: Way::In, parent: None })
         .collect();
     let spawn = Spawn {
         program: Box::from(&b"/bin/cat"[..]),

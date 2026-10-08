@@ -263,8 +263,8 @@ fn only_a_matching_oversized_send_is_an_invariant_violation() {
 
 fn child_command() -> crate::kernel::Spawn {
     let mut pipes = skein_lib::List::with_capacity(2);
-    pipes.push(crate::kernel::Pipe { child: 0, way: crate::kernel::Way::In }).expect("input pipe slot");
-    pipes.push(crate::kernel::Pipe { child: 1, way: crate::kernel::Way::Out }).expect("output pipe slot");
+    pipes.push(crate::kernel::Pipe { child: 0, way: crate::kernel::Way::In, parent: None }).expect("input pipe slot");
+    pipes.push(crate::kernel::Pipe { child: 1, way: crate::kernel::Way::Out, parent: None }).expect("output pipe slot");
     crate::kernel::Spawn {
         program: Box::from(&b"/bin/cat"[..]),
         args: Box::default(),
@@ -278,9 +278,9 @@ fn child_command() -> crate::kernel::Spawn {
 #[test]
 fn native_pipe_close_settles_waiting_output_and_actual_reap_waits_for_both_closed_pipes() {
     let mut rig = Rig::new(Limits { sockets: 3, ..limits() });
-    let spawn = rig.down(Request::Spawn { owner: owner(1), spawn: child_command() }).take(Kind::Spawn);
-    let mut spawned =
-        rig.complete(spawn, Ok(Done::Spawned { pidfd: Fd::new(20), pipes: Box::from([Fd::new(21), Fd::new(22)]) }));
+    let mut spawn = rig.down(Request::Spawn { owner: owner(1), spawn: child_command() }).take(Kind::Spawn);
+    super::process::parent_ends(&mut spawn, &[Fd::new(21), Fd::new(22)]);
+    let mut spawned = rig.complete(spawn, Ok(Done::Spawned { pidfd: Fd::new(20) }));
     let wait = spawned.take(Kind::Wait);
     let (input, output_pipe) = match spawned.events.as_slice() {
         [Event::Spawned { pipes, .. }] => match pipes.as_ref() {

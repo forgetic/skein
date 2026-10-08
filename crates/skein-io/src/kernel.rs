@@ -14,6 +14,9 @@
 //!   backend never drops, copies or replaces a `Box` (programming-model.md,
 //!   6.2). A `Recv` comes back with `buf[..n]` filled, a `Send` with its
 //!   `bytes` untouched.
+//! - **The backend allocates nothing that goes up** (kernel.md, section 4).
+//!   A `Spawn` returns its original pipe table, each `parent` slot filled
+//!   only on success; `Done::Spawned` carries the pidfd alone.
 //! - **One success shape per operation** ([`Shape`], tabled on [`Op`]). An
 //!   error means the operation did nothing usable: a failed `Socket` or
 //!   `Accept` made no descriptor.
@@ -327,7 +330,7 @@ pub struct Complete {
 /// | `Sync`, `Rename`, `Remove`, `MakeDirectory` | `Done::Nothing` |
 /// | `Stat` | `Done::Stat`, the kind and size of what is open |
 /// | `List` | `Done::Count`, entries listed into `entries[..n]`, 0 at the end |
-/// | `Spawn` | `Done::Spawned`, pidfd and parent pipe ends |
+/// | `Spawn` | `Done::Spawned`, pidfd; parent ends written into the returned `Spawn` pipe slots |
 /// | `Wait` | `Done::Exit`, exit code or signal |
 /// | `Signal` | `Done::Nothing` |
 /// | `ReadSignal` | `Done::ServiceSignal`, one blocked termination signal |
@@ -485,10 +488,13 @@ pub struct Spawn {
     pub pipes: Box<[Pipe]>,
 }
 
+/// A requested child pipe, sent by io and returned with its parent end (kernel.md, section 4).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Pipe {
     pub child: u32,
     pub way: Way,
+    /// Empty on submission and failure; filled by the backend on success.
+    pub parent: Option<Fd>,
 }
 
 /// The direction as seen by the child.
@@ -631,10 +637,9 @@ pub enum Done {
     Bound(Addr),
     /// What a `Stat` found.
     Stat(Stat),
-    /// Pidfd and the parent's ends of the requested pipes, in request order.
+    /// The backend's child descriptor; parent pipe ends are in the returned spawn record.
     Spawned {
         pidfd: Fd,
-        pipes: Box<[Fd]>,
     },
     Exit(Exit),
     /// One service termination signal read from a signalfd.
@@ -975,7 +980,7 @@ fn valid_spawn(spawn: &Spawn) -> bool {
         }
     }
     for (at, pipe) in spawn.pipes.iter().enumerate() {
-        if i32::try_from(pipe.child).is_err() {
+        if i32::try_from(pipe.child).is_err() || pipe.parent.is_some() {
             return false;
         }
         let Some(before) = spawn.pipes.get(..at) else {
@@ -1028,7 +1033,12 @@ fn may_fail(op: &Op, error: Error) -> bool {
     if let Op::Cancel { .. } = op {
         return fails_a_cancel(error);
     }
-    if let Op::Spawn { .. } = op {
+    if let Op::Spawn { spawn } = op {
+        for pipe in &spawn.pipes {
+            if pipe.parent.is_some() {
+                return false;
+            }
+        }
         return error != Error::TooLate && error != Error::Cancelled;
     }
     match op.files() {
@@ -1210,12 +1220,40 @@ fn fits(op: &Op, done: &Done) -> bool {
         },
         Done::Bound(bound) => binds(op, bound),
         Done::Stat(stat) => stat.mode & !PERMISSIONS == 0,
-        Done::Spawned { pipes, .. } => {
-            let Op::Spawn { spawn } = op else {
-                return false;
-            };
-            pipes.len() == spawn.pipes.len()
-        }
+        Done::Spawned { .. } => match op {
+            Op::Spawn { spawn } => {
+                for pipe in &spawn.pipes {
+                    if pipe.parent.is_none() {
+                        return false;
+                    }
+                }
+                true
+            }
+            Op::Socket { .. }
+            | Op::Bind { .. }
+            | Op::Listen { .. }
+            | Op::Accept { .. }
+            | Op::Connect { .. }
+            | Op::Recv { .. }
+            | Op::Send { .. }
+            | Op::Shutdown { .. }
+            | Op::Close { .. }
+            | Op::Open { .. }
+            | Op::Read { .. }
+            | Op::Write { .. }
+            | Op::Sync { .. }
+            | Op::Stat { .. }
+            | Op::Rename { .. }
+            | Op::Remove { .. }
+            | Op::MakeDirectory { .. }
+            | Op::List { .. }
+            | Op::Wait { .. }
+            | Op::Signal { .. }
+            | Op::PipeRead { .. }
+            | Op::PipeWrite { .. }
+            | Op::ReadSignal { .. }
+            | Op::Cancel { .. } => false,
+        },
         Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Exit(_) | Done::ServiceSignal(_) => true,
     }
 }

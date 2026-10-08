@@ -150,11 +150,11 @@ fn prepare(command: &Spawn) -> Result<PreparedPipes, i32> {
     Ok((dir, parents, children, nulls))
 }
 
-pub(super) fn spawn(command: &Spawn) -> Result<Done, Error> {
+pub(super) fn spawn(command: &mut Spawn) -> Result<Done, Error> {
     spawn_inner(command).map_err(map_error)
 }
 
-fn spawn_inner(command: &Spawn) -> Result<Done, i32> {
+fn spawn_inner(command: &mut Spawn) -> Result<Done, i32> {
     let path = cstring(&command.program)?;
     let (dir, parents, children, nulls) = prepare(command)?;
     let argv = std::iter::once(&command.program)
@@ -236,9 +236,10 @@ fn spawn_inner(command: &Spawn) -> Result<Done, i32> {
         // SAFETY: no spawn call can still read the attributes.
         let _destroyed = unsafe { libc::posix_spawnattr_destroy(ptr::from_mut(&mut attributes)) };
         let pidfd = spawned?;
-        let pipes =
-            parents.into_iter().map(|parent| Fd::new(parent.into_raw_fd())).collect::<Vec<_>>().into_boxed_slice();
-        Ok(Done::Spawned { pidfd: Fd::new(pidfd.into_raw_fd()), pipes })
+        for (pipe, parent) in command.pipes.iter_mut().zip(parents) {
+            pipe.parent = Some(Fd::new(parent.into_raw_fd()));
+        }
+        Ok(Done::Spawned { pidfd: Fd::new(pidfd.into_raw_fd()) })
     })();
     // SAFETY: the actions object was initialized and is no longer used.
     let _destroyed = unsafe { libc::posix_spawn_file_actions_destroy(ptr::from_mut(&mut actions)) };

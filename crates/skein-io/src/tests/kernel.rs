@@ -77,7 +77,7 @@ fn documented(op: &Op) -> Done {
         Op::List { .. } => Done::Count(0),
         Op::Bind { .. } => Done::Bound(v4()),
         Op::Stat { .. } => Done::Stat(STAT),
-        Op::Spawn { .. } => Done::Spawned { pidfd: NEW, pipes: Box::default() },
+        Op::Spawn { .. } => Done::Spawned { pidfd: NEW },
         Op::Wait { .. } => Done::Exit(crate::kernel::Exit::Code(0)),
         Op::ReadSignal { .. } => Done::ServiceSignal(crate::kernel::ServiceSignal::Terminate),
         Op::Listen { .. }
@@ -595,4 +595,34 @@ fn a_create_asks_for_permission_bits_only() {
     assert!(create(Some(0o777)).is_valid());
     assert!(!create(Some(0o4644)).is_valid(), "no set-user-ID bit");
     assert!(!create(Some(0o10644)).is_valid(), "no file type");
+}
+
+#[test]
+fn spawn_parent_slots_are_empty_until_a_successful_completion() {
+    use crate::kernel::{Pipe, Spawn, Way};
+    let mut kind = Op::Spawn {
+        spawn: Box::new(Spawn {
+            program: name(b"child"),
+            args: Box::default(),
+            env: Box::default(),
+            root: FD,
+            dir: Box::default(),
+            pipes: Box::new([Pipe { child: 1, way: Way::Out, parent: None }]),
+        }),
+    };
+    assert!(kind.is_valid(), "kernel.md, section 4: parent slots start empty");
+    let success = Done::Spawned { pidfd: NEW };
+    let mut complete = Complete { op: Token::new(1), kind, result: Ok(success) };
+    assert!(!complete.is_valid(), "success must fill each requested parent end");
+    let Op::Spawn { spawn } = &mut complete.kind else { panic!("spawn record") };
+    spawn.pipes[0].parent = Some(FD);
+    assert!(complete.is_valid(), "the original pipe table carries the parent end");
+    assert!(!complete.kind.is_valid(), "a filled parent slot is not a submission");
+    complete.result = Err(Error::NotFound);
+    assert!(!complete.is_valid(), "failure cannot leave a usable pipe end");
+    kind = complete.kind;
+    let Op::Spawn { spawn } = &mut kind else { panic!("spawn record") };
+    spawn.pipes[0].parent = None;
+    complete.kind = kind;
+    assert!(complete.is_valid(), "a failed spawn returns empty parent slots");
 }

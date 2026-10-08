@@ -101,7 +101,10 @@ impl Script {
                     env: Box::new([Box::from(&b"KEY=value"[..])]),
                     root: self.root.expect("parent root"),
                     dir: Box::new([]),
-                    pipes: Box::new([Pipe { child: 0, way: Way::In }, Pipe { child: 1, way: Way::Out }]),
+                    pipes: Box::new([
+                        Pipe { child: 0, way: Way::In, parent: None },
+                        Pipe { child: 1, way: Way::Out, parent: None },
+                    ]),
                 }),
             },
             Act::Write(at, bytes) => Op::PipeWrite { fd: self.fds[at], bytes: Box::from(bytes), from: 0 },
@@ -127,9 +130,10 @@ impl Host for Script {
         while let Some(complete) = self.completions.pop() {
             self.waiting = false;
             match complete.result {
-                Ok(Done::Spawned { pidfd, ref pipes }) => {
+                Ok(Done::Spawned { pidfd }) => {
                     self.pidfd = Some(pidfd);
-                    self.fds = pipes.to_vec();
+                    let Op::Spawn { spawn } = &complete.kind else { panic!("spawn record") };
+                    self.fds = spawn.pipes.iter().map(|pipe| pipe.parent.expect("parent pipe end")).collect();
                 }
                 Ok(Done::Count(count)) => {
                     if let Op::PipeRead { buf, .. } = &complete.kind {

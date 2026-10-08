@@ -157,13 +157,15 @@ fn child_pipes_echo_at_chosen_descriptors_and_exit() {
         env: Box::new([]),
         root,
         dir: Box::from(&b"."[..]),
-        pipes: Box::new([Pipe { child: 7, way: Way::In }, Pipe { child: 9, way: Way::Out }]),
+        pipes: Box::new([
+            Pipe { child: 7, way: Way::In, parent: None },
+            Pipe { child: 9, way: Way::Out, parent: None },
+        ]),
     };
-    let Done::Spawned { pidfd, pipes } =
-        run(&mut machine, &mut sim, pid, 1, Op::Spawn { spawn: Box::new(spawn) }).result.unwrap()
-    else {
-        panic!("spawned child")
-    };
+    let complete = run(&mut machine, &mut sim, pid, 1, Op::Spawn { spawn: Box::new(spawn) });
+    let Op::Spawn { spawn } = complete.kind else { panic!("spawn record") };
+    let pipes: Vec<_> = spawn.pipes.iter().map(|pipe| pipe.parent.expect("parent end")).collect();
+    let Done::Spawned { pidfd } = complete.result.unwrap() else { panic!("spawned child") };
     assert_eq!(pipes.len(), 2);
     assert_eq!(
         run(&mut machine, &mut sim, pid, 2, Op::PipeWrite { fd: pipes[0], bytes: Box::from(&b"hello"[..]), from: 0 })
