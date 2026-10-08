@@ -7,18 +7,22 @@
 //! while `spawn_signalfd` and `spawn_signals` supply roots' signal sources.
 //! `run` blocks only when every process and the control queue are idle,
 //! and returns once exits, operations and descriptor closures settle. It
-//! does not replay.
+//! does not replay. Checked constructors meter each process separately; their
+//! outcome verifies exact release on drop (testing-strategy.md, section 6).
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::ops::{Deref, DerefMut};
 
+use skein_heap::Span;
 use skein_io::kernel::{Complete, Done, Error, Exit, Fd, Op, ServiceSignal, Signal, Spawn, Submit};
 use skein_lib::{Duration, Queue, Time, Token};
 use skein_shell::{Clock, Config, Kernel, Now, Wait};
 
+use crate::heap::Heap;
 use crate::host::Host;
 use crate::referee::Referee;
 use crate::{HostedProgram, Inherited, StartupRoots};
@@ -30,10 +34,71 @@ pub struct Outcome<P> {
     /// The processes as the run left them, settled.
     pub procs: Vec<P>,
     pub killed: Vec<Killed>,
+    /// Per-process peak and worst case, in surviving admission order.
+    pub heap: Option<Vec<(u64, u64)>>,
+    /// Bytes each surviving process must release when dropped.
+    pub held: Option<Vec<i64>>,
     pub iterations: u32,
     /// When the run began and settled, on the real clock.
     pub start: Time,
     pub end: Time,
+}
+
+/// A checked real outcome, borrowed for assertions; its final drop verifies
+/// exact per-process release (testing-strategy.md, section 6).
+#[derive(Debug)]
+pub struct CheckedOutcome<P>(Outcome<P>);
+
+impl<P> Deref for CheckedOutcome<P> {
+    type Target = Outcome<P>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<P> Drop for CheckedOutcome<P> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        let held = self.0.held.take().expect("a checked outcome keeps its ownership ledger");
+        assert_eq!(self.0.procs.len(), held.len(), "an ownership entry per surviving process");
+        for (at, (proc, held)) in self.0.procs.drain(..).zip(held).enumerate() {
+            let span = Span::start();
+            drop(proc);
+            let freed = span.end().net.checked_neg().expect("a heap within an i64");
+            assert_eq!(freed, held, "real process {at} must release exactly its own metered heap");
+        }
+    }
+}
+
+/// A real world whose constructors and iterations are metered separately.
+/// Its checked outcome verifies final release, while the existing unchecked
+/// world permits callers to take surviving processes by value.
+#[derive(Debug)]
+pub struct CheckedWorld<P, R>(World<P, R>);
+
+impl<P, R> Deref for CheckedWorld<P, R> {
+    type Target = World<P, R>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<P, R> DerefMut for CheckedWorld<P, R> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<P: Host, R: Referee<P>> CheckedWorld<P, R> {
+    /// Runs on one ring and retains final ownership checking in the outcome.
+    #[must_use]
+    pub fn run(self, clock: &Clock, patience: Duration) -> CheckedOutcome<P> {
+        CheckedOutcome(self.0.run(clock, patience))
+    }
 }
 
 /// Runs unhosted processes on the shared real ring; `World` also hosts spawns.
@@ -51,6 +116,8 @@ pub fn run<P: Host, R: Referee<P>>(procs: Vec<P>, referee: R, clock: &Clock, pat
 pub struct Killed {
     pub host: usize,
     pub exit: Exit,
+    /// Peak and bound after exact metered release, when checked.
+    pub heap: Option<(u64, u64)>,
 }
 
 /// Signal requests the referee injects between iterations, addressed by stable host id.
@@ -84,6 +151,7 @@ pub struct World<P, R> {
     controls: Controls,
     signals: BTreeMap<usize, SignalSource>,
     signalfd: bool,
+    heap: Option<Heap>,
 }
 
 impl<P: Host, R: Referee<P>> World<P, R> {
@@ -107,7 +175,23 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             controls,
             signals: BTreeMap::new(),
             signalfd: false,
+            heap: None,
         }
+    }
+
+    /// Starts a checked world under skein's counting allocator. Build every
+    /// root inside its spawn closure; referee and backend storage is excluded.
+    #[must_use]
+    pub fn new_checked(referee: R) -> CheckedWorld<P, R> {
+        Self::new_controlled_checked(|_| referee)
+    }
+
+    /// Constructs a checked world with referee-controlled signal injection.
+    #[must_use]
+    pub fn new_controlled_checked<F: FnOnce(Controls) -> R>(make_referee: F) -> CheckedWorld<P, R> {
+        let mut world = Self::new_controlled(make_referee);
+        world.heap = Some(Heap::new());
+        CheckedWorld(world)
     }
 
     /// Adds a service whose signal records arrive through its own real pipe.
@@ -151,7 +235,11 @@ impl<P: Host, R: Referee<P>> World<P, R> {
     /// Adds a root host with descriptors it inherits and owns until close or exit.
     pub fn spawn_with_fds<F: FnOnce() -> P>(&mut self, fds: Vec<Fd>, make: F) -> usize {
         let host = self.procs.len();
-        self.procs.push(make());
+        let proc = match &mut self.heap {
+            Some(heap) => heap.admit(make, P::worst_case),
+            None => make(),
+        };
+        self.procs.push(proc);
         self.inherited.push(fds);
         host
     }
@@ -193,6 +281,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             housekeeping: BTreeMap::new(),
             cleanup: VecDeque::new(),
             killed: Vec::new(),
+            dying: BTreeSet::new(),
         }
         .run(clock, patience)
     }
@@ -258,6 +347,7 @@ struct Running<P, R> {
     housekeeping: BTreeMap<Token, usize>,
     cleanup: VecDeque<(usize, Op)>,
     killed: Vec<Killed>,
+    dying: BTreeSet<usize>,
 }
 
 impl<P: Host, R: Referee<P>> Running<P, R> {
@@ -278,7 +368,10 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                 if self.processes.get(&host).expect("a process per host").exit.is_none() {
                     let proc = self.world.procs.get_mut(at).expect("a process per host");
                     self.ring.deliver(host, proc.completions());
-                    proc.iterate(now, wall);
+                    match &mut self.world.heap {
+                        Some(heap) => heap.around(at, || proc.iterate(now, wall)),
+                        None => proc.iterate(now, wall),
+                    }
                     let mut submits = Queue::with_capacity(proc.submissions().len());
                     while let Some(record) = proc.submissions().pop() {
                         submits.push(record);
@@ -287,7 +380,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                         let record = self.ring.register(host, record);
                         self.submit(record);
                     }
-                    // A kill may have removed this or an earlier host.
+                    // Killed hosts remain admitted until their records return.
                     if self.ids.get(at) == Some(&host) {
                         let proc = self.world.procs.get(at).expect("a process per host");
                         if self.children.values().any(|child| child.host == host)
@@ -297,6 +390,9 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                             self.processes.get_mut(&host).expect("a process per host").exit = Some(exit);
                         }
                     }
+                }
+                if self.dying.contains(&host) {
+                    self.discard(at, host);
                 }
                 if self.ids.get(at) == Some(&host) {
                     at = at.checked_add(1).expect("bounded host count");
@@ -323,7 +419,15 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                     self.processes.values().all(|process| process.fds.is_empty()),
                     "settled hosts leave no owned descriptor open"
                 );
-                return Outcome { procs: self.world.procs, killed: self.killed, iterations, start, end: now };
+                return Outcome {
+                    heap: self.world.heap.as_ref().map(Heap::report),
+                    held: self.world.heap.as_ref().map(Heap::held),
+                    procs: self.world.procs,
+                    killed: self.killed,
+                    iterations,
+                    start,
+                    end: now,
+                };
             }
             if let Some(why) = self.world.referee.overdue(now) {
                 crate::fail(&format!(
@@ -391,12 +495,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
         let (host, complete) = self.ring.complete(complete);
         let process = self.processes.get_mut(&host).expect("a process per host");
         process.completed(&complete);
-        if process.exit.is_some() {
-            let count = self.ring.counts.get_mut(host).expect("a count per host");
-            *count = count.checked_sub(1).expect("an abandoned operation was in flight");
-        } else {
-            self.ring.ready.get_mut(host).expect("a queue per host").push_back(complete);
-        }
+        self.ring.ready.get_mut(host).expect("a queue per host").push_back(complete);
     }
 
     fn synthetic(&mut self, record: Submit, result: Result<Done, Error>) {
@@ -527,7 +626,10 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
         match skein_shell::hosted_pipes(spawn) {
             Ok(pipes) => {
                 let inherited = Inherited { pipes: pipes.pipes, roots, signal: pipes.signal };
-                let proc = make(spawn, &inherited);
+                let proc = match &mut self.world.heap {
+                    Some(heap) => heap.admit(|| make(spawn, &inherited), P::worst_case),
+                    None => make(spawn, &inherited),
+                };
                 assert!(proc.operations() <= operations, "hosted operations fit their provision");
                 let child = self.ring.admit(proc.operations());
                 self.world.procs.push(proc);
@@ -574,18 +676,9 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
     fn kill(&mut self, host: usize) {
         let exit = Exit::Signal(9);
         self.processes.get_mut(&host).expect("child process").exit = Some(exit);
-        if let Some(at) = self.ids.iter().position(|id| *id == host) {
-            drop(self.world.procs.remove(at));
-            self.ids.remove(at);
-        }
-        self.killed.push(Killed { host, exit });
-        // Returned-but-not-delivered records are abandoned before cancelling
-        // the still-submitted records; buffers remain kernel-owned until reap.
-        let ready = self.ring.ready.get_mut(host).expect("a queue per host");
-        let discarded = u32::try_from(ready.len()).expect("within host limit");
-        ready.clear();
-        let count = self.ring.counts.get_mut(host).expect("a count per host");
-        *count = count.checked_sub(discarded).expect("returned records were in flight");
+        assert!(self.dying.insert(host), "a hosted child is killed once");
+        // Keep the child until every submitted buffer returns. Returned records
+        // are discarded under that child's meter, never by the backend.
         let targets: Vec<Token> =
             self.ring.bindings.iter().filter_map(|(token, binding)| (binding.host == host).then_some(*token)).collect();
         for target in targets {
@@ -602,6 +695,34 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                 self.cleanup.push_back((host, Op::Cancel { target }));
             }
         }
+    }
+
+    fn discard(&mut self, at: usize, host: usize) {
+        let proc = self.world.procs.get_mut(at).expect("a dying process");
+        self.ring.deliver(host, proc.completions());
+        let mut discard = || {
+            while let Some(complete) = proc.completions().pop() {
+                drop(complete);
+            }
+        };
+        match &mut self.world.heap {
+            Some(heap) => heap.around(at, discard),
+            None => discard(),
+        }
+    }
+
+    fn release_killed(&mut self, host: usize, exit: Exit) {
+        let at = self.ids.iter().position(|id| *id == host).expect("a dying child remains admitted");
+        let proc = self.world.procs.remove(at);
+        self.ids.remove(at);
+        let heap = match &mut self.world.heap {
+            Some(heap) => Some(heap.release(at, proc)),
+            None => {
+                drop(proc);
+                None
+            }
+        };
+        self.killed.push(Killed { host, exit, heap });
     }
 
     fn settle_children(&mut self) {
@@ -623,6 +744,9 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
             }
             if process.cleanup != 0 || self.cleanup.iter().any(|(owner, _)| *owner == host) {
                 continue;
+            }
+            if self.dying.remove(&host) {
+                self.release_killed(host, exit);
             }
             let child = self.children.values_mut().find(|child| child.host == host).expect("registered child");
             child.exit = Some(exit);
