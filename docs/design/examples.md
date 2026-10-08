@@ -297,11 +297,26 @@ processes, each a host of an `iterate` (a service, or a fake client):
   prints, "listening at", which the service will emit as a fact; and its
   call of `svc.shutdown()` for the termination signal, which will come as
   io's `Shutdown` event (io.md, 7). Each moves out once those are built.
-- **The real loop** runs the same processes and referee, each process on
-  a ring of its own (as a process would be: its tokens are its own), in
-  one thread on loopback, with deadlines on the real clock. One thread
-  cannot block on several rings, so each turn enters every ring without
-  waiting, and an idle loop blocks on one ring for a millisecond at most.
+- **The real loop** runs the same processes and referee over one ring, in
+  one thread on loopback, with deadlines on the real clock. An idle loop
+  blocks on the ring until the next completion or deadline.
+  - **Each process's operations stay its own.** The harness renames each
+    token to one unique in the world, and back as its completion is
+    reaped. It holds each process to the operations in flight its own
+    ring would allow, and the ring has room for all of them.
+  - **A spawned service is hosted, not run.** Its spawn never reaches the
+    kernel: the harness makes the child's pipes, hands the parent its
+    ends, and starts the child in the same loop with the other ends, as
+    the simulator does (simulator.md, 3). The parent's wait ends once the
+    child has finished and the harness has closed what it still held, as
+    the kernel would at its exit. A kill drops the child and closes
+    everything it held.
+  - **Signals.** One service reads the process's signalfd, as it would
+    alone, and the referee sends it real signals. A process's signals
+    cannot be aimed at one of the services it hosts, so every other
+    service, a hosted child among them, reads its signals from a pipe the
+    harness gives it. A parent's signal to a hosted child, or the
+    referee's, arrives there as a signal record.
 
 ## 7. Testing
 
@@ -342,5 +357,7 @@ processes, each a host of an `iterate` (a service, or a fake client):
 - **The HTTP server and its client,** with `skein-http`.
 - **Signals to the service** (io.md, 7): `Shutdown` comes from the
   service's `shutdown`, and `main` runs until it is killed.
+- **The real loop on one ring** (section 6): it still gives each process
+  a ring of its own, and hosts no spawned service.
 - **Domain worlds** for the echo's domain: it is one slab and a counter,
   and its step tests cover it.

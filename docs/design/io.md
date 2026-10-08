@@ -480,6 +480,9 @@ caller budgets the command buffers it supplies to `Spawn`.
     the start. Its file actions install requested pipes at chosen child
     descriptors and close everything else on exec. The kernel's own check
     then stops a reused PID from being signalled. `std::process` is not used.
+  - The child starts in a process group of its own, so a terminal's
+    interrupt reaches the service alone, which decides what its children
+    hear (section 7).
   - A requested pipe has a chosen child descriptor and direction. Its
     parent end is a one-way stream token in the `Spawned` event, in request
     order. Each pipe consumes one entity slot alongside the child.
@@ -561,6 +564,7 @@ The remaining order follows what temper pulls:
    (kernel.md, 6.1; simulator.md, 3.1; testing.md, 4);
 2. signals to the service, with the shell's startup.
 
-File streams and datagram sockets come when a user needs them.
+A child's process group of its own (section 6) is not built yet. File
+streams and datagram sockets come when a user needs them.
 Transition coverage of the handlers (testing-strategy.md, 6) waits for
 `cargo llvm-cov`, which is not installed.

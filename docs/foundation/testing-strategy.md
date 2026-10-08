@@ -67,7 +67,7 @@ simulator, or the real ring.
 | protocol worlds | both ends of a connection: machine stacks, and the protocol layers and domains above them where they exist | the bytes between the two ends | both | yes, in plaintext |
 | io worlds | io | the step above it, scripted; the kernel, by the simulator | skein's | yes |
 | simulated worlds | every layer: each process's `iterate` | the kernel, the network and the machine, by the simulator | both | yes, in plaintext |
-| real loop | the service as it ships and its fakes, in one loop over the real ring | the peers, as fakes on loopback sockets; nothing below | both | no |
+| real loop | the service as it ships, the services it spawns, and its fakes, in one loop over one real ring | the peers, as fakes on loopback sockets; nothing below | both | no |
 
 ### 2.1 Step tests
 
@@ -155,14 +155,23 @@ service, with skein's as their template.
 ### 2.8 The real loop
 
 A real-loop test is still one thread and one loop, but its loop makes real
-io_uring calls, through the shell's kernel, and drives everything through
-them: the service as it ships, any service it would spawn, and its fakes,
-which follow the same programming model and meet it on loopback sockets.
-Only programs that are not step machines (git, a shell) run outside the
-loop, as real child processes in a scratch directory. Between iterations
-the test sees a frozen snapshot, as in every other world, so its checks
-and its referee work as they do lower down, with deadlines on the real
-clock.
+io_uring calls, through one ring of the shell's kernel, which the whole
+world shares as it shares the simulator below. It drives everything
+through them: the service as it ships, any service it would spawn, and
+its fakes, which follow the same programming model and meet it on
+loopback sockets.
+
+- **No service runs a loop of its own.** When one spawns another, the
+  harness answers the spawn: it joins the two with real pipes and hosts
+  the child in the same loop. A test that starts a service's binary as a
+  process is not this tier.
+- **Only programs that are not step machines** (git, a shell) run outside
+  the loop, as real child processes in a scratch directory.
+- **Between iterations the test sees a frozen snapshot,** as in every
+  other world, so its checks and its referee work as they do lower down,
+  with deadlines on the real clock. The kernel does not stop meanwhile:
+  bytes still arrive and children still run, and the loop sees them as it
+  reaps.
 
 It shows what only the real kernel can: the ring adapter's `unsafe`,
 under a sanitizer; the probe at startup; signals; TLS; a process tree
