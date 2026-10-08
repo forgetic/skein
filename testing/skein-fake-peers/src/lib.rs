@@ -11,6 +11,7 @@
 
 mod face;
 pub mod llm;
+pub mod oauth;
 mod transport;
 
 pub use face::{Error, Limits};

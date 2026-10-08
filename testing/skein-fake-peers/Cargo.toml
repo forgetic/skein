@@ -11,6 +11,9 @@ skein-lib.workspace = true
 skein-io.workspace = true
 skein-world.workspace = true
 skein-llm.workspace = true
+skein-http.workspace = true
+skein-oauth.workspace = true
+skein-fake-oauth.workspace = true
 skein-fake-llm-domain.workspace = true
 skein-fake-llm-protocol.workspace = true
 rustls = { workspace = true, features = ["std"] }
