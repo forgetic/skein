@@ -317,6 +317,13 @@ processes, each a host of an `iterate` (a service, or a fake client):
     service, a hosted child among them, reads its signals from a pipe the
     harness gives it. A parent's signal to a hosted child, or the
     referee's, arrives there as a signal record.
+- **End to end** (testing-strategy.md, 2.9), the harness starts a
+  service's binary as a child, as it ships, on pipes or under a
+  pseudo-terminal. The test's ends of the pipes, or the terminal's other
+  side, join the test's loop as streams of its scripted processes. The
+  child's exit arrives in the loop as an event, and the referee may send
+  the child a signal. Nothing of the child is hosted: it runs its own
+  loop.
 
 ## 7. Testing
 
@@ -359,5 +366,7 @@ processes, each a host of an `iterate` (a service, or a fake client):
   service's `shutdown`, and `main` runs until it is killed.
 - **The real loop on one ring** (section 6): it still gives each process
   a ring of its own, and hosts no spawned service.
+- **End to end** (section 6): the harness cannot yet start a binary under
+  a pseudo-terminal. The echo's binary is its first user.
 - **Domain worlds** for the echo's domain: it is one slab and a counter,
   and its step tests cover it.
