@@ -45,6 +45,7 @@ pub(super) struct ChildPipe {
     pub spec: Pipe,
     pub open: bool,
     pub ended: bool,
+    pub read_to_end: bool,
     pub bytes: VecDeque<u8>,
     pub waiting: Option<Token>,
 }
@@ -109,6 +110,22 @@ impl Sim {
     pub fn service_running(&self, pid: Pid) -> bool {
         let (parent, child) = self.process(pid).parent.expect("a bound service process");
         self.process(parent).children[&child].exit.is_none()
+    }
+
+    /// Checks a parent's hosted children have exited and their output pipes
+    /// were read through EOF (testing-strategy.md, section 6).
+    pub fn assert_hosted_settled(&self, pid: Pid) {
+        for child in self.process(pid).children.values() {
+            if child.service.is_some() {
+                assert!(child.exit.is_some(), "every hosted child finished once settled");
+                for pipe in &child.pipes {
+                    assert!(
+                        pipe.spec.way != Way::Out || pipe.read_to_end,
+                        "every hosted child's output pipe was read to its end once settled"
+                    );
+                }
+            }
+        }
     }
 
     /// Gives a process a pipe it can read; the world feeds and closes its writer.
@@ -456,7 +473,14 @@ impl Sim {
                 self.next_child = child_id.checked_add(1).expect("fewer than 2^64 children");
                 let pipes = specs
                     .iter()
-                    .map(|&spec| ChildPipe { spec, open: true, ended: false, bytes: VecDeque::new(), waiting: None })
+                    .map(|&spec| ChildPipe {
+                        spec,
+                        open: true,
+                        ended: false,
+                        read_to_end: false,
+                        bytes: VecDeque::new(),
+                        waiting: None,
+                    })
                     .collect();
                 let exit = match program {
                     Program::Exit(code) => Some(Exit::Code(code)),
@@ -498,6 +522,9 @@ impl Sim {
             return;
         }
         let n = buf.len().min(pipe.bytes.len());
+        if n == 0 {
+            pipe.read_to_end = true;
+        }
         for slot in buf.iter_mut().take(n) {
             *slot = pipe.bytes.pop_front().expect("within buffered bytes");
         }

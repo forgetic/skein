@@ -45,6 +45,8 @@ pub struct Script {
     pub child_exit: Option<Exit>,
     pub hog: usize,
     pub held: Box<[u8]>,
+    pub leak: bool,
+    pub terminal: Option<Exit>,
 }
 
 impl Script {
@@ -68,6 +70,8 @@ impl Script {
             child_exit: None,
             hog: 0,
             held: Box::new([]),
+            leak: false,
+            terminal: Some(Exit::Code(0)),
         }
     }
 
@@ -160,6 +164,10 @@ impl Host for Script {
             self.submit(Op::Close { fd });
         } else {
             self.done = true;
+            if self.leak {
+                self.leak = false;
+                let _leaked = Box::leak(std::mem::take(&mut self.held));
+            }
         }
     }
 
@@ -178,6 +186,10 @@ impl Host for Script {
     fn is_empty(&self) -> bool {
         self.done && self.completions.is_empty() && self.submissions.is_empty()
     }
+    fn exit(&self) -> Option<Exit> {
+        if self.is_empty() { self.terminal } else { None }
+    }
+
     fn worst_case(&self) -> u64 {
         64 * 1024
     }

@@ -229,6 +229,7 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
             assert!(proc.is_empty(), "seed {}: {pid} holds nothing once settled", self.seed);
             self.sim.assert_quiescent(*pid);
             self.sim.assert_no_open_fds(*pid);
+            self.sim.assert_hosted_settled(*pid);
         }
         Outcome {
             machine: self.machine,
@@ -325,7 +326,12 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
 
     /// Whether every process holds nothing and has nothing in flight.
     fn settled(&self) -> bool {
-        for (proc, pid) in self.procs.iter().zip(&self.pids) {
+        for (at, (proc, pid)) in self.procs.iter().zip(&self.pids).enumerate() {
+            if self.hosted.get(at).expect("a hosting status per process").is_some()
+                && !self.finished.get(at).expect("a terminal status per process")
+            {
+                return false;
+            }
             if !proc.is_empty() || self.sim.in_flight(*pid) > 0 {
                 return false;
             }
