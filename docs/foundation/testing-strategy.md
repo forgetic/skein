@@ -25,10 +25,13 @@ failure is fixed.
   (the code under test, its fakes, the referee), so between two
   iterations the whole world is a frozen snapshot that checks can inspect
   and reason about. The tiers differ in what sits under the loop.
-- **Deterministic up to the real loop.** Every tier but the top one owns
-  the clock, the seeds and the kernel, so a seed replays to the same run.
+- **Deterministic up to the real loop.** Every tier below it owns the
+  clock, the seeds and the kernel, so a seed replays to the same run.
   The real loop trades replay for the real kernel. TLS is not
   deterministic, so the replaying tiers run in plaintext.
+- **End to end, the service runs as it ships.** Above the real loop, its
+  binaries run as processes: against fakes in the focused suite, and
+  against the real backends in a live suite run by choice.
 - **Faults everywhere, limits tiny.** Worlds run with capacities small
   enough to reach every admission point, and inject faults in every state,
   drawn from the seed.
@@ -52,9 +55,9 @@ failure is fixed.
 
 ## 2. The tiers
 
-Every tier above step tests is a world: one thread, whose one loop drives
-the code under test, its fakes and the referee, iteration by iteration,
-and runs its checks between iterations. What sits under the loop is what
+Every tier between step tests and end to end is a world: one thread,
+whose one loop drives the code under test, its fakes and the referee,
+iteration by iteration, and runs its checks between iterations. What sits under the loop is what
 changes from tier to tier: nothing, byte streams between two ends, the
 simulator, or the real ring.
 
@@ -68,6 +71,7 @@ simulator, or the real ring.
 | io worlds | io | the step above it, scripted; the kernel, by the simulator | skein's | yes |
 | simulated worlds | every layer: each process's `iterate` | the kernel, the network and the machine, by the simulator | both | yes, in plaintext |
 | real loop | the service as it ships, the services it spawns, and its fakes, in one loop over one real ring | the peers, as fakes on loopback sockets; nothing below | both | no |
+| end to end | the service's binaries as they ship, as processes with their own loops | the peers, as fakes on loopback, or nothing when live | both | no |
 
 ### 2.1 Step tests
 
@@ -164,7 +168,7 @@ loopback sockets.
 - **No service runs a loop of its own.** When one spawns another, the
   harness answers the spawn: it joins the two with real pipes and hosts
   the child in the same loop. A test that starts a service's binary as a
-  process is not this tier.
+  process is end to end (2.9).
 - **Only programs that are not step machines** (git, a shell) run outside
   the loop, as real child processes in a scratch directory.
 - **Between iterations the test sees a frozen snapshot,** as in every
@@ -177,6 +181,40 @@ It shows what only the real kernel can: the ring adapter's `unsafe`,
 under a sanitizer; the probe at startup; signals; TLS; a process tree
 that ends; real programs' output. It does not replay. A failure found
 there is rerun lower down as a scenario, where it does.
+
+### 2.9 End to end
+
+An end-to-end test runs the service's binaries as they ship: processes,
+each started by its own `main` and running its own loop, joined by real
+pipes and sockets, and by a pseudo-terminal where a person would sit. The
+test's side is still one thread and one loop over the real ring. It
+drives the fakes on loopback and the scripted person, and starts the
+service as a child.
+
+It sees the service only from outside:
+- what its peers and the person received;
+- its exit and its standard error;
+- the files it left;
+- the trace it was configured to write.
+
+There is no snapshot of the service between iterations, and no memory
+check inside it. It does not replay.
+
+It shows what only processes show:
+- `main`'s wiring, from its arguments and settings to its startup checks;
+- a service starting another by its program;
+- the signal mask, and a terminal's signals;
+- exit codes.
+
+A failure found there is rerun lower down.
+
+- **Against fakes,** it is hermetic and runs in the focused suite, within
+  its budget. These tests are few: one per path through `main`, not one
+  per behaviour.
+- **Live,** the real backends replace the fakes: providers, issuers,
+  remotes. Live tests need credentials, spend a subscription's usage and
+  depend on the network, so they form a suite of their own, run by
+  choice, never at the gate (section 8).
 
 ## 3. Faults
 
@@ -363,8 +401,8 @@ same. Then it moves into skein.
 ## 8. Two suites
 
 - **Focused tests** check what the code is expected to do: the step
-  tests, and each world's scenarios, referee tests, replay, and memory at
-  the worst case. A scenario that needs randomness runs the few seeds
+  tests, each world's scenarios, referee tests, replay, and memory at the
+  worst case, and the end-to-end tests against fakes. A scenario that needs randomness runs the few seeds
   that show its behaviour, and a cheap random world may stand as a smoke
   test. They run by default (`cargo nextest run --workspace`), and the
   suite takes at most **15 seconds**, so it can serve as quick feedback
@@ -378,6 +416,8 @@ same. Then it moves into skein.
   part (one world's sweep, a few seeds) when that is worth it.
 
 **The merge gate runs both suites in full,** whatever ran before it.
+**Live tests** (2.9) are a third suite, run only with `--profile live`,
+one at a time and outside any budget. The gate never runs them.
 
 The budgets are wall time on the development machine, run idle, and they
 are enforced: each nextest profile has a global timeout, so a suite that
@@ -393,9 +433,9 @@ an ignored test until it is.
 
 ## 9. Where a failure is fixed
 
-- **In the lowest tier that shows it.** A failure found in the real loop
-  or a simulated world is reproduced lower down, where it replays and
-  where the cause is closest, and fixed there. The lower scenario stays,
+- **In the lowest tier that shows it.** A failure found end to end, in
+  the real loop or in a simulated world is reproduced lower down, where
+  it replays and where the cause is closest, and fixed there. The lower scenario stays,
   as its regression test.
 - **In skein, when it comes from skein.** A service's tiers stand on
   skein's and do not retest the kit. A failure in a service's world that
