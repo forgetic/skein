@@ -5,6 +5,9 @@
 //!
 //! - [`Host`]: what the harness needs of a process, a service or a fake,
 //!   each following the programming model;
+//! - [`HostedProgram`] and [`Inherited`]: factories shared by simulated and
+//!   real hosting, selected by the program of a spawn, and its child pipes;
+//! - [`Machine`]: the fake machine answering other programs and file calls;
 //! - [`Referee`], [`Expectation`] and [`Expectations`]: a scenario's
 //!   expectations, safety on every observation and liveness as deadlines,
 //!   and what the referee injects that belongs to no process;
@@ -31,12 +34,14 @@ extern crate alloc;
 pub mod domain;
 mod heap;
 mod host;
+mod program;
 pub mod real;
 mod referee;
 mod world;
 
 pub use heap::Memory;
 pub use host::Host;
+pub use program::{HostedProgram, Inherited, Machine, NoMachine};
 pub use referee::{Expectation, Expectations, Referee};
 pub use world::{Outcome, World};
 

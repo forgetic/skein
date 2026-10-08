@@ -1,6 +1,10 @@
 //! A simulated world (testing-strategy.md, 2.7): one thread, one loop,
 //! driving each process's `iterate` over the simulator, iteration by
 //! iteration, as each one's shell would, with the referee beside them.
+//! It keeps processes, a predeclared program registry, and the fake machine;
+//! it never inspects service state. `host` registers factories, `spawn_root`
+//! supplies startup roots, and `run` answers hosted spawns and their exits
+//! through the simulator (simulator.md, section 3; examples.md, section 6).
 
 use alloc::format;
 use alloc::string::String;
@@ -9,12 +13,14 @@ use core::fmt::{self, Debug, Write};
 use std::thread;
 
 use skein_heap::Span;
-use skein_lib::Time;
-use skein_sim::{Config, Entry, Pid, Sim};
+use skein_io::kernel::{Done, Fd, Op};
+use skein_lib::{Queue, Time};
+use skein_sim::{Answer, Ask, Config, Entry, Handle, Pid, Program, Reply, Sim};
 
 use crate::heap::{Heap, Memory};
 use crate::host::Host;
 use crate::referee::Referee;
+use crate::{HostedProgram, Inherited, Machine, NoMachine};
 
 /// The most iterations a world runs before it is declared stuck.
 const STEPS: u32 = 1_000_000;
@@ -23,7 +29,7 @@ const STEPS: u32 = 1_000_000;
 const TAIL: usize = 80;
 
 /// A world: the simulator, its processes, and the referee.
-pub struct World<P, R> {
+pub struct World<P, R, M = NoMachine> {
     seed: u64,
     sim: Sim,
     procs: Vec<P>,
@@ -31,10 +37,16 @@ pub struct World<P, R> {
     pids: Vec<Pid>,
     referee: R,
     heap: Option<Heap>,
+    programs: Vec<HostedProgram<P>>,
+    hosted: Vec<Option<usize>>,
+    finished: Vec<bool>,
+    machine: M,
+    calls: Queue<skein_sim::Call>,
+    answers: Queue<Answer>,
 }
 
 /// Briefly: its seed, and how many processes it hosts.
-impl<P, R> Debug for World<P, R> {
+impl<P, R, M> Debug for World<P, R, M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("World").field("seed", &self.seed).field("procs", &self.procs.len()).finish_non_exhaustive()
     }
@@ -47,7 +59,9 @@ impl<P, R> Debug for World<P, R> {
 /// or something it allocated was never accounted, or never freed. A test
 /// that panicked skips it.
 #[derive(Debug)]
-pub struct Outcome<P> {
+pub struct Outcome<P, M = NoMachine> {
+    /// The fake machine after every non-hosted call has been answered.
+    pub machine: M,
     pub seed: u64,
     /// Every submission and completion, and every fault drawn: what the same
     /// seed replays to.
@@ -65,7 +79,7 @@ pub struct Outcome<P> {
     pub held: Option<Vec<i64>>,
 }
 
-impl<P> Drop for Outcome<P> {
+impl<P, M> Drop for Outcome<P, M> {
     fn drop(&mut self) {
         let Some(held) = self.held.take() else {
             return;
@@ -98,18 +112,72 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             Memory::Checked => Some(Heap::new()),
             Memory::Unchecked => None,
         };
-        World { seed, sim: Sim::new(seed, config), procs: Vec::new(), pids: Vec::new(), referee, heap }
+        World {
+            seed,
+            sim: Sim::new(seed, config),
+            procs: Vec::new(),
+            pids: Vec::new(),
+            referee,
+            heap,
+            programs: Vec::new(),
+            hosted: Vec::new(),
+            finished: Vec::new(),
+            machine: NoMachine,
+            calls: Queue::with_capacity(256),
+            answers: Queue::with_capacity(256),
+        }
+    }
+
+    /// Supplies the scenario's fake machine before the world starts.
+    pub fn with_machine<M: Machine>(self, machine: M) -> World<P, R, M> {
+        World {
+            seed: self.seed,
+            sim: self.sim,
+            procs: self.procs,
+            pids: self.pids,
+            referee: self.referee,
+            heap: self.heap,
+            programs: self.programs,
+            hosted: self.hosted,
+            finished: self.finished,
+            machine,
+            calls: self.calls,
+            answers: self.answers,
+        }
+    }
+}
+
+impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
+    /// Registers a hosted program before execution, rejecting duplicate names.
+    pub fn host(&mut self, program: HostedProgram<P>) {
+        assert!(program.instances > 0 && program.operations > 0, "a hosted program has room to run");
+        assert!(!self.programs.iter().any(|entry| entry.program == program.program), "one factory per program");
+        self.programs.push(program);
+    }
+
+    /// Adds a process with a fake-machine root inherited from startup.
+    pub fn spawn_root<F: FnOnce(Fd) -> P>(&mut self, root: Handle, make: F) -> usize {
+        let pid = self.sim.spawn_process();
+        let root = self.sim.root(pid, root);
+        self.admit(pid, None, || make(root))
     }
 
     /// Adds the process `make` builds: its heap, from its making on, is the
     /// processes'.
     pub fn spawn<F: FnOnce() -> P>(&mut self, make: F) -> usize {
+        let pid = self.sim.spawn_process();
+        self.admit(pid, None, make)
+    }
+
+    fn admit<F: FnOnce() -> P>(&mut self, pid: Pid, hosted: Option<usize>, make: F) -> usize {
         let proc = match &mut self.heap {
             Some(heap) => heap.admit(make, P::worst_case),
             None => make(),
         };
-        self.pids.push(self.sim.spawn_process());
+        self.pids.push(pid);
         self.procs.push(proc);
+        self.hosted.push(hosted);
+        self.finished.push(false);
         self.procs.len().checked_sub(1).expect("just pushed")
     }
 
@@ -117,7 +185,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
     /// checks that every process holds nothing, and that the simulator has
     /// nothing in flight and no descriptor open.
     #[must_use]
-    pub fn run(mut self) -> Outcome<P> {
+    pub fn run(mut self) -> Outcome<P, M> {
         let mut iterations: u32 = 0;
         loop {
             iterations = iterations.checked_add(1).expect("within STEPS");
@@ -163,6 +231,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             self.sim.assert_no_open_fds(*pid);
         }
         Outcome {
+            machine: self.machine,
             seed: self.seed,
             trace: self.sim.trace().to_vec(),
             end: self.sim.now(),
@@ -176,13 +245,71 @@ impl<P: Host, R: Referee<P>> World<P, R> {
     /// One turn of process `at`'s loop: reap, iterate, submit.
     fn turn(&mut self, at: usize, now: Time, wall: skein_lib::Wall) {
         let pid = *self.pids.get(at).expect("a pid for each process");
+        if *self.finished.get(at).expect("a status per process") {
+            return;
+        }
+        // Inspect the completion before the parent's next iterate: a hosted
+        // child already exists when its parent learns that it was spawned.
+        let mut arrived =
+            Queue::with_capacity(self.procs.get_mut(at).expect("a process at each index").completions().room());
+        self.sim.reap(pid, &mut arrived);
+        while let Some(complete) = arrived.pop() {
+            if let (Op::Spawn { spawn }, Ok(Done::Spawned { pidfd, .. })) = (&complete.kind, &complete.result)
+                && let Some((program_at, entry)) =
+                    self.programs.iter().enumerate().find(|(_, entry)| entry.program == spawn.program)
+            {
+                let active = self
+                    .hosted
+                    .iter()
+                    .zip(&self.finished)
+                    .filter(|(hosted, finished)| **hosted == Some(program_at) && !**finished)
+                    .count();
+                assert!(
+                    active < usize::try_from(entry.instances).expect("instances fit"),
+                    "hosted program fits its instance provision"
+                );
+                let make = entry.make;
+                let operations = entry.operations;
+                let (child, pipes) = self.sim.bind_service(pid, *pidfd);
+                let inherited = Inherited { pipes, signal: self.sim.open_signal_source(child) };
+                let child_at = self.admit(child, Some(program_at), || make(spawn, &inherited));
+                assert!(
+                    self.procs.get(child_at).expect("newly admitted child").operations() <= operations,
+                    "hosted program operations fit its provision"
+                );
+            }
+            self.procs.get_mut(at).expect("a process at each index").completions().push(complete);
+        }
         let proc = self.procs.get_mut(at).expect("a process at each index");
-        self.sim.reap(pid, proc.completions());
         match &mut self.heap {
             Some(heap) => heap.around(at, || proc.iterate(now, wall)),
             None => proc.iterate(now, wall),
         }
         self.sim.submit(pid, proc.submissions());
+        if self.hosted.get(at).expect("a status per process").is_some()
+            && let Some(exit) = proc.exit()
+        {
+            assert!(proc.is_empty(), "a normal hosted exit releases every entity");
+            self.sim.assert_quiescent(pid);
+            self.sim.assert_no_open_fds(pid);
+            self.sim.finish_service(pid, exit);
+            *self.finished.get_mut(at).expect("a status per process") = true;
+        }
+        self.serve_machine();
+    }
+
+    fn serve_machine(&mut self) {
+        self.sim.calls(&mut self.calls);
+        while let Some(call) = self.calls.pop() {
+            if let Ask::Spawn { program, .. } = &call.ask
+                && self.programs.iter().any(|entry| entry.program == *program)
+            {
+                self.answers.push(Answer { ticket: call.ticket, result: Ok(Reply::Program(Program::Service)) });
+            } else {
+                self.machine.step(call, &mut self.answers);
+            }
+        }
+        self.sim.answer(&mut self.answers);
     }
 
     /// Whether any process has work now: its loop's, the kernel's deferred

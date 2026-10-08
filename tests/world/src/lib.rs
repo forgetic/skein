@@ -322,3 +322,5 @@ pub fn server() -> Script {
 pub fn client(start: Time, send: Time) -> Script {
     Script::new(start, &[Act::Socket, Act::Connect(PORT), Act::Wait(send), Act::Send(b"hello")])
 }
+
+pub mod hosted;
