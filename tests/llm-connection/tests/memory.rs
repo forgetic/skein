@@ -126,3 +126,19 @@ fn full_fake_process_and_connection_pool_fit_and_free_their_separate_heaps() {
         }
     }
 }
+
+#[test]
+fn bounded_request_batches_preserve_exact_upload_latency_replay_and_separate_heaps() {
+    use skein_fake_peers::Transport;
+    use skein_llm_connection_world::simulated::{assert_replay, run_with_input};
+    use skein_world::Memory;
+
+    let first = run_with_input(23, false, Transport::Plaintext, false, Memory::Checked, 1500);
+    let second = run_with_input(23, false, Transport::Plaintext, false, Memory::Checked, 1500);
+    assert_replay(&first, &second);
+    assert_eq!(first.heap, second.heap);
+    assert!(first.iterations < 256, "bounded upload settled in {} iterations", first.iterations);
+    assert_eq!(first.procs.len(), 2, "client and fake remain separately owned processes");
+    let heap = first.heap.as_ref().unwrap();
+    assert!(heap.iter().all(|(peak, bound)| *peak > 0 && peak <= bound));
+}

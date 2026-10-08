@@ -55,10 +55,11 @@ pub struct Client {
     completions: Queue<kernel::Complete>,
     received: Vec<Event>,
     calls: u32,
+    input_bytes: usize,
 }
 
 impl Client {
-    fn new(transport: Transport, calls: u32) -> Self {
+    fn new(transport: Transport, calls: u32, input_bytes: usize) -> Self {
         let limits = limits(calls);
         Self {
             io: io::Io::new(&limits.io),
@@ -73,6 +74,7 @@ impl Client {
             completions: Queue::with_capacity(ROOM),
             received: Vec::with_capacity(32),
             calls,
+            input_bytes,
         }
     }
 
@@ -99,6 +101,15 @@ impl Client {
             let call = skein_llm_world::call(token.raw());
             let mut prompt = call.prompt;
             prompt.instructions = CUE.into();
+            if self.input_bytes > 0 {
+                prompt.messages = Box::new([skein_llm::Message {
+                    role: skein_llm::Role::User,
+                    content: Box::new([skein_llm::Block::Text {
+                        text: vec![b'x'; self.input_bytes].into_boxed_slice(),
+                        replay: None,
+                    }]),
+                }]);
+            }
             component.down(
                 &env,
                 Request::Start {
@@ -304,6 +315,8 @@ struct Judge {
     calls: u32,
     answer: Vec<u8>,
     passed: bool,
+    query_times: std::collections::BTreeMap<Token, Time>,
+    input_bytes: usize,
 }
 
 impl Referee<Process> for Judge {
@@ -326,7 +339,7 @@ impl Referee<Process> for Judge {
             }
         }
     }
-    fn observe(&mut self, _now: Time, processes: &[Process]) {
+    fn observe(&mut self, now: Time, processes: &[Process]) {
         let mut completed = 0;
         let mut queries = 0;
         let mut answers = 0;
@@ -356,12 +369,33 @@ impl Referee<Process> for Judge {
                 Process::Peer(peer) => {
                     for observation in peer.observations() {
                         match observation {
-                            llm::Observation::Query { query, .. } => {
+                            llm::Observation::Query { connection, query } => {
                                 assert_eq!(query.system.as_ref(), CUE);
+                                self.query_times.entry(*connection).or_insert(now);
+                                if self.input_bytes > 0 {
+                                    assert_eq!(query.messages.len(), 1);
+                                    assert_eq!(query.messages[0].parts.len(), 1);
+                                    match &query.messages[0].parts[0] {
+                                        api::Part::Text { text } => {
+                                            assert_eq!(text.len(), self.input_bytes);
+                                            assert!(text.iter().all(|byte| *byte == b'x'));
+                                        }
+                                        part @ (api::Part::Opaque { .. }
+                                        | api::Part::ToolCall { .. }
+                                        | api::Part::ToolOutput { .. }) => {
+                                            panic!("expected literal user text, got {part:?}")
+                                        }
+                                    }
+                                }
                                 queries += 1;
                             }
-                            llm::Observation::Answered { result, .. } => {
+                            llm::Observation::Answered { connection, result } => {
                                 assert_eq!(*result, Ok(()));
+                                let started = self.query_times[&connection.expect("live call route")];
+                                assert!(
+                                    now >= started.checked_add(Duration::from_millis(5)).expect("bounded script delay"),
+                                    "batching must not shortcut the actual script latency"
+                                );
                                 answers += 1;
                             }
                             llm::Observation::Accepted { .. } | llm::Observation::Closed { .. } => {}
@@ -397,9 +431,29 @@ impl Referee<Process> for Judge {
 /// Runs the shared harness with separate process heaps; large fills every delayed-call slot.
 #[must_use]
 pub fn run(seed: u64, faulted: bool, transport: Transport, large: bool, memory: Memory) -> Outcome<Process> {
+    run_with_input(seed, faulted, transport, large, memory, 0)
+}
+
+/// Runs an exact caller-owned text upload through the independently hosted peer.
+#[must_use]
+pub fn run_with_input(
+    seed: u64,
+    faulted: bool,
+    transport: Transport,
+    large: bool,
+    memory: Memory,
+    input_bytes: usize,
+) -> Outcome<Process> {
     let calls = if large { 2 } else { 1 };
     let answer = if large { vec![b'x'; 2048] } else { b"simulated answer".to_vec() };
-    let judge = Judge { activated: false, calls, answer: answer.clone(), passed: false };
+    let judge = Judge {
+        activated: false,
+        calls,
+        answer: answer.clone(),
+        passed: false,
+        query_times: std::collections::BTreeMap::new(),
+        input_bytes,
+    };
     let mut config = Config::calm();
     config.wall = skein_tls_world::pki::VALID;
     config.buffer = if faulted { 256 } else { 1024 };
@@ -462,7 +516,7 @@ pub fn run(seed: u64, faulted: bool, transport: Transport, large: bool, memory: 
         .expect("bounded independent process");
         Process::Peer(Box::new(peer))
     });
-    world.spawn(|| Process::Client(Box::new(Client::new(transport, calls))));
+    world.spawn(|| Process::Client(Box::new(Client::new(transport, calls, input_bytes))));
     world.run()
 }
 

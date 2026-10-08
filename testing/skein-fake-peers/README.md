@@ -55,3 +55,13 @@ seed sweeps live in the fuzzy profile.
 Contracts: `fake-llm.md`, section 3; `oauth.md`, section 5;
 `testing-strategy.md`, sections 4, 6 and 7;
 `programming-model.md`, section 10.2.
+
+Length-framed LLM uploads progress in exact batches up to the configured
+HTTP read cap, including the final short batch. Actual HTTP `End` still
+precedes domain admission; an announced length is never a terminal.
+Unknown-length chunked bodies retain one-byte demands. This batching changes
+neither the Host passes nor kernel scheduling, and the checked provider bound
+prices queued batch ownership separately from its intake and stored document.
+The connection-world controls upload literal text under separate metered
+process heaps, retain injected reply latency, replay the complete outside
+trace, and exercise actual short socket operations.

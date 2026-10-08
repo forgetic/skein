@@ -242,6 +242,8 @@ pub struct Server {
     writer_events: Queue<sse::Event>,
     requests: Queue<http::Request>,
     body: List<u8>,
+    // Remaining announced body bytes; None for chunked framing.
+    remaining_body: Option<u64>,
     call: Option<Id<Call>>,
     answer: Option<api::Answer>,
     sequence: u32,
@@ -270,6 +272,7 @@ impl Server {
             writer_events: Queue::with_capacity(1),
             requests: Queue::with_capacity(REQUESTS),
             body: List::with_capacity(request),
+            remaining_body: None,
             call: None,
             answer: None,
             sequence: 0,
@@ -481,7 +484,13 @@ pub fn closed(
     above.push(Event::Closed);
 }
 
-fn entrance(server: &mut Server, service: &mut Service, credential: &skein_llm::Credential, call: http::Call) {
+fn entrance(
+    server: &mut Server,
+    service: &mut Service,
+    credential: &skein_llm::Credential,
+    limits: &Limits,
+    call: http::Call,
+) {
     let identity = next_response(&mut service.count);
     server.response_id = identity.unwrap_or(0);
     server.refused = if identity.is_some() && call.method == Method::Post && call.target == service.config.path {
@@ -551,7 +560,30 @@ fn entrance(server: &mut Server, service: &mut Service, credential: &skein_llm::
         server.refused = Some(api::Error::Unauthorized);
     }
     server.state = State::Body;
-    server.requests.push(http::Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
+    server.remaining_body = match call.body {
+        http::Body::None => Some(0),
+        http::Body::Length(length) => Some(length),
+        http::Body::Chunked => None,
+    };
+    demand_body(server, limits);
+}
+
+// A known length permits exact bounded batches, including the final short
+// batch. Unknown chunked lengths keep their conservative demand: Fill must
+// never wait for bytes beyond the body end. After zero, probe for actual End
+// rather than treating the announced length as a terminal.
+fn body_read(remaining: Option<u64>, cap: u32) -> Read {
+    let size = match remaining {
+        Some(remaining) => u32::try_from(remaining.min(u64::from(cap))).expect("bounded HTTP read"),
+        None => 1,
+    };
+    Read::Fill(size.max(1))
+}
+
+fn demand_body(server: &mut Server, limits: &Limits) {
+    server
+        .requests
+        .push(http::Request::Body(Down::Demand { read: body_read(server.remaining_body, limits.http.read), room: 0 }));
 }
 
 fn next_response(count: &mut u64) -> Option<u64> {
@@ -610,10 +642,17 @@ fn http_event(
                 close(server, service, env, above, below);
                 return;
             }
+            if let Some(remaining) = server.remaining_body {
+                server.remaining_body = Some(
+                    remaining
+                        .checked_sub(u64::try_from(data.len()).expect("bounded body delivery"))
+                        .expect("HTTP delivers within the announced body"),
+                );
+            }
             for byte in data {
                 server.body.push(byte).expect("checked body cap");
             }
-            server.requests.push(http::Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
+            demand_body(server, &env.limits);
         }
         http::Event::Body(Up::End) => requested(server, service, env, above),
         http::Event::Reply(event) => match server.state {
@@ -645,7 +684,7 @@ fn http_event(
                 http::Reuse::Close => close(server, service, env, above, below),
             }
         }
-        http::Event::Call(call) => entrance(server, service, credential, call),
+        http::Event::Call(call) => entrance(server, service, credential, &env.limits, call),
         http::Event::Ended
         | http::Event::Failed(_)
         | http::Event::Refused(_)
@@ -881,11 +920,31 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(Queue::<http::Request>::worst_case(REQUESTS)?)?
         .checked_add(Queue::<sse::Event>::worst_case(1)?)?
         .checked_add(Queue::<Down>::worst_case(2)?)?
-        .checked_add(u64::from(limits.http.head).checked_mul(3)?)
+        .checked_add(u64::from(limits.http.head).checked_mul(3)?)?
+        // Queued body events and the current entrance delivery own their
+        // batches separately from HTTP's intake and the accumulated document.
+        .checked_add(u64::from(limits.http.read).checked_mul(u64::from(EVENTS.checked_add(1)?))?)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn length_framed_body_demands_bounded_batches_and_probes_actual_end() {
+        use skein_lib::stream::Read;
+
+        for (remaining, cap, expected) in [
+            (None, 256, 1),
+            (Some(0), 256, 1),
+            (Some(1), 256, 1),
+            (Some(257), 256, 256),
+            (Some(255), 256, 255),
+            (Some(u64::MAX), u32::MAX, u32::MAX),
+            (Some(8192), 1, 1),
+        ] {
+            assert_eq!(super::body_read(remaining, cap), Read::Fill(expected));
+        }
+    }
+
     #[test]
     fn final_identity_is_unique_and_exhaustion_refuses_further_identities() {
         let mut count = u64::MAX - 1;
