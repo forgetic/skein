@@ -55,6 +55,12 @@ A lost connection cannot authorize effects or turn a withdrawal into a
 provider answer. The independent script domain still produces its actual
 terminal; old connection routing may no longer deliver it.
 
+**On io,** the byte peer also runs as a process of its own. It listens on
+loopback, in plaintext, or in TLS with skein's test certificates, so that
+a simulated world and the real loop host it as they host a service
+(testing-strategy.md, 4 and 4.1). The fake issuer runs the same way
+(oauth.md, 5).
+
 ## 4. Shared codec and replay
 
 `skein-llm::DocumentLimits` is the neutral document-bound vocabulary. Native
