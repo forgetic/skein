@@ -138,7 +138,7 @@ against its bound plus that input's size.
 one loop over the processes' `iterate`, generic over a scenario's
 processes, with the referee's expectations, the trace, the heap at every
 iteration, and the settled world's invariants; and the same loop over the
-shell's rings, on the real clock. The examples are its first user and its
+shell's shared ring, on the real clock. The examples are its first user and its
 second, which is why it is skein's (testing-strategy.md, 7).
 
 ## 6. Layout
@@ -371,7 +371,7 @@ stream failing while its line is out with the domain); the fuzzy suite
 over 300 of each, asserting that every fault of the simulator fell and
 that every outcome a client can see came of some connection. io holds
 the echo, as every owner, to the room it was granted (io.md, 3.3). The
-real loop runs the echo and two fake clients on loopback, a ring each, in
+real loop runs the echo and two fake clients on loopback, one shared ring, in
 half a second. The world harness has tests of its own (`tests/world`),
 over scripted processes of raw records.
 
@@ -433,8 +433,9 @@ By tier, in the order temper pulls the parts (README.md):
   a local rustls server (tls.md, 8). A TLS that replays is an open
   question (notes.md).
 - **The HTTP examples' simulated worlds and real loop,** with skein-http.
-  The echo's are built; the real loop's signals, child processes, scratch
-  directory and TLS wait for the parts that pull them.
+  The echo's are built; the real loop hosts spawned services over real
+  pipes and delivers signals through signalfd and per-service pipes.
+  Scratch-directory worlds and TLS wait for the parts that pull them.
 
 By check: state digests for replay, transition coverage, fuzzing.
 Transition coverage of io's handlers needs `cargo llvm-cov`, which is not

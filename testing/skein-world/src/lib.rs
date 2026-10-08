@@ -18,7 +18,8 @@
 //!   settled checks that every process holds
 //!   nothing and the simulator nothing in flight;
 //! - [`real`]: the same processes and referee in one loop over the real
-//!   ring, a ring each, on the real clock (testing-strategy.md, 2.8).
+//!   shared ring, hosting spawns over real pipes with per-service signals,
+//!   on the real clock (testing-strategy.md, 2.8).
 //!
 //! [`domain`] supplies the reusable harness for domain-only worlds: a
 //! delivery schedule, output-pressure stages, terminal ledgers, boundary

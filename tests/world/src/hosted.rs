@@ -15,6 +15,8 @@ pub enum Act {
     Write(usize, &'static [u8]),
     /// The script reads from one inherited pipe, possibly its end.
     Read(usize),
+    /// The script closes an inherited pipe before continuing its exchange.
+    Close(usize),
     /// The parent waits for its child to exit.
     Wait,
     /// The parent sends a termination or kill signal to its child.
@@ -113,6 +115,7 @@ impl Script {
             },
             Act::Write(at, bytes) => Op::PipeWrite { fd: self.fds[at], bytes: Box::from(bytes), from: 0 },
             Act::Read(at) => Op::PipeRead { fd: self.fds[at], buf: Box::new([0; 32]) },
+            Act::Close(at) => Op::Close { fd: self.fds.remove(at) },
             Act::Wait => Op::Wait { pidfd: self.pidfd.expect("spawned child") },
             Act::Signal(signal) => Op::Signal { pidfd: self.pidfd.expect("spawned child"), signal },
             Act::ReadSignal => Op::ReadSignal { fd: self.signal.expect("child signal source") },

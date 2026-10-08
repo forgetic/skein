@@ -1,16 +1,19 @@
 //! The real loop (testing-strategy.md, 2.8): the same processes and referee
 //! as a simulated world, in one thread and one loop, whose calls go to the
 //! real kernel through one ring, on loopback, with deadlines on the real
-//! clock (examples.md, section 6). It keeps token bindings and each host
-//! operation limit, never service state. `run` blocks on the shared ring
-//! only when every process is idle. It does not replay.
+//! clock (examples.md, section 6). It keeps token bindings, operation limits,
+//! hosted factories, descriptor ownership and queued referee signals; it
+//! never inspects service state. `World::host` selects a spawn's factory,
+//! while `spawn_signalfd` and `spawn_signals` supply roots' signal sources.
+//! `run` blocks only when every process and the control queue are idle,
+//! and returns once exits, operations and descriptor closures settle. It
+//! does not replay.
 
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-
-use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use skein_io::kernel::{Complete, Done, Error, Exit, Fd, Op, ServiceSignal, Signal, Spawn, Submit};
 use skein_lib::{Duration, Queue, Time, Token};
@@ -192,6 +195,40 @@ struct Process {
     cleaned: bool,
 }
 
+impl Process {
+    fn submitted(&mut self, operation: &Op) {
+        // Close releases ownership at submission. Its completion may arrive
+        // after another operation returned a newly reused descriptor number.
+        if let Op::Close { fd } = operation {
+            self.fds.remove(fd);
+        }
+    }
+
+    fn completed(&mut self, complete: &Complete) {
+        match &complete.result {
+            Ok(Done::Fd(fd) | Done::Accepted { fd, .. } | Done::Spawned { pidfd: fd }) => {
+                self.fds.insert(*fd);
+            }
+            Ok(
+                Done::Nothing
+                | Done::Count(_)
+                | Done::Bound(_)
+                | Done::Stat(_)
+                | Done::Exit(_)
+                | Done::ServiceSignal(_),
+            )
+            | Err(_) => {}
+        }
+        if let Op::Spawn { spawn } = &complete.kind {
+            for pipe in &spawn.pipes {
+                if let Some(fd) = pipe.parent {
+                    self.fds.insert(fd);
+                }
+            }
+        }
+    }
+}
+
 struct Child {
     host: usize,
     program: usize,
@@ -343,30 +380,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
     fn answer(&mut self, complete: Complete) {
         let (host, complete) = self.ring.complete(complete);
         let process = self.processes.get_mut(&host).expect("a process per host");
-        match complete.result {
-            Ok(Done::Fd(fd) | Done::Accepted { fd, .. } | Done::Spawned { pidfd: fd }) => {
-                process.fds.insert(fd);
-            }
-            Ok(
-                Done::Nothing
-                | Done::Count(_)
-                | Done::Bound(_)
-                | Done::Stat(_)
-                | Done::Exit(_)
-                | Done::ServiceSignal(_),
-            )
-            | Err(_) => {}
-        }
-        if let Op::Spawn { spawn } = &complete.kind {
-            for pipe in &spawn.pipes {
-                if let Some(fd) = pipe.parent {
-                    process.fds.insert(fd);
-                }
-            }
-        }
-        if let Op::Close { fd } = complete.kind {
-            process.fds.remove(&fd);
-        }
+        process.completed(&complete);
         if process.exit.is_some() {
             let count = self.ring.counts.get_mut(host).expect("a count per host");
             *count = count.checked_sub(1).expect("an abandoned operation was in flight");
@@ -381,6 +395,8 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
 
     fn submit(&mut self, mut record: Submit) {
         assert!(record.kind.is_valid(), "only valid records cross the kernel boundary");
+        let host = self.ring.bindings.get(&record.op).expect("a registered operation").host;
+        self.processes.get_mut(&host).expect("an operation owner").submitted(&record.kind);
         match &mut record.kind {
             Op::Spawn { spawn } => {
                 if let Some(program) = self.world.programs.iter().position(|entry| entry.program == spawn.program) {
@@ -580,6 +596,11 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
             self.ring.kernel.room().checked_sub(self.ring.submits.len()).expect("pending submissions fit the ring");
         for _ in 0..room {
             let Some((host, kind)) = self.cleanup.pop_front() else { break };
+            if let Op::Close { fd } = &kind
+                && let Some(child_host) = self.placeholders.remove(fd)
+            {
+                self.children.get_mut(&child_host).expect("registered placeholder").placeholder_open = false;
+            }
             let op = self.ring.fresh();
             self.housekeeping.insert(op, host);
             let process = self.processes.get_mut(&host).expect("cleanup owner");
@@ -702,5 +723,29 @@ impl Ring {
 
     fn is_empty(&self) -> bool {
         self.kernel.in_flight() == 0 && !self.has_ready()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Process;
+    use skein_io::kernel::{Complete, Done, Family, Fd, Op};
+    use skein_lib::Token;
+
+    #[test]
+    fn a_late_close_completion_does_not_erase_a_reused_descriptor() {
+        let fd = Fd::new(42);
+        let mut process = Process { fds: [fd].into_iter().collect(), exit: None, cleanup: 0, cleaned: false };
+        process.submitted(&Op::Close { fd });
+        process.completed(&Complete {
+            op: Token::new(2),
+            kind: Op::Socket { family: Family::Ipv4 },
+            result: Ok(Done::Fd(fd)),
+        });
+        process.completed(&Complete { op: Token::new(1), kind: Op::Close { fd }, result: Ok(Done::Nothing) });
+        assert!(
+            process.fds.contains(&fd),
+            "kernel.md: completions may arrive in any order; the new descriptor remains owned"
+        );
     }
 }

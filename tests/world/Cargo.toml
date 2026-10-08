@@ -31,3 +31,9 @@ allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 disallowed_types = "deny"
 disallowed_methods = "deny"
+
+# Reuse exactly the conformance suite's process fixture, rather than owning
+# another executable with the same behaviour.
+[[bin]]
+name = "world_process_fixture"
+path = "../conformance/ring/src/bin/process_fixture.rs"

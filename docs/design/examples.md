@@ -356,7 +356,7 @@ processes, each a host of an `iterate` (a service, or a fake client):
   every iteration, and that each process frees what it held once
   settled; io holds the echo to the room it was granted in every world.
 - **The real loop** (`tests/echo/tests/real.rs`): the echo and its fake
-  clients in one loop over the shell's rings, on loopback, quick, failing
+  clients in one loop over the shell's ring, on loopback, quick, failing
   clearly where `io_uring` is unusable.
 
 ## 8. Not built yet
@@ -364,8 +364,6 @@ processes, each a host of an `iterate` (a service, or a fake client):
 - **The HTTP server and its client,** with `skein-http`.
 - **Signals to the service** (io.md, 7): `Shutdown` comes from the
   service's `shutdown`, and `main` runs until it is killed.
-- **The real loop on one ring** (section 6): it still gives each process
-  a ring of its own, and hosts no spawned service.
 - **End to end** (section 6): the harness cannot yet start a binary under
   a pseudo-terminal. The echo's binary is its first user.
 - **Domain worlds** for the echo's domain: it is one slab and a counter,

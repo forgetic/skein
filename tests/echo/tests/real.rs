@@ -1,5 +1,5 @@
 //! The echo on the real loop (testing-strategy.md, 2.8; examples.md, 7): the
-//! echo as it ships and its fake clients, each on a ring of its own, in one
+//! echo as it ships and its fake clients, on one shared ring, in one
 //! thread and one loop over the shell's kernel, on loopback, with the
 //! referee's deadlines on the real clock. It shows what only the real
 //! kernel can: the ring adapter under the whole service, and real sockets
