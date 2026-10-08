@@ -109,3 +109,20 @@ fn full_pool_stays_within_its_checked_bound() {
     drop(third.endpoint);
     assert_eq!(meter.held(), 0, "all pool allocations released");
 }
+
+#[test]
+fn full_fake_process_and_connection_pool_fit_and_free_their_separate_heaps() {
+    for transport in [skein_fake_peers::Transport::Plaintext, skein_fake_peers::Transport::Tls] {
+        let first =
+            skein_llm_connection_world::simulated::run(37, false, transport, true, skein_world::Memory::Checked);
+        let heap = first.heap.as_ref().unwrap();
+        assert_eq!(heap.len(), 2);
+        assert!(heap.iter().all(|(peak, bound)| *peak > 0 && peak <= bound));
+        if transport == skein_fake_peers::Transport::Plaintext {
+            let second =
+                skein_llm_connection_world::simulated::run(37, false, transport, true, skein_world::Memory::Checked);
+            skein_llm_connection_world::simulated::assert_replay(&first, &second);
+            assert_eq!(first.heap, second.heap);
+        }
+    }
+}

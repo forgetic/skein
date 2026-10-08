@@ -21,6 +21,7 @@ use crate::transport::{self, Wire};
 use crate::{Error, Limits, Transport};
 
 /// The issuer's outside records for a world's referee; secret bodies have no Debug.
+#[derive(PartialEq, Eq)]
 pub enum Observation {
     /// The server accepted this connection from a client or scripted browser.
     Accepted { connection: Token },
@@ -193,6 +194,11 @@ impl Peer {
                 });
                 self.observe(Observation::Accepted { connection: owner }, 0);
             }
+            io::Event::Output { owner, up } => {
+                if let Some(connection) = self.connections.iter_mut().find(|connection| connection.owner == owner) {
+                    connection.wire.output(up, &mut connection.plain, &mut self.face.requests);
+                }
+            }
             io::Event::Stream { owner, up } => {
                 if let Some(connection) = self.connections.iter_mut().find(|connection| connection.owner == owner) {
                     connection.wire.up(up, &mut connection.plain, &mut self.face.requests);
@@ -216,7 +222,6 @@ impl Peer {
             }
             io::Event::Connecting { .. }
             | io::Event::Connected { .. }
-            | io::Event::Output { .. }
             | io::Event::Spawned { .. }
             | io::Event::Exited { .. }
             | io::Event::Shutdown { .. } => {
@@ -280,7 +285,22 @@ impl Peer {
         let target_base = call.target.split(|byte| *byte == b'?').next().expect("target has a base");
         if call.method == Method::Get && target_base == self.authorization_path.as_ref() {
             let owner = self.connections[index].owner;
-            let mut url = self.authorization_url.to_vec();
+            if self
+                .authorization_url
+                .len()
+                .checked_add(call.target.len().checked_sub(target_base.len()).expect("target suffix"))
+                .is_none_or(|length| length > usize::try_from(self.issuer_limits.request_bytes).expect("u32 fits"))
+            {
+                self.respond(index, 400, Box::new([]), Box::new([]), Duration::ZERO);
+                return;
+            }
+            let mut url = Vec::with_capacity(
+                self.authorization_url
+                    .len()
+                    .checked_add(call.target.len().checked_sub(target_base.len()).expect("suffix"))
+                    .expect("bounded URL"),
+            );
+            url.extend_from_slice(&self.authorization_url);
             if let Some(query) = call.target.get(target_base.len()..) {
                 url.extend_from_slice(query);
             }
@@ -414,10 +434,15 @@ impl Peer {
             headers.push(Header { name: bytes::copy_of(b"retry-after"), value: bytes::copy_of(seconds.as_bytes()) });
         }
         let empty = body.is_empty();
+        connection.requests.push(http::Request::Discard);
         connection.requests.push(http::Request::Respond(http::Response {
             status,
             headers: headers.into_boxed_slice(),
-            body: http::Body::Length(u64::try_from(body.len()).expect("bounded token response")),
+            body: if empty {
+                http::Body::None
+            } else {
+                http::Body::Length(u64::try_from(body.len()).expect("bounded token response"))
+            },
             close: false,
         }));
         connection.response = Some(Response { body, offset: 0 });

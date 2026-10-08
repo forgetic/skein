@@ -454,6 +454,7 @@ version = "0.0.0"
 dependencies = [
  "skein-fake-llm-domain",
  "skein-fake-llm-protocol",
+ "skein-fake-peers",
  "skein-heap",
  "skein-io",
  "skein-lib",
@@ -494,9 +495,14 @@ name = "skein-oauth-world"
 version = "0.0.0"
 dependencies = [
  "skein-fake-oauth",
+ "skein-fake-peers",
  "skein-heap",
+ "skein-http",
+ "skein-io",
  "skein-lib",
  "skein-oauth",
+ "skein-sim",
+ "skein-world",
 ]
 
 [[package]]

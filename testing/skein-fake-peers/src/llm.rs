@@ -38,6 +38,7 @@ struct Connection {
     above: Queue<provider::Event>,
     below: Queue<Down>,
     plain: Queue<Up>,
+    closing: bool,
 }
 
 /// A world's fake LLM process, configured with its real script domain and wire peer.
@@ -111,16 +112,22 @@ impl Peer {
         self.face.shutdown();
     }
 
-    fn observe(&mut self, observation: Observation, bytes: u64) {
+    fn reserve_observation(&self, bytes: u64) {
         assert!(
             self.observations.len() < usize::try_from(self.face.limits.observations).expect("u32 fits"),
             "the world's referee observation count fits its configured cap"
         );
-        self.observed_bytes = self.observed_bytes.checked_add(bytes).expect("bounded observation bytes");
         assert!(
-            self.observed_bytes <= u64::from(self.face.limits.observation_bytes),
-            "the world's observation bytes fit their cap"
+            self.observed_bytes
+                .checked_add(bytes)
+                .is_some_and(|total| total <= u64::from(self.face.limits.observation_bytes)),
+            "observation admitted before copying"
         );
+    }
+
+    fn observe(&mut self, observation: Observation, bytes: u64) {
+        self.reserve_observation(bytes);
+        self.observed_bytes = self.observed_bytes.checked_add(bytes).expect("bounded observation bytes");
         self.observations.push(observation);
     }
 
@@ -154,6 +161,7 @@ impl Peer {
                     above: Queue::with_capacity(limits.queue),
                     below: Queue::with_capacity(limits.queue),
                     plain: Queue::with_capacity(limits.queue),
+                    closing: false,
                 };
                 provider::start(
                     &mut connection.server,
@@ -165,6 +173,11 @@ impl Peer {
                 );
                 self.connections.push(connection);
                 self.observe(Observation::Accepted { connection: owner }, 0);
+            }
+            io::Event::Output { owner, up } => {
+                if let Some(connection) = self.connections.iter_mut().find(|connection| connection.owner == owner) {
+                    connection.wire.output(up, &mut connection.plain, &mut self.face.requests);
+                }
             }
             io::Event::Stream { owner, up } => {
                 if let Some(connection) = self.connections.iter_mut().find(|connection| connection.owner == owner) {
@@ -193,8 +206,7 @@ impl Peer {
                     connection.wire.close(&mut self.face.requests);
                 }
             }
-            io::Event::Output { .. }
-            | io::Event::Connecting { .. }
+            io::Event::Connecting { .. }
             | io::Event::Connected { .. }
             | io::Event::Spawned { .. }
             | io::Event::Exited { .. }
@@ -221,7 +233,7 @@ impl Peer {
                     &mut connection.above,
                     &mut connection.below,
                 );
-                connection.wire.close(&mut self.face.requests);
+                connection.closing = true;
             }
             if connection.above.room() >= provider::MAX_UP && connection.below.room() >= provider::MAX_DOWN {
                 if let Some(up) = connection.plain.pop() {
@@ -259,12 +271,7 @@ impl Peer {
                         let connection = connection.owner;
                         let bytes = query_bytes(&query).expect("bounded decoded query");
                         // Check before cloning any owned query bytes.
-                        assert!(
-                            self.observed_bytes
-                                .checked_add(bytes)
-                                .is_some_and(|total| total <= u64::from(self.face.limits.observation_bytes)),
-                            "observation admitted before copying"
-                        );
+                        self.reserve_observation(bytes);
                         self.observe(Observation::Query { connection, query: query.clone() }, bytes);
                         domain::step(
                             &mut self.domain,
@@ -273,9 +280,14 @@ impl Peer {
                             &mut self.replies,
                         );
                     }
-                    provider::Event::Close => self.connections[index].wire.close(&mut self.face.requests),
+                    provider::Event::Close => self.connections[index].closing = true,
                     provider::Event::Closed => {}
                 }
+            }
+        }
+        for connection in &mut self.connections {
+            if connection.closing && connection.below.is_empty() && self.face.requests.room() > 0 {
+                connection.wire.close(&mut self.face.requests);
             }
         }
         if self.domain.is_due(now) && self.replies.room() >= domain::MAX_OUT {

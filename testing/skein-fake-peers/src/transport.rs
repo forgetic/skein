@@ -7,7 +7,7 @@ use std::sync::Arc;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection};
 use skein_io as io;
-use skein_lib::stream::{Down, Fault, Read, Up};
+use skein_lib::stream::{Down, Fault, OutputDown, OutputOutcome, OutputUp, Read, Up};
 use skein_lib::{Intake, Queue, Token};
 
 use crate::{Error, Limits};
@@ -35,9 +35,12 @@ pub(crate) struct Wire {
     reading: bool,
     output: Vec<u8>,
     output_room: bool,
+    right: Option<Token>,
+    next_right: u64,
     ended: bool,
     notified: bool,
     closing: bool,
+    close_requested: bool,
     limits: Limits,
 }
 
@@ -62,9 +65,12 @@ impl Wire {
             reading: false,
             output: Vec::with_capacity(usize::try_from(limits.ciphertext).expect("u32 fits")),
             output_room: false,
+            right: None,
+            next_right: 1,
             ended: false,
             notified: false,
             closing: false,
+            close_requested: false,
             limits,
         }
     }
@@ -118,13 +124,7 @@ impl Wire {
                     }
                 }
             }
-            Up::Room => {
-                assert!(self.output_room, "one network output demand");
-                self.output_room = false;
-                let bytes = self.output.clone().into_boxed_slice();
-                self.output.clear();
-                requests.push(io::Request::Stream { stream: self.socket, down: Down::Send(bytes) });
-            }
+            Up::Room => panic!("TLS ciphertext uses independent output rights"),
             Up::End => {
                 self.reading = false;
                 self.ended = true;
@@ -132,6 +132,24 @@ impl Wire {
             Up::Failed(_) => {
                 self.fail(above, requests);
                 return;
+            }
+        }
+        self.pump(above, requests);
+    }
+
+    pub fn output(&mut self, up: OutputUp, above: &mut Queue<Up>, requests: &mut Queue<io::Request>) {
+        let OutputUp::Settled { right, outcome } = up;
+        assert_eq!(self.right.take(), Some(right), "one independent ciphertext output right");
+        self.output_room = false;
+        match outcome {
+            OutputOutcome::Granted => {
+                let bytes = self.output.clone().into_boxed_slice();
+                self.output.clear();
+                requests.push(io::Request::Output { stream: self.socket, down: OutputDown::Send { right, bytes } });
+            }
+            OutputOutcome::Cancelled | OutputOutcome::Failed(_) => {
+                self.output.clear();
+                self.close(requests);
             }
         }
         self.pump(above, requests);
@@ -181,18 +199,12 @@ impl Wire {
             assert!(self.output.is_empty(), "a previous ciphertext send was handed down");
             self.output.extend_from_slice(&scratch[..length]);
             self.output_room = true;
-            requests.push(io::Request::Stream {
+            let right = Token::new(self.next_right);
+            self.next_right = self.next_right.checked_add(1).expect("finite TLS output rights");
+            self.right = Some(right);
+            requests.push(io::Request::Output {
                 stream: self.socket,
-                down: Down::Demand {
-                    read: if self.reading {
-                        Read::Fill(
-                            self.header.map_or(5, |header| u32::from(u16::from_be_bytes([header[3], header[4]]))),
-                        )
-                    } else {
-                        Read::Nothing
-                    },
-                    room: u32::try_from(length).expect("bounded ciphertext"),
-                },
+                down: OutputDown::Room { right, bytes: u32::try_from(length).expect("bounded ciphertext") },
             });
         }
         if !tls.is_handshaking() {
@@ -210,7 +222,7 @@ impl Wire {
                 above.push(Up::End);
             }
         }
-        if !self.ended && !self.reading && !self.output_room && self.input.room() >= 16_384 {
+        if !self.close_requested && !self.ended && !self.reading && !self.output_room && self.input.room() >= 16_384 {
             let size = self.header.map_or(5, |header| u32::from(u16::from_be_bytes([header[3], header[4]])));
             requests.push(io::Request::Stream {
                 stream: self.socket,
@@ -218,12 +230,24 @@ impl Wire {
             });
             self.reading = true;
         }
+        self.settle_close(requests);
     }
 
     pub fn close(&mut self, requests: &mut Queue<io::Request>) {
-        if !self.closing && requests.room() > 0 {
+        self.close_requested = true;
+        self.settle_close(requests);
+    }
+
+    fn settle_close(&mut self, requests: &mut Queue<io::Request>) {
+        if self.close_requested
+            && !self.closing
+            && !self.output_room
+            && self.output.is_empty()
+            && !self.tls.as_ref().is_some_and(|tls| tls.wants_write())
+            && requests.room() > 0
+        {
             self.closing = true;
-            requests.push(io::Request::Abort { entity: self.socket });
+            requests.push(io::Request::Close { entity: self.socket });
         }
     }
 
@@ -231,7 +255,10 @@ impl Wire {
         if !self.closing {
             above.push(Up::Failed(Fault::Invalid));
         }
-        self.close(requests);
+        if !self.closing && requests.room() > 0 {
+            self.closing = true;
+            requests.push(io::Request::Abort { entity: self.socket });
+        }
     }
 
     pub fn work_pending(&self) -> bool {
@@ -239,7 +266,12 @@ impl Wire {
             !self.closing
                 && ((!self.output_room && tls.wants_write())
                     || (!tls.is_handshaking() && self.room > 0 && self.output.is_empty())
-                    || (!self.reading && !self.output_room && !self.ended && self.input.room() >= 16_384))
+                    || (self.close_requested && !self.output_room)
+                    || (!self.close_requested
+                        && !self.reading
+                        && !self.output_room
+                        && !self.ended
+                        && self.input.room() >= 16_384))
         })
     }
 }
