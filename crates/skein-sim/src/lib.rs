@@ -29,7 +29,11 @@
 //!   root the shell would open at startup is the machine's [`Handle`] of a
 //!   directory, given to a process with [`Sim::root`].
 //! - A child spawn asks the machine which program it names; the simulator
-//!   keeps the child's pidfd, pipes, waiting and exit state.
+//!   keeps the child's pidfd, pipes, waiting and exit state. For
+//!   [`Program::Service`], the world calls [`Sim::bind_service`] after the
+//!   spawn completion, hosts the returned process, then calls
+//!   [`Sim::finish_service`] when it exits. The three pipe ends belong to
+//!   those two processes; backpressure, closure and exit cross between them.
 //! - A world hosting a process with inherited channel pipes opens them with
 //!   [`Sim::open_inherited_read`] and [`Sim::open_inherited_write`]. The
 //!   scripted peer moves bytes with [`Sim::peer_feed`] and [`Sim::peer_drain`],

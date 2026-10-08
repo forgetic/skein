@@ -30,6 +30,14 @@ pub(super) struct Child {
     pub wait: Option<Token>,
     pub pidfd_open: bool,
     pub pipes: Vec<ChildPipe>,
+    pub service: Option<Pid>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BoundEnd {
+    pub parent: Pid,
+    pub child: u64,
+    pub index: usize,
 }
 
 #[derive(Debug)]
@@ -49,9 +57,60 @@ pub(super) struct InheritedPipe {
     pub peer_open: bool,
     pub bytes: VecDeque<u8>,
     pub waiting: Option<Token>,
+    pub bound: Option<BoundEnd>,
 }
 
 impl Sim {
+    /// Starts the service selected by a successful spawn. The returned
+    /// descriptors are the child's inherited pipe table, keyed by the
+    /// descriptor numbers requested in `Spawn`. The world hosts this process
+    /// and drives it through `submit` and `reap` (simulator.md, section 3).
+    pub fn bind_service(&mut self, parent: Pid, pidfd: Fd) -> (Pid, Vec<(u32, Fd)>) {
+        let child_id = *self.process(parent).pidfds.get(&pidfd).expect("a spawned child's pidfd");
+        let child = &self.process(parent).children[&child_id];
+        assert_eq!(child.program, Program::Service, "only a service program can be bound");
+        assert!(child.service.is_none(), "a service is bound once");
+        assert!(child.exit.is_none(), "a finished service cannot be bound");
+        let specs: Vec<Pipe> = child.pipes.iter().map(|pipe| pipe.spec).collect();
+        let pid = self.spawn_process();
+        self.process_mut(pid).parent = Some((parent, child_id));
+        let mut inherited = Vec::with_capacity(specs.len());
+        for (index, spec) in specs.into_iter().enumerate() {
+            assert!(!self.fds_full(pid), "a bound service needs a descriptor slot");
+            let fd = self.new_process_fd(pid);
+            self.process_mut(pid).inherited_pipes.insert(
+                fd,
+                InheritedPipe {
+                    readable: spec.way == Way::In,
+                    process_open: true,
+                    peer_open: true,
+                    bytes: VecDeque::new(),
+                    waiting: None,
+                    bound: Some(BoundEnd { parent, child: child_id, index }),
+                },
+            );
+            inherited.push((spec.child, fd));
+        }
+        self.process_mut(parent).children.get_mut(&child_id).expect("the spawned child").service = Some(pid);
+        (pid, inherited)
+    }
+
+    /// Settles a hosted service's exit, waking the parent's `Wait` and pipe
+    /// readers. Call after the service has closed its descriptors.
+    pub fn finish_service(&mut self, pid: Pid, exit: Exit) {
+        let (parent, child) = self.process(pid).parent.expect("a bound service process");
+        assert!(self.process(parent).children[&child].exit.is_none(), "a service exits once");
+        self.exit_child(parent, child, exit);
+    }
+
+    /// Whether the hosted service has not yet exited. A world can stop
+    /// driving it after a parent kills it.
+    #[must_use]
+    pub fn service_running(&self, pid: Pid) -> bool {
+        let (parent, child) = self.process(pid).parent.expect("a bound service process");
+        self.process(parent).children[&child].exit.is_none()
+    }
+
     /// Gives a process a pipe it can read; the world feeds and closes its writer.
     pub fn open_inherited_read(&mut self, pid: Pid) -> Fd {
         self.open_inherited(pid, true)
@@ -67,7 +126,14 @@ impl Sim {
         let fd = self.new_process_fd(pid);
         self.process_mut(pid).inherited_pipes.insert(
             fd,
-            InheritedPipe { readable, process_open: true, peer_open: true, bytes: VecDeque::new(), waiting: None },
+            InheritedPipe {
+                readable,
+                process_open: true,
+                peer_open: true,
+                bytes: VecDeque::new(),
+                waiting: None,
+                bound: None,
+            },
         );
         fd
     }
@@ -108,12 +174,14 @@ impl Sim {
     #[must_use]
     pub fn peer_eof(&self, pid: Pid, fd: Fd) -> bool {
         let pipe = self.process(pid).inherited_pipes.get(&fd).expect("an inherited pipe");
+        assert!(pipe.bound.is_none(), "a bound pipe has a process peer");
         assert!(!pipe.readable, "peer_eof needs an inherited write pipe");
         !pipe.process_open && pipe.bytes.is_empty()
     }
 
     fn inherited_peer(&mut self, pid: Pid, fd: Fd, readable: bool) -> &mut InheritedPipe {
         let pipe = self.process_mut(pid).inherited_pipes.get_mut(&fd).expect("an inherited pipe");
+        assert!(pipe.bound.is_none(), "a bound pipe has a process peer");
         assert_eq!(pipe.readable, readable, "the wrong end of an inherited pipe");
         assert!(pipe.peer_open, "the world's pipe end is closed");
         pipe
@@ -291,14 +359,7 @@ impl Sim {
                 }
             }
             Op::Signal { pidfd, signal } => {
-                let child_id = self.process(pid).pidfds[&pidfd];
-                if self.process(pid).children[&child_id].exit.is_none() {
-                    let number = match signal {
-                        Signal::Terminate => 15,
-                        Signal::Kill => 9,
-                    };
-                    self.exit_child(pid, child_id, Exit::Signal(number));
-                }
+                self.signal_child(pid, pidfd, signal);
                 self.complete(pid, token, Op::Signal { pidfd, signal }, Ok(Done::Nothing));
             }
             Op::ReadSignal { fd } => {
@@ -311,14 +372,18 @@ impl Sim {
                 }
             }
             Op::PipeRead { fd, .. } => {
-                if self.process(pid).inherited_pipes.contains_key(&fd) {
+                if let Some(bound) = self.process(pid).inherited_pipes.get(&fd).and_then(|pipe| pipe.bound) {
+                    self.recv_bound(pid, token, op, fd, bound);
+                } else if self.process(pid).inherited_pipes.contains_key(&fd) {
                     self.recv_inherited(pid, token, op, fd);
                 } else {
                     self.recv_pipe(pid, token, op, fd);
                 }
             }
             Op::PipeWrite { fd, .. } => {
-                if self.process(pid).inherited_pipes.contains_key(&fd) {
+                if let Some(bound) = self.process(pid).inherited_pipes.get(&fd).and_then(|pipe| pipe.bound) {
+                    self.send_bound(pid, token, op, fd, bound);
+                } else if self.process(pid).inherited_pipes.contains_key(&fd) {
                     self.send_inherited(pid, token, op, fd);
                 } else {
                     self.send_pipe(pid, token, op, fd);
@@ -330,6 +395,9 @@ impl Sim {
                     if pipe.readable {
                         pipe.bytes.clear();
                     }
+                    if let Some(bound) = pipe.bound {
+                        self.close_bound(bound);
+                    }
                 } else if let Some(end) = self.process_mut(pid).pipe_fds.remove(&fd) {
                     let pipe = &mut self.process_mut(pid).children.get_mut(&end.child).expect("pipe names child").pipes
                         [end.index];
@@ -338,6 +406,7 @@ impl Sim {
                     if pipe.spec.way == Way::In {
                         self.end_input(pid, end);
                     }
+                    self.wake_bound(end, pid);
                 } else if self.process_mut(pid).signal_fds.remove(&fd).is_some() {
                     // All reads settled before closing this source.
                 } else {
@@ -347,6 +416,30 @@ impl Sim {
                 self.complete(pid, token, Op::Close { fd }, Ok(Done::Nothing));
             }
             _ => self.bug("a non-process operation was routed here"),
+        }
+    }
+
+    fn signal_child(&mut self, parent: Pid, pidfd: Fd, signal: Signal) {
+        let child_id = self.process(parent).pidfds[&pidfd];
+        if self.process(parent).children[&child_id].exit.is_some() {
+            return;
+        }
+        let number = match signal {
+            Signal::Terminate => 15,
+            Signal::Kill => 9,
+        };
+        let service = self.process(parent).children[&child_id].service;
+        match (signal, service) {
+            (Signal::Terminate, Some(service)) => {
+                let source = self.process(service).signal_fds.keys().next().copied();
+                match source {
+                    Some(fd) => {
+                        self.deliver_service_signal(service, fd, skein_io::kernel::ServiceSignal::Terminate);
+                    }
+                    None => self.exit_child(parent, child_id, Exit::Signal(number)),
+                }
+            }
+            _ => self.exit_child(parent, child_id, Exit::Signal(number)),
         }
     }
 
@@ -369,9 +462,10 @@ impl Sim {
                     Program::Exit(code) => Some(Exit::Code(code)),
                     _ => None,
                 };
-                self.process_mut(pid)
-                    .children
-                    .insert(child_id, Child { program, exit, waited: false, wait: None, pidfd_open: true, pipes });
+                self.process_mut(pid).children.insert(
+                    child_id,
+                    Child { program, exit, waited: false, wait: None, pidfd_open: true, pipes, service: None },
+                );
                 let pidfd = self.new_process_fd(pid);
                 self.process_mut(pid).pidfds.insert(pidfd, child_id);
                 let mut parent = Vec::with_capacity(specs.len());
@@ -410,6 +504,7 @@ impl Sim {
         }
         self.complete(pid, token, op, Ok(Done::Count(u32::try_from(n).expect("a count"))));
         self.wake_pipe(pid, end.child);
+        self.wake_bound(end, pid);
     }
 
     fn send_pipe(&mut self, pid: Pid, token: Token, op: Op, fd: Fd) {
@@ -425,6 +520,11 @@ impl Sim {
         let Op::PipeWrite { ref bytes, from, .. } = op else { self.bug("Send has bytes") };
         let left = &bytes[usize::try_from(from).expect("from fits")..];
         let (n, output) = match program {
+            Program::Service => {
+                let pipe = &self.process(pid).children[&end.child].pipes[end.index];
+                let room = usize::try_from(self.config.buffer).expect("buffer fits").saturating_sub(pipe.bytes.len());
+                (left.len().min(room), Some(end.index))
+            }
             Program::Echo { input, output }
                 if self.process(pid).children[&end.child].pipes[end.index].spec.child == input =>
             {
@@ -455,6 +555,7 @@ impl Sim {
         }
         self.complete(pid, token, op, Ok(Done::Count(u32::try_from(n).expect("a count"))));
         self.wake_pipe(pid, end.child);
+        self.wake_bound(PipeEnd { child: end.child, index: end.index }, pid);
     }
 
     fn end_input(&mut self, pid: Pid, end: PipeEnd) {
@@ -470,6 +571,85 @@ impl Sim {
         }
     }
 
+    fn close_bound(&mut self, bound: BoundEnd) {
+        let pipe =
+            &mut self.process_mut(bound.parent).children.get_mut(&bound.child).expect("bound child").pipes[bound.index];
+        pipe.ended = true;
+        self.wake_pipe(bound.parent, bound.child);
+    }
+
+    fn recv_bound(&mut self, pid: Pid, token: Token, mut op: Op, fd: Fd, bound: BoundEnd) {
+        let child = self.process_mut(bound.parent).children.get_mut(&bound.child).expect("bound child");
+        let pipe = &mut child.pipes[bound.index];
+        let Op::PipeRead { ref mut buf, .. } = op else { self.bug("a pipe read holds a buffer") };
+        if pipe.bytes.is_empty() && pipe.open && !pipe.ended && child.exit.is_none() {
+            self.process_mut(pid).inherited_pipes.get_mut(&fd).expect("bound pipe").waiting = Some(token);
+            self.park(pid, token, op);
+            return;
+        }
+        let count = buf.len().min(pipe.bytes.len());
+        for slot in buf.iter_mut().take(count) {
+            *slot = pipe.bytes.pop_front().expect("within buffered bytes");
+        }
+        self.complete(pid, token, op, Ok(Done::Count(u32::try_from(count).expect("a count"))));
+        self.wake_pipe(bound.parent, bound.child);
+    }
+
+    fn send_bound(&mut self, pid: Pid, token: Token, op: Op, fd: Fd, bound: BoundEnd) {
+        let pipe = &self.process(bound.parent).children[&bound.child].pipes[bound.index];
+        if !pipe.open || pipe.ended || self.process(bound.parent).children[&bound.child].exit.is_some() {
+            self.complete(pid, token, op, Err(Error::BrokenPipe));
+            return;
+        }
+        let Op::PipeWrite { ref bytes, from, .. } = op else { self.bug("a pipe write holds bytes") };
+        let left = &bytes[usize::try_from(from).expect("from fits")..];
+        let room = usize::try_from(self.config.buffer).expect("buffer fits").saturating_sub(pipe.bytes.len());
+        let count = left.len().min(room);
+        if count == 0 && !left.is_empty() {
+            self.process_mut(pid).inherited_pipes.get_mut(&fd).expect("bound pipe").waiting = Some(token);
+            self.park(pid, token, op);
+            return;
+        }
+        self.process_mut(bound.parent).children.get_mut(&bound.child).expect("bound child").pipes[bound.index]
+            .bytes
+            .extend(left[..count].iter().copied());
+        self.complete(pid, token, op, Ok(Done::Count(u32::try_from(count).expect("a count"))));
+        self.wake_pipe(bound.parent, bound.child);
+    }
+
+    fn wake_bound(&mut self, end: PipeEnd, parent: Pid) {
+        let child = &self.process(parent).children[&end.child];
+        let Some(pid) = child.service else { return };
+        let Some((&fd, pipe)) = self.process(pid).inherited_pipes.iter().find(|(_, pipe)| {
+            pipe.bound
+                .is_some_and(|bound| bound.parent == parent && bound.child == end.child && bound.index == end.index)
+        }) else {
+            return;
+        };
+        let Some(token) = pipe.waiting else { return };
+        let shared = &child.pipes[end.index];
+        let ready = match shared.spec.way {
+            Way::In => !shared.bytes.is_empty() || shared.ended || child.exit.is_some(),
+            Way::Out => {
+                !shared.open
+                    || shared.ended
+                    || child.exit.is_some()
+                    || shared.bytes.len() < usize::try_from(self.config.buffer).expect("buffer fits")
+            }
+        };
+        if !ready {
+            return;
+        }
+        self.process_mut(pid).inherited_pipes.get_mut(&fd).expect("bound pipe").waiting = None;
+        let op = self.unpark(pid, token);
+        let bound = BoundEnd { parent, child: end.child, index: end.index };
+        match op {
+            Op::PipeRead { .. } => self.recv_bound(pid, token, op, fd, bound),
+            Op::PipeWrite { .. } => self.send_bound(pid, token, op, fd, bound),
+            _ => self.bug("a bound pipe waiter holds a pipe operation"),
+        }
+    }
+
     fn exit_child(&mut self, pid: Pid, child_id: u64, exit: Exit) {
         let child = self.process_mut(pid).children.get_mut(&child_id).expect("child");
         child.exit = Some(exit);
@@ -482,6 +662,10 @@ impl Sim {
             self.complete(pid, token, op, Ok(Done::Exit(exit)));
         }
         self.wake_pipe(pid, child_id);
+        let count = self.process(pid).children[&child_id].pipes.len();
+        for index in 0..count {
+            self.wake_bound(PipeEnd { child: child_id, index }, pid);
+        }
     }
 
     fn wake_pipe(&mut self, pid: Pid, child_id: u64) {
@@ -526,13 +710,18 @@ impl Sim {
 
     fn echo_room(&self, pid: Pid, child_id: u64, input_index: usize) -> bool {
         let child = &self.process(pid).children[&child_id];
-        let Program::Echo { input, output } = child.program else {
-            return true;
+        let (input, output) = match child.program {
+            Program::Echo { input, output } => (input, Some(output)),
+            Program::Service => {
+                return child.pipes[input_index].bytes.len()
+                    < usize::try_from(self.config.buffer).expect("buffer fits");
+            }
+            Program::Exit(_) | Program::Never => return true,
         };
         if child.pipes[input_index].spec.child != input {
             return true;
         }
-        let Some(target) = child.pipes.iter().find(|pipe| pipe.spec.child == output) else {
+        let Some(target) = child.pipes.iter().find(|pipe| Some(pipe.spec.child) == output) else {
             return true;
         };
         !target.open || target.bytes.len() < usize::try_from(self.config.buffer).expect("buffer fits")
@@ -541,10 +730,144 @@ impl Sim {
 
 #[cfg(test)]
 mod tests {
+    use alloc::boxed::Box;
     use skein_io::kernel::{Done, Error, Exit, Op, Pipe, ServiceSignal, Signal, Spawn, Submit, Way};
     use skein_lib::{Queue, Token};
 
     use crate::{Answer, Ask, Config, Handle, Program, Reply, Sim};
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "one service exchange covers all three pipe directions and exit")]
+    fn hosted_service_exchanges_three_pipes_and_settles_wait() {
+        let mut config = Config::calm();
+        config.buffer = 2;
+        let mut sim = Sim::new(7, config);
+        let parent = sim.spawn_process();
+        let root = sim.root(parent, Handle::new(1));
+        let mut submits = Queue::with_capacity(5);
+        let mut completes = Queue::with_capacity(5);
+        submits.push(Submit {
+            op: Token::new(1),
+            kind: Op::Spawn {
+                spawn: Box::new(Spawn {
+                    program: Box::from(&b"service"[..]),
+                    args: Box::new([]),
+                    env: Box::new([]),
+                    root,
+                    dir: Box::new([]),
+                    pipes: Box::new([
+                        Pipe { child: 0, way: Way::In },
+                        Pipe { child: 1, way: Way::Out },
+                        Pipe { child: 2, way: Way::Out },
+                    ]),
+                }),
+            },
+        });
+        sim.submit(parent, &mut submits);
+        let mut calls = Queue::with_capacity(1);
+        sim.calls(&mut calls);
+        let call = calls.pop().expect("spawn call");
+        let mut answers = Queue::with_capacity(1);
+        answers.push(Answer { ticket: call.ticket, result: Ok(Reply::Program(Program::Service)) });
+        sim.answer(&mut answers);
+        sim.reap(parent, &mut completes);
+        let Ok(Done::Spawned { pidfd, pipes }) = completes.pop().expect("spawned").result else {
+            unreachable!("a service and three pipes")
+        };
+        let (child, inherited) = sim.bind_service(parent, pidfd);
+        assert_eq!(inherited.len(), 3);
+        assert_eq!([inherited[0].0, inherited[1].0, inherited[2].0], [0, 1, 2]);
+        assert!(sim.service_running(child));
+
+        submits.push(Submit {
+            op: Token::new(2),
+            kind: Op::PipeWrite { fd: pipes[0], bytes: Box::from(&b"ab"[..]), from: 0 },
+        });
+        sim.submit(parent, &mut submits);
+        sim.reap(parent, &mut completes);
+        assert_eq!(completes.pop().expect("stdin write").result, Ok(Done::Count(2)));
+        submits.push(Submit {
+            op: Token::new(3),
+            kind: Op::PipeWrite { fd: pipes[0], bytes: Box::from(&b"c"[..]), from: 0 },
+        });
+        sim.submit(parent, &mut submits);
+        sim.reap(parent, &mut completes);
+        assert!(completes.is_empty(), "backpressure parks the next write");
+
+        let mut child_submits = Queue::with_capacity(4);
+        let mut child_completes = Queue::with_capacity(4);
+        child_submits
+            .push(Submit { op: Token::new(10), kind: Op::PipeRead { fd: inherited[0].1, buf: Box::new([0; 1]) } });
+        sim.submit(child, &mut child_submits);
+        sim.reap(child, &mut child_completes);
+        let read = child_completes.pop().expect("first stdin byte");
+        assert_eq!(read.result, Ok(Done::Count(1)));
+        let Op::PipeRead { buf, .. } = read.kind else { unreachable!("pipe read") };
+        assert_eq!(&buf[..1], b"a");
+        sim.reap(parent, &mut completes);
+        assert_eq!(completes.pop().expect("writer wakes").result, Ok(Done::Count(1)));
+
+        child_submits.push(Submit {
+            op: Token::new(11),
+            kind: Op::PipeWrite { fd: inherited[1].1, bytes: Box::from(&b"ok"[..]), from: 0 },
+        });
+        child_submits.push(Submit {
+            op: Token::new(12),
+            kind: Op::PipeWrite { fd: inherited[2].1, bytes: Box::from(&b"no"[..]), from: 0 },
+        });
+        sim.submit(child, &mut child_submits);
+        sim.reap(child, &mut child_completes);
+        assert_eq!(child_completes.pop().expect("stdout write").result, Ok(Done::Count(2)));
+        assert_eq!(child_completes.pop().expect("stderr write").result, Ok(Done::Count(2)));
+        for (index, expected) in [(1, b"ok"), (2, b"no")] {
+            submits.push(Submit {
+                op: Token::new(20 + u64::try_from(index).expect("small index")),
+                kind: Op::PipeRead { fd: pipes[index], buf: Box::new([0; 2]) },
+            });
+            sim.submit(parent, &mut submits);
+            sim.reap(parent, &mut completes);
+            let read = completes.pop().expect("output read");
+            assert_eq!(read.result, Ok(Done::Count(2)));
+            let Op::PipeRead { buf, .. } = read.kind else { unreachable!("pipe read") };
+            assert_eq!(&buf[..2], expected);
+        }
+
+        submits.push(Submit { op: Token::new(30), kind: Op::Wait { pidfd } });
+        sim.submit(parent, &mut submits);
+        sim.reap(parent, &mut completes);
+        assert!(completes.is_empty());
+        let signal_fd = sim.open_signal_source(child);
+        child_submits.push(Submit { op: Token::new(31), kind: Op::ReadSignal { fd: signal_fd } });
+        sim.submit(child, &mut child_submits);
+        submits.push(Submit { op: Token::new(32), kind: Op::Signal { pidfd, signal: Signal::Terminate } });
+        sim.submit(parent, &mut submits);
+        sim.reap(parent, &mut completes);
+        assert_eq!(completes.pop().expect("signal submitted").result, Ok(Done::Nothing));
+        assert!(sim.service_running(child), "termination is delivered to the service");
+        sim.reap(child, &mut child_completes);
+        assert_eq!(
+            child_completes.pop().expect("service signal").result,
+            Ok(Done::ServiceSignal(ServiceSignal::Terminate))
+        );
+        for (index, (_, fd)) in inherited.iter().enumerate() {
+            child_submits.push(Submit {
+                op: Token::new(40 + u64::try_from(index).expect("small index")),
+                kind: Op::Close { fd: *fd },
+            });
+        }
+        child_submits.push(Submit { op: Token::new(44), kind: Op::Close { fd: signal_fd } });
+        sim.submit(child, &mut child_submits);
+        sim.reap(child, &mut child_completes);
+        assert_eq!(child_completes.len(), 4);
+        sim.finish_service(child, Exit::Code(7));
+        assert!(!sim.service_running(child));
+        sim.reap(parent, &mut completes);
+        assert_eq!(completes.pop().expect("waiting parent wakes").result, Ok(Done::Exit(Exit::Code(7))));
+        submits.push(Submit { op: Token::new(50), kind: Op::PipeRead { fd: pipes[1], buf: Box::new([0; 1]) } });
+        sim.submit(parent, &mut submits);
+        sim.reap(parent, &mut completes);
+        assert_eq!(completes.pop().expect("stdout end").result, Ok(Done::Count(0)));
+    }
 
     #[test]
     fn signal_source_delivers_and_cancels_a_pending_read() {

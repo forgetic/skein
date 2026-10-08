@@ -121,4 +121,6 @@ pub enum Program {
     Exit(u8),
     /// Stay alive until signalled.
     Never,
+    /// Run a service hosted by the world in a process bound to these pipes.
+    Service,
 }

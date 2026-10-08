@@ -54,6 +54,8 @@ const UNSUBMITTED: i32 = 11;
 
 #[derive(Debug)]
 struct Process {
+    /// The parent spawn represented by this process, when it hosts a child service.
+    parent: Option<(Pid, u64)>,
     /// The next descriptor number: numbers are never reused.
     next_fd: i32,
     /// The open descriptors of sockets, and the socket each names.
@@ -198,6 +200,7 @@ impl Sim {
     pub fn spawn_process(&mut self) -> Pid {
         let pid = Pid(u32::try_from(self.processes.len()).expect("fewer than 2^32 processes"));
         self.processes.push(Process {
+            parent: None,
             next_fd: FIRST_FD,
             fds: BTreeMap::new(),
             files: BTreeMap::new(),
