@@ -136,8 +136,8 @@ secret omits its bytes from `Debug` and logs. HTTP request bodies and headers
 that contain them are treated as secrets by the owner. Authorization URLs
 contain state and challenge and are handed only to the person's visit flow;
 the URL is not a durable record. Error descriptions and JWT claims are
-untrusted metadata. Only an authenticated TLS token endpoint can supply a
-usable bearer token.
+untrusted metadata. Only an authenticated TLS token endpoint, or an
+`http` one on loopback (section 1), can supply a usable bearer token.
 
 ## 5. Bounds and verification
 
