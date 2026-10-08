@@ -4,7 +4,7 @@ Provisional, 2026-10-07. `skein-llm-connection` runs LLM calls end to end
 for the protocol layer that owns it. For each call it:
 
 - connects through io;
-- runs TLS;
+- runs TLS, or plaintext to an endpoint on loopback;
 - drives skein's LLM client (llm.md);
 - arms the deadlines the client leaves to its owner;
 - reuses connections that are idle.
@@ -56,7 +56,10 @@ agent is its first user.
 An endpoint is configuration, given when the component is made. It has:
 
 - **an address,** resolved before the loop starts (io.md, section 4);
-- **the TLS server name** and what to trust it by;
+- **its transport:** TLS, with the server name and what to trust it by;
+  or plaintext, refused at configuration unless the address is on
+  loopback. Plaintext serves a server on the same machine, such as a local
+  model's, and the replaying tiers' fakes (testing-strategy.md, 4.4);
 - **skein's LLM endpoint:** the dialect, the path, and the headers the
   dialect needs, such as an identity profile (llm.md).
 
@@ -87,9 +90,9 @@ The owner names an endpoint by its index in that configuration.
 
 ## 5. Connections
 
-- **Opening:** a socket to the endpoint's address, then TLS, before the
-  call's request goes up. A connection that fails to open fails its call
-  as unsent.
+- **Opening:** a socket to the endpoint's address, then TLS where the
+  endpoint has it, before the call's request goes up. A connection that
+  fails to open fails its call as unsent.
 - **Reuse:** when a response has drained, skein's client says it is
   reusable, and the connection waits for the next call to that endpoint.
 - **Idle connections** close after the configured idle time, or when the
@@ -144,6 +147,9 @@ and the component's own state.
 - **A simulated world** (testing-strategy.md, 2.7), with io over the
   simulator and the fake peer as a simulated server.
 - **Memory:** the pool at its size, against the worst case.
+- **Transports:** the worlds that replay run plaintext endpoints. TLS
+  endpoints run in the real loop, and in the protocol world's handshake
+  cases, which do not replay (tls.md).
 
 ## 9. Open questions
 

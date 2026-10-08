@@ -274,7 +274,9 @@ scenarios remain the service's.
 TLS is not deterministic: its cryptography draws entropy from the kernel.
 It is tested on its own, with in-memory handshakes against itself under
 every split of the ciphertext, against transcripts where they can be
-replayed, and in the real loop. The replaying tiers run in plaintext.
+replayed, and in the real loop. The replaying tiers run in plaintext, so
+a component that connects with TLS also connects in plaintext to an
+address on loopback, for them and for servers on the same machine.
 
 ## 5. Keeping the simulator honest
 

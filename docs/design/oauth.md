@@ -17,16 +17,18 @@ through `skein-http` as in `skein-llm`.
 
 The caller supplies a `Registration` with an authorization URL, token
 endpoint, client id, redirect URI, requested scope, token wire format, and
-optional client secret. It admits one `Client` machine for an exchange. The endpoint
-binding is kept through the exchange; a redirect cannot choose a new token
-endpoint. A public client requires an already bound loopback listener and a
-redirect URI whose loopback address, port, and path match that listener. The
-confidential client has a secret supplied beside its registration. The caller
-routes the browser's redirect to the same in-progress client and checks the
-request's actual URI against the bound redirect URI before giving its query
-parameters to the machine. A caller using multiple issuers keeps each sign-in
-bound to its issuer and redirect; the machine never infers an issuer from the
-redirect or token response.
+optional client secret. The authorization URL and token endpoint are `https`,
+or `http` on loopback for an issuer on the same machine, such as a replaying
+tier's fake (testing-strategy.md, 4.4). It admits one `Client` machine for an
+exchange. The endpoint binding is kept through the exchange; a redirect cannot
+choose a new token endpoint. A public client requires an already bound
+loopback listener and a redirect URI whose loopback address, port, and path
+match that listener. The confidential client has a secret supplied beside its
+registration. The caller routes the browser's redirect to the same in-progress
+client and checks the request's actual URI against the bound redirect URI
+before giving its query parameters to the machine. A caller using multiple
+issuers keeps each sign-in bound to its issuer and redirect; the machine never
+infers an issuer from the redirect or token response.
 
 `Client` owns only a sign-in or refresh in progress: its registration, private
 state value and optional PKCE verifier, one authorization code or prior token
@@ -82,7 +84,7 @@ refreshes. A response yields a candidate with an absolute expiry calculated
 from the injected wall clock, shortened by any read-only JWT `exp` claim the
 caller requested. `remaining` is recalculated when durability completes or
 when a grant is encoded. JWT claims are metadata from a token obtained at the
-configured TLS endpoint, never proof of authentication; this crate does not
+configured endpoint, never proof of authentication; this crate does not
 verify signatures or use claims to choose an issuer or account.
 
 ## 3. Machine and deadlines
