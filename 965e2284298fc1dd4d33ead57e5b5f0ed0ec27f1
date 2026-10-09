@@ -1,0 +1,11 @@
+Reliability04.8 final rebased-tip gate PASS
+Tested hash: 965e2284298fc1dd4d33ead57e5b5f0ed0ec27f1
+Parent: 733ee9e6233a3d42e235d1acb62e10ba1aa5095e
+Heavy scripts/check.sh: /tmp/skein04-8-gate.log
+Fmt, workspace alltargets clippy-Dwarnings, standalone skein-tls passed.
+Focused1639/3.271s run5ed8563c-8d66-45b4-b4f8-13c3e12a6858
+Fuzzy89/9.827s run117a583a-c465-4cc9-a39c-f86a38801bd3
+Browser6/3.546s runf654cfc2-8ae3-4074-8241-a2f71e338afa
+Serial3/0.081s run3697410a-9688-4654-b6c5-d045e91a18d7; max new world0.050s
+Actual both-dialect heads match the independent reference HTTP reader. Exact header ownership fits checked peak, drops to heldzero; one byte less refuses retention before query/response.
+No probe specified; no live credentials. Main and increment worktree clean at merge.
