@@ -63,6 +63,7 @@ fn request() -> Request {
         ]),
         effort: Some(owned(b"high")),
         prompt_cache_key: Some(owned(b"conversation")),
+        choice: crate::ToolChoice::Auto,
     }
 }
 fn drain(queue: &mut Queue<Output>, trace: &mut Vec<Output>) {
@@ -915,4 +916,31 @@ fn numerals_keep_the_fixed_tokenizer_cap_distinct_from_strings() {
     let limits = Limits { string_bytes: 64, ..LIMITS };
     Json::from_bytes(&[b'1'; 32], &limits).unwrap();
     assert_eq!(Json::from_bytes(&[b'1'; 33], &limits), Err(DecodeError::limit(crate::Cap::Number, 32)));
+}
+
+#[test]
+fn tool_choice_encodes_auto_none_and_only_without_filtering() {
+    for choice in
+        [crate::ToolChoice::Auto, crate::ToolChoice::None, crate::ToolChoice::Only(Box::new([owned(b"read")]))]
+    {
+        let mut request = request();
+        request.choice = choice.clone();
+        let wire = encode_request(&request, &LIMITS).expect("bounded choice");
+        let value = Json::from_bytes(&wire, &LIMITS).expect("request object");
+        let tokens = value.as_tokens();
+        let encoded =
+            json::text_ref(json::value_at(tokens, json::required(tokens, b"tool_choice").unwrap()).unwrap()).unwrap();
+        let expected = match choice {
+            crate::ToolChoice::Auto | crate::ToolChoice::Only(_) => b"auto".as_slice(),
+            crate::ToolChoice::None => b"none".as_slice(),
+        };
+        assert_eq!(encoded, expected);
+        assert_eq!(
+            json::value_at(tokens, json::required(tokens, b"parallel_tool_calls").unwrap()).unwrap(),
+            [Token::True]
+        );
+        let decoded = decode_request(&value, &LIMITS).unwrap();
+        assert_eq!(decoded.tools, request.tools);
+        assert_eq!(decoded.choice, if expected == b"none" { crate::ToolChoice::None } else { crate::ToolChoice::Auto });
+    }
 }

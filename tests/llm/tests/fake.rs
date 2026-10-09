@@ -491,3 +491,71 @@ fn actual_byte_peer_preserves_opaque_extensions_refusal_stop_and_continuation_re
         );
     }
 }
+
+#[test]
+fn tool_choice_none_and_an_outside_call_cross_both_actual_wires() {
+    use skein_fake_llm_domain::{Domain, api, fire, step};
+    use skein_lib::{Duration, Env, Queue, Time, Wall};
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        for outside_choice in [0, 1000] {
+            let mut input = input(provider, 1);
+            input.prompt.instructions = Box::new([]);
+            input.prompt.choice = skein_llm::ToolChoice::None;
+            let mut world = Exchange::new(input, limits(), Box::new([]));
+            world.manual_replies = true;
+            world.start();
+            awaiting_domain(&mut world);
+            let config = skein_fake_llm_domain::Config {
+                tool_rounds: 1,
+                outside_choice,
+                latency_min: Duration::ZERO,
+                latency_max: Duration::ZERO,
+                ..skein_llm_world::fake::config()
+            };
+            let mut domain = Domain::configured(
+                &config,
+                3,
+                Box::new([]),
+                api::Menu { arguments: Box::new([b"{}".as_slice().into()]), invalid: Box::new([]) },
+            )
+            .expect("bounded actual domain");
+            let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: config };
+            let mut out = Queue::with_capacity(skein_fake_llm_domain::MAX_OUT);
+            let [query] = world.queries.as_slice() else { panic!("actual decoded query") };
+            assert_eq!(query.choice, api::ToolChoice::None);
+            assert_eq!(query.tools.len(), 1, "offered tools are never filtered");
+            step(&mut domain, &env, world.pending.pop().expect("actual call right"), &mut out);
+            fire(&mut domain, &env, &mut out);
+            world.reply(out.pop().expect("one actual domain terminal"));
+            world.run();
+            let answer = completion(&world);
+            if outside_choice == 0 {
+                assert_eq!(answer.stop, skein_llm::Stop::EndTurn);
+                assert!(
+                    answer.content.iter().all(|block| matches!(block, Block::Text { .. })),
+                    "None gives text without a call"
+                );
+            } else {
+                let [Block::ToolCall { name, .. }] = answer.content.as_ref() else {
+                    panic!("outside call reaches caller")
+                };
+                assert_eq!(name.as_ref(), b"caller_tool");
+            }
+        }
+    }
+}
+
+#[test]
+fn scripted_calls_are_delivered_even_when_tool_choice_is_none() {
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        let mut input = input(provider, 1);
+        input.prompt.choice = skein_llm::ToolChoice::None;
+        let mut world = Exchange::new(input, limits(), scripts());
+        world.start();
+        world.run();
+        let [Block::ToolCall { name, .. }] = completion(&world).content.as_ref() else {
+            panic!("scripts call what they name")
+        };
+        assert_eq!(name.as_ref(), b"caller_tool");
+    }
+}

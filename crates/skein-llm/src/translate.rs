@@ -38,6 +38,7 @@ pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limit
         input: input.into_boxed(),
         effort: prompt.reasoning_effort,
         prompt_cache_key: prompt.cache_key,
+        choice: prompt.choice,
     };
     match openai::measure_request(&raw, limits) {
         Ok(_) => Ok(raw),
@@ -54,7 +55,16 @@ fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Res
             Error::limit(crate::Cap::Parts, limits.parts)
         });
     }
+    validate_choice(&prompt.choice, &prompt.tools)?;
     let mut budget: u64 = 0;
+    match &prompt.choice {
+        crate::ToolChoice::Auto | crate::ToolChoice::None => {}
+        crate::ToolChoice::Only(names) => {
+            for name in names {
+                charge_text(name, &mut budget, limits)?;
+            }
+        }
+    }
     charge_text(&prompt.model, &mut budget, limits)?;
     charge_text(&prompt.instructions, &mut budget, limits)?;
     if let Some(value) = &prompt.reasoning_effort {
@@ -133,6 +143,33 @@ fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Res
     }
     Ok(())
 }
+/// The offered list stays intact; Only is local policy, not client filtering.
+pub(crate) fn validate_choice(choice: &crate::ToolChoice, tools: &[crate::Tool]) -> Result<(), Error> {
+    match choice {
+        crate::ToolChoice::Auto | crate::ToolChoice::None => Ok(()),
+        crate::ToolChoice::Only(names) => {
+            if names.is_empty() {
+                return Err(Error::Invalid);
+            }
+            for (index, name) in names.iter().enumerate() {
+                let mut offered = false;
+                for tool in tools {
+                    offered |= tool.name == *name;
+                }
+                if !offered {
+                    return Err(Error::Invalid);
+                }
+                for previous in names.get(..index).expect("an index through the names") {
+                    if previous == name {
+                        return Err(Error::Invalid);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 fn charge_text(value: &[u8], budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
     if value.len() > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
         return Err(Error::limit(crate::Cap::String, limits.string_bytes));
@@ -445,6 +482,7 @@ mod tests {
             messages: Box::new([Message { role, content: Box::new([block]) }]),
             reasoning_effort: None,
             cache_key: None,
+            choice: crate::ToolChoice::Auto,
             max_output_tokens: None,
         }
     }
@@ -630,5 +668,26 @@ mod tests {
             failure(openai::Failure::RateLimited { retry_after: Duration::from_secs(7) }),
             Failure::RateLimited { retry_after: Duration::from_secs(7) }
         );
+    }
+    #[test]
+    fn only_requires_distinct_offered_names_in_both_dialects() {
+        let mut prompt = prompt(Role::User, Block::Text { text: bytes::copy_of(b"hello"), replay: None });
+        prompt.tools = Box::new([crate::Tool {
+            name: bytes::copy_of(b"read"),
+            description: Box::new([]),
+            schema: openai::Json::from_bytes(b"{}", &LIMITS).expect("schema object"),
+        }]);
+        for names in [
+            [].as_slice(),
+            [bytes::copy_of(b"unknown")].as_slice(),
+            [bytes::copy_of(b"read"), bytes::copy_of(b"read")].as_slice(),
+        ] {
+            prompt.choice = crate::ToolChoice::Only(names.into());
+            assert_eq!(request(prompt.clone(), Provider::OpenAiCodex, &LIMITS), Err(Error::Invalid));
+            assert_eq!(crate::anthropic::encode_request(&prompt, &LIMITS), Err(Error::Invalid));
+        }
+        prompt.choice = crate::ToolChoice::Only(Box::new([bytes::copy_of(b"read")]));
+        request(prompt.clone(), Provider::OpenAiCodex, &LIMITS).expect("offered name accepted");
+        crate::anthropic::encode_request(&prompt, &LIMITS).expect("offered name accepted");
     }
 }

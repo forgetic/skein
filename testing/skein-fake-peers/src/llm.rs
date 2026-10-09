@@ -435,6 +435,15 @@ fn query_bytes(query: &api::Query) -> Option<u64> {
     bytes = bytes
         .checked_add(u64::try_from(query.messages.len().checked_mul(size_of::<api::Message>())?).ok()?)?
         .checked_add(u64::try_from(query.tools.len().checked_mul(size_of::<api::ToolSpec>())?).ok()?)?;
+    match &query.choice {
+        api::ToolChoice::Auto | api::ToolChoice::None => {}
+        api::ToolChoice::Only(names) => {
+            bytes = bytes.checked_add(u64::try_from(names.len().checked_mul(size_of::<Box<[u8]>>())?).ok()?)?;
+            for name in names {
+                bytes = bytes.checked_add(u64::try_from(name.len()).ok()?)?;
+            }
+        }
+    }
     for tool in &query.tools {
         bytes = bytes.checked_add(
             u64::try_from(tool.name.len().checked_add(tool.description.len())?.checked_add(tool.parameters.len())?)

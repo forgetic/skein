@@ -135,6 +135,18 @@ pub struct ToolSpec {
     pub parameters: Box<[u8]>,
 }
 
+/// Caller tool policy, supplied in a query independently of client vocabulary.
+/// Contract: docs/design/fake-llm.md, section 2.1.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum ToolChoice {
+    /// Random answers may call any offered tool.
+    Auto,
+    /// Random answers use no tools, unless the configured breach chance fires.
+    None,
+    /// Random answers may call only these offered names.
+    Only(Box<[Box<[u8]>]>),
+}
+
 /// A request for the next assistant message.
 ///
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -152,6 +164,7 @@ pub struct Query {
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
     pub tools: Box<[ToolSpec]>,
+    pub choice: ToolChoice,
     /// Oldest-first conversation messages, with provider call/result pairing preserved.
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.

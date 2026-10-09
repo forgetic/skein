@@ -29,6 +29,7 @@ pub struct Request {
     pub input: Box<[Input]>,
     pub effort: Option<Box<[u8]>>,
     pub prompt_cache_key: Option<Box<[u8]>>,
+    pub choice: crate::ToolChoice,
 }
 pub fn encode_request(request: &Request, limits: &Limits) -> Result<Box<[u8]>, DecodeError> {
     let len = measure_request(request, limits)?;
@@ -113,7 +114,10 @@ fn write_request(out: &mut Encoder, request: &Request) {
     out.key(b"tools");
     write_tools(out, &request.tools);
     out.key(b"tool_choice");
-    out.string(b"auto");
+    out.string(match &request.choice {
+        crate::ToolChoice::Auto | crate::ToolChoice::Only(_) => b"auto",
+        crate::ToolChoice::None => b"none",
+    });
     out.key(b"parallel_tool_calls");
     out.boolean(true);
     out.key(b"input");
@@ -258,9 +262,24 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
         Some(value) => optional_text(value, b"effort")?,
         None => None,
     };
+    let choice = match json::optional_at(tokens, json::field(tokens, b"tool_choice")?)? {
+        Some(value) => match json::text_ref(value)? {
+            b"auto" => crate::ToolChoice::Auto,
+            b"none" => crate::ToolChoice::None,
+            _ => return Err(DecodeError::WrongType),
+        },
+        None => crate::ToolChoice::Auto,
+    };
     let prompt_cache_key = optional_text(tokens, b"prompt_cache_key")?;
-    let request =
-        Request { model, instructions, tools: tools.into_boxed(), input: input.into_boxed(), effort, prompt_cache_key };
+    let request = Request {
+        model,
+        instructions,
+        tools: tools.into_boxed(),
+        input: input.into_boxed(),
+        effort,
+        prompt_cache_key,
+        choice,
+    };
     validate(&request, limits)?;
     Ok(request)
 }

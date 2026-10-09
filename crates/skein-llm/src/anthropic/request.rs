@@ -35,7 +35,16 @@ pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), E
     if prompt.cache_key.is_some() {
         return Err(Error::Unsupported);
     }
+    crate::translate::validate_choice(&prompt.choice, &prompt.tools)?;
     let mut budget: u64 = 0;
+    match &prompt.choice {
+        crate::ToolChoice::Auto | crate::ToolChoice::None => {}
+        crate::ToolChoice::Only(names) => {
+            for name in names {
+                text(name, &mut budget, limits)?;
+            }
+        }
+    }
     text(&prompt.model, &mut budget, limits)?;
     text(&prompt.instructions, &mut budget, limits)?;
     if let Some(effort) = &prompt.reasoning_effort {
@@ -247,6 +256,16 @@ fn write_request(out: &mut writer::Encoder, prompt: &Prompt, limits: &openai::Li
     if !prompt.tools.is_empty() {
         out.key(b"tools");
         write_tools(out, &prompt.tools);
+    }
+    match &prompt.choice {
+        crate::ToolChoice::Auto | crate::ToolChoice::Only(_) => {}
+        crate::ToolChoice::None => {
+            out.key(b"tool_choice");
+            out.object_start();
+            out.key(b"type");
+            out.string(b"none");
+            out.object_end();
+        }
     }
     out.key(b"messages");
     out.array_start();

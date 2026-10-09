@@ -71,6 +71,14 @@ pub fn request(provider: Provider, data: &[u8], limits: &Limits) -> Result<api::
     }
 }
 
+fn choice(choice: skein_llm::ToolChoice) -> api::ToolChoice {
+    match choice {
+        skein_llm::ToolChoice::Auto => api::ToolChoice::Auto,
+        skein_llm::ToolChoice::None => api::ToolChoice::None,
+        skein_llm::ToolChoice::Only(names) => api::ToolChoice::Only(names),
+    }
+}
+
 fn anthropic_request(data: &[u8], limits: &anthropic::Limits) -> Result<api::Query, Error> {
     let json = anthropic::Json::from_bytes(data, limits).or(Err(Error::Malformed))?;
     let request = anthropic::decode_request(&json, limits).or(Err(Error::Malformed))?;
@@ -109,6 +117,7 @@ fn anthropic_request(data: &[u8], limits: &anthropic::Limits) -> Result<api::Que
         model: request.model,
         system: request.instructions,
         tools: tools.into_boxed(),
+        choice: choice(request.choice),
         messages: messages.into_boxed(),
         max_tokens: request.max_output_tokens.expect("Messages request decoded its required cap"),
     })
@@ -172,6 +181,7 @@ fn openai_request(data: &[u8], limits: &Limits) -> Result<api::Query, Error> {
         model: request.model,
         system: request.instructions,
         tools: tools.into_boxed(),
+        choice: choice(request.choice),
         messages: messages.into_boxed(),
         max_tokens: limits.model_ceiling,
     })

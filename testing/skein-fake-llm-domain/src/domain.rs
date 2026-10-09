@@ -94,6 +94,8 @@ pub struct Config {
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
     pub malformed: u32,
+    /// Chance per mille of choosing an offered tool outside the query's choice.
+    pub outside_choice: u32,
     /// Rounds of tool calls after each of the client's messages before the
     /// fake answers it.
     ///

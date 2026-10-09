@@ -1,6 +1,7 @@
 use super::{DEFAULT_MAX_TOKENS, encode_request, measure_request};
 use crate::{Block, Error, Json, Message, Prompt, Provider, Replay, Role, Tool, openai};
 use alloc::boxed::Box;
+use skein_json::Token;
 use skein_lib::bytes;
 
 const LIMITS: openai::Limits = openai::Limits {
@@ -25,6 +26,7 @@ fn prompt(role: Role, block: Block) -> Prompt {
         max_output_tokens: None,
         reasoning_effort: None,
         cache_key: None,
+        choice: crate::ToolChoice::Auto,
     }
 }
 
@@ -355,5 +357,44 @@ fn peer_request_admits_native_core_before_corrupted_controls() {
         assert_ne!(wire.as_bytes(), good.as_bytes(), "negative actually changes native core");
         let value = Json::from_bytes(wire.as_bytes(), &LIMITS).expect("corruption retains JSON syntax");
         assert!(super::decode_request(&value, &LIMITS).is_err(), "native core corruption {old} rejected");
+    }
+}
+
+#[test]
+fn tool_choice_none_is_native_and_auto_and_only_are_omitted() {
+    for choice in
+        [crate::ToolChoice::Auto, crate::ToolChoice::None, crate::ToolChoice::Only(Box::new([bytes::copy_of(b"read")]))]
+    {
+        let mut prompt = prompt(Role::User, text(b"hello"));
+        prompt.tools = Box::new([Tool {
+            name: bytes::copy_of(b"read"),
+            description: Box::new([]),
+            schema: Json::from_bytes(b"{}", &LIMITS).expect("schema object"),
+        }]);
+        prompt.choice = choice.clone();
+        let wire = encode_request(&prompt, &LIMITS).expect("choice is bounded");
+        let value = Json::from_bytes(&wire, &LIMITS).expect("request document");
+        let decoded = super::decode_request(&value, &LIMITS).expect("peer decodes choice");
+        assert_eq!(decoded.tools, prompt.tools);
+        match choice {
+            crate::ToolChoice::Auto | crate::ToolChoice::Only(_) => {
+                assert_eq!(openai::json::field(value.as_tokens(), b"tool_choice").expect("unique field"), None);
+                assert_eq!(decoded.choice, crate::ToolChoice::Auto);
+            }
+            crate::ToolChoice::None => {
+                let tokens = value.as_tokens();
+                let at = openai::json::required(tokens, b"tool_choice").expect("native choice");
+                assert_eq!(
+                    openai::json::value_at(tokens, at).expect("choice object"),
+                    [
+                        Token::ObjectStart,
+                        Token::Key(bytes::copy_of(b"type")),
+                        Token::String(bytes::copy_of(b"none")),
+                        Token::ObjectEnd
+                    ]
+                );
+                assert_eq!(decoded.choice, crate::ToolChoice::None);
+            }
+        }
     }
 }

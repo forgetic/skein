@@ -46,6 +46,15 @@ pub(crate) fn query(query: &Query) -> Option<u64> {
     total = total
         .checked_add(array(query.tools.len(), size_of::<ToolSpec>())?)?
         .checked_add(array(query.messages.len(), size_of::<Message>())?)?;
+    match &query.choice {
+        crate::api::ToolChoice::Auto | crate::api::ToolChoice::None => {}
+        crate::api::ToolChoice::Only(names) => {
+            total = total.checked_add(array(names.len(), size_of::<Box<[u8]>>())?)?;
+            for name in names {
+                total = total.checked_add(bytes(name)?)?;
+            }
+        }
+    }
     for tool in &query.tools {
         total = total
             .checked_add(bytes(&tool.name)?)?

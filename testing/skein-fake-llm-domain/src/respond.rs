@@ -58,7 +58,7 @@ pub(crate) fn respond(
             return Err(error);
         }
     }
-    if !valid(&query.messages) {
+    if !valid(&query.messages) || !valid_choice(query) {
         return Err(Error::InvalidRequest);
     }
     let roll = rng.below(1000);
@@ -86,14 +86,18 @@ pub(crate) fn respond(
         }
         return Ok(answer(query, Box::new([Part::Text { text: copy_of(b"done") }]), Finish::Stop, 1, cut_text()));
     }
-    if tool_rounds(&query.messages) < config.tool_rounds && !query.tools.is_empty() && !menu.arguments.is_empty() {
+    let outside = rng.chance(config.outside_choice) && tool_count(query, true) != 0;
+    if tool_rounds(&query.messages) < config.tool_rounds
+        && tool_count(query, outside) != 0
+        && !menu.arguments.is_empty()
+    {
         let count = u32::try_from(rng.between(1, config.calls_per_answer.max(1).into())).expect("drawn below a u32");
         if !limits::fits(limits::random_answer(query, menu, count), config.answer_bytes) {
             return Err(Error::ContextTooLong);
         }
         let mut calls = List::with_capacity(count);
         for _ in 0..count {
-            calls.push(call(rng, minted, config, menu, query)?).expect("room for every call");
+            calls.push(call(rng, minted, config, menu, query, outside)?).expect("room for every call");
         }
         // Cut short, the answer ends partway into its first call.
         let first = match calls.get(0) {
@@ -111,6 +115,58 @@ pub(crate) fn respond(
     Ok(answer(query, Box::new([Part::Text { text: copy_of(b"done") }]), Finish::Stop, tokens, cut_text()))
 }
 
+/// Only names offered distinct tools; the independent domain validates its inputs.
+fn valid_choice(query: &Query) -> bool {
+    match &query.choice {
+        crate::api::ToolChoice::Auto | crate::api::ToolChoice::None => true,
+        crate::api::ToolChoice::Only(names) => {
+            if names.is_empty() {
+                return false;
+            }
+            for (index, name) in names.iter().enumerate() {
+                let mut offered = false;
+                for tool in &query.tools {
+                    offered |= tool.name == *name;
+                }
+                if !offered {
+                    return false;
+                }
+                for previous in names.get(..index).expect("an index through the names") {
+                    if previous == name {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+    }
+}
+
+fn allowed(choice: &crate::api::ToolChoice, name: &[u8]) -> bool {
+    match choice {
+        crate::api::ToolChoice::Auto => true,
+        crate::api::ToolChoice::None => false,
+        crate::api::ToolChoice::Only(names) => {
+            for offered in names {
+                if offered.as_ref() == name {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+fn tool_count(query: &Query, outside: bool) -> u64 {
+    let mut count: u64 = 0;
+    for tool in &query.tools {
+        if allowed(&query.choice, &tool.name) != outside {
+            count = count.checked_add(1).expect("a count through a bounded tool array");
+        }
+    }
+    count
+}
+
 /// What a text answer cut short says.
 ///
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -125,10 +181,20 @@ fn call(
     config: &Config,
     menu: &crate::api::Menu,
     query: &Query,
+    outside: bool,
 ) -> Result<Part, Error> {
-    let tools = u64::try_from(query.tools.len()).expect("a usize fits in a u64");
-    let index = usize::try_from(rng.below(tools)).expect("an index below a usize fits in one");
-    let tool = query.tools.get(index).expect("picked below the tool count");
+    let mut pick = rng.below(tool_count(query, outside));
+    let mut selected = None;
+    for tool in &query.tools {
+        if allowed(&query.choice, &tool.name) != outside {
+            if pick == 0 {
+                selected = Some(tool);
+                break;
+            }
+            pick = pick.checked_sub(1).expect("a nonzero remaining tool index");
+        }
+    }
+    let tool = selected.expect("picked below the eligible tool count");
     *minted = minted.checked_add(1).ok_or(Error::InvalidRequest)?;
     let id = call_id(*minted);
     if rng.chance(config.malformed) && !menu.invalid.is_empty() {
@@ -462,6 +528,7 @@ mod tests {
         answer_tokens: 1,
         calls_per_answer: 1,
         malformed: 0,
+        outside_choice: 0,
         tool_rounds: 1,
     };
 
@@ -497,7 +564,14 @@ mod tests {
 
     fn query(messages: Box<[Message]>) -> Query {
         let tool = ToolSpec { name: copy_of(b"ls"), description: copy_of(b""), parameters: copy_of(b"{}") };
-        Query { model: copy_of(b"fake"), system: copy_of(b""), tools: Box::new([tool]), messages, max_tokens: 100 }
+        Query {
+            model: copy_of(b"fake"),
+            system: copy_of(b""),
+            tools: Box::new([tool]),
+            messages,
+            max_tokens: 100,
+            choice: crate::api::ToolChoice::Auto,
+        }
     }
 
     #[test]
@@ -732,5 +806,29 @@ mod tests {
     fn call_ids_are_hex() {
         assert_eq!(&*call_id(0xAB), b"call_00000000000000ab");
         assert_eq!(&*call_id(u64::MAX), b"call_ffffffffffffffff");
+    }
+    #[test]
+    fn random_tool_choices_honour_none_only_and_the_breach_chance() {
+        for seed in 0..64 {
+            let mut query = query(Box::new([user(Box::new([text()]))]));
+            let other = ToolSpec { name: copy_of(b"other"), description: Box::new([]), parameters: copy_of(b"{}") };
+            query.tools = Box::new([query.tools.first().expect("offered tool").clone(), other]);
+            query.choice = crate::api::ToolChoice::None;
+            let mut rng = Rng::new(seed);
+            let mut minted = 0;
+            let answer = respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &query).expect("valid choice");
+            assert_eq!(answer.finish, Finish::Stop);
+            assert!(!super::calls_any(&answer.parts), "None calls no tool");
+            query.choice = crate::api::ToolChoice::Only(Box::new([copy_of(b"other")]));
+            let answer = respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &query).expect("valid choice");
+            assert_eq!(called(answer.parts.first()).1, b"other");
+            let config = Config { outside_choice: 1000, ..CONFIG };
+            let answer = respond(&mut rng, &mut minted, &config, &[], &menu(), &query).expect("configured breach");
+            assert_eq!(called(answer.parts.first()).1, b"ls");
+            query.choice = crate::api::ToolChoice::None;
+            let answer = respond(&mut rng, &mut minted, &config, &[], &menu(), &query).expect("configured breach");
+            assert_eq!(answer.finish, Finish::ToolCalls);
+            assert!(super::calls_any(&answer.parts), "None breach still calls an offered tool");
+        }
     }
 }

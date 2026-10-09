@@ -41,6 +41,7 @@ fn query() -> Query {
         tools: Box::new([]),
         messages: Box::new([Message { role: Role::User, parts: Box::new([Part::Text { text: Box::new([]) }]) }]),
         max_tokens: 10,
+        choice: skein_fake_llm_domain::api::ToolChoice::Auto,
     }
 }
 

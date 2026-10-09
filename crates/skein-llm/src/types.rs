@@ -71,6 +71,17 @@ pub struct Tool {
     /// A JSON Schema object describing the tool's argument object.
     pub schema: Json,
 }
+/// The caller's tool policy for one call (llm.md, section 2.2).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum ToolChoice {
+    /// The provider may select any offered tool.
+    Auto,
+    /// The caller asks the provider for an answer without tools.
+    None,
+    /// The caller permits these distinct offered names; native wires use Auto.
+    Only(Box<[Box<[u8]>]>),
+}
+
 /// Owned input to one call. Admission validates counts, bytes and replay data.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Prompt {
@@ -79,6 +90,7 @@ pub struct Prompt {
     /// System-level instructions, separate from user/assistant history.
     pub instructions: Box<[u8]>,
     pub tools: Box<[Tool]>,
+    pub choice: ToolChoice,
     /// Chronological conversation history, including prior replay metadata.
     pub messages: Box<[Message]>,
     /// An optional provider-supported reasoning effort value.

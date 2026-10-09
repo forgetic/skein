@@ -137,6 +137,15 @@ fn query_bytes(query: &api::Query) -> Option<u64> {
         .checked_add(bytes(&query.system)?)?
         .checked_add(cells::<api::ToolSpec>(u32::try_from(query.tools.len()).ok()?)?)?
         .checked_add(cells::<api::Message>(u32::try_from(query.messages.len()).ok()?)?)?;
+    match &query.choice {
+        api::ToolChoice::Auto | api::ToolChoice::None => {}
+        api::ToolChoice::Only(names) => {
+            owned = owned.checked_add(cells::<Box<[u8]>>(u32::try_from(names.len()).ok()?)?)?;
+            for name in names {
+                owned = owned.checked_add(bytes(name)?)?;
+            }
+        }
+    }
     for tool in &query.tools {
         owned = owned
             .checked_add(bytes(&tool.name)?)?
@@ -283,6 +292,7 @@ pub fn config() -> fake::Config {
         answer_tokens: 1,
         calls_per_answer: 1,
         malformed: 0,
+        outside_choice: 0,
         tool_rounds: 0,
     }
 }

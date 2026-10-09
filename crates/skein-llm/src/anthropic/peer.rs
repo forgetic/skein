@@ -95,6 +95,7 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeErr
             .push(Message { role, content: blocks.into_boxed() })
             .or(Err(DecodeError::limit(crate::Cap::Parts, limits.parts)))?;
     }
+    let choice = tool_choice(tokens)?;
     let prompt = Prompt {
         model,
         instructions,
@@ -102,12 +103,24 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeErr
         messages: messages.into_boxed(),
         reasoning_effort: None,
         cache_key: None,
+        choice,
         max_output_tokens: Some(max),
     };
     match super::request::validate(&prompt, limits) {
         Ok(()) => Ok(prompt),
         Err(crate::Error::Limit { which, bound }) => Err(DecodeError::TooLarge { which, bound }),
         Err(crate::Error::Invalid | crate::Error::Unsupported) => Err(DecodeError::Malformed),
+    }
+}
+
+fn tool_choice(tokens: &[Token]) -> Result<crate::ToolChoice, DecodeError> {
+    match optional(tokens, b"tool_choice")? {
+        Some(value) => match json::text_ref(required(value, b"type")?)? {
+            b"none" => Ok(crate::ToolChoice::None),
+            b"auto" => Ok(crate::ToolChoice::Auto),
+            _ => Err(DecodeError::WrongType),
+        },
+        None => Ok(crate::ToolChoice::Auto),
     }
 }
 

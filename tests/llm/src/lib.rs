@@ -48,6 +48,7 @@ pub fn call(owner: u64) -> Call {
             }]),
             reasoning_effort: None,
             cache_key: Some(b"cache-world".to_vec().into()),
+            choice: skein_llm::ToolChoice::Auto,
             max_output_tokens: None,
         },
     }

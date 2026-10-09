@@ -7,7 +7,9 @@ Responses route and Anthropic's OAuth Messages route. It composes
 normally supplied by TLS.
 
 `Prompt` contains instructions, model, conversation messages and function
-tools. Ordered `Block` values describe text, refusals, tool calls/results and
+tools and `ToolChoice` (`Auto`, `None`, or distinct offered names in `Only`).
+Both dialects render `Only` as automatic selection; callers enforce tool policy.
+Ordered `Block` values describe text, refusals, tool calls/results and
 opaque reasoning. Responses expose text, reasoning and tool-argument deltas,
 completed blocks, and one final `Completion` with stop reason and usage.
 Completed blocks preserve provider replay metadata for the next turn.

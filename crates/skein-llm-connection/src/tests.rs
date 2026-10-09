@@ -58,6 +58,7 @@ fn prompt() -> Prompt {
         }]),
         reasoning_effort: None,
         cache_key: None,
+        choice: skein_llm::ToolChoice::Auto,
         max_output_tokens: None,
     }
 }
