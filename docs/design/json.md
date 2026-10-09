@@ -345,15 +345,21 @@ pub struct Limits {
       are kept as `Into` keeps them; an unknown one keeps the object whole,
       up to the unknown cap;
     - **the tag later, or never:** until the tag is read, the collector
-      keeps two candidates side by side. One is the object projected
-      through every known variant's children together; the other is the
-      object whole, copied up to the unknown cap and, past it, only
-      marked as over. At the tag, a known value keeps the projection,
-      restricted to its variant's children, and drops the copy. An
-      unknown value, or an object that ends with no tag, keeps the copy,
-      or fails past the unknown cap (`TooMuchText`, naming the cap). So a
-      known object is never failed by the size of a field it does not
-      keep, whatever the order of its fields;
+      keeps two candidates side by side:
+      - the object projected through every known variant's children
+        together, counted per variant: each variant's own tokens and text
+        run against `tokens` and `text`, as if it alone were kept;
+      - the object whole, copied up to the unknown cap and, past it, only
+        marked as over.
+
+      A variant whose own count passes a limit is marked over. The
+      collector stops storing what only over-variants keep, and fails
+      nothing yet. At the tag, a known value keeps its variant's
+      projection and drops the rest, or fails if that variant is over,
+      naming the count it passed. An unknown value, or an object that
+      ends with no tag, keeps the copy, or fails past the unknown cap
+      (`TooMuchText`, naming the cap). So a known object fails only on
+      what its own variant keeps, whatever the order of its fields;
     - the tag given twice, or not a string, fails (`Duplicate`,
       `NotTagged`);
   - a key the node does not name is read, compared and dropped, and its
@@ -376,10 +382,13 @@ pub struct Limits {
 - **Errors** are the tokenizer's, and `TooManyTokens`, `TooMuchText`
   (with the cap it passed, if a named one), `SkippedTooLong`, `Duplicate`
   and `NotTagged`.
-- **`worst_case(&limits, &caps)`** is the tokenizer's, the walk stack,
-  and the buffers the document is kept in, at `tokens` and `text`, plus,
-  for a `Tagged` node, one whole copy at its unknown cap, all allocated
-  with the collector; and the document being handed up, of the same size at
+- **`worst_case(&limits, &caps, &filter)`** is the tokenizer's, the walk
+  stack, and the buffers the document is kept in, at `tokens` and `text`.
+  Each `Tagged` node on the filter's deepest path adds its provisional
+  candidates: one projection at `tokens` and `text` for each known
+  variant past the first, and one whole copy at its unknown cap. The
+  filter is static, so the collector computes this once, at
+  construction. All of it is allocated with the collector; and the document being handed up, of the same size at
   most, which is the side above's once emitted. A skipped value adds
   nothing to it, whatever its size.
 - **Restarting.** Once its outcome is out, a collector, and its tokenizer,

@@ -473,8 +473,11 @@ preserving local output bounds for Codex.
   `Only` sends `"auto"` (section 2.2). `parallel_tool_calls` stays true.
 - **Usage.** `input_tokens_details.cached_tokens` is cache read;
   `input_tokens_details.cache_write_tokens`, when present, is cache write;
-  `input_tokens` less both is input, and `None` when `input_tokens` is
-  below their sum (section 2: usage never fails a completion); `output_tokens` is output;
+  `input_tokens` less the parts that are reported is input, and `None`
+  when `input_tokens` is below their sum (section 2: usage never fails a
+  completion). A part the wire does not carry stays `None` and is not
+  separated: its tokens, if any, stay within input. Nothing is invented
+  for it; `output_tokens` is output;
   `output_tokens_details.reasoning_tokens` is reasoning. A field absent
   from the wire is `None`.
 - **Cut calls.** A response that ends incomplete for its output limit
