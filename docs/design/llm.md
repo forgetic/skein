@@ -180,6 +180,12 @@ pub struct Usage {
   whose provider reported no usage has every field `None`.
 - **The three prompt fields are disjoint.** When all three are reported,
   their sum is the prompt's size as the provider counted it.
+- **Usage never fails a completion.** A dialect's arithmetic is checked.
+  A report that contradicts it keeps what was reported, and the derived
+  field is `None`; the completion completes. An example is a total below
+  the sum of its parts. Usage is accounting: a mismatch never discards
+  what the model said, and a consumer charges for a missing count as for
+  an unreported one.
 - **`reasoning` is part of `output`,** never added to it.
 - Each dialect maps its own fields (sections 4.6 and 4.7). A cumulative
   patch replaces a field only when it reports that field.
@@ -467,7 +473,8 @@ preserving local output bounds for Codex.
   `Only` sends `"auto"` (section 2.2). `parallel_tool_calls` stays true.
 - **Usage.** `input_tokens_details.cached_tokens` is cache read;
   `input_tokens_details.cache_write_tokens`, when present, is cache write;
-  `input_tokens` less both is input; `output_tokens` is output;
+  `input_tokens` less both is input, and `None` when `input_tokens` is
+  below their sum (section 2: usage never fails a completion); `output_tokens` is output;
   `output_tokens_details.reasoning_tokens` is reasoning. A field absent
   from the wire is `None`.
 - **Cut calls.** A response that ends incomplete for its output limit
