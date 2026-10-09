@@ -9,7 +9,7 @@ use std::fmt;
 
 use skein_io::kernel::Addr;
 use skein_lib::{Duration, Time};
-use skein_world::{Expectation, Expectations, Referee};
+use skein_world::{Controls, Expectation, Expectations, Referee};
 
 use crate::proc::Proc;
 
@@ -155,6 +155,7 @@ pub enum Shutdown {
 #[derive(Debug)]
 pub struct EchoReferee {
     expectations: Expectations<Proc, Expect>,
+    controls: Controls,
     shutdown: Shutdown,
     /// The echo's address, once seen, and whether the clients were told it.
     listening: Option<Addr>,
@@ -169,9 +170,10 @@ pub struct EchoReferee {
 
 impl EchoReferee {
     #[must_use]
-    pub fn new(seed: u64, expectations: Vec<Expect>, shutdown: Shutdown) -> EchoReferee {
+    pub fn new(seed: u64, expectations: Vec<Expect>, shutdown: Shutdown, controls: Controls) -> EchoReferee {
         EchoReferee {
             expectations: Expectations::new(seed, expectations),
+            controls,
             shutdown,
             listening: None,
             told: false,
@@ -205,9 +207,9 @@ impl Referee<Proc> for EchoReferee {
                         client.dial(addr);
                     }
                 }
-                Proc::Echo { svc, .. } => {
+                Proc::Echo { .. } => {
                     if shut {
-                        svc.svc.shutdown();
+                        self.controls.signal(0, skein_io::kernel::ServiceSignal::Terminate);
                     }
                 }
             }

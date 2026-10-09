@@ -234,7 +234,8 @@ impl Service {
     /// blocks only when there is none.
     #[must_use]
     pub fn work_pending(&self, now: Time) -> bool {
-        self.io.is_ready()
+        (self.protocol.is_empty() && !self.signals_closing && self.signals.is_some())
+            || self.io.is_ready()
             || self.io.is_due(now)
             || self.protocol.is_ready()
             || self.protocol.is_due(now)

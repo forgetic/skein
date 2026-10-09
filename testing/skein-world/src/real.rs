@@ -12,9 +12,7 @@
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
-use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 use core::ops::{Deref, DerefMut};
 
 use skein_heap::Span;
@@ -24,6 +22,7 @@ use skein_shell::{Clock, Config, Kernel, Now, Wait};
 
 use crate::Host;
 use crate::heap::Heap;
+pub use crate::referee::Controls;
 use crate::referee::Referee;
 use crate::{HostedProgram, Inherited, StartupRoots};
 use std::os::unix::ffi::OsStrExt;
@@ -120,20 +119,6 @@ pub struct Killed {
     pub heap: Option<(u64, u64)>,
 }
 
-/// Signal requests the referee injects between iterations, addressed by stable host id.
-#[derive(Clone, Debug)]
-pub struct Controls {
-    signals: Rc<RefCell<Queue<(usize, ServiceSignal)>>>,
-}
-
-impl Controls {
-    /// Delivers a signal to the named root or hosted child in the next turn.
-    /// Root ids come from `spawn`; hosted ids follow them in admission order.
-    pub fn signal(&self, host: usize, signal: ServiceSignal) {
-        self.signals.borrow_mut().push((host, signal));
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 enum SignalSource {
     Pipe(Fd),
@@ -164,7 +149,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
     /// Constructs a referee with a handle for injecting signals into this world.
     #[must_use]
     pub fn new_controlled<F: FnOnce(Controls) -> R>(make_referee: F) -> Self {
-        let controls = Controls { signals: Rc::new(RefCell::new(Queue::with_capacity(256))) };
+        let controls = Controls::new();
         let referee = make_referee(controls.clone());
         Self {
             procs: Vec::new(),

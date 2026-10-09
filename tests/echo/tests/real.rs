@@ -68,13 +68,18 @@ fn the_echo_serves_refuses_and_idles_out_its_clients_on_the_real_ring() {
     expect.push(Expect::Finished { at: 2, conn: 0, by });
     expect.push(Expect::Finished { at: 2, conn: 1, by });
 
-    let procs = vec![
-        Proc::echo(limits, listen, rng.next_u64()),
-        Proc::client(client_limits(3), &first),
-        Proc::client(client_limits(2), &second),
-    ];
-    let referee = EchoReferee::new(7, expect, Shutdown::WhenDone);
-    let outcome = real::run(procs, referee, &clock, Duration::from_secs(10));
+    let mut world = real::World::new_controlled(|controls| EchoReferee::new(7, expect, Shutdown::WhenDone, controls));
+    world.spawn_signals(|signal| {
+        let mut proc = Proc::echo(limits, listen, rng.next_u64());
+        match &mut proc {
+            Proc::Echo { svc, .. } => svc.svc.adopt_signals(signal).expect("signal slot"),
+            Proc::Client { .. } => unreachable!("echo"),
+        }
+        proc
+    });
+    world.spawn(|| Proc::client(client_limits(3), &first));
+    world.spawn(|| Proc::client(client_limits(2), &second));
+    let outcome = world.run(&clock, Duration::from_secs(10));
     let took = outcome.end.saturating_since(outcome.start);
     assert!(took < Duration::from_secs(5), "over within five seconds: {} ms", took.as_nanos() / 1_000_000);
     let seen = outcome.procs[2].as_client().expect("a fake client").seen(0);

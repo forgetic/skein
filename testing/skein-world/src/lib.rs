@@ -45,7 +45,7 @@ mod world;
 
 pub use heap::Memory;
 pub use program::{HostedProgram, Inherited, Machine, NoMachine, StartupRoot, StartupRoots};
-pub use referee::{Expectation, Expectations, Referee};
+pub use referee::{Controls, Expectation, Expectations, Referee};
 pub use skein_shell::{Host, drive};
 pub use world::{Killed, Outcome, World};
 

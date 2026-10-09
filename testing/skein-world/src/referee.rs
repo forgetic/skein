@@ -13,7 +13,10 @@ use alloc::vec::Vec;
 use core::fmt::{self, Debug, Write};
 use core::marker::PhantomData;
 
-use skein_lib::Time;
+use alloc::rc::Rc;
+use core::cell::RefCell;
+use skein_io::kernel::ServiceSignal;
+use skein_lib::{Queue, Time};
 
 /// A scenario's referee, over its processes `P`.
 pub trait Referee<P> {
@@ -129,4 +132,22 @@ impl<P, X: Debug> Debug for Expectations<P, X> {
 /// What a broken safety expectation fails the world with.
 fn broke(seed: u64, now: Time, expectation: &dyn Debug, why: &str) -> String {
     format!("seed {seed}: at {} ns, {expectation:?} broke: {why}", now.as_nanos())
+}
+
+/// Signal requests the referee injects between iterations, addressed by stable host id.
+#[derive(Clone, Debug)]
+pub struct Controls {
+    pub(crate) signals: Rc<RefCell<Queue<(usize, ServiceSignal)>>>,
+}
+
+impl Controls {
+    pub(crate) fn new() -> Self {
+        Self { signals: Rc::new(RefCell::new(Queue::with_capacity(256))) }
+    }
+
+    /// Delivers a signal to the named root or hosted child in the next turn.
+    /// Root ids come from `spawn`; hosted ids follow them in admission order.
+    pub fn signal(&self, host: usize, signal: ServiceSignal) {
+        self.signals.borrow_mut().push((host, signal));
+    }
 }

@@ -41,3 +41,25 @@ fn signal_failure_and_close_echo_the_service_binding_instead_of_its_io_handle() 
     assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner }]);
     rig.empty();
 }
+
+#[test]
+fn a_signal_read_retries_an_unsubmitted_cancel_only_while_its_target_waits() {
+    for read_first in [false, true] {
+        let mut rig = Rig::new(Limits { sockets: 1, ..limits() });
+        let source = rig.io.adopt_signals(Fd::new(50)).expect("one entity slot");
+        let read = rig.next().take(Kind::ReadSignal);
+        let cancel = rig.down(Request::Close { entity: source }).take(Kind::Cancel);
+        if read_first {
+            rig.complete(read, Ok(Done::ServiceSignal(ServiceSignal::Terminate))).nothing();
+            let close = rig.complete(cancel, Err(Error::Other(11))).take(Kind::Close);
+            rig.complete(close, Ok(Done::Nothing));
+        } else {
+            let retried = rig.complete(cancel, Err(Error::Other(11))).take(Kind::Cancel);
+            assert_eq!(retried.kind, Op::Cancel { target: read.op });
+            rig.complete(retried, Ok(Done::Nothing)).nothing();
+            let close = rig.complete(read, Err(Error::Cancelled)).take(Kind::Close);
+            rig.complete(close, Ok(Done::Nothing));
+        }
+        rig.empty();
+    }
+}

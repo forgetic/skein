@@ -21,7 +21,7 @@ use skein_sim::{Answer, Ask, Config, Entry, Handle, Pid, Program, Reply, Sim};
 
 use crate::Host;
 use crate::heap::{Heap, Memory};
-use crate::referee::Referee;
+use crate::referee::{Controls, Referee};
 use crate::{HostedProgram, Inherited, Machine, NoMachine, StartupRoots};
 
 /// The most iterations a world runs before it is declared stuck.
@@ -37,6 +37,9 @@ type PreparedRoots = Vec<(Box<[u8]>, Handle)>;
 pub struct World<P, R, M = NoMachine> {
     seed: u64,
     sim: Sim,
+    controls: Controls,
+    signals: BTreeMap<usize, (Pid, Fd)>,
+    next_host: usize,
     procs: Vec<P>,
     /// Each process's, in the simulator.
     pids: Vec<Pid>,
@@ -128,6 +131,19 @@ impl<P: Host, R: Referee<P>> World<P, R> {
     /// `memory` says so.
     #[must_use]
     pub fn new(seed: u64, config: Config, referee: R, memory: Memory) -> World<P, R> {
+        Self::new_controlled(seed, config, memory, |_| referee)
+    }
+
+    /// Builds the referee with the same signal controls as a real world.
+    #[must_use]
+    pub fn new_controlled<F: FnOnce(Controls) -> R>(
+        seed: u64,
+        config: Config,
+        memory: Memory,
+        make_referee: F,
+    ) -> World<P, R> {
+        let controls = Controls::new();
+        let referee = make_referee(controls.clone());
         let heap = match memory {
             Memory::Checked => Some(Heap::new()),
             Memory::Unchecked => None,
@@ -135,6 +151,9 @@ impl<P: Host, R: Referee<P>> World<P, R> {
         World {
             seed,
             sim: Sim::new(seed, config),
+            controls,
+            signals: BTreeMap::new(),
+            next_host: 0,
             procs: Vec::new(),
             pids: Vec::new(),
             referee,
@@ -156,6 +175,9 @@ impl<P: Host, R: Referee<P>> World<P, R> {
         World {
             seed: self.seed,
             sim: self.sim,
+            controls: self.controls,
+            signals: self.signals,
+            next_host: self.next_host,
             procs: self.procs,
             pids: self.pids,
             referee: self.referee,
@@ -202,11 +224,20 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
         self.admit(pid, None, make)
     }
 
+    /// Adds a process whose termination records arrive through its simulated signal source.
+    pub fn spawn_signals<F: FnOnce(Fd) -> P>(&mut self, make: F) -> usize {
+        let pid = self.sim.spawn_process();
+        let signal = self.sim.open_signal_source(pid);
+        self.signals.insert(self.next_host, (pid, signal));
+        self.admit(pid, None, || make(signal))
+    }
+
     fn admit<F: FnOnce() -> P>(&mut self, pid: Pid, hosted: Option<usize>, make: F) -> usize {
         let proc = match &mut self.heap {
             Some(heap) => heap.admit(make, P::worst_case),
             None => make(),
         };
+        self.next_host = self.next_host.checked_add(1).expect("bounded admission count");
         self.pids.push(pid);
         self.procs.push(proc);
         self.hosted.push(hosted);
@@ -232,6 +263,7 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
             let now = self.sim.now();
             let wall = self.sim.wall();
             self.referee.act(now, &mut self.procs);
+            self.deliver_signals();
             let mut at = 0;
             while at < self.procs.len() {
                 if self.hosted.get(at).expect("a status per process").is_some()
@@ -287,6 +319,18 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
         }
     }
 
+    fn deliver_signals(&mut self) {
+        loop {
+            let Some((host, signal)) = self.controls.signals.borrow_mut().pop() else {
+                break;
+            };
+            let (pid, source) = *self.signals.get(&host).expect("a service declares its signal source");
+            let at = self.pids.iter().position(|current| *current == pid).expect("a signal names a running host");
+            assert!(!self.procs.get(at).expect("admitted process").is_empty(), "a signal names a running service");
+            self.sim.deliver_service_signal(pid, source, signal);
+        }
+    }
+
     /// One turn of process `at`'s loop: reap, iterate, submit.
     fn turn(&mut self, at: usize, now: Time, wall: skein_lib::Wall) {
         let pid = *self.pids.get(at).expect("a pid for each process");
@@ -319,6 +363,7 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
                 let roots = self.pending_roots.remove(&(pid, complete.op)).expect("a hosted launch prepared its roots");
                 let roots = roots.into_iter().map(|(name, handle)| (name, self.sim.root(child, handle))).collect();
                 let inherited = Inherited { pipes, roots, signal: self.sim.open_signal_source(child) };
+                self.signals.insert(self.next_host, (child, inherited.signal));
                 let child_at = self.admit(child, Some(program_at), || make(spawn, &inherited));
                 assert!(
                     self.procs.get(child_at).expect("newly admitted child").operations() <= operations,
@@ -443,6 +488,9 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
     /// Whether any process has work now: its loop's, the kernel's deferred
     /// to its next entry, or completions delivered and not reaped.
     fn busy(&self, now: Time) -> bool {
+        if !self.controls.signals.borrow().is_empty() {
+            return true;
+        }
         for (proc, pid) in self.procs.iter().zip(&self.pids) {
             if proc.work_pending(now) || self.sim.deferred(*pid) || self.sim.ready(*pid) > 0 {
                 return true;

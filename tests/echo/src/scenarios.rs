@@ -43,14 +43,14 @@ const END: Time = Time::from_nanos(60_000_000_000);
 pub const ECHO: usize = 0;
 
 /// The echo's limits: tiny, so that each layer refuses at its own entrance
-/// in some scenario. Five sockets, so that io still accepts past the
+/// in some scenario. Six io slots (one for signals), so that io still accepts past the
 /// protocol layer's three connections, which still bind past the domain's
 /// two sessions.
 #[must_use]
 pub const fn server(spread: Duration) -> service::Limits {
     service::Limits {
         io: skein_io::Limits {
-            sockets: 5,
+            sockets: 6,
             refusals: 1,
             intake: 24,
             receive: 8,
@@ -130,9 +130,17 @@ pub const fn plan(at: Time, seed: u64) -> Plan {
 
 /// A world with the echo in it, and these expectations.
 fn world(seed: u64, config: Config, expect: Vec<Expect>, shutdown: Shutdown) -> EchoWorld {
-    let referee = EchoReferee::new(seed, expect, shutdown);
-    let mut world = World::new(seed, config, referee, Memory::Checked);
-    world.spawn(|| Proc::echo(server(SPREAD), listen(), seed));
+    let mut world = World::new_controlled(seed, config, Memory::Checked, |controls| {
+        EchoReferee::new(seed, expect, shutdown, controls)
+    });
+    world.spawn_signals(|signal| {
+        let mut proc = Proc::echo(server(SPREAD), listen(), seed);
+        match &mut proc {
+            Proc::Echo { svc, .. } => svc.svc.adopt_signals(signal).expect("signal slot"),
+            Proc::Client { .. } => unreachable!("echo"),
+        }
+        proc
+    });
     world
 }
 
@@ -366,9 +374,17 @@ pub fn worst(seed: u64, config: Config) -> EchoWorld {
     let mut rng = Rng::new(seed ^ 0x3057);
     let mut limits = server(SPREAD);
     limits.domain.sessions = 3;
-    let referee = EchoReferee::new(seed, Vec::new(), Shutdown::WhenDone);
-    let mut world = World::new(seed, config, referee, Memory::Checked);
-    world.spawn(|| Proc::echo(limits, listen(), seed));
+    let mut world = World::new_controlled(seed, config, Memory::Checked, |controls| {
+        EchoReferee::new(seed, Vec::new(), Shutdown::WhenDone, controls)
+    });
+    world.spawn_signals(|signal| {
+        let mut proc = Proc::echo(limits, listen(), seed);
+        match &mut proc {
+            Proc::Echo { svc, .. } => svc.svc.adopt_signals(signal).expect("signal slot"),
+            Proc::Client { .. } => unreachable!("echo"),
+        }
+        proc
+    });
     let mut plans = Vec::new();
     for _ in 0..4 {
         plans.push(Plan {
