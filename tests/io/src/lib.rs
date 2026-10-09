@@ -21,6 +21,7 @@ pub mod census;
 pub mod ledger;
 pub mod output;
 pub mod owner;
+pub mod processes;
 pub mod referee;
 pub mod scenarios;
 pub mod world;

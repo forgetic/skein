@@ -346,7 +346,12 @@ fn native_pipe_close_settles_waiting_output_and_actual_reap_waits_for_both_close
     let output_close = rig.down(Request::Close { entity: output_pipe }).take(Kind::Close);
     let mut closed = rig.complete(output_close, Ok(Done::Nothing));
     assert_eq!(closed.events, [Event::Closed { owner: output_pipe }]);
-    let reaping = closed.take(Kind::Wait);
+    let killing = closed.take(Kind::Signal);
+    assert_eq!(
+        killing.kind,
+        Op::Signal { pidfd: Fd::new(20), signal: crate::kernel::Signal::Kill, to: crate::kernel::Target::Group }
+    );
+    let reaping = rig.complete(killing, Ok(Done::Nothing)).take(Kind::Wait);
     assert_eq!(reaping.kind, Op::Wait { pidfd: Fd::new(20), reap: true });
     let pidfd_close = rig.complete(reaping, Ok(Done::Exit(crate::kernel::Exit::Code(0)))).take(Kind::Close);
     assert_eq!(pidfd_close.kind, Op::Close { fd: Fd::new(20) });

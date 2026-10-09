@@ -1,9 +1,21 @@
-//! A pidfd-backed child and its ordered pipe tokens.
+//! A pidfd-backed child, retained exit and ordered pipe tokens (io.md, section 6).
+//! It keeps an observing wait and at most one signal, never a numeric PID.
+//! `signal` targets the child or its group. `close` requests the group kill;
+//! `release` reaps only after that kill, the exit and every pipe close settle.
+//!
+//! | Phase | Completion | Next |
+//! |---|---|---|
+//! | Spawning | Spawned | Running, observing Wait |
+//! | Running | exit observed | Exited, Exited told once |
+//! | Running, Exited | close | group Kill after an owner signal settles |
+//! | Exited | kill and pipes settled | Reaping, reaping Wait |
+//! | Reaping | reap | Releasing, pidfd Close |
+//! | Releasing | Close | Closed, terminal told |
 
 use alloc::boxed::Box;
 use skein_lib::{Id, List, Queue, Token};
 
-use crate::kernel::{self, Done, Fd, Op, Signal, Spawn, Submit};
+use crate::kernel::{self, Done, Fd, Op, Signal, Spawn, Submit, Target};
 use crate::layer::{Entity, Io, Landed, Purpose};
 use crate::records::{Error, Event};
 
@@ -17,18 +29,35 @@ enum Phase {
     Closed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Signalling {
+    Idle,
+    Owner,
+    Closing,
+}
+
 #[derive(Debug)]
 pub(crate) struct Child {
     owner: Token,
     pipes: Box<[Id<Entity>]>,
     pidfd: Option<Fd>,
     phase: Phase,
-    signalling: bool,
+    signalling: Signalling,
+    closing: bool,
+    killed: bool,
 }
 
 impl Child {
     fn new(owner: Token, pipes: Box<[Id<Entity>]>) -> Child {
-        Child { owner, pipes, pidfd: None, phase: Phase::Spawning, signalling: false }
+        Child {
+            owner,
+            pipes,
+            pidfd: None,
+            phase: Phase::Spawning,
+            signalling: Signalling::Idle,
+            closing: false,
+            killed: false,
+        }
     }
     pub(crate) const fn is_closed(&self) -> bool {
         match self.phase {
@@ -169,7 +198,12 @@ pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &
         Purpose::Signal => {
             drop(result);
             let Some(Entity::Child(child)) = io.entities.get_mut(id) else { unreachable!("a child owns signal") };
-            child.signalling = false;
+            match child.signalling {
+                Signalling::Closing => child.killed = true,
+                Signalling::Owner => {}
+                Signalling::Idle => unreachable!("a submitted signal has its purpose"),
+            }
+            child.signalling = Signalling::Idle;
         }
         Purpose::Close => {
             let Some(Entity::Child(child)) = io.entities.get_mut(id) else { unreachable!("a child owns close") };
@@ -190,33 +224,55 @@ pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &
         | Purpose::PipeWrite
         | Purpose::Cancel(_) => unreachable!("a child only spawns, waits, signals and closes"),
     }
+    begin_close(io, id, subs);
     release(io, id, subs);
 }
 
-pub(crate) fn signal(io: &mut Io, token: Token, signal: Signal, subs: &mut Queue<Submit>) {
+pub(crate) fn signal(io: &mut Io, token: Token, signal: Signal, to: Target, subs: &mut Queue<Submit>) {
     let id = Id::<Entity>::from_token(token);
     let Some(Entity::Child(child)) = io.entities.get(id) else { return };
-    if child.phase != Phase::Running || child.signalling {
+    match child.phase {
+        Phase::Running | Phase::Exited => {}
+        Phase::Spawning | Phase::Reaping | Phase::Releasing | Phase::Closed => return,
+    }
+    if child.signalling != Signalling::Idle || child.closing {
         return;
     }
     let Some(pidfd) = child.pidfd else { return };
     let Some(Entity::Child(child)) = io.entities.get_mut(id) else { unreachable!("a live child remains") };
-    child.signalling = true;
-    io.tables.submit(subs, id, Purpose::Signal, Op::Signal { pidfd, signal, to: kernel::Target::Child });
+    child.signalling = Signalling::Owner;
+    io.tables.submit(subs, id, Purpose::Signal, Op::Signal { pidfd, signal, to });
 }
 
 pub(crate) fn close(io: &mut Io, id: Id<Entity>, subs: &mut Queue<Submit>) {
-    let Some(Entity::Child(child)) = io.entities.get(id) else { return };
+    let child = match io.entities.get_mut(id) {
+        Some(Entity::Child(child)) => child,
+        Some(Entity::Pipe(_) | Entity::Listener(_) | Entity::Stream(_) | Entity::Signals(_)) | None => return,
+    };
     match child.phase {
-        Phase::Running => signal(io, id.token(), Signal::Kill, subs),
-        Phase::Exited => release(io, id, subs),
-        Phase::Spawning | Phase::Reaping | Phase::Releasing | Phase::Closed => {}
+        Phase::Running | Phase::Exited => child.closing = true,
+        Phase::Spawning | Phase::Reaping | Phase::Releasing | Phase::Closed => return,
     }
+    begin_close(io, id, subs);
+    release(io, id, subs);
+}
+
+fn begin_close(io: &mut Io, id: Id<Entity>, subs: &mut Queue<Submit>) {
+    let child = match io.entities.get_mut(id) {
+        Some(Entity::Child(child)) => child,
+        Some(Entity::Pipe(_) | Entity::Listener(_) | Entity::Stream(_) | Entity::Signals(_)) | None => return,
+    };
+    if !child.closing || child.killed || child.signalling != Signalling::Idle {
+        return;
+    }
+    let pidfd = child.pidfd.expect("a closing child has its pidfd");
+    child.signalling = Signalling::Closing;
+    io.tables.submit(subs, id, Purpose::Signal, Op::Signal { pidfd, signal: Signal::Kill, to: Target::Group });
 }
 
 pub(crate) fn release(io: &mut Io, id: Id<Entity>, subs: &mut Queue<Submit>) {
     let Some(Entity::Child(child)) = io.entities.get(id) else { return };
-    if child.phase != Phase::Exited || child.signalling {
+    if child.phase != Phase::Exited || child.signalling != Signalling::Idle {
         return;
     }
     for pipe in &child.pipes {
@@ -225,6 +281,17 @@ pub(crate) fn release(io: &mut Io, id: Id<Entity>, subs: &mut Queue<Submit>) {
             Some(Entity::Pipe(_) | Entity::Listener(_) | Entity::Stream(_) | Entity::Child(_) | Entity::Signals(_))
             | None => {}
         }
+    }
+    if !child.killed {
+        let child = match io.entities.get_mut(id) {
+            Some(Entity::Child(child)) => child,
+            Some(Entity::Pipe(_) | Entity::Listener(_) | Entity::Stream(_) | Entity::Signals(_)) | None => {
+                unreachable!("a releasing child remains")
+            }
+        };
+        child.closing = true;
+        begin_close(io, id, subs);
+        return;
     }
     let Some(fd) = child.pidfd else {
         return;

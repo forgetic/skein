@@ -375,11 +375,13 @@ dependencies = [
 name = "skein-io-world"
 version = "0.0.0"
 dependencies = [
+ "skein-fake-machine",
  "skein-heap",
  "skein-io",
  "skein-lib",
  "skein-shell",
  "skein-sim",
+ "skein-world",
 ]
 
 [[package]]

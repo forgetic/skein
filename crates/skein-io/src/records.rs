@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use skein_lib::Token;
 use skein_lib::stream::{self, Fault};
 
-use crate::kernel::{self, Addr, Exit, ServiceSignal, Signal, Spawn};
+use crate::kernel::{self, Addr, Exit, ServiceSignal, Signal, Spawn, Target};
 
 /// What the layer above asks of io. Each names an entity by a token: its
 /// owner's, for an entity it asks io to make, and io's (from `Listening`,
@@ -40,11 +40,11 @@ pub enum Request {
     },
     /// Start a child, returning its pidfd-backed token and pipe tokens.
     Spawn { owner: Token, spawn: Spawn },
-    /// Send a signal to a child by its token.
-    Signal { child: Token, signal: Signal },
+    /// An owner signals its child or group, before closing the child.
+    Signal { child: Token, signal: Signal, to: Target },
     // Files, processes and signals (io.md, 5 to 7) go here when a user pulls
     // them: File { owner, root, op }, Spawn { owner, spawn },
-    // Signal { child, signal }.
+    // Signal { child, signal, to }.
     /// A graceful close (io.md, 3): the output flushed and half-closed, the
     /// input discarded until the peer ends or the close deadline passes. On
     /// the classic face only `Closed` follows; a pending native output right

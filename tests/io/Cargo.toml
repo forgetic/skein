@@ -10,6 +10,8 @@ publish.workspace = true
 skein-lib.workspace = true
 skein-io.workspace = true
 skein-sim.workspace = true
+skein-world.workspace = true
+skein-fake-machine.workspace = true
 
 # The ring, for tests/ring.rs; the counting allocator, for tests/memory.rs.
 [dev-dependencies]
@@ -34,3 +36,7 @@ allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 disallowed_types = "deny"
 disallowed_methods = "deny"
+
+[[bin]]
+name = "io_process_fixture"
+path = "../conformance/ring/src/bin/process_fixture.rs"

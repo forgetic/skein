@@ -423,7 +423,7 @@ pub fn down(io: &mut Io, env: &Env<Limits>, request: Request, subs: &mut Queue<S
         Request::Stream { stream, down } => stream_request(io, env, stream, down, subs),
         Request::Output { stream, down } => output_request(io, env, stream, down, subs),
         Request::Spawn { owner, spawn } => process::spawn(io, owner, spawn, subs),
-        Request::Signal { child, signal } => process::signal(io, child, signal, subs),
+        Request::Signal { child, signal, to } => process::signal(io, child, signal, to, subs),
         Request::Close { entity } => close(io, env, entity, false, subs),
         Request::Abort { entity } => close(io, env, entity, true, subs),
     }

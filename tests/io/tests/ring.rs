@@ -69,3 +69,28 @@ fn an_exchange_through_io_over_the_ring() {
     assert!(!client.broken(), "nothing broke on loopback");
     proc.ledger.settled();
 }
+
+fn group_story(story: skein_io_world::processes::Story) {
+    use skein_io_world::processes::{Judge, Process};
+    use std::os::unix::ffi::OsStrExt;
+    let root = skein_shell::open_root(std::path::Path::new("/tmp")).expect("the fixture's directory opens");
+    let program = std::path::Path::new(env!("CARGO_BIN_EXE_io_process_fixture"));
+    let process = Process::new(root, program.as_os_str().as_bytes(), story, true);
+    let mut world = skein_world::real::World::new(Judge::default());
+    world.spawn_with_fds(vec![root], || process);
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    outcome.procs[0].check();
+}
+
+#[test]
+fn a_descendant_holding_the_pipe_ends_with_a_signal_to_the_group() {
+    group_story(skein_io_world::processes::Story::SignalRunning);
+}
+#[test]
+fn closing_a_child_whose_group_still_runs_ends_the_group() {
+    group_story(skein_io_world::processes::Story::CloseExited);
+}
+#[test]
+fn a_signal_to_the_group_after_its_leader_exited_reaches_the_group() {
+    group_story(skein_io_world::processes::Story::SignalExited);
+}
