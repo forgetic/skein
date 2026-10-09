@@ -6,6 +6,7 @@
 use crate::{ClaimSelector, DecodeError, Failure, Json, Limits, OAuthError, RefreshState, SavedToken, TokenResponse};
 use crate::{classify, decode_error, decode_response, pkce, rotate};
 use alloc::boxed::Box;
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use core::str::FromStr;
 use skein_json::writer::Encoder;
 use skein_lib::{Duration, Queue, Time, Wall, Writer, bytes};
@@ -544,7 +545,7 @@ fn validate_registration(registration: &Registration, limits: &ClientLimits, sig
         return Err(Failure::Malformed);
     }
     if sign_in {
-        if registration.client_secret.is_none() && !loopback(&registration.redirect_uri) {
+        if registration.client_secret.is_none() && redirect_address(&registration.redirect_uri).is_err() {
             return Err(Failure::InvalidRedirect);
         }
         if registration.client_secret.is_some() && !registration.redirect_uri.starts_with(b"https://") {
@@ -587,7 +588,7 @@ fn issuer_endpoint(uri: &[u8]) -> bool {
         let suffix_at = end.checked_add(1).expect("the bracket is within the bounded URI");
         let suffix = rest.get(suffix_at..).expect("the closing bracket fits");
         let Ok(host) = core::str::from_utf8(host) else { return false };
-        match core::net::Ipv6Addr::from_str(host) {
+        match Ipv6Addr::from_str(host) {
             Ok(address) => address.is_loopback() && endpoint_port(suffix),
             Err(_) => false,
         }
@@ -599,7 +600,7 @@ fn issuer_endpoint(uri: &[u8]) -> bool {
         let host = authority.get(..end).expect("the port separator fits");
         let suffix = authority.get(end..).expect("the port separator fits");
         let Ok(host) = core::str::from_utf8(host) else { return false };
-        match core::net::Ipv4Addr::from_str(host) {
+        match Ipv4Addr::from_str(host) {
             Ok(address) => address.is_loopback() && endpoint_port(suffix),
             Err(_) => false,
         }
@@ -615,32 +616,52 @@ fn endpoint_port(suffix: &[u8]) -> bool {
 }
 
 fn port_number(port: &[u8]) -> bool {
+    redirect_port(port).is_some()
+}
+
+fn redirect_port(port: &[u8]) -> Option<u16> {
     if port.is_empty() || port.len() > 5 {
-        return false;
+        return None;
     }
     let mut number = 0_u32;
     for &digit in port {
         if !digit.is_ascii_digit() {
-            return false;
+            return None;
         }
-        let Some(tens) = number.checked_mul(10_u32) else { return false };
-        let Some(value) = tens.checked_add(u32::from(digit.wrapping_sub(b'0'))) else { return false };
+        let tens = number.checked_mul(10_u32)?;
+        let value = tens.checked_add(u32::from(digit.wrapping_sub(b'0')))?;
         number = value;
     }
-    number > 0 && u16::try_from(number).is_ok()
+    if number == 0 { None } else { u16::try_from(number).ok() }
 }
 
-fn loopback(uri: &[u8]) -> bool {
-    let rest = if let Some(value) = uri.strip_prefix(b"http://127.0.0.1:") {
+/// Address the caller binds for a public redirect; `localhost` is never resolved.
+/// Admits only exact loopback spellings, an explicit nonzero port and a path
+/// (oauth.md, sections 1 and 5); the caller still compares the whole URI exactly.
+pub fn redirect_address(uri: &[u8]) -> Result<SocketAddr, Failure> {
+    if uri.contains(&b'#') {
+        return Err(Failure::InvalidRedirect);
+    }
+    let Some(rest) = uri.strip_prefix(b"http://") else { return Err(Failure::InvalidRedirect) };
+    let Some(path_at) = bytes::find(rest, b"/") else { return Err(Failure::InvalidRedirect) };
+    let authority = rest.get(..path_at).expect("the path separator is within the URI");
+    let address;
+    let port = if let Some(value) = authority.strip_prefix(b"127.0.0.1:") {
+        address = IpAddr::V4(Ipv4Addr::LOCALHOST);
         value
-    } else if let Some(value) = uri.strip_prefix(b"http://[::1]:") {
+    } else if let Some(value) = authority.strip_prefix(b"[::1]:") {
+        address = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        value
+    } else if let Some(value) = authority.strip_prefix(b"localhost:") {
+        address = IpAddr::V4(Ipv4Addr::LOCALHOST);
         value
     } else {
-        return false;
+        return Err(Failure::InvalidRedirect);
     };
-    let Some(path_at) = bytes::find(rest, b"/") else { return false };
-    let Some(port) = rest.get(..path_at) else { return false };
-    port_number(port)
+    match redirect_port(port) {
+        Some(port) => Ok(SocketAddr::new(address, port)),
+        None => Err(Failure::InvalidRedirect),
+    }
 }
 
 fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {

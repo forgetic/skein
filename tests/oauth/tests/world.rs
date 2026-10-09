@@ -153,6 +153,56 @@ fn sign_in(client: &mut oauth::Client, issuer: &mut fake::Issuer, public: bool) 
 }
 
 #[test]
+fn a_localhost_registration_signs_in_through_its_exact_redirect() {
+    let redirect_uri = b"http://localhost:1234/callback";
+    let mut registration = registration(true);
+    registration.redirect_uri = boxed(redirect_uri);
+    let mut issuer = fake::Issuer::new(
+        fake::Config {
+            authorization_url: registration.authorization_url.clone(),
+            token_endpoint: registration.token_endpoint.clone(),
+            client_id: registration.client_id.clone(),
+            client_secret: None,
+            redirect_uri: boxed(redirect_uri),
+            refresh_token: boxed(b"seed"),
+        },
+        fake_limits(),
+    )
+    .expect("issuer");
+    issuer.queue(success(b"access", Some(b"refresh"), 0)).expect("plan");
+    let mut client = oauth::Client::new(client_limits()).expect("client");
+    let Some(oauth::Request::Visit { url }) = client_step(
+        &mut client,
+        oauth::Event::SignIn {
+            registration,
+            key: 7,
+            generation: 0,
+            state: boxed(b"0123456789abcdef"),
+            verifier: Some(boxed(b"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")),
+            now: time(1),
+        },
+    ) else {
+        panic!("visit expected")
+    };
+    let Some(fake::Request::Redirect { uri, state, code }) =
+        fake_step(&mut issuer, fake::Event::Authorize { url, now: time(1) })
+    else {
+        panic!("redirect expected")
+    };
+    assert_eq!(uri.as_ref(), redirect_uri);
+    let request = http(client_step(
+        &mut client,
+        oauth::Event::Redirected { uri, state, code: Some(code), error: None, now: time(2) },
+    ));
+    assert!(bytes::find(&request.body, b"redirect_uri=http%3A%2F%2Flocalhost%3A1234%2Fcallback").is_some());
+    let answer = response(fake_step(&mut issuer, fake::Event::Post { request, now: time(2), wall: wall(100) }));
+    let saved = record(client_step(&mut client, oauth::Event::Http(answer)));
+    assert_eq!(saved.key, 7);
+    assert_eq!(saved.generation, 1);
+    assert!(client.is_done());
+}
+
+#[test]
 fn public_sign_in_refresh_rotation_and_old_refresh_replay() {
     let mut client = oauth::Client::new(client_limits()).expect("client");
     let mut issuer = issuer(true);
