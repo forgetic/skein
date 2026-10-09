@@ -595,3 +595,158 @@ fn journal_memory<W: Item + std::fmt::Debug, O: Item + std::fmt::Debug>(limits: 
     journal.committed(u64::from(limits.commits));
     metered.end(());
 }
+
+#[test]
+fn a_request_table_filled_to_every_limit_stays_within_its_worst_case() {
+    for capacity in CAPACITIES {
+        for restored in [false, true] {
+            request_table_memory::<u8>(capacity, restored);
+            request_table_memory::<u64>(capacity, restored);
+            request_table_memory::<u128>(capacity, restored);
+            request_table_memory::<[u64; 8]>(capacity, restored);
+        }
+    }
+}
+
+fn request_table_memory<T: Item + std::fmt::Debug>(capacity: u32, restored: bool) {
+    use skein_lib::{Duration, RequestLimits, RequestRecord, RequestTable, Token, Wall};
+
+    let limits = RequestLimits {
+        requests: capacity,
+        bytes: 2 * u64::from(capacity),
+        out: 3,
+        first: Duration::from_secs(1),
+        most: Duration::from_secs(8),
+        margin: Duration::from_secs(1),
+    };
+    // Owner/store bookkeeping is allocated before the container's meter.
+    let mut keys = Vec::with_capacity(index(capacity));
+    let mut saved = vec![None; index(capacity)];
+    let mut attempts = Vec::with_capacity(index(capacity));
+    let mut metered = Metered::new("RequestTable", type_name::<T>(), capacity, RequestTable::<T>::worst_case(&limits));
+    metered.start();
+    let mut table = RequestTable::new(&limits, 0xB5_7A);
+    metered.end(());
+    for n in 0..capacity {
+        let key;
+        metered.start();
+        if restored {
+            let mut restored_key = [0xAA; 16];
+            restored_key[..8].copy_from_slice(&u64::from(n).to_be_bytes());
+            let record =
+                RequestRecord { key: restored_key, scope: 7, first_sent: Some(Wall::EPOCH), request: T::nth(n) };
+            saved[index(n)] = Some(record.clone());
+            table.restore(Token::new(u64::from(n)), 2, record).expect("room for restored records");
+            key = restored_key;
+        } else {
+            key = table.ask(Token::new(u64::from(n)), 7, 2, T::nth(n)).expect("room to every limit");
+        }
+        metered.end(());
+        keys.push(key);
+    }
+    assert_eq!(table.len(), capacity);
+    assert_eq!(table.bytes(), limits.bytes);
+    metered.start();
+    assert!(table.ask(Token::new(u64::MAX), 7, 1, T::nth(0)).is_err(), "full count and bytes refuse");
+    metered.end(());
+    request_table_outputs(&mut table, &mut metered, &keys, &mut saved, &mut attempts, Time::ZERO);
+    metered.start();
+    table.retention(Duration::from_secs(100));
+    table.link(true);
+    table.confirmed(Some(7));
+    metered.end(());
+    request_table_outputs(&mut table, &mut metered, &keys, &mut saved, &mut attempts, Time::ZERO);
+    assert_eq!(attempts.len(), index(capacity));
+    if restored {
+        metered.start();
+        table.retention(Duration::ZERO);
+        table.fire(Time::from_nanos(1), Wall::EPOCH);
+        metered.end(());
+        request_table_outputs(&mut table, &mut metered, &keys, &mut saved, &mut attempts, Time::from_nanos(1));
+        metered.start();
+        for _ in 0..capacity {
+            assert_eq!(table.progress().expect("unknown remains held").1, skein_lib::RequestProgress::Unknown);
+        }
+        table.reclaim();
+        metered.end(());
+    } else {
+        request_table_finish(&mut table, &mut metered, &keys, &mut saved, &mut attempts);
+    }
+    assert!(table.is_empty());
+    assert_eq!(table.bytes(), 0);
+    assert!(saved.iter().all(Option::is_none));
+}
+
+fn request_table_outputs<T: Item>(
+    table: &mut skein_lib::RequestTable<T>,
+    metered: &mut Metered,
+    keys: &[skein_lib::RequestKey],
+    saved: &mut [Option<skein_lib::RequestRecord<T>>],
+    attempts: &mut Vec<skein_lib::Token>,
+    now: Time,
+) {
+    use skein_lib::{RequestOut, Wall};
+    while table.pending() {
+        metered.start();
+        {
+            let mut visit = table.take(now, Wall::EPOCH);
+            while let Some(out) = visit.next_out() {
+                match out {
+                    RequestOut::Save(record) => {
+                        let at = keys.iter().position(|key| *key == record.key).expect("known key");
+                        saved[at] = Some(record.clone());
+                    }
+                    RequestOut::Erase(key) => {
+                        let at = keys.iter().position(|candidate| *candidate == key).expect("known key");
+                        saved[at] = None;
+                    }
+                    RequestOut::Send { attempt, .. } => attempts.push(attempt),
+                }
+            }
+        }
+        metered.end(());
+    }
+}
+
+fn request_table_finish<T: Item + std::fmt::Debug>(
+    table: &mut skein_lib::RequestTable<T>,
+    metered: &mut Metered,
+    keys: &[skein_lib::RequestKey],
+    saved: &mut [Option<skein_lib::RequestRecord<T>>],
+    attempts: &mut Vec<skein_lib::Token>,
+) {
+    use skein_lib::{RequestAnswered, RequestEnvelope, Token, Wall};
+    for attempt in attempts.iter() {
+        metered.start();
+        assert_eq!(table.answered(Time::ZERO, *attempt, RequestEnvelope::Again), RequestAnswered::Pending);
+        metered.end(());
+    }
+    attempts.clear();
+    metered.start();
+    table.fire(Time::from_nanos(8_000_000_000), Wall::EPOCH);
+    metered.end(());
+    request_table_outputs(table, metered, keys, saved, attempts, Time::from_nanos(8_000_000_000));
+    if let Some(attempt) = attempts.first() {
+        metered.start();
+        assert_eq!(
+            table.answered(Time::from_nanos(8_000_000_000), *attempt, RequestEnvelope::SignedOut),
+            RequestAnswered::Pending
+        );
+        table.confirmed(Some(7));
+        metered.end(());
+        attempts.clear();
+        request_table_outputs(table, metered, keys, saved, attempts, Time::from_nanos(8_000_000_000));
+    }
+    for (owner, attempt) in attempts.iter().enumerate() {
+        metered.start();
+        assert_eq!(
+            table.answered(Time::from_nanos(8_000_000_000), *attempt, RequestEnvelope::Final),
+            RequestAnswered::Final(Token::new(u64::try_from(owner).expect("small owner")))
+        );
+        metered.end(());
+    }
+    request_table_outputs(table, metered, keys, saved, attempts, Time::from_nanos(8_000_000_000));
+    metered.start();
+    table.reclaim();
+    metered.end(());
+}

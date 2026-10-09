@@ -217,7 +217,7 @@ impl<R> RequestTable<R> {
 
     /// Admit a request, or return ownership without changing anything at a limit.
     pub fn ask(&mut self, owner: Token, scope: u64, size: u64, request: R) -> Result<RequestKey, R> {
-        if !self.fits(size) || self.serial == u64::MAX {
+        if !self.fits(size) || self.serial == u64::MAX || self.fresh_attempt(owner).is_none() {
             return Err(request);
         }
         let Some((key, draws)) = self.fresh_key() else {
@@ -558,13 +558,21 @@ impl<R> RequestTable<R> {
         }
     }
 
+    fn fresh_attempt(&self, owner: Token) -> Option<Token> {
+        let mut raw = self.attempt.checked_add(1)?;
+        if raw == owner.raw() {
+            raw = raw.checked_add(1)?;
+        }
+        Some(Token::new(raw))
+    }
+
     fn eligible(&self, entry: &Entry<R>) -> bool {
         match entry.state {
             State::Ready => {
                 self.up
                     && self.scope == Some(entry.record.scope)
                     && (!entry.restored || self.retention.is_some())
-                    && self.attempt < u64::MAX
+                    && self.fresh_attempt(entry.owner).is_some()
             }
             State::Parked | State::InFlight(_) | State::Retrying(_) | State::Retired { .. } => false,
         }
@@ -606,8 +614,9 @@ impl<R> RequestTake<'_, R> {
             return Some(RequestOut::Save(&entry.record));
         }
         let id = send?;
-        self.table.attempt = self.table.attempt.checked_add(1).expect("eligibility checked numbering");
-        let attempt = Token::new(self.table.attempt);
+        let owner = self.table.entries.get(id).expect("held entry").owner;
+        let attempt = self.table.fresh_attempt(owner).expect("eligibility checked numbering");
+        self.table.attempt = attempt.raw();
         let entry = self.table.entries.get_mut(id).expect("held entry");
         entry.state = State::InFlight(attempt);
         entry.progress(RequestProgress::InFlight);

@@ -9,4 +9,5 @@
 
 pub mod intake;
 pub mod journal;
+pub mod request_table;
 pub mod search;

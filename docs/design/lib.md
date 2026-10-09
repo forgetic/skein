@@ -282,6 +282,10 @@ plain reference, over random cases drawn from a seed: a few hundred in
 the step tests, and 20,000 from the same seeds in the fuzzy suite, in
 `tests/lib` (testing-strategy.md, 8).
 
+The request table's step tests are `src/tests/requests.rs`; its independent
+obligation model, replay and seeded sweep are in `tests/lib/src/request_table.rs`
+and `tests/lib/tests/{request_table,fuzzy_request_table}.rs`.
+
 Each `worst_case` is checked against the counting allocator (testing.md,
 5), in `tests/lib/tests/memory.rs`, in the focused suite. Every container
 is built at capacities from 0 to 300, filled to them, emptied and filled

@@ -462,3 +462,18 @@ fn time_overflow_and_zero_backoff_stay_bounded() {
     assert_eq!(table.next_deadline(), Some(now));
     assert!(sent(&mut table, now, Wall::EPOCH).is_some());
 }
+
+#[test]
+fn attempt_tokens_do_not_alias_their_owners() {
+    let mut table = live();
+    let mut owner = Token::new(1);
+    for _ in 0_u32..20 {
+        table.ask(owner, 7, 1, owner.raw()).expect("fits");
+        let attempt = sent(&mut table, Time::ZERO, Wall::EPOCH).expect("send");
+        assert_ne!(attempt, owner, "attempt and owner have distinct tokens");
+        assert_eq!(table.answered(Time::ZERO, attempt, RequestEnvelope::Final), RequestAnswered::Final(owner));
+        assert_eq!(sent(&mut table, Time::ZERO, Wall::EPOCH), None);
+        table.reclaim();
+        owner = Token::new(attempt.raw().checked_add(1).expect("small test token"));
+    }
+}
