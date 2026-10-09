@@ -498,6 +498,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-oauth-accounts"
+version = "0.0.0"
+dependencies = [
+ "skein-lib",
+ "skein-oauth",
+]
+
+[[package]]
+name = "skein-oauth-accounts-world"
+version = "0.0.0"
+dependencies = [
+ "skein-heap",
+ "skein-lib",
+ "skein-oauth",
+ "skein-oauth-accounts",
+]
+
+[[package]]
 name = "skein-oauth-world"
 version = "0.0.0"
 dependencies = [

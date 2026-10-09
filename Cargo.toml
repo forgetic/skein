@@ -37,6 +37,7 @@ members = [
     "tests/llm",
     "tests/llm-connection",
     "tests/oauth",
+    "tests/oauth-accounts",
     "tests/protocol",
     "tests/ring",
     "tests/sim",
@@ -60,6 +61,7 @@ skein-json = { path = "crates/skein-json" }
 skein-llm = { path = "crates/skein-llm" }
 skein-llm-connection = { path = "crates/skein-llm-connection" }
 skein-oauth = { path = "crates/skein-oauth" }
+skein-oauth-accounts = { path = "crates/skein-oauth-accounts" }
 skein-fake-llm-domain = { path = "testing/skein-fake-llm-domain" }
 skein-fake-llm-protocol = { path = "testing/skein-fake-llm-protocol" }
 skein-fake-peers = { path = "testing/skein-fake-peers" }
