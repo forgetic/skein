@@ -32,7 +32,7 @@ mod session;
 #[cfg(test)]
 mod tests;
 
-pub use config::{ALPN, Config, Name, Refusal};
+pub use config::{ALPN, Config, Name, Parsed, Refusal, roots_worst_case};
 /// What [`Config::new`] takes: the roots a service trusts, which its shell
 /// reads at startup, and the certificates they are made of.
 pub use rustls::RootCertStore;
