@@ -1,0 +1,7 @@
+Final rebased tip cf978d90a360e06f3b951e0b51f3df6d41a91718, base a7e07ea3627f4541e0b4b187cee88300985feee1. Heavy1062 /tmp/skein04-12-final2.log: scripts/check.sh passed formatting, workspace/all-targets clippy -D warnings and standalone skein-tls check. Focused1700/5.728s (527b3c7b-65f0-4a4a-a95c-d4c2921ac684), fuzzy90/11.901s (412a5bff-8fe3-4f95-8a52-4d45496c6d31), browser6/4.264s (60922299-916b-4e08-bf9b-643d389326f8).
+
+Targeted pre-rebase serial heavy1051:37/37 in0.484s (732d916f-3193-41a9-9bae-d27fe2efc530); new actual connect/late-settlement world0.013s, whole/pings world0.012s, client every-phase/clipping world0.009s. Exact final-tip serial terminal control check1/1 in0.044s (c4ffe08d-6af9-46ab-9f24-72ae722ff4dc).
+
+Earlier full gate heavy1058 /tmp/skein04-12-final.log stopped on the pre-existing terminal-control ready-line assertion:724/725executed passed,975not run. No code change for this unrelated transient failure; it passed serially and in final full gate after normal main rebase. Initial migrated assertions and empty-wire replay-diversity fixture were corrected before the final tip.
+
+Probe slow-completion remains pending smith04 retry-by-phase consumption; deterministic coverage passes, no live probe performed. Interface sketches hold, no new question or design departure. Default gitnote supplies final gate evidence without rewriting the code commit.
