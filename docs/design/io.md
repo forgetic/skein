@@ -540,9 +540,20 @@ writes, a token record. It is the idiom of kernel.md, 6.1 (`Create`,
 run by io.
 
 - **One request, one terminal,** answered `Stored` only after the
-  directory's `Sync`: the new content then survives a crash. Until then
-  the old file stands, and a reader sees the old file or the new, never
-  part of either.
+  directory's `Sync`: the new content then survives a crash. A reader
+  sees the old file or the new, never part of either.
+- **The rename is the commit.**
+  - Before it, a failure, a deadline or a cancel removes the temporary
+    before the one terminal, and the old file is as it was.
+  - After it, the new file is in place. A failure of the directory's
+    `Sync`, or its deadline, answers `Failed` saying that the replace
+    committed: the new content is what a reader sees, and its durability
+    is unknown. Nothing is rolled back, and the same replace done again
+    makes it durable.
+  - A cancel after the rename is not honoured: the request runs to its
+    terminal.
+  - Rolling back would need a second copy of the old file, and would
+    still leave a window a crash could fall in, so none is kept.
 - **What a crash leaves:** the old file or the new, whole, and at most a
   temporary beside the target, named from it. The next replace of the
   target does not depend on it, and a scan may remove it.
@@ -553,8 +564,9 @@ run by io.
   in silence.
 - **The mode** is the old file's, or `0o600` for a private file (5.3).
 - **Its deadline** is the owner's, as for every whole-file operation. A
-  replace that fails or times out removes its temporary before its one
-  terminal, and leaves the old file as it was.
+  replace that fails or times out before its rename removes its
+  temporary before its one terminal, and leaves the old file as it was.
+  After its rename, it answers as the commit says.
 - **Not here:** updating part of a file, or a set of records larger than
   one write. Those are skein-kv's (kv.md).
 
