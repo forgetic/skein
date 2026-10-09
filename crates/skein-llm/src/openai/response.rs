@@ -194,6 +194,17 @@ impl StreamDecoder {
     /// Drain `has_ready()` before delivering another event. Events following
     /// a terminal outcome are ignored.
     pub fn event(&mut self, event: Event, limits: &Limits, wall: Wall, out: &mut Queue<Output>) {
+        self.received(event, None, limits, wall, out);
+    }
+
+    pub(crate) fn received(
+        &mut self,
+        event: Event,
+        long: Option<u64>,
+        limits: &Limits,
+        wall: Wall,
+        out: &mut Queue<Output>,
+    ) {
         if self.over {
             return;
         }
@@ -202,7 +213,7 @@ impl StreamDecoder {
             return;
         }
         let before = out.len();
-        let result = self.accept(event, limits, wall, out);
+        let result = self.accept(event, long, limits, wall, out);
         match result {
             Ok(()) => {
                 if out.len() == before {
@@ -297,6 +308,7 @@ impl StreamDecoder {
     fn accept(
         &mut self,
         event: Event,
+        long: Option<u64>,
         limits: &Limits,
         wall: Wall,
         out: &mut Queue<Output>,
@@ -327,7 +339,7 @@ impl StreamDecoder {
                         return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
                     }
                 }
-                let bytes = u64::try_from(arguments.len()).expect("slice length fits u64");
+                let bytes = received_length(long, arguments.len());
                 let mut input = List::with_capacity(limits.input_bytes);
                 let too_large = bytes > u64::from(limits.input_bytes);
                 if !too_large {
@@ -346,13 +358,12 @@ impl StreamDecoder {
             }
             Event::ArgumentsDelta { index, delta } => {
                 self.delta(index, b"function_call", None, delta.len(), limits)?;
+                let length = received_length(long, delta.len());
                 match self.opened.get_mut(index) {
                     Some(Opened::Tool { input, bytes, too_large, .. }) => {
-                        *bytes = bytes
-                            .checked_add(u64::try_from(delta.len()).expect("slice length fits u64"))
-                            .ok_or(DecodeError::Malformed)?;
+                        *bytes = bytes.checked_add(length).ok_or(DecodeError::Malformed)?;
                         if !*too_large {
-                            if delta.len() > usize::try_from(input.room()).expect("u32 fits usize") {
+                            if long.is_some() || delta.len() > usize::try_from(input.room()).expect("u32 fits usize") {
                                 *too_large = true;
                                 input.clear();
                             } else {
@@ -374,8 +385,8 @@ impl StreamDecoder {
                 let slot = self.opened.get_mut(index).ok_or(DecodeError::Malformed)?;
                 let state = mem::replace(slot, Opened::Emitted);
                 let prepared = match state {
-                    Opened::Active { id, kind } => prepare(item, &id, &kind, limits, self.reasoning)?,
-                    Opened::Tool { id, .. } => prepare(item, &id, b"function_call", limits, self.reasoning)?,
+                    Opened::Active { id, kind } => prepare(item, &id, &kind, long, limits, self.reasoning)?,
+                    Opened::Tool { id, .. } => prepare(item, &id, b"function_call", long, limits, self.reasoning)?,
                     Opened::Ready(_) | Opened::Emitted => return Err(DecodeError::Malformed),
                 };
                 self.reserve(1, part_size(&prepared.part), limits)?;
@@ -540,6 +551,7 @@ fn prepare(
     item: Item,
     expected_id: &[u8],
     expected_kind: &[u8],
+    long: Option<u64>,
     limits: &Limits,
     reasoning: ReasoningPolicy,
 ) -> Result<Prepared, DecodeError> {
@@ -563,8 +575,8 @@ fn prepare(
             if expected_id != id.as_ref() || expected_kind != b"function_call" {
                 return Err(DecodeError::Malformed);
             }
-            let bytes = u64::try_from(arguments.len()).expect("slice length fits u64");
-            let too_large = arguments.len() > usize::try_from(limits.input_bytes).expect("u32 fits usize");
+            let bytes = received_length(long, arguments.len());
+            let too_large = bytes > u64::from(limits.input_bytes);
             let input = if too_large { bytes::copy_of(b"") } else { arguments };
             Ok(Prepared {
                 part: Part::ToolCall { call_id, item_id: id, name, input, too_large, bytes, cut },
@@ -578,6 +590,19 @@ fn prepare(
                 || json::text_ref(json::value_at(tokens, json::required(tokens, b"type")?)?)? != expected_kind
             {
                 return Err(DecodeError::Malformed);
+            }
+            if let Some(encrypted) = json::optional_at(tokens, json::field(tokens, b"encrypted_content")?)?
+                && let Some(length) = long_text(encrypted)
+            {
+                if expected_kind != b"reasoning" {
+                    return Err(DecodeError::WrongType);
+                }
+                match reasoning {
+                    ReasoningPolicy::Drop => {
+                        return Ok(Prepared { part: Part::Dropped { bytes: length }, tool: false, refusal: false });
+                    }
+                    ReasoningPolicy::Keep => return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes)),
+                }
             }
             let bytes = value.to_bytes(limits)?;
             if bytes.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
@@ -616,7 +641,7 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
                     call_id: json::text(json::value_at(item, json::required(item, b"call_id")?)?)?,
                     name: json::text(json::value_at(item, json::required(item, b"name")?)?)?,
                     arguments: match json::optional_at(item, json::field(item, b"arguments")?)? {
-                        Some(value) => json::text(value)?,
+                        Some(value) => arguments(value)?,
                         None => Box::new([]),
                     },
                 });
@@ -672,7 +697,7 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
         }),
         b"response.function_call_arguments.delta" => Ok(Event::ArgumentsDelta {
             index: index(tokens)?,
-            delta: json::text(json::value_at(tokens, json::required(tokens, b"delta")?)?)?,
+            delta: arguments(json::value_at(tokens, json::required(tokens, b"delta")?)?)?,
         }),
         b"response.reasoning_summary_text.delta" => Ok(Event::ReasoningDelta {
             index: index(tokens)?,
@@ -704,7 +729,7 @@ fn read_item(tokens: (&Document, json::Span), limits: &Limits) -> Result<Item, D
             let id = json::text(json::value_at(tokens, json::required(tokens, b"id")?)?)?;
             let call_id = json::text(json::value_at(tokens, json::required(tokens, b"call_id")?)?)?;
             let name = json::text(json::value_at(tokens, json::required(tokens, b"name")?)?)?;
-            let arguments = json::text(json::value_at(tokens, json::required(tokens, b"arguments")?)?)?;
+            let arguments = arguments(json::value_at(tokens, json::required(tokens, b"arguments")?)?)?;
             let status = request::optional_text(tokens, b"status")?;
             match status.as_deref() {
                 Some(b"incomplete") => Ok(Item::CutCall { id, call_id, name, arguments }),
@@ -751,6 +776,7 @@ fn read_item(tokens: (&Document, json::Span), limits: &Limits) -> Result<Item, D
                 refusal,
             })
         }
+        b"reasoning" => Ok(Item::Opaque { value: Json::collected_view(tokens, limits)? }),
         _ => Ok(Item::Opaque { value: Json::from_view(tokens, limits)? }),
     }
 }
@@ -1152,5 +1178,26 @@ fn write_usage(out: &mut Encoder, usage: Usage) {
         out.key(b"reasoning_tokens");
         out.unsigned(reasoning);
         out.object_end();
+    }
+}
+
+fn received_length(long: Option<u64>, stored: usize) -> u64 {
+    match long {
+        Some(length) => length,
+        None => u64::try_from(stored).expect("slice length fits u64"),
+    }
+}
+
+pub(crate) fn long_text(value: (&Document, json::Span)) -> Option<u64> {
+    match json::record(value, 0) {
+        Some(record) if record.kind == Kind::Long && json::len(value) == 1 => Some(u64::from(record.len)),
+        Some(_) | None => None,
+    }
+}
+
+fn arguments(value: (&Document, json::Span)) -> Result<Box<[u8]>, DecodeError> {
+    match long_text(value) {
+        Some(_) => Ok(bytes::copy_of(b"")),
+        None => json::text(value),
     }
 }

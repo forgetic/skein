@@ -428,7 +428,7 @@ struct Cursor {
 }
 
 // Static filter descriptions have no peer-controlled size. This bound keeps
-// startup traversal finite; every level also uses the configured depth.
+// startup traversal finite independently of the peer's JSON depth.
 const FILTER_STEPS: u32 = 65_536;
 
 fn next_child(cursor: &mut Cursor) -> Option<Keep> {
@@ -470,58 +470,83 @@ fn validate(tag: &'static Tagged) -> Result<(), AmbiguousFilter> {
     Ok(())
 }
 
-pub(super) fn describe(filter: Filter, limits: &Limits) -> Result<List<&'static Tagged>, AmbiguousFilter> {
-    let mut count = 0_u32;
-    for pass in 0_u32..2 {
-        let mut tags: List<&'static Tagged> = List::with_capacity(if pass == 0 { 0 } else { count });
-        let mut walk = Stack::with_capacity(limits.tokenizer.depth.checked_add(1).expect("filter depth"));
-        walk.push(Cursor { keep: filter.root, child: 0 }).expect("root frame");
-        for _ in 0..FILTER_STEPS {
-            let keep = walk.top().expect("unfinished filter").keep;
-            if walk.top().expect("frame").child == 0 {
-                match keep {
-                    Keep::Tagged(tag) => {
-                        validate(tag)?;
-                        if pass == 0 {
-                            count = count.checked_add(1).expect("static tags");
-                        } else {
-                            let mut exists = false;
-                            for existing in &tags {
-                                if *existing == tag {
-                                    exists = true;
-                                    break;
+pub(super) struct Plan {
+    pub tags: List<&'static Tagged>,
+    pub depth: u32,
+}
+
+pub(super) fn describe(filter: Filter) -> Result<Plan, AmbiguousFilter> {
+    // The filter is static owner data. Its depth is independent of the
+    // peer's lowered JSON depth: unreachable paths still require validation.
+    let mut steps = 0_u32;
+    for depth in 1..=FILTER_STEPS {
+        let mut count = 0_u32;
+        let mut retry = false;
+        for pass in 0_u32..2 {
+            let mut tags: List<&'static Tagged> = List::with_capacity(if pass == 0 { 0 } else { count });
+            let mut walk = Stack::with_capacity(depth);
+            walk.push(Cursor { keep: filter.root, child: 0 }).expect("root frame");
+            for _ in 0..FILTER_STEPS {
+                steps = steps.checked_add(1).expect("static filter work");
+                assert!(steps <= FILTER_STEPS, "static filter traversal fits its bound");
+                let keep = walk.top().expect("unfinished filter").keep;
+                if walk.top().expect("frame").child == 0 {
+                    match keep {
+                        Keep::Tagged(tag) => {
+                            validate(tag)?;
+                            if pass == 0 {
+                                count = count.checked_add(1).expect("static tags");
+                            } else {
+                                let mut exists = false;
+                                for existing in &tags {
+                                    if *existing == tag {
+                                        exists = true;
+                                        break;
+                                    }
+                                }
+                                if !exists {
+                                    tags.push(tag).expect("counted nodes");
                                 }
                             }
-                            if !exists {
-                                tags.push(tag).expect("counted nodes");
+                        }
+                        Keep::Value | Keep::Text(_) | Keep::Into(_) => {}
+                    }
+                }
+                match next_child(walk.top_mut().expect("frame")) {
+                    Some(child) => {
+                        if walk.push(Cursor { keep: child, child: 0 }).is_err() {
+                            retry = true;
+                            break;
+                        }
+                    }
+                    None => {
+                        walk.pop().expect("completed frame");
+                        if walk.is_empty() {
+                            if pass == 1 {
+                                return Ok(Plan { tags, depth });
                             }
+                            break;
                         }
-                    }
-                    Keep::Value | Keep::Text(_) | Keep::Into(_) => {}
-                }
-            }
-            match next_child(walk.top_mut().expect("frame")) {
-                Some(child) => walk.push(Cursor { keep: child, child: 0 }).expect("static filter fits tokenizer depth"),
-                None => {
-                    walk.pop().expect("completed frame");
-                    if walk.is_empty() {
-                        if pass == 1 {
-                            return Ok(tags);
-                        }
-                        break;
                     }
                 }
             }
+            if retry {
+                break;
+            }
+            assert!(walk.is_empty(), "static filter traversal fits its bound");
         }
-        assert!(walk.is_empty(), "static filter traversal fits its bound");
     }
-    unreachable!("second pass returns the static nodes")
+    unreachable!("the bounded static traversal returns or asserts")
+}
+
+pub(super) fn planning_bytes(plan: &Plan) -> Option<u64> {
+    Stack::<Cursor>::worst_case(plan.depth)?.checked_add(List::<&Tagged>::worst_case(plan.tags.capacity())?)
 }
 
 pub(super) fn build(filter: Filter, limits: &Limits, caps: &[u32]) -> Result<List<Pending>, AmbiguousFilter> {
-    let plan = describe(filter, limits)?;
-    let mut tags = List::with_capacity(plan.len());
-    for tag in &plan {
+    let plan = describe(filter)?;
+    let mut tags = List::with_capacity(plan.tags.len());
+    for tag in &plan.tags {
         tags.push(Pending::new(tag, limits, caps)).expect("static node capacity");
     }
     Ok(tags)

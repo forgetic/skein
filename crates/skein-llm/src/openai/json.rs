@@ -145,7 +145,18 @@ impl Json {
         (&self.document, whole(&self.document))
     }
 
+    /// Takes the collector's checked document for immediate native decoding.
+    /// Long records are consumed by the decoder and never admitted as replay.
+    pub(crate) fn collected(document: Document) -> Json {
+        Json { document }
+    }
+
     pub(crate) fn from_view(view: (&Document, Span), limits: &Limits) -> Result<Json, DecodeError> {
+        let value = Self::collected_view(view, limits)?;
+        Self::from_document(value.document, limits)
+    }
+
+    pub(crate) fn collected_view(view: (&Document, Span), limits: &Limits) -> Result<Json, DecodeError> {
         let count = len(view);
         if count > limits.tokens {
             return Err(DecodeError::limit(crate::Cap::Tokens, limits.tokens));
@@ -188,7 +199,7 @@ impl Json {
             &document::Limits { tokens: count, text: size },
         )
         .or(Err(DecodeError::Malformed))?;
-        Json::from_document(document, limits)
+        Ok(Json { document })
     }
 
     pub(crate) fn write(&self, out: &mut writer::Encoder) {
@@ -198,6 +209,10 @@ impl Json {
 
 pub(crate) fn whole(document: &Document) -> Span {
     Span { start: 0, end: document.len() }
+}
+
+pub(crate) fn offset(view: (&Document, Span)) -> u32 {
+    view.1.start
 }
 
 pub(crate) fn len(view: (&Document, Span)) -> u32 {

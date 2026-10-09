@@ -195,7 +195,7 @@ fn almost_full_error_buffer_and_partial_request_are_bounded() {
 }
 
 #[test]
-fn multiple_reasoning_items_with_many_empty_tokens_fit_the_bound() {
+fn multiple_unknown_items_with_many_empty_tokens_fit_the_bound() {
     let mut bounds = limits();
     bounds.dialect.parts = 4;
     bounds.dialect.opaque_bytes = 4096;
@@ -206,8 +206,8 @@ fn multiple_reasoning_items_with_many_empty_tokens_fit_the_bound() {
     let tiny_values = vec![r#""""#; 850].join(",");
     let mut documents = Vec::new();
     for index in 0..3 {
-        documents.push(format!(r#"{{"type":"response.output_item.added","output_index":{index},"item":{{"id":"rs_{index}","type":"reasoning"}}}}"#));
-        documents.push(format!(r#"{{"type":"response.output_item.done","output_index":{index},"item":{{"id":"rs_{index}","type":"reasoning","encrypted_content":"opaque","future":[{tiny_values}],"summary":[]}}}}"#));
+        documents.push(format!(r#"{{"type":"response.output_item.added","output_index":{index},"item":{{"id":"rs_{index}","type":"future_reasoning"}}}}"#));
+        documents.push(format!(r#"{{"type":"response.output_item.done","output_index":{index},"item":{{"id":"rs_{index}","type":"future_reasoning","encrypted_content":"opaque","future":[{tiny_values}],"summary":[]}}}}"#));
     }
     documents.push(skein_llm_world::TERMINAL.to_owned());
     let refs: Vec<_> = documents.iter().map(String::as_str).collect();
@@ -247,7 +247,7 @@ fn multiple_reasoning_items_with_many_empty_tokens_fit_the_bound() {
 }
 
 #[test]
-fn thirty_two_reasoning_arrays_exercise_the_compact_record_bound() {
+fn thirty_two_unknown_arrays_exercise_the_compact_record_bound() {
     let mut bounds = limits();
     bounds.dialect.parts = 32;
     bounds.dialect.tokens = 2048;
@@ -261,8 +261,8 @@ fn thirty_two_reasoning_arrays_exercise_the_compact_record_bound() {
     let tiny_values = vec!["0"; 1900].join(",");
     let mut documents = Vec::new();
     for index in 0..32 {
-        documents.push(format!(r#"{{"type":"response.output_item.added","output_index":{index},"item":{{"id":"rs_{index}","type":"reasoning"}}}}"#));
-        documents.push(format!(r#"{{"type":"response.output_item.done","output_index":{index},"item":{{"id":"rs_{index}","type":"reasoning","encrypted_content":"opaque","future":[{tiny_values}],"summary":[]}}}}"#));
+        documents.push(format!(r#"{{"type":"response.output_item.added","output_index":{index},"item":{{"id":"rs_{index}","type":"future_reasoning"}}}}"#));
+        documents.push(format!(r#"{{"type":"response.output_item.done","output_index":{index},"item":{{"id":"rs_{index}","type":"future_reasoning","encrypted_content":"opaque","future":[{tiny_values}],"summary":[]}}}}"#));
     }
     documents.push(skein_llm_world::TERMINAL.to_owned());
     let refs: Vec<_> = documents.iter().map(String::as_str).collect();
@@ -628,4 +628,76 @@ fn replay_at_its_cap_owns_only_shared_text_and_fixed_records() {
     drop(cloned);
     drop(replay);
     assert_eq!(meter.held(), 0, "compact replay allocations release together");
+}
+
+fn selective_peak(size: usize, call_arguments: bool) -> u64 {
+    // One MiB across the four independently ignored echo paths keeps this
+    // focused memory world within its serial one-second budget.
+    let text = "x".repeat(if call_arguments { size } else { size / 4 });
+    let documents = if call_arguments {
+        vec![
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"i","call_id":"c","name":"read","type":"function_call","arguments":""}}"#.to_owned(),
+            format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{{"arguments":"{text}","id":"i","call_id":"c","name":"read","type":"function_call"}}}}"#),
+            skein_llm_world::TERMINAL.to_owned(),
+        ]
+    } else {
+        vec![format!(
+            r#"{{"type":"response.completed","response":{{"output":["{text}"],"instructions":"{text}","tools":[{{"description":"{text}"}}],"status":"completed","usage":{{"input_tokens":1,"output_tokens":1,"attribution":{{"echo":"{text}"}}}}}}}}"#
+        )]
+    };
+    let refs: Vec<_> = documents.iter().map(String::as_str).collect();
+    let wire =
+        skein_llm_world::response(200, "Content-Type: text/event-stream\r\n", &skein_llm_world::events(&refs), false);
+    drop(refs);
+    drop(documents);
+    drop(text);
+    let mut bounds = limits();
+    bounds.dialect.tokens = 64;
+    bounds.dialect.document_bytes = 512;
+    bounds.dialect.string_bytes = 64;
+    bounds.dialect.input_bytes = 3;
+    bounds.dialect.opaque_bytes = 128;
+    bounds.sse.line = 8_000_000;
+    bounds.sse.event = 8_000_000;
+    let bound = client::worst_case(&bounds).expect("checked selective receiving bound");
+    // The wire tape is world-owned and allocated before the meter's base.
+    // Its unchanged allocation stays alive throughout every measured step.
+    let meter = Meter::new();
+    meter.start();
+    let mut world = World::new(call(1), bounds, wire, 77);
+    world.fragmentation(256, 31);
+    world.request(client::Request::Start);
+    let initial = meter.end();
+    let mut peak = meter.check(initial, bound, &"selective preparation");
+    for _ in 0..200_000 {
+        meter.start();
+        let progress = world.tick(true);
+        let measured = meter.end();
+        peak = peak.max(meter.check(measured, bound, &"selective receive"));
+        if !progress {
+            break;
+        }
+    }
+    world.assert_once();
+    assert!(world.seen.iter().any(|event| matches!(event, client::Event::Completed { .. })), "{:?}", world.seen);
+    if call_arguments {
+        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Block { block: skein_llm::Block::Oversize { bytes, .. }, .. } if *bytes == u64::try_from(size).expect("fixture size fits u64"))));
+    }
+    world.request(client::Request::Close);
+    world.settle();
+    peak
+}
+
+#[test]
+fn selective_echo_high_water_is_independent_of_the_echo_size() {
+    let short = selective_peak(64, false);
+    let long = selective_peak(1_048_576, false);
+    assert_eq!(short, long, "discarded echoes never become an event buffer");
+}
+
+#[test]
+fn selective_oversize_call_high_water_is_independent_of_the_argument_size() {
+    let short = selective_peak(64, true);
+    let long = selective_peak(1_048_576, true);
+    assert_eq!(short, long, "discarded arguments retain only their length");
 }

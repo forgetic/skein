@@ -126,11 +126,22 @@ impl StreamDecoder {
     /// The owner reserves `MAX_OUT` queue slots before delivering an event.
     /// Events following a terminal outcome are ignored.
     pub fn event(&mut self, event: Event, limits: &Limits, wall: Wall, out: &mut Queue<Output>) {
+        self.received(event, None, limits, wall, out);
+    }
+
+    pub(crate) fn received(
+        &mut self,
+        event: Event,
+        long: Option<u64>,
+        limits: &Limits,
+        wall: Wall,
+        out: &mut Queue<Output>,
+    ) {
         if self.over {
             return;
         }
         let before = out.len();
-        match self.accept(event, limits, wall, out) {
+        match self.accept(event, long, limits, wall, out) {
             Ok(()) => {
                 if before == out.len() {
                     out.push(Output::Progress);
@@ -167,6 +178,7 @@ impl StreamDecoder {
     fn accept(
         &mut self,
         event: Event,
+        long: Option<u64>,
         limits: &Limits,
         wall: Wall,
         out: &mut Queue<Output>,
@@ -206,7 +218,7 @@ impl StreamDecoder {
                         self.reserve_received(len, limits)?;
                     }
                 }
-                self.delta(index, delta, out)?;
+                self.delta(index, delta, long, out)?;
             }
             Event::Done { index } => {
                 self.check_active(index)?;
@@ -360,45 +372,69 @@ impl StreamDecoder {
         }
         Ok(())
     }
-    fn delta(&mut self, index: u32, delta: Delta, out: &mut Queue<Output>) -> Result<(), DecodeError> {
+    fn delta(
+        &mut self,
+        index: u32,
+        delta: Delta,
+        long: Option<u64>,
+        out: &mut Queue<Output>,
+    ) -> Result<(), DecodeError> {
         let active = self.active.as_mut().ok_or(DecodeError::Malformed)?;
-        match (active, delta) {
-            (Active::Text { text }, Delta::Text { text: fragment }) => {
-                append(text, &fragment, crate::Cap::Answer)?;
-                out.push(Output::TextDelta { index, content_index: 0, text: fragment });
-            }
-            (Active::ToolCall { input, fragmented, too_large, bytes, .. }, Delta::Arguments { text: fragment }) => {
-                if !*fragmented {
-                    // The start's `{}` is a placeholder, replaced by partial_json.
-                    input.clear();
-                    *bytes = 0;
-                    *too_large = false;
-                    *fragmented = true;
+        match delta {
+            Delta::Text { text: fragment } => match active {
+                Active::Text { text } => {
+                    append(text, &fragment, crate::Cap::Answer)?;
+                    out.push(Output::TextDelta { index, content_index: 0, text: fragment });
                 }
-                *bytes = bytes
-                    .checked_add(u64::try_from(fragment.len()).expect("slice length fits u64"))
-                    .ok_or(DecodeError::Malformed)?;
-                if !*too_large {
-                    if fragment.len() > usize::try_from(input.room()).expect("u32 fits usize") {
-                        *too_large = true;
+                Active::ToolCall { .. } | Active::Thinking { .. } | Active::Opaque { .. } => {
+                    return Err(DecodeError::Malformed);
+                }
+            },
+            Delta::Arguments { text: fragment } => match active {
+                Active::ToolCall { input, fragmented, too_large, bytes, .. } => {
+                    if !*fragmented {
+                        // The start's `{}` is a placeholder, replaced by partial_json.
                         input.clear();
-                    } else {
-                        append(input, &fragment, crate::Cap::String)?;
+                        *bytes = 0;
+                        *too_large = false;
+                        *fragmented = true;
                     }
+                    let length = match long {
+                        Some(length) => length,
+                        None => u64::try_from(fragment.len()).expect("slice length fits u64"),
+                    };
+                    *bytes = bytes.checked_add(length).ok_or(DecodeError::Malformed)?;
+                    if !*too_large {
+                        if long.is_some() || fragment.len() > usize::try_from(input.room()).expect("u32 fits usize") {
+                            *too_large = true;
+                            input.clear();
+                        } else {
+                            append(input, &fragment, crate::Cap::String)?;
+                        }
+                    }
+                    out.push(Output::ArgumentsDelta { index, delta: fragment });
                 }
-                out.push(Output::ArgumentsDelta { index, delta: fragment });
-            }
-            (Active::Thinking { text, .. }, Delta::Thinking { text: fragment }) => {
-                append(text, &fragment, crate::Cap::Opaque)?;
-                out.push(Output::ReasoningDelta { index, summary_index: 0, text: fragment });
-            }
-            (Active::Thinking { signature, .. }, Delta::Signature { text }) => {
-                append(signature, &text, crate::Cap::Opaque)?;
-            }
-            (
-                Active::Text { .. } | Active::ToolCall { .. } | Active::Thinking { .. } | Active::Opaque { .. },
-                Delta::Text { .. } | Delta::Arguments { .. } | Delta::Thinking { .. } | Delta::Signature { .. },
-            ) => return Err(DecodeError::Malformed),
+                Active::Text { .. } | Active::Thinking { .. } | Active::Opaque { .. } => {
+                    return Err(DecodeError::Malformed);
+                }
+            },
+            Delta::Thinking { text: fragment } => match active {
+                Active::Thinking { text, .. } => {
+                    append(text, &fragment, crate::Cap::Opaque)?;
+                    out.push(Output::ReasoningDelta { index, summary_index: 0, text: fragment });
+                }
+                Active::Text { .. } | Active::ToolCall { .. } | Active::Opaque { .. } => {
+                    return Err(DecodeError::Malformed);
+                }
+            },
+            Delta::Signature { text } => match active {
+                Active::Thinking { signature, .. } => {
+                    append(signature, &text, crate::Cap::Opaque)?;
+                }
+                Active::Text { .. } | Active::ToolCall { .. } | Active::Opaque { .. } => {
+                    return Err(DecodeError::Malformed);
+                }
+            },
         }
         Ok(())
     }
@@ -581,7 +617,12 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
             let delta = field(tokens, b"delta")?;
             let delta = match text_ref(delta, b"type")? {
                 b"text_delta" => Delta::Text { text: text(delta, b"text")? },
-                b"input_json_delta" => Delta::Arguments { text: text(delta, b"partial_json")? },
+                b"input_json_delta" => Delta::Arguments {
+                    text: match crate::openai::response::long_text(field(delta, b"partial_json")?) {
+                        Some(_) => bytes::copy_of(b""),
+                        None => text(delta, b"partial_json")?,
+                    },
+                },
                 b"thinking_delta" => Delta::Thinking { text: text(delta, b"thinking")? },
                 b"signature_delta" => Delta::Signature { text: text(delta, b"signature")? },
                 _ => return Err(DecodeError::WrongType),

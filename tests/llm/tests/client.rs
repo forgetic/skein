@@ -681,6 +681,7 @@ fn receiving_caps_admit_the_edge_and_refuse_one_over_by_name() {
     let wire = text_response(false);
     let head = u32::try_from(wire.windows(4).position(|part| part == b"\r\n\r\n").unwrap() + 4).unwrap();
     let document = u32::try_from(documents.iter().map(|document| document.len()).max().unwrap()).unwrap();
+    let retained = values_text_edge(&documents);
     let values: Vec<_> =
         documents.iter().map(|text| Json::from_bytes(text.as_bytes(), &limits().dialect).unwrap()).collect();
     let tokens = values.iter().map(|value| value.document().len()).max().unwrap();
@@ -701,7 +702,7 @@ fn receiving_caps_admit_the_edge_and_refuse_one_over_by_name() {
     let opaque = u32::try_from(br#"{"id":"msg_1","phase":"final_answer"}"#.len()).unwrap();
     for (which, edge) in [
         (Cap::Head, head),
-        (Cap::Document, document),
+        (Cap::Document, retained),
         (Cap::Tokens, tokens),
         (Cap::String, string),
         (Cap::Depth, 4),
@@ -898,4 +899,15 @@ fn owner_timeouts_keep_every_phase_and_clip_the_detail_without_repeating_a_termi
             world.assert_once();
         }
     }
+}
+
+fn values_text_edge(documents: &[&str]) -> u32 {
+    documents
+        .iter()
+        .map(|text| {
+            let value = skein_llm::Json::from_bytes(text.as_bytes(), &limits().dialect).expect("handwritten event");
+            value.document().text_len()
+        })
+        .max()
+        .expect("nonempty event sequence")
 }

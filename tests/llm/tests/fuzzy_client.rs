@@ -198,3 +198,82 @@ fn randomized_receiving_limits_name_the_cap_and_the_bound_that_was_passed() {
         assert!(expected_bound < 8);
     }
 }
+
+#[test]
+fn selective_known_events_ignore_seeded_extensions_and_field_order() {
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        for seed in 1_u64..=256 {
+            let mut rng = skein_lib::Rng::new(seed);
+            let noise =
+                "x".repeat(usize::try_from(rng.next_u64() % 2048).expect("seeded value fits the configured bound"));
+            let extra = format!(r#""extension_{seed}":{{"future":[null,1,{{"wire":"{noise}"}}]}}"#);
+            let documents = match provider {
+                skein_llm::Provider::OpenAiCodex => {
+                    let item = if seed % 2 == 0 {
+                        format!(
+                            r#"{{{extra},"id":"m","content":[{{{extra},"text":"hello","type":"output_text"}}],"type":"message"}}"#
+                        )
+                    } else {
+                        format!(
+                            r#"{{"type":"message","id":"m","content":[{{"type":"output_text","text":"hello",{extra}}}],{extra}}}"#
+                        )
+                    };
+                    vec![
+                        format!(
+                            r#"{{{extra},"type":"response.output_item.added","output_index":0,"item":{{"id":"m","type":"message"}}}}"#
+                        ),
+                        format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{item},{extra}}}"#),
+                        format!(
+                            r#"{{"type":"response.completed","response":{{{extra},"output":["{noise}"],"status":"completed","usage":{{{extra},"input_tokens":3,"output_tokens":2}}}},{extra}}}"#
+                        ),
+                    ]
+                }
+                skein_llm::Provider::Anthropic => vec![
+                    format!(
+                        r#"{{{extra},"type":"message_start","message":{{{extra},"type":"message","role":"assistant","content":[],"usage":{{"input_tokens":3,{extra}}}}}}}"#
+                    ),
+                    format!(
+                        r#"{{"type":"content_block_start","index":0,"content_block":{{{extra},"text":"hello","type":"text"}}}}"#
+                    ),
+                    format!(r#"{{{extra},"type":"content_block_stop","index":0}}"#),
+                    format!(
+                        r#"{{"type":"message_delta","delta":{{"stop_reason":"end_turn"}},"usage":{{{extra},"output_tokens":2}}}}"#
+                    ),
+                    format!(r#"{{{extra},"type":"message_stop"}}"#),
+                ],
+            };
+            let refs: Vec<_> = documents.iter().map(String::as_str).collect();
+            let wire = skein_llm_world::response(
+                200,
+                "Content-Type: text/event-stream\r\n",
+                &skein_llm_world::events(&refs),
+                seed % 2 == 0,
+            );
+            let mut bounds = limits();
+            bounds.dialect.tokens = 64;
+            bounds.dialect.document_bytes = 512;
+            bounds.dialect.string_bytes = 64;
+            bounds.dialect.input_bytes = 64;
+            bounds.dialect.opaque_bytes = 128;
+            bounds.sse.line = 16_384;
+            bounds.sse.event = 16_384;
+            let mut input = call(seed);
+            if provider == skein_llm::Provider::Anthropic {
+                input.endpoint = skein_llm::Endpoint::anthropic();
+                input.credential = skein_llm::Credential::anthropic(b"test-oauth".to_vec().into());
+                input.prompt.affinity = None;
+            }
+            let mut world = World::new(input, bounds, wire, seed);
+            world.fragmentation(
+                u32::try_from(rng.next_u64() % 73 + 1).expect("seeded value fits the configured bound"),
+                3,
+            );
+            world.request(client::Request::Start);
+            world.run();
+            world.assert_once();
+            assert!(world.seen.iter().any(|event| matches!(event, client::Event::Completed { completion, .. }
+                if completion.usage.input == Some(3) && completion.usage.output == Some(2)
+                && matches!(completion.content.as_ref(), [skein_llm::Block::Text { text, .. }] if text.as_ref() == b"hello"))), "{provider:?} seed {seed}: {:?}", world.seen);
+        }
+    }
+}

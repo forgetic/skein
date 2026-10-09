@@ -32,11 +32,14 @@ impl Limits {
         }
     }
 }
-/// A conservative per-exchange bound including one event's tokens, temporary
-/// tokenizer/writer storage and a completion being handed to its owner.
+/// A conservative bound for native admission, request encoding and decoded
+/// output. The client's selective collector prices streamed events separately.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
-    let tokens = document::worst_case(&document::Limits { tokens: limits.tokens, text: limits.document_bytes })?;
+    // Native temporary values belong to the request, answer or replay
+    // budgets. A discarded wire event contributes no document-sized buffer.
+    let temporary = limits.request_bytes.max(limits.answer_bytes).max(limits.input_bytes).max(limits.opaque_bytes);
+    let tokens = document::worst_case(&document::Limits { tokens: limits.tokens, text: temporary })?;
     // Translation validates the aggregate request before it clones it.
     // Every JSON token costs at least one byte in that request budget.
     // The caller's prompt and its translated copy may coexist until encoding.
@@ -50,12 +53,14 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .min(u64::from(limits.answer_bytes))
         .checked_mul(u64::try_from(size_of::<Compact>()).ok()?)?
         .checked_mul(2)?;
-    let collector = collector::worst_case(
+    // Whole-value collection remains a neutral JSON admission entrance for
+    // schemas and replay metadata. The client prices its error body separately.
+    let admission = collector::worst_case(
         &collector::Limits {
             tokenizer: limits.tokenizer_limits(),
             tokens: limits.tokens,
-            text: limits.document_bytes,
-            skip: u64::from(limits.document_bytes),
+            text: temporary,
+            skip: u64::from(temporary),
         },
         &[],
         &collector::Filter { root: collector::Keep::Value },
@@ -63,19 +68,19 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     let request_slots = List::<Input>::worst_case(limits.parts)?
         .checked_add(List::<Tool>::worst_case(limits.parts)?)?
         .checked_mul(2)?;
-    let documents = u64::from(limits.document_bytes).checked_mul(8)?;
+    let documents = u64::from(temporary).checked_mul(8)?;
     let answer = u64::from(limits.answer_bytes).checked_mul(4)?;
     tokens
         .checked_mul(4)?
         .checked_add(request_tokens)?
         .checked_add(answer_records)?
-        .checked_add(collector)?
+        .checked_add(admission)?
         .checked_add(request_slots)?
         .checked_add(documents)?
         .checked_add(answer)?
         .checked_add(u64::from(limits.request_bytes))?
         .checked_add(tokenizer::worst_case(&limits.tokenizer_limits())?)?
-        .checked_add(writer::worst_case(&limits.writer_limits())?)?
+        .checked_add(writer::worst_case(&writer::Limits { depth: limits.depth, length: temporary })?)?
         .checked_add(crate::openai::response::decoder_worst_case(limits)?)
 }
 /// A bounded document entrance refused its grammar, shape or receiving limits.

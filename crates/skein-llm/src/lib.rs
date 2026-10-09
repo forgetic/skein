@@ -12,6 +12,7 @@ mod affinity;
 pub mod anthropic;
 pub mod client;
 mod dialect;
+mod filter;
 pub mod openai;
 mod replay;
 mod translate;

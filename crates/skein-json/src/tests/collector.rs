@@ -316,10 +316,23 @@ fn an_ambiguous_shared_field_is_refused_at_construction() {
         ],
         unknown: Cap::new(0),
     };
-    assert_eq!(
-        Collector::new(Filter { root: Keep::Tagged(&BAD) }, &LIMITS, &[64]).unwrap_err(),
-        collector::AmbiguousFilter { field: b"id" }
-    );
+    const DEEP_BAD: Filter =
+        Filter { root: Keep::Into(&[Node { key: Key::Field(b"nested"), keep: Keep::Tagged(&BAD) }]) };
+    for depth in [0, 1, 8] {
+        let limits = Limits { tokenizer: tokenizer::Limits { depth, ..LIMITS.tokenizer }, ..LIMITS };
+        assert_eq!(Collector::new(DEEP_BAD, &limits, &[64]).unwrap_err(), collector::AmbiguousFilter { field: b"id" });
+    }
+}
+
+#[test]
+fn static_filter_depth_does_not_raise_the_peer_depth_limit() {
+    const DEEP: Filter =
+        Filter { root: Keep::Into(&[Node { key: Key::Field(b"nested"), keep: Keep::Tagged(&TAGGED) }]) };
+    let limits = Limits { tokenizer: tokenizer::Limits { depth: 1, ..LIMITS.tokenizer }, ..LIMITS };
+    let mut machine = Machine::with_caps(DEEP, limits, &[64]);
+    let Event::Collected(_) = machine.read(b"{}") else { panic!("shallow root is collected") };
+    let mut machine = Machine::with_caps(DEEP, limits, &[64]);
+    assert_eq!(machine.read(br#"{"nested":{}}"#), Event::Failed(Error::Tokenizer(tokenizer::Error::TooDeep)));
 }
 
 #[test]

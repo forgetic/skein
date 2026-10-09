@@ -1250,3 +1250,114 @@ fn a_discarded_string_length_is_not_a_neutral_writable_json_value() {
     .unwrap();
     assert_eq!(Json::from_document(document, &LIMITS), Err(DecodeError::Malformed));
 }
+
+fn projected(input: &[u8], provider: crate::Provider) -> skein_json::Document {
+    use skein_json::{collector, tokenizer};
+    use skein_lib::stream::{Down, Read, Up};
+    let bounds = collector::Limits {
+        tokenizer: tokenizer::Limits { depth: 32, string: 128, number: 32, chunk: 128, length: 2_000_000 },
+        tokens: 64,
+        text: 512,
+        skip: 2_000_000,
+    };
+    let env = skein_lib::Env { now: skein_lib::Time::ZERO, wall: Wall::EPOCH, limits: bounds };
+    let mut collector = collector::Collector::new(crate::dialect::event_filter(provider), &bounds, &[3, 128, 64])
+        .expect("the native filter has unambiguous shared paths");
+    let mut above = Queue::with_capacity(1);
+    let mut below = Queue::with_capacity(1);
+    collector::down(&mut collector, &env, collector::Request::Collect, &mut above, &mut below);
+    let mut at = 0_usize;
+    for _ in 0_u32..100_000 {
+        match above.pop() {
+            Some(collector::Event::Collected(document)) => return document,
+            Some(collector::Event::Failed(error)) => panic!("projection failed: {error:?}"),
+            Some(collector::Event::Closed) => panic!("the test never closes the collector"),
+            None => {}
+        }
+        let request = below.pop().expect("the unfinished projection demands data");
+        let remaining = &input[at..];
+        let wanted = match request {
+            Down::Demand { read: Read::Fill(count), .. } => usize::try_from(count).unwrap(),
+            Down::Demand { read: Read::Scan { until, max }, .. } => {
+                let max = usize::try_from(max).unwrap();
+                match bytes::find(&remaining[..remaining.len().min(max)], until.as_bytes()) {
+                    Some(offset) => offset + until.as_bytes().len(),
+                    None => max,
+                }
+            }
+            _ => panic!("collector is a read-only byte machine"),
+        };
+        let event = if wanted <= remaining.len() {
+            let event = Up::Bytes(owned(&remaining[..wanted]));
+            at += wanted;
+            event
+        } else {
+            Up::End
+        };
+        collector::up(&mut collector, &env, event, &mut above, &mut below);
+    }
+    panic!("the bounded projection must finish");
+}
+
+#[test]
+fn captured_completion_retains_status_and_usage_without_echoes() {
+    let document = projected(include_bytes!("fixtures/provider-completed.json"), crate::Provider::OpenAiCodex);
+    assert!(document.len() < 64, "capture costs only its retained paths");
+    assert!(document.text_len() < 512, "wire echoes do not occupy retained text");
+    for index in 0..document.len() {
+        let record = document.token(index).unwrap();
+        if record.kind == skein_json::Kind::Key {
+            let key = document.text(record).unwrap();
+            assert!(
+                ![b"output".as_slice(), b"instructions", b"tools", b"attribution"].contains(&key),
+                "echo key was retained"
+            );
+        }
+    }
+    let event = decode_event(&Json::collected(document), &LIMITS).unwrap();
+    assert_eq!(
+        event,
+        Event::Completed {
+            stop: Stop::EndTurn,
+            usage: Usage {
+                input: Some(5256),
+                output: Some(36),
+                cache_read: Some(0),
+                cache_write: Some(0),
+                reasoning: Some(0)
+            },
+        }
+    );
+}
+
+#[test]
+fn native_function_arguments_are_counted_without_text_even_with_a_late_tag() {
+    let input = format!(
+        r#"{{"type":"response.output_item.done","output_index":0,"item":{{"arguments":"{}","id":"i","call_id":"c","name":"read","type":"function_call"}}}}"#,
+        "x".repeat(1_048_576)
+    );
+    let value = Json::collected(projected(input.as_bytes(), crate::Provider::OpenAiCodex));
+    let item = json::value_at(value.view(), json::required(value.view(), b"item").unwrap()).unwrap();
+    let args = json::value_at(item, json::required(item, b"arguments").unwrap()).unwrap();
+    assert_eq!(crate::openai::response::long_text(args), Some(1_048_576));
+    assert_eq!(json::record_text(args, 0).unwrap(), b"");
+}
+
+#[test]
+fn both_native_filters_and_their_receiving_bounds_are_unambiguous() {
+    use skein_json::{collector, tokenizer};
+    let bounds = collector::Limits {
+        tokenizer: tokenizer::Limits { depth: 32, string: 128, number: 32, chunk: 128, length: 4096 },
+        tokens: 64,
+        text: 512,
+        skip: 4096,
+    };
+    for provider in [crate::Provider::OpenAiCodex, crate::Provider::Anthropic] {
+        let filter = crate::dialect::event_filter(provider);
+        assert!(collector::Collector::new(filter, &bounds, &[3, 128, 64]).is_ok(), "static filter constructs");
+        assert!(
+            collector::worst_case(&bounds, &[3, 128, 64], &filter).is_some(),
+            "static filter has a checked receiving bound"
+        );
+    }
+}

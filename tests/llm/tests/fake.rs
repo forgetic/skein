@@ -424,7 +424,7 @@ fn opaque_script(opaque: &[u8]) -> Box<[Script]> {
 #[test]
 fn actual_byte_peer_preserves_opaque_extensions_refusal_stop_and_continuation_replay() {
     for (provider, opaque) in [
-        (skein_llm::Provider::OpenAiCodex, br#"{"type":"reasoning","id":"opaque_1","encrypted_content":"signed","summary":[],"extension":{"signed":true}}"#.as_slice()),
+        (skein_llm::Provider::OpenAiCodex, br#"{"type":"future_reasoning","id":"opaque_1","encrypted_content":"signed","summary":[],"extension":{"signed":true}}"#.as_slice()),
         (skein_llm::Provider::Anthropic, br#"{"type":"thinking","extension":{"signed":true},"thinking":"visible","signature":"signed"}"#.as_slice()),
         (skein_llm::Provider::Anthropic, br#"{"type":"future_block","proof":{"a":[1,2]},"data":"opaque"}"#.as_slice()),
     ] {
@@ -721,7 +721,7 @@ fn echoed_completion_json(world: &Exchange, bounds: &client::Limits) -> skein_ll
 }
 
 #[test]
-fn configured_codex_echoes_preserve_the_completion_and_retain_the_token_cliff() {
+fn configured_codex_echoes_preserve_the_completion_past_the_previous_token_cliff() {
     let mut bounds = limits();
     bounds.dialect.parts = 32;
     let echo = skein_llm::openai::Echo { instructions: true, tools: true, attribution_bytes: 24 };
@@ -757,11 +757,7 @@ fn configured_codex_echoes_preserve_the_completion_and_retain_the_token_cliff() 
         let mut world = Exchange::new_with_codex_echo(echo_input(1), bounds, scripts(), echo);
         world.start();
         world.run();
-        if cap == edge {
-            assert_eq!(completion(&world), &expected);
-        } else {
-            assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Tokens, bound }, .. } if *bound == u64::from(cap))));
-        }
+        assert_eq!(completion(&world), &expected, "echo wire tokens never become retained tokens");
     }
 }
 

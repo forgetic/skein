@@ -1,10 +1,11 @@
 //! `ChatGPT` Responses documents, both sides, and an ordered answer decoder.
 mod common;
+pub(crate) mod filter;
 pub(crate) use common::{limit_detail, measured};
 pub mod identity;
 pub(crate) mod json;
 mod request;
-mod response;
+pub(crate) mod response;
 pub(crate) use common::clipped as clip_detail;
 pub use common::{DecodeError, Failure, Limits, ProviderError, RateLimit, Stop, Usage, classify, worst_case};
 pub use json::Json;

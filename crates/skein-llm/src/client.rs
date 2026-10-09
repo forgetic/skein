@@ -13,11 +13,12 @@ use core::mem;
 use core::mem::size_of;
 
 use skein_http::{Header, MaxOut, Method, client as http, sse};
+use skein_json::{Document, collector, tokenizer};
 use skein_lib::stream::{Down, Read, Up};
 use skein_lib::{Decimal, Env, List, Queue, Token, Writer, bytes};
 
 use crate::{
-    Block, Call, Completion, Delta, Endpoint, Error, Failure, Provider, anthropic, dialect, openai, translate,
+    Block, Call, Completion, Delta, Endpoint, Error, Failure, Provider, anthropic, dialect, filter, openai, translate,
 };
 
 /// Startup bounds, unchanged for a client's lifetime and reuse.
@@ -182,6 +183,16 @@ enum Outcome {
     Cancelled,
 }
 
+#[derive(Debug)]
+enum EventData {
+    Idle,
+    First,
+    Json,
+    Sentinel(u32),
+    SentinelEnd,
+    Collected(Document),
+}
+
 /// A single bound call; no socket, TLS object or OAuth refresh state.
 #[expect(missing_debug_implementations, reason = "the HTTP machine retains bearer credentials in its request head")]
 pub struct Client {
@@ -204,7 +215,10 @@ pub struct Client {
     outputs: Queue<dialect::Output>,
     requests: Queue<http::Request>,
     sse_below: Queue<Down>,
-    event_data: List<u8>,
+    collector: collector::Collector,
+    collector_events: Queue<collector::Event>,
+    collector_below: Queue<Down>,
+    event_data: EventData,
     error: List<u8>,
     status: u16,
     rate: openai::RateLimit,
@@ -292,7 +306,15 @@ impl Client {
             outputs: Queue::with_capacity(dialect::MAX_OUT),
             requests: Queue::with_capacity(REQUESTS),
             sse_below: Queue::with_capacity(1),
-            event_data: List::with_capacity(limits.sse.event),
+            collector: collector::Collector::new(
+                dialect::event_filter(provider),
+                &filter::collector(limits),
+                &filter::caps(limits),
+            )
+            .expect("the dialect's static filter is unambiguous"),
+            collector_events: Queue::with_capacity(1),
+            collector_below: Queue::with_capacity(1),
+            event_data: EventData::Idle,
             error: List::with_capacity(limits.error_bytes),
             status: 0,
             rate: openai::RateLimit { retry_after: None, reset: None, exhausted: false },
@@ -482,7 +504,12 @@ pub fn resume(client: &mut Client, env: &Env<Limits>, above: &mut Queue<Event>, 
             } else if client.sse.waiting() == sse::Waiting::Next {
                 sse_down(client, env, sse::Request::Next);
             } else if client.sse.waiting() == sse::Waiting::Above {
-                sse_down(client, env, sse::Request::Data(Down::Demand { read: Read::Fill(1), room: 0 }));
+                let demand = match &client.event_data {
+                    EventData::Json => client.collector_below.pop().expect("a collecting event has its next read"),
+                    EventData::First | EventData::Sentinel(_) => Down::Demand { read: Read::Fill(1), room: 0 },
+                    EventData::Idle | EventData::SentinelEnd | EventData::Collected(_) => break,
+                };
+                sse_down(client, env, sse::Request::Data(demand));
             } else {
                 break;
             }
@@ -747,29 +774,34 @@ fn sse_event(
         return;
     }
     match event {
-        sse::Event::Opened => client.event_data.clear(),
-        sse::Event::Data(event) => match event {
-            Up::Bytes(bytes) => {
-                for byte in &bytes {
-                    client.event_data.push(*byte).expect("event data fits its wire event cap");
-                }
-            }
-            Up::End => {}
-            Up::Failed(_) => client.event_data.clear(),
-            Up::Room => unreachable!("SSE data is read only"),
-        },
+        sse::Event::Opened => {
+            client.event_data = EventData::First;
+        }
+        sse::Event::Data(event) => {
+            event_data(client, event, env, above, below);
+        }
         sse::Event::Dispatched(dispatch) => {
             client.activity = client.activity.checked_add(1).expect("an SSE message count fits u64");
+            let data = mem::replace(&mut client.event_data, EventData::Idle);
             let decoder = client.decoder.as_mut().expect("the streaming state has its decoder");
-            let parsed = decoder.event(
-                &dispatch.name,
-                client.event_data.as_slice(),
-                &env.limits.dialect,
-                env.wall,
-                client.status,
-                client.rate,
-                &mut client.outputs,
-            );
+            let parsed = match data {
+                EventData::Collected(document) => decoder.event(
+                    &dispatch.name,
+                    document,
+                    &env.limits.dialect,
+                    env.wall,
+                    client.status,
+                    client.rate,
+                    &mut client.outputs,
+                ),
+                EventData::SentinelEnd => {
+                    decoder.end(&env.limits.dialect, &mut client.outputs);
+                    Ok(())
+                }
+                EventData::Idle | EventData::First | EventData::Json | EventData::Sentinel(_) => {
+                    Err(openai::DecodeError::Malformed)
+                }
+            };
             if let Err(error) = parsed {
                 let failure = match error {
                     openai::DecodeError::TooLarge { which, bound } => Failure::Limit { which, bound },
@@ -802,6 +834,101 @@ fn sse_event(
             closing(client, env, above, below);
         }
         sse::Event::Closed => {}
+    }
+}
+
+/// Route one data delivery; the first byte chooses JSON or the fixed sentinel.
+fn event_data(client: &mut Client, event: Up, env: &Env<Limits>, above: &mut Queue<Event>, below: &mut Queue<Down>) {
+    let state = mem::replace(&mut client.event_data, EventData::Idle);
+    match state {
+        EventData::First => match event {
+            Up::Bytes(bytes) => {
+                assert_eq!(bytes.len(), 1, "the first data demand is one byte");
+                if bytes.first() == Some(&b'[') {
+                    client.event_data = EventData::Sentinel(1);
+                } else {
+                    if client.collector.waiting() == collector::Waiting::Close {
+                        client.collector.restart();
+                    }
+                    let child = Env { now: env.now, wall: env.wall, limits: filter::collector(&env.limits) };
+                    collector::down(
+                        &mut client.collector,
+                        &child,
+                        collector::Request::Collect,
+                        &mut client.collector_events,
+                        &mut client.collector_below,
+                    );
+                    let first = client.collector_below.pop().expect("the collector reads its first byte");
+                    assert_eq!(
+                        first,
+                        Down::Demand { read: Read::Fill(1), room: 0 },
+                        "the collector starts with one byte"
+                    );
+                    client.event_data = EventData::Json;
+                    collected_data(client, Up::Bytes(bytes), env, above, below);
+                }
+            }
+            Up::End => {
+                fail(client, Failure::Protocol, bytes::copy_of(b"empty provider event"), above);
+                closing(client, env, above, below);
+            }
+            Up::Failed(_) => {}
+            Up::Room => unreachable!("SSE data is read only"),
+        },
+        EventData::Json => {
+            client.event_data = EventData::Json;
+            match event {
+                Up::Failed(_) => {}
+                Up::Bytes(_) | Up::End | Up::Room => collected_data(client, event, env, above, below),
+            }
+        }
+        EventData::Sentinel(at) => match event {
+            Up::Bytes(bytes) => {
+                let mut at = at;
+                for &byte in &bytes {
+                    if b"[DONE]".get(usize::try_from(at).expect("sentinel offset")) != Some(&byte) {
+                        fail(client, Failure::Protocol, bytes::copy_of(b"invalid provider sentinel"), above);
+                        closing(client, env, above, below);
+                        return;
+                    }
+                    at = at.checked_add(1).expect("fixed sentinel length");
+                }
+                client.event_data = EventData::Sentinel(at);
+            }
+            Up::End => {
+                if at == 6 {
+                    client.event_data = EventData::SentinelEnd;
+                } else {
+                    fail(client, Failure::Protocol, bytes::copy_of(b"truncated provider sentinel"), above);
+                    closing(client, env, above, below);
+                }
+            }
+            Up::Failed(_) => {}
+            Up::Room => unreachable!("SSE data is read only"),
+        },
+        EventData::Idle | EventData::SentinelEnd | EventData::Collected(_) => {
+            unreachable!("data answers an outstanding read")
+        }
+    }
+}
+
+fn collected_data(
+    client: &mut Client,
+    event: Up,
+    env: &Env<Limits>,
+    above: &mut Queue<Event>,
+    below: &mut Queue<Down>,
+) {
+    let child = Env { now: env.now, wall: env.wall, limits: filter::collector(&env.limits) };
+    collector::up(&mut client.collector, &child, event, &mut client.collector_events, &mut client.collector_below);
+    match client.collector_events.pop() {
+        Some(collector::Event::Collected(document)) => client.event_data = EventData::Collected(document),
+        Some(collector::Event::Failed(error)) => {
+            fail(client, dialect::failure(error, &env.limits), bytes::copy_of(b"provider JSON failed"), above);
+            closing(client, env, above, below);
+        }
+        Some(collector::Event::Closed) => unreachable!("the active collector was not closed"),
+        None => {}
     }
 }
 
@@ -993,6 +1120,19 @@ fn close_sse(client: &mut Client, env: &Env<Limits>) {
         drop(client.sse_events.pop());
     }
     clear_requests(client);
+    let child = Env { now: env.now, wall: env.wall, limits: filter::collector(&env.limits) };
+    drop(client.collector_below.pop());
+    drop(client.collector_events.pop());
+    collector::down(
+        &mut client.collector,
+        &child,
+        collector::Request::Close,
+        &mut client.collector_events,
+        &mut client.collector_below,
+    );
+    drop(client.collector_events.pop());
+    drop(client.collector_below.pop());
+    client.event_data = EventData::Idle;
     sse_down(client, env, sse::Request::Close);
     client.sse_closed = true;
 }
@@ -1051,6 +1191,7 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         || limits.dialect.depth == 0
         || limits.dialect.tokens == 0
         || sse::largest_demand(&limits.sse) > limits.http.read
+        || tokenizer::largest_demand(&filter::collector(limits).tokenizer) > limits.sse.chunk
     {
         return None;
     }
@@ -1063,7 +1204,13 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(u64::from(limits.dialect.answer_bytes).checked_mul(4)?)?
         .checked_add(u64::from(limits.dialect.request_bytes).checked_mul(4)?)?
         .checked_add(u64::from(limits.http.request).checked_mul(4)?)?
-        .checked_add(u64::from(limits.sse.event).checked_mul(4)?)?
+        .checked_add(
+            collector::worst_case(&filter::collector(limits), &filter::caps(limits), &openai::filter::EVENT)?.max(
+                collector::worst_case(&filter::collector(limits), &filter::caps(limits), &anthropic::filter::EVENT)?,
+            ),
+        )?
+        .checked_add(Queue::<collector::Event>::worst_case(1)?)?
+        .checked_add(Queue::<Down>::worst_case(1)?)?
         .checked_add(u64::from(limits.error_bytes).checked_mul(4)?)?
         .checked_add(Queue::<http::Event>::worst_case(HTTP_EVENTS)?)?
         .checked_add(Queue::<sse::Event>::worst_case(SSE_EVENTS)?)?

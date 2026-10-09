@@ -225,8 +225,9 @@ impl Collector {
     pub fn new(filter: Filter, limits: &Limits, caps: &[u32]) -> Result<Collector, AmbiguousFilter> {
         assert!(caps.len() <= 256, "cap indexes fit u8");
         let tags = tagged::build(filter, limits, caps)?;
-        let plan = tagged::describe(filter, limits)?;
-        let capacity = tagged::projection_limits(limits, &plan).expect("the filter's projection capacities fit u32");
+        let plan = tagged::describe(filter)?;
+        let capacity =
+            tagged::projection_limits(limits, &plan.tags).expect("the filter's projection capacities fit u32");
         Ok(Collector {
             tokenizer: Tokenizer::new(&limits.tokenizer),
             events: Queue::with_capacity(1),
@@ -300,22 +301,27 @@ pub fn worst_case(limits: &Limits, caps: &[u32], filter: &Filter) -> Option<u64>
     let tokenizer = json::worst_case(&limits.tokenizer)?.checked_sub(delivery)?;
     let walk = Stack::<Frame>::worst_case(limits.tokenizer.depth)?;
     let queue = Queue::<json::Event>::worst_case(1)?;
-    let tags = tagged::describe(*filter, limits).ok()?;
-    let retained = document::worst_case(&tagged::projection_limits(limits, &tags)?)?;
-    let candidates = tagged::candidate_bytes(limits, caps, &tags)?;
+    let plan = tagged::describe(*filter).ok()?;
+    let tags = &plan.tags;
+    let retained = document::worst_case(&tagged::projection_limits(limits, tags)?)?;
+    let candidates = tagged::candidate_bytes(limits, caps, tags)?;
     let token = u64::from(limits.tokenizer.string.max(limits.tokenizer.number));
     // A token's delivery and owned text coexist while the tokenizer emits it.
     // The output document is copied only after that delivery and token are gone.
-    let planning = List::<&Tagged>::worst_case(tags.capacity())?;
+    let planning = tagged::planning_bytes(&plan)?;
     let output = document::worst_case(&document::Limits { tokens: limits.tokens, text: limits.text })?;
-    let transient = delivery.checked_add(token)?.max(output).max(planning);
-    tokenizer
+    let description = List::<&Tagged>::worst_case(plan.tags.capacity())?;
+    let transient = delivery.checked_add(token)?.max(output).max(description);
+    let receiving = tokenizer
         .checked_add(walk)?
         .checked_add(queue)?
         .checked_add(retained)?
         .checked_add(transient)?
         .checked_add(cap_bytes)?
-        .checked_add(candidates)
+        .checked_add(candidates)?;
+    // Static planning happens before the tokenizer and document are allocated.
+    // Its stack never coexists with a delivery or emitted document.
+    Some(receiving.max(candidates.checked_add(planning)?))
 }
 
 /// Receives a stream event, emitting at most `UP_MAX_OUT`.

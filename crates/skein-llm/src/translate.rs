@@ -374,8 +374,8 @@ fn input_block(block: &Block, role: Role) -> Result<openai::Input, Error> {
                 Err(error) => return Err(decode(error)),
             };
             match openai::json::text_ref(kind) {
-                Ok(b"reasoning") => Ok(openai::Input::Opaque { value: replay.value.clone() }),
-                Ok(_) => Err(Error::Invalid),
+                Ok(b"" | b"message" | b"function_call" | b"function_call_output") => Err(Error::Invalid),
+                Ok(_) => Ok(openai::Input::Opaque { value: replay.value.clone() }),
                 Err(error) => Err(decode(error)),
             }
         }

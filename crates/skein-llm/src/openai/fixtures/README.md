@@ -11,3 +11,11 @@ not captures of Codex itself and not fresh temper captures. They do not
 establish current subscription identity. The single-text archive includes encrypted reasoning. This archive has no
 Codex parallel call scenario; parallel ordering remains covered by labeled
 synthetic tests until a real capture is available.
+
+`provider-completed.json` is the real-structure completion captured by the
+smith Codex spike, copied unchanged from
+`crates/smith/tests/fixtures/provider-completed.json` at smith `8e83931`
+(`bench/smith-codex-2026-10-08`). Its large response output and per-item
+usage attribution reproduce the wire-token cliff; the selective decoder
+retains only status and reported usage. It is archived evidence, not a
+fresh live probe.
