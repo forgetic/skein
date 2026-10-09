@@ -1,0 +1,18 @@
+Final rebased-tip gate evidence for skein reliability 02.3
+
+The merged tip is 1f750dd29483e22de21a5ab2a987310f44e074b0 on
+parent ed93954687f173bfc474161bc2a3675f5ccddf40. The commit body retained
+the earlier successful gate’s counts and times; the final rebased-tip gate
+before the ff-only merge was heavy task 346, scripts/check.sh:
+- formatting, clippy --workspace --all-targets -D warnings, standalone
+  cargo check -p skein-tls: pass;
+- focused: 1520 tests passed in 2.963 s;
+- fuzzy: 85 tests passed in 8.504 s;
+- browser: 6 tests passed in 3.625 s.
+
+Serial measure of the new shutdown stories was 0.018-0.042 s each.
+Frozen simulator trace proves echo closes settle between 200 and 250 ms,
+after the second signal and before the fake’s abort at 500 ms. The shipped
+binary with idle clients exits successfully within 1 s after SIGTERM.
+No smith probe is required for 02.3. Final gate log:
+/tmp/skein-02-3-rebased-gate.log. Worktree and primary were clean at merge.
