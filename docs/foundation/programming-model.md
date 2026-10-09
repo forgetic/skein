@@ -497,11 +497,19 @@ inside them, and *settling* (5.3) is part of *closing*.
   entities beyond the requests that made them (a pool of connections, a
   listener and what it accepted, a cache, a keep-alive) is itself an
   entity of its owner's, and takes a close from it:
-  - from the close on, it refuses new work at its entrance, with a
-    refusal that says it is closed, never one that blames the request;
+  - from the close until its `Closed`, it refuses new work at its
+    entrance, with a refusal that says it is closed, never one that blames
+    the request. After `Closed` the component has ended, like any entity
+    after its terminal: its owner sends it nothing more, and a request
+    after `Closed` is the owner's bug, asserted, never answered;
   - it closes what it keeps through the ordinary lifecycle;
   - it reports `Closed` once everything below it has settled: its one
-    terminal. Close is permanent, and a second one changes nothing;
+    terminal, and the last thing it says. Close is permanent, and a second
+    one before `Closed` changes nothing;
+  - until `Closed` it is not done, but it has work only while it has a
+    step to take: waiting for io to settle what it closed is not work, so
+    it neither spins nor holds a deadline past due, and io's answers wake
+    it;
   - it takes an abort as well: a close that does not wait, which ends each
     request it holds as cancelled and aborts what it keeps. An abort after
     a close turns what still closes gracefully into aborts; a close after

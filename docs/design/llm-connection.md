@@ -173,7 +173,9 @@ Once it runs, a call that waited is a call like any other.
 
 ### 5.1 The owner close
 
-- **Close drains.** From the close on, every start is refused. Idle
+- **Close drains.** From the close until `closed`, every start is
+  refused, as closed. After `closed` the owner sends nothing more: a
+  request then is the owner's bug, asserted (programming-model.md, 5.2). Idle
   connections close at once. A busy connection's call runs to its
   terminal; the connection then drains and takes a call waiting for its
   endpoint, if one is, and otherwise closes at once, without draining,
@@ -181,8 +183,11 @@ Once it runs, a call that waited is a call like any other.
   and memory free, as before the close: every admitted call ends with its
   ordinary terminal.
 - **`closed`** goes up once, when no call is left and every connection's
-  socket has settled at io. Until then the component has work, and the
-  owner keeps routing io's answers to it.
+  socket has settled at io, and it is the last event. Until then the
+  component is not done, and the owner keeps routing io's answers to it;
+  but it has work only while it has a step to take. Waiting for io to
+  settle sockets is not work: no spin, and no deadline past due (section
+  8).
 - **Abort** is a close that does not wait. Every call still running or
   waiting ends `cancelled`, and every socket, idle, busy or already
   closing, is aborted at io; `closed` follows io's settlement. An owner may
