@@ -4,7 +4,8 @@
 
 use super::{Component, State};
 use crate::accounts::{Source, copy_registration};
-use crate::exchange::Exchange;
+use crate::exchange::{Exchange, Stage};
+use crate::keeper::Store;
 use crate::listener::Listener;
 use crate::redirect::{self, Redirect};
 use crate::route::{self, Socket};
@@ -42,12 +43,23 @@ impl Component {
             let mut listeners = 0_u32;
             for binding in &self.bindings {
                 match binding {
-                    Some(id) => match &self.exchanges.get(*id).expect("bound exchange").listener {
-                        Some(listener) if !listener.settled() => {
+                    Some(id) => {
+                        let exchange = self.exchanges.get(*id).expect("bound exchange");
+                        let reserved = match exchange.stage {
+                            Stage::Loading => match self.sources.get(exchange.account).expect("account source") {
+                                Source::SignIn { registration, .. } => registration.client_secret.is_none(),
+                                Source::HandedIn => false,
+                            },
+                            Stage::Running | Stage::Keeping { .. } | Stage::Finished => false,
+                        };
+                        let listening = match &exchange.listener {
+                            Some(listener) => !listener.settled(),
+                            None => false,
+                        };
+                        if reserved || listening {
                             listeners = listeners.checked_add(1).expect("bounded listeners");
                         }
-                        Some(_) | None => {}
-                    },
+                    }
                     None => {}
                 }
             }
@@ -60,6 +72,36 @@ impl Component {
                 return;
             }
         }
+        let client = oauth::Client::new(env.limits.client).expect("validated client");
+        let mut exchange = Exchange::new(account, client, false);
+        exchange.stage = Stage::Loading;
+        exchange.purpose = crate::exchange::Purpose::SignIn { waiting: false };
+        let id = match self.exchanges.insert(exchange) {
+            Ok(id) => id,
+            Err(_) => unreachable!("admitted exchange slot"),
+        };
+        *self.bindings.get_mut(account).expect("account binding") = Some(id);
+        let must_load = match self.accounts.get(account).expect("account state") {
+            State::Empty => match self.keepers.get_mut(account).expect("account keeper") {
+                Store::Private(keeper) => {
+                    keeper.reload();
+                    true
+                }
+                Store::Owner => false,
+            },
+            State::Record { .. } | State::Loaded { .. } => false,
+        };
+        if !must_load {
+            self.begin_sign_in(env, account, io);
+        }
+    }
+
+    pub(super) fn begin_sign_in(&mut self, env: &Env<Limits>, account: u32, io: &mut Queue<Lower>) {
+        let registration = match self.sources.get(account).expect("configured source") {
+            Source::SignIn { registration, .. } => copy_registration(registration),
+            Source::HandedIn => unreachable!("admitted sign-in source"),
+        };
+        let public = registration.client_secret.is_none();
         let generation = match self.accounts.get(account).expect("account") {
             State::Record { record, .. } | State::Loaded { record } => record.generation,
             State::Empty => 0,
@@ -67,30 +109,21 @@ impl Component {
         let state = draw(&mut self.random, env.limits.client.state_bytes.min(32));
         let verifier =
             if public || registration.pkce_for_confidential { Some(draw(&mut self.random, 43)) } else { None };
-        let address = if public {
-            Some(oauth::redirect_address(&registration.redirect_uri).expect("validated public redirect"))
-        } else {
-            None
-        };
-        let client = oauth::Client::new(env.limits.client).expect("validated client");
-        let mut exchange = Exchange::new(account, client, false);
+        let id = self.bindings.get(account).expect("account binding").expect("admitted exchange");
+        let exchange = self.exchanges.get_mut(id).expect("bound exchange");
+        exchange.stage = Stage::Running;
         exchange.purpose = crate::exchange::Purpose::SignIn { waiting: true };
         if public {
             exchange.listener = Some(Listener::new());
+            io.push(Lower::Listen {
+                owner: route::owner(id, Socket::Listener),
+                addr: oauth::redirect_address(&registration.redirect_uri).expect("validated public redirect"),
+            });
         }
         exchange.client.step(
             oauth::Event::SignIn { registration, key: account, generation, state, verifier, now: env.now },
             &mut exchange.above,
         );
-        let id = match self.exchanges.insert(exchange) {
-            Ok(id) => id,
-            Err(_) => unreachable!("admitted exchange slot"),
-        };
-        *self.bindings.get_mut(account).expect("account binding") = Some(id);
-        match address {
-            Some(addr) => io.push(Lower::Listen { owner: route::owner(id, Socket::Listener), addr }),
-            None => {}
-        }
     }
 
     pub(super) fn redirected(&mut self, env: &Env<Limits>, account: u32, uri: &[u8], up: &mut Queue<Event>) {

@@ -10,6 +10,8 @@ use skein_oauth::ClientLimits;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Limits {
     pub accounts: u32,
+    /// Deadline stated on each private keeper request, including cleanup.
+    pub file_stall: Duration,
     pub exchanges: u32,
     /// Public redirect listeners admitted at once; zero permits only confidential sign-ins.
     pub listeners: u32,
@@ -24,7 +26,8 @@ pub struct Limits {
 }
 
 pub(crate) fn usable(limits: &Limits) -> bool {
-    limits.accounts > 0
+    limits.file_stall > Duration::ZERO
+        && limits.accounts > 0
         && limits.exchanges > 0
         && limits.exchanges <= u32::MAX.checked_div(3).expect("nonzero divisor")
         && match socket_count(limits) {
@@ -73,8 +76,12 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     } else {
         skein_http::server::worst_case(&limits.server)?.checked_add(crate::listener::worst_case(limits)?)?
     };
+    // Directory, filename and one outstanding request path, plus encoded load/store bytes.
+    let private = 4095_u64.checked_mul(3)?.checked_add(record.checked_mul(2)?)?;
     List::<State>::worst_case(limits.accounts)?
         .checked_add(List::<Source>::worst_case(limits.accounts)?)?
+        .checked_add(List::<crate::keeper::Store>::worst_case(limits.accounts)?)?
+        .checked_add(u64::from(limits.accounts).checked_mul(private)?)?
         .checked_add(List::<Option<Id<Exchange>>>::worst_case(limits.accounts)?)?
         .checked_add(
             u64::from(limits.accounts)

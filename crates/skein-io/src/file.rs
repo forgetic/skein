@@ -153,7 +153,7 @@ pub struct Entry {
 }
 
 /// The unsafe metadata io found before reading a private root or file (io.md, 5.3).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Unsafe {
     /// The requested name or a parent is a symbolic link.
     Link,

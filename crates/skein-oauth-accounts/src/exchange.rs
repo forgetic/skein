@@ -18,6 +18,7 @@ use skein_tls::client as tls;
 pub(crate) const ROUTES: u32 = 8;
 
 pub(crate) enum Stage {
+    Loading,
     Running,
     Keeping { candidate: oauth::SavedToken },
     Finished,
@@ -39,6 +40,7 @@ pub(crate) struct Exchange {
     pub(crate) purpose: Purpose,
     pub(crate) visit: Option<Box<[u8]>>,
     pub(crate) listener: Option<crate::listener::Listener>,
+    pub(crate) file_active: bool,
 }
 
 impl Exchange {
@@ -73,6 +75,7 @@ impl Exchange {
             purpose: Purpose::Refresh,
             visit: None,
             listener: None,
+            file_active: false,
         }
     }
 
@@ -95,14 +98,15 @@ impl Exchange {
     pub(crate) fn settled(&self) -> bool {
         match self.stage {
             Stage::Finished => {
-                self.web.is_none()
+                !self.file_active
+                    && self.web.is_none()
                     && match &self.listener {
                         Some(listener) => listener.settled(),
                         None => true,
                     }
                     && self.above.is_empty()
             }
-            Stage::Running | Stage::Keeping { .. } => false,
+            Stage::Loading | Stage::Running | Stage::Keeping { .. } => false,
         }
     }
 }

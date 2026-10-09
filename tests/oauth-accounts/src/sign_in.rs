@@ -132,6 +132,9 @@ pub struct Client {
     limits: accounts::Limits,
     events: Queue<io::Event>,
     requests: Queue<io::Request>,
+    files: Queue<accounts::FileLower>,
+    file_driver: Option<skein_world::files::Driver>,
+    file_keep: Option<(skein_lib::Token, oauth::SavedToken)>,
     above: Queue<accounts::Event>,
     completions: Queue<kernel::Complete>,
     submissions: Queue<kernel::Submit>,
@@ -156,6 +159,9 @@ impl Client {
             limits,
             events: Queue::with_capacity(ROOM),
             requests: Queue::with_capacity(ROOM),
+            files: Queue::with_capacity(ROOM),
+            file_driver: None,
+            file_keep: None,
             above: Queue::with_capacity(ROOM),
             completions: Queue::with_capacity(ROOM),
             submissions: Queue::with_capacity(ROOM),
@@ -182,7 +188,14 @@ impl Client {
                         address: self.address.expect("issuer address"),
                         transport: accounts::Transport::Plaintext
                     },
-                    keeper: accounts::Keeper::Owner { kept: None }
+                    keeper: match &self.file_driver {
+                        Some(driver) => accounts::Keeper::Private {
+                            root: driver.root(),
+                            directory: bytes::copy_of(b"secret"),
+                            file: bytes::copy_of(b"record")
+                        },
+                        None => accounts::Keeper::Owner { kept: None },
+                    }
                 })
                 .is_ok()
         );
@@ -190,7 +203,13 @@ impl Client {
         self.ask(env, accounts::Request::SignIn { account: 0 });
     }
     fn ask(&mut self, env: &Env<accounts::Limits>, request: accounts::Request) {
-        self.component.as_mut().expect("component").down(env, request, &mut self.above, &mut self.requests);
+        self.component.as_mut().expect("component").down(
+            env,
+            request,
+            &mut self.above,
+            &mut self.requests,
+            &mut self.files,
+        );
     }
     fn close(&mut self, env: &Env<accounts::Limits>) {
         if !self.closing {
@@ -287,11 +306,56 @@ impl Client {
                     self.contracts.closed();
                     self.facts.push(Fact::Closed);
                     self.closed = true;
+                    if let Some(driver) = &mut self.file_driver {
+                        driver.close_root(env.now);
+                    }
                 }
                 accounts::Event::Refused { .. } | accounts::Event::Expiring { .. } => {
                     panic!("unexpected sign-in owner event")
                 }
             }
+        }
+    }
+    fn private_io(&mut self, env: &Env<accounts::Limits>) {
+        if self.file_driver.is_none() {
+            return;
+        }
+        while let Some(lower) = self.files.pop() {
+            match lower {
+                accounts::FileLower::Request { request, deadline } => {
+                    if let io::file::Request::Store { owner, bytes, .. } = &request {
+                        let record =
+                            oauth::decode_record(bytes, &env.limits.client.document).expect("candidate record");
+                        self.contracts.keep(record.generation);
+                        self.facts.push(Fact::Keep(record.generation));
+                        assert!(self.file_keep.is_none());
+                        self.file_keep = Some((*owner, record));
+                    }
+                    self.file_driver.as_mut().expect("file driver").request(request, deadline);
+                }
+                accounts::FileLower::Cancel { owner } => self.file_driver.as_mut().expect("file driver").cancel(owner),
+            }
+        }
+        self.file_driver.as_mut().expect("file driver").progress(env.now);
+        while let Some(event) = self.file_driver.as_mut().expect("file driver").take_event() {
+            if event.owner() == skein_lib::Token::new(u64::MAX) {
+                continue;
+            }
+            if self.file_keep.as_ref().is_some_and(|(owner, _)| *owner == event.owner()) {
+                let (_, record) = self.file_keep.take().expect("matching keep");
+                self.contracts.kept(record.generation, matches!(event, io::file::Event::Stored { .. }));
+                self.records.push(record);
+            }
+            self.component.as_mut().expect("started component").filed(
+                env,
+                event,
+                &mut self.above,
+                &mut self.requests,
+                &mut self.files,
+            );
+        }
+        while let Some(submit) = self.file_driver.as_mut().expect("file driver").take_submit() {
+            self.submissions.push(submit);
         }
     }
 }
@@ -307,6 +371,7 @@ impl Host for Client {
             self.ask(&env, accounts::Request::Redirected { account: 0, uri });
         }
         let io_env = Env { now, wall, limits: self.limits.io };
+        self.private_io(&env);
         for _ in 0..ROOM {
             if self.events.room() < 3 || self.submissions.room() < 2 || !self.io.is_ready() {
                 break;
@@ -318,7 +383,11 @@ impl Host for Client {
                 break;
             }
             let Some(complete) = self.completions.pop() else { break };
-            io::up(&mut self.io, &io_env, complete, &mut self.events, &mut self.submissions);
+            if skein_world::files::Driver::owns(complete.op) {
+                self.file_driver.as_mut().expect("tagged file completion").up(complete);
+            } else {
+                io::up(&mut self.io, &io_env, complete, &mut self.events, &mut self.submissions);
+            }
         }
         for _ in 0..ROOM {
             if self.events.room() < 3 || self.submissions.room() < 2 || !self.io.is_due(now) {
@@ -336,6 +405,7 @@ impl Host for Client {
                 event,
                 &mut self.above,
                 &mut self.requests,
+                &mut self.files,
             );
         }
         if let Some(component) = &mut self.component
@@ -343,7 +413,7 @@ impl Host for Client {
             && self.requests.room() >= accounts::MAX_OUT_FIRE.io
             && (component.has_work() || component.next_deadline().is_some_and(|due| due <= now))
         {
-            component.fire(&env, &mut self.above, &mut self.requests);
+            component.fire(&env, &mut self.above, &mut self.requests, &mut self.files);
         }
         if self.requests.room() >= accounts::MAX_OUT_DOWN.io && self.above.room() >= accounts::MAX_OUT_DOWN.above {
             self.observe(&env);
@@ -355,6 +425,7 @@ impl Host for Client {
             let Some(request) = self.requests.pop() else { break };
             io::down(&mut self.io, &io_env, request, &mut self.submissions);
         }
+        self.private_io(&env);
         self.io.reclaim();
         if let Some(component) = &mut self.component {
             component.reclaim();
@@ -367,7 +438,9 @@ impl Host for Client {
         &mut self.submissions
     }
     fn work_pending(&self, now: Time) -> bool {
-        self.io.is_ready()
+        self.file_driver.as_ref().is_some_and(skein_world::files::Driver::has_work)
+            || !self.files.is_empty()
+            || self.io.is_ready()
             || !self.events.is_empty()
             || !self.requests.is_empty()
             || !self.above.is_empty()
@@ -379,22 +452,29 @@ impl Host for Client {
             })
     }
     fn next_deadline(&self) -> Option<Time> {
-        [self.io.next_deadline(), self.component.as_ref().and_then(accounts::Component::next_deadline)]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.io.next_deadline(),
+            self.component.as_ref().and_then(accounts::Component::next_deadline),
+            self.file_driver.as_ref().and_then(skein_world::files::Driver::next_deadline),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
     fn is_empty(&self) -> bool {
         self.closed
             && self.io.is_empty()
+            && self.file_driver.as_ref().is_none_or(skein_world::files::Driver::is_empty)
             && self.events.is_empty()
             && self.requests.is_empty()
+            && self.files.is_empty()
             && self.above.is_empty()
             && self.completions.is_empty()
             && self.submissions.is_empty()
     }
     fn worst_case(&self) -> u64 {
         accounts::worst_case(&self.limits).expect("component bound")
+            + self.file_driver.as_ref().map_or(0, |driver| driver.worst_case(4))
             + io::worst_case(&self.limits.io).expect("io bound")
             + 512_000
     }
@@ -480,6 +560,7 @@ struct Judge {
     wake: Option<Time>,
     passed: bool,
     story: Story,
+    private_failure: bool,
 }
 impl Referee<Process> for Judge {
     fn act(&mut self, _now: Time, processes: &mut [Process]) {
@@ -569,33 +650,40 @@ impl Referee<Process> for Judge {
         .then_some(now);
         if client.closed {
             assert_eq!(client.facts.last(), Some(&Fact::Closed));
-            match self.story {
-                Story::Cancel | Story::Abort => assert!(
-                    client.facts.contains(&Fact::Failed(accounts::Failure::Exchange(oauth::Failure::Cancelled)))
-                ),
-                Story::Timeout => {
-                    assert!(
-                        client.facts.contains(&Fact::Failed(accounts::Failure::Exchange(oauth::Failure::TimedOut)))
-                    );
-                }
-                Story::NotKept => {
-                    assert!(client.facts.contains(&Fact::Failed(accounts::Failure::NotKept)));
-                    assert!(!client.facts.iter().any(|fact| matches!(fact, Fact::SignedIn(_) | Fact::Granted(_))));
-                }
-                Story::Public => {
-                    assert!(client.facts.contains(&Fact::Granted(2)));
-                    assert_eq!(client.records.len(), 2);
-                }
-                Story::Confidential => {
-                    assert!(client.facts.contains(&Fact::SignedIn(1)));
-                    assert!(client.facts.contains(&Fact::Late));
-                }
-                Story::WrongPath
-                | Story::WrongHost
-                | Story::LongHead
-                | Story::CloseWaiting
-                | Story::CloseConfidential => {
-                    assert!(client.facts.contains(&Fact::SignedIn(1)));
+            if self.private_failure {
+                assert!(
+                    client.facts.iter().any(|fact| matches!(fact, Fact::Failed(accounts::Failure::Unloaded { .. })))
+                );
+                assert!(client.visit.is_none(), "unsafe loading fails before Visit");
+            } else {
+                match self.story {
+                    Story::Cancel | Story::Abort => assert!(
+                        client.facts.contains(&Fact::Failed(accounts::Failure::Exchange(oauth::Failure::Cancelled)))
+                    ),
+                    Story::Timeout => {
+                        assert!(
+                            client.facts.contains(&Fact::Failed(accounts::Failure::Exchange(oauth::Failure::TimedOut)))
+                        );
+                    }
+                    Story::NotKept => {
+                        assert!(client.facts.contains(&Fact::Failed(accounts::Failure::NotKept)));
+                        assert!(!client.facts.iter().any(|fact| matches!(fact, Fact::SignedIn(_) | Fact::Granted(_))));
+                    }
+                    Story::Public => {
+                        assert!(client.facts.contains(&Fact::Granted(2)));
+                        assert_eq!(client.records.len(), 2);
+                    }
+                    Story::Confidential => {
+                        assert!(client.facts.contains(&Fact::SignedIn(1)));
+                        assert!(client.facts.contains(&Fact::Late));
+                    }
+                    Story::WrongPath
+                    | Story::WrongHost
+                    | Story::LongHead
+                    | Story::CloseWaiting
+                    | Story::CloseConfidential => {
+                        assert!(client.facts.contains(&Fact::SignedIn(1)));
+                    }
                 }
             }
         }
@@ -605,7 +693,11 @@ impl Referee<Process> for Judge {
             .filter(|observation| matches!(observation, peer::Observation::Post { .. }))
             .count();
         assert!(posts <= if self.story == Story::Public { 2 } else { 1 });
-        if client.closed && browser.is_empty() && !matches!(self.story, Story::Cancel | Story::Abort | Story::Timeout) {
+        if !self.private_failure
+            && client.closed
+            && browser.is_empty()
+            && !matches!(self.story, Story::Cancel | Story::Abort | Story::Timeout)
+        {
             assert!(browser.done);
             assert_eq!(posts, if self.story == Story::Public { 2 } else { 1 });
         }
@@ -687,7 +779,15 @@ pub fn run(seed: u64, story: Story, faulted: bool, large: bool, memory: Memory) 
     let mut world = World::new(
         seed,
         config,
-        Judge { delivered: false, redirected: false, shutdown: false, wake: None, passed: false, story },
+        Judge {
+            delivered: false,
+            redirected: false,
+            shutdown: false,
+            wake: None,
+            passed: false,
+            story,
+            private_failure: false,
+        },
         memory,
     );
     world.spawn(|| issuer(story, large));
@@ -713,4 +813,57 @@ pub fn assert_replay(first: &Outcome<Process>, second: &Outcome<Process>) {
             _ => panic!("process order"),
         }
     }
+}
+
+/// Signs in with the private keeper on the actual minimal machine and independent issuer/browser.
+#[must_use]
+pub fn run_private(seed: u64, private: crate::private::Story) -> Outcome<Process, crate::private::FileSystem> {
+    let mut files = crate::private::FileSystem::new(private);
+    let root = files.startup();
+    let story = Story::Confidential;
+    let private_failure = matches!(
+        private,
+        crate::private::Story::RootMode
+            | crate::private::Story::FileMode
+            | crate::private::Story::FileOwner
+            | crate::private::Story::FileLinks
+            | crate::private::Story::FileLink
+            | crate::private::Story::LoadFailed
+            | crate::private::Story::LoadStalled
+            | crate::private::Story::TooLarge
+    );
+    let mut config = skein_sim::Config::calm();
+    config.wall = Wall::EPOCH;
+    let mut world = World::new(
+        seed,
+        config,
+        Judge {
+            delivered: false,
+            redirected: false,
+            shutdown: false,
+            wake: None,
+            passed: false,
+            story,
+            private_failure,
+        },
+        Memory::Checked,
+    )
+    .with_machine(files);
+    world.spawn(|| issuer(story, false));
+    world.spawn_root(root, |fd| {
+        let mut client = Client::new(story, false);
+        client.file_driver = Some(skein_world::files::Driver::new(fd, 4, 1024, client.limits.file_stall, 1234));
+        Process::Client(Box::new(client))
+    });
+    world.spawn(|| Process::Browser(Box::new(Browser::new(story))));
+    let mut stalled = false;
+    let mut outcome = world.run_with_faults(|_, _, submissions| {
+        let stall = private == crate::private::Story::LoadStalled
+            && !stalled
+            && submissions.iter().any(|submit| matches!(submit.kind, kernel::Op::Read { .. }));
+        stalled |= stall;
+        Some(skein_sim::Faults { hung: if stall { 1000 } else { 0 }, ..skein_sim::Faults::NONE })
+    });
+    outcome.machine.faulted |= stalled;
+    outcome
 }

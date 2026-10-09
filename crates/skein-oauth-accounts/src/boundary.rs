@@ -70,6 +70,8 @@ pub enum Failure {
     Exchange(skein_oauth::Failure),
     /// No valid record, or the provider rejected its token; a newer record is needed.
     Expired,
+    /// The private record did not load, with its location and unread cause (oauth.md, section 6.4).
+    Unloaded { at: Place, why: Unloaded },
 }
 
 /// The request a refusal answers.
@@ -117,4 +119,28 @@ pub enum Keeping {
     Kept,
     /// The record was not stored; no part of it may be lent.
     NotKept,
+}
+
+/// The part of a private keeper whose loading stopped (oauth.md, section 6.4).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Place {
+    /// The private directory, opened before any record is served.
+    Directory,
+    /// The account's whole record file.
+    File,
+}
+
+/// Why loading left an account without a record (oauth.md, section 6.4).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Unloaded {
+    /// Loaded bytes are damaged or belong to another version; a sign-in may replace their digest.
+    Unreadable,
+    /// io refused unsafe metadata without reading; sign-in fails before Visit.
+    Refused(skein_io::file::Unsafe),
+    /// io's kernel error; sign-in fails before Visit.
+    Failed(skein_io::kernel::Error),
+    /// The file operation reached its stall deadline; sign-in fails before Visit.
+    Stalled,
+    /// io observed more bytes than the record bound; sign-in fails before Visit.
+    TooLarge { size: u64 },
 }

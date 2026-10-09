@@ -17,6 +17,7 @@ skein-sim.workspace = true
 skein-world.workspace = true
 skein-shell.workspace = true
 skein-fake-oauth.workspace = true
+skein-fake-machine.workspace = true
 skein-fake-peers.workspace = true
 skein-tls-world = { path = "../tls" }
 

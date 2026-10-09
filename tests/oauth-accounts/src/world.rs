@@ -50,6 +50,7 @@ pub enum Story {
 pub fn limits() -> accounts::Limits {
     accounts::Limits {
         accounts: 2,
+        file_stall: Duration::from_secs(1),
         exchanges: 2,
         listeners: 1,
         server: skein_http::server::Limits {
@@ -216,23 +217,30 @@ pub struct Client {
     limits: accounts::Limits,
     events: Queue<io::Event>,
     requests: Queue<io::Request>,
+    pub(crate) files: Queue<accounts::FileLower>,
+    file_driver: Option<skein_world::files::Driver>,
+    file_keep: Option<(skein_lib::Token, oauth::SavedToken)>,
+    pub(crate) stop_at_store: Option<bool>,
+    pub(crate) stop_at_load: Option<bool>,
+    pub(crate) retry_load: Option<()>,
     above: Queue<accounts::Event>,
     completions: Queue<kernel::Complete>,
     submissions: Queue<kernel::Submit>,
-    address: Option<SocketAddr>,
+    pub(crate) address: Option<SocketAddr>,
     transport: Transport,
     story: Story,
-    facts: Vec<Fact>,
+    pub(crate) facts: Vec<Fact>,
     records: Vec<oauth::SavedToken>,
     contracts: Contracts,
     closing: bool,
-    closed: bool,
+    pub(crate) closed: bool,
+    pub(crate) recovered: Option<u64>,
     rejected: bool,
     started: Time,
 }
 
 impl Client {
-    fn new(story: Story, transport: Transport) -> Client {
+    pub(crate) fn new(story: Story, transport: Transport) -> Client {
         let limits = limits();
         Client {
             io: io::Io::new(&limits.io),
@@ -240,6 +248,12 @@ impl Client {
             limits,
             events: Queue::with_capacity(ROOM),
             requests: Queue::with_capacity(ROOM),
+            files: Queue::with_capacity(ROOM),
+            file_driver: None,
+            file_keep: None,
+            stop_at_store: None,
+            stop_at_load: None,
+            retry_load: None,
             above: Queue::with_capacity(ROOM),
             completions: Queue::with_capacity(ROOM),
             submissions: Queue::with_capacity(ROOM),
@@ -251,11 +265,28 @@ impl Client {
             contracts: Contracts::with_pending_grant(),
             closing: false,
             closed: false,
+            recovered: None,
             rejected: false,
             started: Time::ZERO,
         }
     }
-    fn start(&mut self, env: &Env<accounts::Limits>) {
+    pub(crate) fn private(root: kernel::Fd, story: Story) -> Client {
+        let mut client = Client::new(story, Transport::Plaintext);
+        client.file_driver = Some(skein_world::files::Driver::new(root, 4, 1024, client.limits.file_stall, 1234));
+        client
+    }
+    pub(crate) fn recovery(root: kernel::Fd) -> Client {
+        let mut client = Client::private(root, Story::NotKept);
+        client.limits.refresh_lead = Duration::ZERO;
+        client
+    }
+    pub(crate) fn refresh_at_start(&mut self) {
+        self.limits.refresh_lead = Duration::from_secs(10);
+    }
+    pub(crate) fn unstarted(&self) -> bool {
+        self.component.is_none()
+    }
+    pub(crate) fn start(&mut self, env: &Env<accounts::Limits>) {
         let mut configured = List::with_capacity(1);
         let seconds = if matches!(self.story, Story::Lead | Story::Rejected | Story::Repeated | Story::Released) {
             30
@@ -286,19 +317,38 @@ impl Client {
                             },
                         }
                     },
-                    keeper: accounts::Keeper::Owner { kept: Some(record) }
+                    keeper: match &self.file_driver {
+                        Some(driver) => accounts::Keeper::Private {
+                            root: driver.root(),
+                            directory: bytes::copy_of(b"secret"),
+                            file: bytes::copy_of(b"record")
+                        },
+                        None => accounts::Keeper::Owner { kept: Some(record) },
+                    }
                 })
                 .is_ok()
         );
         let mut component = accounts::Component::new(configured, &self.limits, 17).expect("configured accounts");
-        component.down(env, accounts::Request::Grant { account: 0 }, &mut self.above, &mut self.requests);
+        component.down(
+            env,
+            accounts::Request::Grant { account: 0 },
+            &mut self.above,
+            &mut self.requests,
+            &mut self.files,
+        );
         self.component = Some(component);
         self.started = env.now;
     }
-    fn ask(&mut self, env: &Env<accounts::Limits>, request: accounts::Request) {
-        self.component.as_mut().expect("started component").down(env, request, &mut self.above, &mut self.requests);
+    pub(crate) fn ask(&mut self, env: &Env<accounts::Limits>, request: accounts::Request) {
+        self.component.as_mut().expect("started component").down(
+            env,
+            request,
+            &mut self.above,
+            &mut self.requests,
+            &mut self.files,
+        );
     }
-    fn close(&mut self, env: &Env<accounts::Limits>) {
+    pub(crate) fn close(&mut self, env: &Env<accounts::Limits>) {
         if !self.closing {
             self.closing = true;
             self.contracts.closing();
@@ -353,12 +403,20 @@ impl Client {
                 accounts::Event::Failed { failure, .. } => {
                     self.contracts.failed();
                     self.facts.push(Fact::Failed(failure));
-                    self.close(env);
+                    if matches!(failure, accounts::Failure::Unloaded { .. }) && self.retry_load.take().is_some() {
+                        self.contracts.grant.open(0, ());
+                        self.ask(env, accounts::Request::Grant { account: 0 });
+                    } else {
+                        self.close(env);
+                    }
                 }
                 accounts::Event::Closed => {
                     self.contracts.closed();
                     self.facts.push(Fact::Closed);
                     self.closed = true;
+                    if let Some(driver) = &mut self.file_driver {
+                        driver.close_root(env.now);
+                    }
                 }
                 accounts::Event::Expiring { .. }
                 | accounts::Event::Refused { .. }
@@ -367,6 +425,70 @@ impl Client {
                     panic!("positive story has no such event")
                 }
             }
+        }
+    }
+    fn private_io(&mut self, env: &Env<accounts::Limits>) {
+        if self.file_driver.is_none() {
+            return;
+        }
+        while let Some(lower) = self.files.pop() {
+            match lower {
+                accounts::FileLower::Request { request, deadline } => {
+                    if let io::file::Request::Store { owner, bytes, .. } = &request {
+                        let record =
+                            oauth::decode_record(bytes, &env.limits.client.document).expect("candidate record");
+                        self.contracts.keep(record.generation);
+                        self.facts.push(Fact::Keep(record.generation));
+                        assert!(self.file_keep.is_none());
+                        self.file_keep = Some((*owner, record));
+                        if let Some(abort) = self.stop_at_store.take() {
+                            self.close(env);
+                            if abort {
+                                self.ask(env, accounts::Request::Abort);
+                            }
+                        }
+                    }
+                    if matches!(request, io::file::Request::Load { .. })
+                        && let Some(abort) = self.stop_at_load.take()
+                    {
+                        self.close(env);
+                        if abort {
+                            self.ask(env, accounts::Request::Abort);
+                        }
+                    }
+                    self.file_driver.as_mut().expect("file driver").request(request, deadline);
+                }
+                accounts::FileLower::Cancel { owner } => self.file_driver.as_mut().expect("file driver").cancel(owner),
+            }
+        }
+        self.file_driver.as_mut().expect("file driver").progress(env.now);
+        while let Some(event) = self.file_driver.as_mut().expect("file driver").take_event() {
+            if event.owner() == skein_lib::Token::new(u64::MAX) {
+                continue;
+            }
+            if let io::file::Event::Loaded { bytes, .. } = &event
+                && let Ok(record) = oauth::decode_record(bytes, &env.limits.client.document)
+            {
+                if !self.contracts.kept.contains(&record.generation) {
+                    self.contracts.kept.push(record.generation);
+                }
+                self.recovered = Some(record.generation);
+            }
+            if self.file_keep.as_ref().is_some_and(|(owner, _)| *owner == event.owner()) {
+                let (_, record) = self.file_keep.take().expect("matching keep");
+                self.contracts.kept(record.generation, matches!(event, io::file::Event::Stored { .. }));
+                self.records.push(record);
+            }
+            self.component.as_mut().expect("started component").filed(
+                env,
+                event,
+                &mut self.above,
+                &mut self.requests,
+                &mut self.files,
+            );
+        }
+        while let Some(submit) = self.file_driver.as_mut().expect("file driver").take_submit() {
+            self.submissions.push(submit);
         }
     }
 }
@@ -378,6 +500,7 @@ impl Host for Client {
             self.start(&env);
         }
         let io_env = Env { now, wall, limits: self.limits.io };
+        self.private_io(&env);
         for _ in 0..ROOM {
             if self.events.room() < 3 || self.submissions.room() < 2 || !self.io.is_ready() {
                 break;
@@ -389,7 +512,11 @@ impl Host for Client {
                 break;
             }
             let Some(complete) = self.completions.pop() else { break };
-            io::up(&mut self.io, &io_env, complete, &mut self.events, &mut self.submissions);
+            if skein_world::files::Driver::owns(complete.op) {
+                self.file_driver.as_mut().expect("tagged file completion").up(complete);
+            } else {
+                io::up(&mut self.io, &io_env, complete, &mut self.events, &mut self.submissions);
+            }
         }
         for _ in 0..ROOM {
             if self.events.room() < 3 || self.submissions.room() < 2 || !self.io.is_due(now) {
@@ -407,6 +534,7 @@ impl Host for Client {
                 event,
                 &mut self.above,
                 &mut self.requests,
+                &mut self.files,
             );
         }
         if let Some(component) = &mut self.component
@@ -414,7 +542,7 @@ impl Host for Client {
             && self.requests.room() >= accounts::MAX_OUT_FIRE.io
             && (component.has_work() || component.next_deadline().is_some_and(|due| due <= now))
         {
-            component.fire(&env, &mut self.above, &mut self.requests);
+            component.fire(&env, &mut self.above, &mut self.requests, &mut self.files);
         }
         if self.requests.room() >= accounts::MAX_OUT_DOWN.io && self.above.room() >= accounts::MAX_OUT_DOWN.above {
             self.observe(&env);
@@ -443,6 +571,7 @@ impl Host for Client {
             }
             io::down(&mut self.io, &io_env, request, &mut self.submissions);
         }
+        self.private_io(&env);
         self.io.reclaim();
         if let Some(component) = &mut self.component {
             component.reclaim();
@@ -455,7 +584,9 @@ impl Host for Client {
         &mut self.submissions
     }
     fn work_pending(&self, now: Time) -> bool {
-        self.io.is_ready()
+        self.file_driver.as_ref().is_some_and(skein_world::files::Driver::has_work)
+            || !self.files.is_empty()
+            || self.io.is_ready()
             || !self.events.is_empty()
             || !self.requests.is_empty()
             || !self.above.is_empty()
@@ -468,6 +599,7 @@ impl Host for Client {
     fn next_deadline(&self) -> Option<Time> {
         [
             self.io.next_deadline(),
+            self.file_driver.as_ref().and_then(skein_world::files::Driver::next_deadline),
             self.component.as_ref().and_then(accounts::Component::next_deadline),
             (self.story == Story::Released && self.component.is_some() && !self.closing)
                 .then(|| self.started.saturating_add(Duration::from_secs(40))),
@@ -479,8 +611,10 @@ impl Host for Client {
     fn is_empty(&self) -> bool {
         self.closed
             && self.io.is_empty()
+            && self.file_driver.as_ref().is_none_or(skein_world::files::Driver::is_empty)
             && self.events.is_empty()
             && self.requests.is_empty()
+            && self.files.is_empty()
             && self.above.is_empty()
             && self.completions.is_empty()
             && self.submissions.is_empty()
@@ -488,10 +622,11 @@ impl Host for Client {
     fn worst_case(&self) -> u64 {
         accounts::worst_case(&self.limits).expect("component bound")
             + io::worst_case(&self.limits.io).expect("io bound")
+            + self.file_driver.as_ref().map_or(0, |driver| driver.worst_case(4))
             + 512_000
     }
     fn operations(&self) -> u32 {
-        io::operations(&self.limits.io).expect("io operations")
+        io::operations(&self.limits.io).expect("io operations") + if self.file_driver.is_some() { 4 } else { 0 }
     }
 }
 
@@ -657,7 +792,7 @@ impl Referee<Process> for Judge {
     }
 }
 
-fn issuer(transport: Transport, story: Story, address: SocketAddr) -> Process {
+pub(crate) fn issuer(transport: Transport, story: Story, address: SocketAddr) -> Process {
     let profile = limits();
     let mut peer = peer::Peer::new(
         address,
@@ -829,7 +964,7 @@ pub fn protocol(seed: u64, story: Story) -> (Vec<Fact>, Vec<String>) {
         let server_env = Env { now, wall, limits: server_limits };
         let component = client.component.as_mut().expect("component");
         if component.has_work() || component.next_deadline().is_some_and(|due| due <= now) {
-            component.fire(&env, &mut client.above, &mut client.requests);
+            component.fire(&env, &mut client.above, &mut client.requests, &mut client.files);
         }
         client.observe(&env);
         if story == Story::Released && now >= Time::ZERO.saturating_add(Duration::from_secs(40)) {
@@ -856,12 +991,14 @@ pub fn protocol(seed: u64, story: Story) -> (Vec<Fact>, Vec<String>) {
                         io::Event::Connecting { owner: identity, socket: Token::new(9) },
                         &mut client.above,
                         &mut client.requests,
+                        &mut client.files,
                     );
                     component.up(
                         &env,
                         io::Event::Connected { owner: identity },
                         &mut client.above,
                         &mut client.requests,
+                        &mut client.files,
                     );
                     server_requests.push(http::Request::Next);
                 }
@@ -879,6 +1016,7 @@ pub fn protocol(seed: u64, story: Story) -> (Vec<Fact>, Vec<String>) {
                         io::Event::Closed { owner: owner.take().expect("socket owner") },
                         &mut client.above,
                         &mut client.requests,
+                        &mut client.files,
                     );
                     server_requests.push(http::Request::Close);
                 }
@@ -899,6 +1037,7 @@ pub fn protocol(seed: u64, story: Story) -> (Vec<Fact>, Vec<String>) {
                 io::Event::Stream { owner: identity, up },
                 &mut client.above,
                 &mut client.requests,
+                &mut client.files,
             );
         }
         if let Some(request) = server_requests.pop() {

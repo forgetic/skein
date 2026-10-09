@@ -83,7 +83,7 @@ pub fn protocol(seed: u64, story: Story) -> (Vec<Fact>, Vec<String>) {
         let server_env = Env { now, wall, limits: server_limits };
         let component = client.component.as_mut().expect("component");
         if component.has_work() || component.next_deadline().is_some_and(|due| due <= now) {
-            component.fire(&env, &mut client.above, &mut client.requests);
+            component.fire(&env, &mut client.above, &mut client.requests, &mut client.files);
         }
         client.observe(&env);
         if !scripted && let Some(url) = &client.visit {
@@ -120,6 +120,7 @@ pub fn protocol(seed: u64, story: Story) -> (Vec<Fact>, Vec<String>) {
                     },
                     &mut client.above,
                     &mut client.requests,
+                    &mut client.files,
                 );
                 let (_, authority, target) = url_parts(uri);
                 let target = if callback_count == 0 && story == Story::WrongPath {
@@ -157,12 +158,14 @@ pub fn protocol(seed: u64, story: Story) -> (Vec<Fact>, Vec<String>) {
                         io::Event::Connecting { owner: identity, socket: Token::new(9) },
                         &mut client.above,
                         &mut client.requests,
+                        &mut client.files,
                     );
                     component.up(
                         &env,
                         io::Event::Connected { owner: identity },
                         &mut client.above,
                         &mut client.requests,
+                        &mut client.files,
                     );
                     server = http::Server::new(&server_limits);
                     server_closed = false;
@@ -183,6 +186,7 @@ pub fn protocol(seed: u64, story: Story) -> (Vec<Fact>, Vec<String>) {
                         io::Event::Listening { owner: identity, listener: Token::new(10), addr },
                         &mut client.above,
                         &mut client.requests,
+                        &mut client.files,
                     );
                 }
                 io::Request::Bind { owner: identity, socket } => {
@@ -231,6 +235,7 @@ pub fn protocol(seed: u64, story: Story) -> (Vec<Fact>, Vec<String>) {
                         io::Event::Closed { owner: identity },
                         &mut client.above,
                         &mut client.requests,
+                        &mut client.files,
                     );
                 }
                 io::Request::Reject { .. }
@@ -248,6 +253,7 @@ pub fn protocol(seed: u64, story: Story) -> (Vec<Fact>, Vec<String>) {
                 io::Event::Stream { owner: identity, up },
                 &mut client.above,
                 &mut client.requests,
+                &mut client.files,
             );
         }
         if let Some(identity) = owner
@@ -258,6 +264,7 @@ pub fn protocol(seed: u64, story: Story) -> (Vec<Fact>, Vec<String>) {
                 io::Event::Stream { owner: identity, up },
                 &mut client.above,
                 &mut client.requests,
+                &mut client.files,
             );
         }
         if let Some(request) = server_requests.pop() {

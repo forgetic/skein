@@ -1,6 +1,8 @@
 //! Configured sources, endpoint bindings and keepers (oauth.md, sections 6.2 and 6.4).
 
+use alloc::boxed::Box;
 use skein_io::kernel::Addr;
+use skein_lib::Token;
 use skein_oauth::{Registration, SavedToken};
 use skein_tls::{Config, Name};
 
@@ -38,6 +40,9 @@ pub enum Transport {
 pub enum Keeper {
     /// The owner's store; each candidate goes out as Keep and waits for Kept.
     Owner { kept: Option<SavedToken> },
+    /// Private whole-file storage beneath the owner's `FileIo` root; the component closes only its private root.
+    /// The owner configures `FileIo`'s effective user before adopting that startup root (io.md, section 5.3).
+    Private { root: Token, directory: Box<[u8]>, file: Box<[u8]> },
 }
 
 #[expect(clippy::large_enum_variant, reason = "bounded account configuration stores its one source in place")]

@@ -1,5 +1,7 @@
 //! Account records, holds and owner lifecycle (oauth.md, sections 6.3 and 6.6).
-//! Keeps one exchange binding per account; no provider identity or store policy.
+//! Keeps one exchange binding and keeper ownership per account; knows no provider
+//! identity or filesystem metadata. Owner requests, socket events and file
+//! terminals enter through `down`, `up` and `filed`; `fire` advances their work.
 
 #![expect(
     clippy::single_match,
@@ -9,10 +11,13 @@
 
 use crate::accounts::{Source, copy_registration};
 use crate::exchange::{Exchange, Stage, Web};
+use crate::keeper::{Private, Store};
 use crate::route::{self, Socket};
 use crate::{Account, Asked, Ends, Event, Failure, Keeper, Keeping, Limits, Refusal, Request, Transport, worst_case};
 use skein_lib::{Duration, Env, Id, List, Queue, Rng, Slab, Time};
 use skein_oauth::{self as oauth, SavedToken};
+
+mod private;
 mod sign_in;
 
 /// An io request the owner sends on, translating component tokens to io tokens.
@@ -26,16 +31,33 @@ pub type LowerEvent = skein_io::Event;
 pub struct MaxOut {
     pub above: u32,
     pub io: u32,
+    pub files: u32,
 }
 
 /// Room reserved before one owner request.
-pub const MAX_OUT_DOWN: MaxOut = MaxOut { above: 3, io: 3 };
+pub const MAX_OUT_DOWN: MaxOut = MaxOut { above: 3, io: 3, files: 1 };
 
 /// Room reserved before firing one due account or progressing one exchange.
-pub const MAX_OUT_FIRE: MaxOut = MaxOut { above: 3, io: 3 };
+pub const MAX_OUT_FIRE: MaxOut = MaxOut { above: 3, io: 3, files: 1 };
 
 /// Room reserved before one routed io event.
-pub const MAX_OUT_UP: MaxOut = MaxOut { above: 1, io: 1 };
+pub const MAX_OUT_UP: MaxOut = MaxOut { above: 1, io: 1, files: 0 };
+
+/// Room reserved before one routed file terminal.
+pub const MAX_OUT_FILED: MaxOut = MaxOut { above: 3, io: 3, files: 1 };
+
+/// A private keeper request or cancellation for the owner's `FileIo` (oauth.md, section 6.4).
+/// Requests use `file_layer::down_until`; cancellations use `file_layer::cancel`.
+/// The owner handles controls while `FileIo` is busy. A cancelled request still
+/// queued by the owner is discarded with its one `file::Event::Cancelled`.
+/// Queued requests expire at their stated deadline as well as active requests.
+#[expect(missing_debug_implementations, reason = "file stores carry credential records")]
+pub enum FileLower {
+    /// One file request, ending in its matching owner-token terminal.
+    Request { request: skein_io::file::Request, deadline: Time },
+    /// Stop this owner token's request; retain it until its file terminal.
+    Cancel { owner: skein_lib::Token },
+}
 
 /// Why the component cannot run its owner's configured accounts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -52,6 +74,8 @@ pub enum Unusable {
     Registration { account: u32, failure: oauth::Failure },
     /// A keeper's startup record violates the client's record bounds.
     Record { account: u32, why: oauth::DecodeError },
+    /// A private directory or file path exceeds io's path bound.
+    Path { account: u32 },
 }
 
 pub(crate) enum State {
@@ -91,6 +115,8 @@ pub struct Component {
     exchanges: Slab<Exchange>,
     lifecycle: Lifecycle,
     random: Rng,
+    keepers: List<Store>,
+    file_owner: u64,
 }
 
 impl Component {
@@ -105,10 +131,11 @@ impl Component {
         let mut states = List::with_capacity(limits.accounts);
         let mut sources = List::with_capacity(limits.accounts);
         let mut bindings = List::with_capacity(limits.accounts);
+        let mut keepers = List::with_capacity(limits.accounts);
         for (index, account) in accounts.into_boxed().into_iter().enumerate() {
             let index = u32::try_from(index).expect("bounded accounts");
-            let (source, state) = match account {
-                Account::HandedIn => (Source::HandedIn, State::Empty),
+            let (source, state, store) = match account {
+                Account::HandedIn => (Source::HandedIn, State::Empty, Store::Owner),
                 Account::SignIn { registration, endpoint, keeper } => {
                     match endpoint.transport {
                         Transport::Plaintext if !endpoint.address.ip().is_loopback() => {
@@ -125,19 +152,28 @@ impl Component {
                         Ok(()) => {}
                         Err(failure) => return Err(Unusable::Registration { account: index, failure }),
                     }
-                    let state = match keeper {
-                        Keeper::Owner { kept } => match kept {
-                            Some(record) => {
-                                match oauth::encode_record(&record, &limits.client.document) {
-                                    Ok(encoded) => drop(encoded),
-                                    Err(why) => return Err(Unusable::Record { account: index, why }),
+                    let (state, store) = match keeper {
+                        Keeper::Owner { kept } => (
+                            match kept {
+                                Some(record) => {
+                                    match oauth::encode_record(&record, &limits.client.document) {
+                                        Ok(encoded) => drop(encoded),
+                                        Err(why) => return Err(Unusable::Record { account: index, why }),
+                                    }
+                                    State::Loaded { record }
                                 }
-                                State::Loaded { record }
+                                None => State::Empty,
+                            },
+                            Store::Owner,
+                        ),
+                        Keeper::Private { root, directory, file } => {
+                            if directory.len() >= 4096 || file.len() >= 4096 {
+                                return Err(Unusable::Path { account: index });
                             }
-                            None => State::Empty,
-                        },
+                            (State::Empty, Store::Private(Private::new(root, directory, file)))
+                        }
                     };
-                    (Source::SignIn { registration, endpoint }, state)
+                    (Source::SignIn { registration, endpoint }, state, store)
                 }
             };
             match states.push(state) {
@@ -149,6 +185,10 @@ impl Component {
                 Err(Source::HandedIn | Source::SignIn { .. }) => unreachable!("validated accounts"),
             }
             bindings.push(None).expect("validated accounts");
+            match keepers.push(store) {
+                Ok(()) => {}
+                Err(Store::Owner | Store::Private(_)) => unreachable!("validated accounts"),
+            }
         }
         Ok(Component {
             accounts: states,
@@ -157,6 +197,8 @@ impl Component {
             exchanges: Slab::with_capacity(limits.exchanges),
             lifecycle: Lifecycle::Live,
             random: Rng::new(seed),
+            keepers,
+            file_owner: 0,
         })
     }
 
@@ -177,8 +219,15 @@ impl Component {
         }
     }
 
-    /// Handles one owner request with `MAX_OUT_DOWN` room reserved in both queues.
-    pub fn down(&mut self, env: &Env<Limits>, request: Request, up: &mut Queue<Event>, io: &mut Queue<Lower>) {
+    /// Handles one owner request with `MAX_OUT_DOWN` room reserved in all queues.
+    pub fn down(
+        &mut self,
+        env: &Env<Limits>,
+        request: Request,
+        up: &mut Queue<Event>,
+        io: &mut Queue<Lower>,
+        _files: &mut Queue<FileLower>,
+    ) {
         self.initialize(env);
         match request {
             Request::SignIn { account } => self.sign_in(env, account, up, io),
@@ -238,7 +287,10 @@ impl Component {
                 Some(slot) => set_held(slot, false),
                 None => {}
             },
-            Request::Kept { account, generation, keeping } => self.kept(env, account, generation, keeping, up, io),
+            Request::Kept { account, generation, keeping } => match self.keepers.get(account) {
+                Some(Store::Owner) => self.kept(env, account, generation, keeping, up, io),
+                Some(Store::Private(_)) | None => {}
+            },
             Request::Close => match self.lifecycle {
                 Lifecycle::Live => {
                     self.lifecycle = Lifecycle::Closing;
@@ -260,6 +312,13 @@ impl Component {
         if self.refused(account, Asked::Grant, up) {
             return;
         }
+        if self.wait_for_load(account, up) {
+            return;
+        }
+        self.grant_loaded(env, account, up);
+    }
+
+    fn grant_loaded(&mut self, env: &Env<Limits>, account: u32, up: &mut Queue<Event>) {
         let refreshable = self.refreshable(account);
         let slot = self.accounts.get_mut(account).expect("validated account");
         match slot {
@@ -275,7 +334,11 @@ impl Component {
                 let exchange = self.exchanges.get_mut(id).expect("bound exchange");
                 match exchange.stage {
                     Stage::Finished => grant(slot, env.now, account, up),
-                    Stage::Running | Stage::Keeping { .. } => {
+                    Stage::Loading | Stage::Running | Stage::Keeping { .. } => {
+                        if exchange.pending_grant {
+                            up.push(Event::Refused { account, asked: Asked::Grant, why: Refusal::Held });
+                            return;
+                        }
                         set_held(slot, true);
                         exchange.pending_grant = true;
                     }
@@ -290,7 +353,7 @@ impl Component {
                         State::Loaded { .. } => unreachable!("initialized account"),
                     },
                 };
-                if needs_refresh && refreshable {
+                if needs_refresh && refreshable && self.lifecycle == Lifecycle::Live {
                     if self.exchanges.is_full() {
                         up.push(Event::Refused {
                             account,
@@ -398,7 +461,14 @@ impl Component {
     }
 
     /// Routes one socket event by its component owner token, with `MAX_OUT_UP` room.
-    pub fn up(&mut self, env: &Env<Limits>, event: LowerEvent, up: &mut Queue<Event>, io: &mut Queue<Lower>) {
+    pub fn up(
+        &mut self,
+        env: &Env<Limits>,
+        event: LowerEvent,
+        up: &mut Queue<Event>,
+        io: &mut Queue<Lower>,
+        _files: &mut Queue<FileLower>,
+    ) {
         self.initialize(env);
         let owner = match &event {
             LowerEvent::Connecting { owner, .. }
@@ -434,7 +504,13 @@ impl Component {
     }
 
     /// Advances one due account or one child transition with reserved output room.
-    pub fn fire(&mut self, env: &Env<Limits>, up: &mut Queue<Event>, io: &mut Queue<Lower>) {
+    pub fn fire(
+        &mut self,
+        env: &Env<Limits>,
+        up: &mut Queue<Event>,
+        io: &mut Queue<Lower>,
+        files: &mut Queue<FileLower>,
+    ) {
         self.initialize(env);
         for account in 0..self.bindings.len() {
             match *self.bindings.get(account).expect("account binding") {
@@ -456,6 +532,9 @@ impl Component {
                 }
                 None => {}
             }
+        }
+        if self.private_progress(env, up, io, files) {
+            return;
         }
         if self.lifecycle != Lifecycle::Live {
             self.settled(up);
@@ -507,6 +586,10 @@ impl Component {
     fn progress(&mut self, env: &Env<Limits>, id: Id<Exchange>, up: &mut Queue<Event>, io: &mut Queue<Lower>) {
         let exchange = self.exchanges.get_mut(id).expect("bound exchange");
         let account = exchange.account;
+        match exchange.stage {
+            Stage::Loading => return,
+            Stage::Running | Stage::Keeping { .. } | Stage::Finished => {}
+        }
         if web_closing(exchange.web.as_ref()) && !exchange.above.is_empty() {
             if let Some(web) = &mut exchange.web {
                 web.close_progress(env, io);
@@ -625,7 +708,13 @@ impl Component {
             oauth::Request::Tokens { record } => {
                 let kept = record.clone();
                 exchange.stage = Stage::Keeping { candidate: record };
-                up.push(Event::Keep { account, record: kept });
+                match self.keepers.get_mut(account).expect("account keeper") {
+                    Store::Owner => up.push(Event::Keep { account, record: kept }),
+                    Store::Private(keeper) => {
+                        keeper.next = Some(crate::keeper::Operation::Store { generation: kept.generation });
+                        exchange.file_active = true;
+                    }
+                }
             }
             oauth::Request::Failed { failure } => self.fail_exchange(env, id, Failure::Exchange(failure), up, io),
             oauth::Request::Visit { url } => match &exchange.listener {
@@ -655,7 +744,7 @@ impl Component {
         }
         match &exchange.stage {
             Stage::Keeping { candidate } if candidate.generation == generation => {}
-            Stage::Keeping { .. } | Stage::Running | Stage::Finished => return,
+            Stage::Keeping { .. } | Stage::Loading | Stage::Running | Stage::Finished => return,
         }
         let stage = core::mem::replace(&mut exchange.stage, Stage::Finished);
         exchange.received();
@@ -685,7 +774,7 @@ impl Component {
                     }
                 }
             }
-            Stage::Running | Stage::Finished => unreachable!("matching pending keep"),
+            Stage::Loading | Stage::Running | Stage::Finished => unreachable!("matching pending keep"),
         }
         match &mut exchange.web {
             Some(web) => web.close(env, false, io),
@@ -706,6 +795,18 @@ impl Component {
                     return;
                 }
                 exchange.aborted = true;
+                match self.keepers.get_mut(account).expect("account keeper") {
+                    Store::Private(keeper) => match &mut keeper.pending {
+                        Some(pending) if exchange.file_active => pending.cancel = true,
+                        Some(_) | None => {
+                            if exchange.file_active {
+                                keeper.next = None;
+                                exchange.file_active = false;
+                            }
+                        }
+                    },
+                    Store::Owner => {}
+                }
                 exchange.stage = Stage::Finished;
                 for _ in 0..oauth::MAX_OUT {
                     drop(exchange.above.pop());
@@ -736,7 +837,7 @@ impl Component {
         let slot = self.accounts.get_mut(account).expect("account state");
         let unfinished = match exchange.stage {
             Stage::Finished => false,
-            Stage::Running | Stage::Keeping { .. } => true,
+            Stage::Loading | Stage::Running | Stage::Keeping { .. } => true,
         };
         if unfinished {
             if exchange.signing_in() {
@@ -746,6 +847,18 @@ impl Component {
                 set_held(slot, false);
                 failed(account, failure, up);
             }
+        }
+        match self.keepers.get_mut(account).expect("account keeper") {
+            Store::Private(keeper) => match &mut keeper.pending {
+                Some(pending) if exchange.file_active => pending.cancel = true,
+                Some(_) | None => {
+                    if exchange.file_active {
+                        keeper.next = None;
+                        exchange.file_active = false;
+                    }
+                }
+            },
+            Store::Owner => {}
         }
         exchange.stage = Stage::Finished;
         exchange.received();
@@ -790,8 +903,15 @@ impl Component {
                 return;
             }
         }
+        for keeper in &self.keepers {
+            match keeper {
+                Store::Private(keeper) if !keeper.closed => return,
+                Store::Private(_) | Store::Owner => {}
+            }
+        }
         self.accounts.clear();
         self.sources.clear();
+        self.keepers.clear();
         self.lifecycle = Lifecycle::Closed;
         up.push(Event::Closed);
     }
@@ -799,6 +919,30 @@ impl Component {
     /// Child work buffered for the owner to schedule before sleeping.
     #[must_use]
     pub fn has_work(&self) -> bool {
+        for account in 0..self.keepers.len() {
+            match self.keepers.get(account).expect("account keeper") {
+                Store::Private(keeper) => {
+                    let abort_pending = match &keeper.pending {
+                        Some(pending) => {
+                            self.lifecycle == Lifecycle::Aborting
+                                && pending.operation != crate::keeper::Operation::Close
+                                && !pending.cancelled
+                        }
+                        None => false,
+                    };
+                    if keeper.has_work()
+                        || abort_pending
+                        || (self.lifecycle != Lifecycle::Live
+                            && !keeper.closed
+                            && keeper.pending.is_none()
+                            && self.bindings.get(account) == Some(&None))
+                    {
+                        return true;
+                    }
+                }
+                Store::Owner => {}
+            }
+        }
         for binding in &self.bindings {
             match binding {
                 Some(id) => match self.exchanges.get(*id) {
@@ -823,10 +967,22 @@ impl Component {
         false
     }
 
-    /// The earliest client or live account deadline; closing adds no policy timers.
+    /// The earliest client, private file or live account deadline; closing adds no policy timers.
     #[must_use]
     pub fn next_deadline(&self) -> Option<Time> {
         let mut earliest = None;
+        for keeper in &self.keepers {
+            match keeper {
+                Store::Private(keeper) => match &keeper.pending {
+                    Some(pending) => match pending.deadline {
+                        Some(deadline) => earlier(&mut earliest, deadline),
+                        None => {}
+                    },
+                    None => {}
+                },
+                Store::Owner => {}
+            }
+        }
         for account in 0..self.accounts.len() {
             if let Some(id) = *self.bindings.get(account).expect("account binding") {
                 let exchange = self.exchanges.get(id).expect("bound exchange");

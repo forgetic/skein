@@ -20,6 +20,7 @@ fn every_account_holds_a_maximal_record_within_the_heap_bound() {
     };
     let limits = Limits {
         accounts: 4,
+        file_stall: Duration::from_secs(1),
         exchanges: 4,
         listeners: 0,
         server: skein_http::server::Limits {
@@ -86,8 +87,15 @@ fn every_account_holds_a_maximal_record_within_the_heap_bound() {
             },
             &mut out,
             &mut Queue::with_capacity(MAX_OUT_DOWN.io),
+            &mut Queue::with_capacity(1),
         );
-        component.down(&env, Request::Grant { account }, &mut out, &mut Queue::with_capacity(MAX_OUT_DOWN.io));
+        component.down(
+            &env,
+            Request::Grant { account },
+            &mut out,
+            &mut Queue::with_capacity(MAX_OUT_DOWN.io),
+            &mut Queue::with_capacity(1),
+        );
         drop(out.pop());
     }
     let measured = meter.end();
@@ -145,7 +153,7 @@ fn every_refresh_slot_holds_its_maximal_records_and_tls_connection() {
     let mut above = Queue::with_capacity(MAX_OUT_DOWN.above.max(MAX_OUT_FIRE.above));
     let mut io = Queue::with_capacity(MAX_OUT_DOWN.io.max(MAX_OUT_FIRE.io));
     for account in 0..limits.accounts {
-        component.down(&env, Request::Grant { account }, &mut above, &mut io);
+        component.down(&env, Request::Grant { account }, &mut above, &mut io, &mut Queue::with_capacity(1));
         assert!(above.is_empty(), "grant waits for a kept refresh");
     }
     let mut connects = 0;
@@ -153,7 +161,7 @@ fn every_refresh_slot_holds_its_maximal_records_and_tls_connection() {
         if !component.has_work() {
             break;
         }
-        component.fire(&env, &mut above, &mut io);
+        component.fire(&env, &mut above, &mut io, &mut Queue::with_capacity(1));
         assert!(above.is_empty());
         while let Some(request) = io.pop() {
             assert!(matches!(request, skein_io::Request::Connect { .. }));
@@ -185,17 +193,7 @@ fn every_listener_slot_keeps_a_bounded_partial_head_within_the_heap_bound() {
         assert!(
             configured
                 .push(Account::SignIn {
-                    registration: skein_oauth::Registration {
-                        authorization_url: bytes::copy_of(b"http://127.0.0.1:31000/authorize"),
-                        token_endpoint: bytes::copy_of(b"http://127.0.0.1:31000/token"),
-                        client_id: bytes::copy_of(b"client"),
-                        redirect_uri: uri,
-                        scope: bytes::copy_of(b"read"),
-                        wire: skein_oauth::WireFormat::Form,
-                        client_secret: None,
-                        pkce_for_confidential: false,
-                        metadata_claim: None,
-                    },
+                    registration: registration(b"client", uri, None, b"read"),
                     endpoint: Endpoint {
                         address: "127.0.0.1:31000".parse().expect("loopback"),
                         transport: Transport::Plaintext
@@ -212,12 +210,12 @@ fn every_listener_slot_keeps_a_bounded_partial_head_within_the_heap_bound() {
     let mut callbacks = Vec::with_capacity(4);
     let mut wires = Vec::with_capacity(4);
     for account in 0..4 {
-        component.down(&env, Request::SignIn { account }, &mut above, &mut below);
+        component.down(&env, Request::SignIn { account }, &mut above, &mut below, &mut Queue::with_capacity(1));
     }
     for _ in 0..512 {
         if component.has_work() {
             assert!(above.room() >= MAX_OUT_FIRE.above && below.room() >= MAX_OUT_FIRE.io);
-            component.fire(&env, &mut above, &mut below);
+            component.fire(&env, &mut above, &mut below, &mut Queue::with_capacity(1));
         }
         while let Some(event) = above.pop() {
             assert!(matches!(event, skein_oauth_accounts::Event::Visit { .. }));
@@ -228,8 +226,20 @@ fn every_listener_slot_keeps_a_bounded_partial_head_within_the_heap_bound() {
                     let index = u64::try_from(wires.len()).expect("four listeners");
                     let listener = Token::new(20 + index);
                     let socket = Token::new(40 + index);
-                    component.up(&env, IoEvent::Listening { owner, listener, addr }, &mut above, &mut below);
-                    component.up(&env, IoEvent::Accepted { owner, socket, peer: addr }, &mut above, &mut below);
+                    component.up(
+                        &env,
+                        IoEvent::Listening { owner, listener, addr },
+                        &mut above,
+                        &mut below,
+                        &mut Queue::with_capacity(1),
+                    );
+                    component.up(
+                        &env,
+                        IoEvent::Accepted { owner, socket, peer: addr },
+                        &mut above,
+                        &mut below,
+                        &mut Queue::with_capacity(1),
+                    );
                     let mut wire = Wire::new(index);
                     let mut partial = b"GET /callback?state=".to_vec();
                     partial.resize(usize::try_from(limits.server.head - 64).expect("head size"), b'x');
@@ -254,7 +264,7 @@ fn every_listener_slot_keeps_a_bounded_partial_head_within_the_heap_bound() {
             if let Some(up) = wire.answer() {
                 let owner = callbacks.iter().find(|(candidate, _)| candidate == socket).expect("bound callback").1;
                 assert!(above.room() >= MAX_OUT_UP.above && below.room() >= MAX_OUT_UP.io);
-                component.up(&env, IoEvent::Stream { owner, up }, &mut above, &mut below);
+                component.up(&env, IoEvent::Stream { owner, up }, &mut above, &mut below, &mut Queue::with_capacity(1));
             }
         }
     }
@@ -262,4 +272,135 @@ fn every_listener_slot_keeps_a_bounded_partial_head_within_the_heap_bound() {
     assert!(component.next_deadline().is_some());
     let measured = meter.end();
     meter.check(measured, bound, &"every OAuth listener and partial head");
+}
+
+#[test]
+fn every_private_keeper_retains_its_maximal_paths_and_pending_load() {
+    use skein_io::file;
+    use skein_lib::Token;
+    use skein_oauth_accounts::{Endpoint, FileLower, Keeper, Transport};
+    let mut limits = skein_oauth_accounts_world::world::limits();
+    limits.accounts = 4;
+    limits.exchanges = 4;
+    limits.listeners = 0;
+    limits.io.sockets = 4;
+    let bound = worst_case(&limits).expect("private account bound");
+    let meter = Meter::new();
+    meter.start();
+    let mut configured = List::with_capacity(4);
+    for _ in 0..4 {
+        assert!(
+            configured
+                .push(Account::SignIn {
+                    registration: registration(
+                        &[b'c'; 64],
+                        bytes::copy_of(b"https://service.example/callback"),
+                        Some(bytes::copy_of(&[b's'; 64])),
+                        &[b's'; 64],
+                    ),
+                    endpoint: Endpoint { address: ([127, 0, 0, 1], 31000).into(), transport: Transport::Plaintext },
+                    keeper: Keeper::Private {
+                        root: Token::new(99),
+                        directory: bytes::copy_of(&[b'd'; 4095]),
+                        file: bytes::copy_of(&[b'f'; 4095])
+                    },
+                })
+                .is_ok()
+        );
+    }
+    let mut component = Component::new(configured, &limits, 17).expect("maximal private keepers");
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
+    let mut above = Queue::with_capacity(32);
+    let mut io = Queue::with_capacity(32);
+    let mut files = Queue::with_capacity(32);
+    for account in 0..4 {
+        component.down(&env, Request::SignIn { account }, &mut above, &mut io, &mut files);
+        component.down(&env, Request::Grant { account }, &mut above, &mut io, &mut files);
+    }
+    for _ in 0..4 {
+        component.fire(&env, &mut above, &mut io, &mut files);
+    }
+    assert!(above.is_empty() && io.is_empty(), "all exchanges wait for private loading");
+    assert_eq!(files.len(), 4);
+
+    let mut requests = Vec::with_capacity(4);
+    while let Some(lower) = files.pop() {
+        match lower {
+            FileLower::Request { request: file::Request::OpenPrivate { owner, .. }, .. } => requests.push(owner),
+            FileLower::Request { .. } | FileLower::Cancel { .. } => panic!("expected private opening"),
+        }
+    }
+    for (account, owner) in requests.iter().enumerate() {
+        component.filed(
+            &env,
+            file::Event::Opened {
+                owner: *owner,
+                file: Token::new(u64::try_from(account).expect("four roots") + 100),
+                len: 0,
+            },
+            &mut above,
+            &mut io,
+            &mut files,
+        );
+    }
+    for _ in 0..4 {
+        component.fire(&env, &mut above, &mut io, &mut files);
+    }
+    assert_eq!(files.len(), 4, "one pending load per keeper at the account limit");
+    let mut loads = Vec::with_capacity(4);
+    while let Some(lower) = files.pop() {
+        match lower {
+            FileLower::Request { request: file::Request::Load { owner, .. }, .. } => loads.push(owner),
+            FileLower::Request { .. } | FileLower::Cancel { .. } => panic!("expected private loading"),
+        }
+    }
+    for (account, owner) in loads.iter().enumerate() {
+        let record = maximal_private_record(u32::try_from(account).expect("four accounts"));
+        component.filed(
+            &env,
+            file::Event::Loaded {
+                owner: *owner,
+                bytes: skein_oauth::encode_record(&record, &limits.client.document).expect("maximal record"),
+            },
+            &mut above,
+            &mut io,
+            &mut files,
+        );
+    }
+    for _ in 0..4 {
+        component.fire(&env, &mut above, &mut io, &mut files);
+    }
+    assert_eq!(above.len(), 4, "every sign-in slot starts only after its maximal record loaded");
+    let measured = meter.end();
+    meter.check(measured, bound, &"all private paths, pending roots, records and sign-in slots");
+}
+
+fn registration(
+    client_id: &[u8],
+    redirect_uri: Box<[u8]>,
+    client_secret: Option<Box<[u8]>>,
+    scope: &[u8],
+) -> skein_oauth::Registration {
+    skein_oauth::Registration {
+        authorization_url: bytes::copy_of(b"http://127.0.0.1:31000/authorize"),
+        token_endpoint: bytes::copy_of(b"http://127.0.0.1:31000/token"),
+        client_id: bytes::copy_of(client_id),
+        redirect_uri,
+        scope: bytes::copy_of(scope),
+        wire: skein_oauth::WireFormat::Form,
+        client_secret,
+        pkce_for_confidential: false,
+        metadata_claim: None,
+    }
+}
+
+fn maximal_private_record(account: u32) -> SavedToken {
+    SavedToken {
+        key: account,
+        generation: 0,
+        access_token: bytes::copy_of(&[b'a'; 256]),
+        refresh_token: Some(bytes::copy_of(&[b'r'; 256])),
+        metadata: Some(bytes::copy_of(&[b'm'; 256])),
+        expires_at: Wall::from_nanos(30_000_000_000),
+    }
 }
