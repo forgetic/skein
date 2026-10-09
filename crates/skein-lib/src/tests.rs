@@ -7,6 +7,7 @@ mod containers;
 mod handles;
 mod held;
 mod journal;
+mod requests;
 mod streams;
 mod time;
 
