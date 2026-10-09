@@ -175,6 +175,39 @@ once in the worst case. A machine with neither a bundle nor
 `SSL_CERT_FILE` refuses to start when its configuration asks for the
 machine's roots.
 
+- **A bundle is read in RFC 7468's lax form.** Text outside blocks is
+  ignored. A block runs from its `-----BEGIN <label>-----` line to the
+  next `END` line or the next `BEGIN` line, whichever comes first. Its
+  base64 may hold whitespace and line breaks anywhere.
+- **Blocks that are not certificates** (any label but `CERTIFICATE`:
+  `TRUSTED CERTIFICATE`, `X509 CRL`, a key) are skipped without being
+  decoded, and counted as others.
+- **A malformed certificate block is skipped and counted, never a
+  refusal.** A block is malformed when it:
+  - does not end with its own `END CERTIFICATE` line;
+  - carries encapsulated headers;
+  - has invalid base64: a character outside the alphabet, or padding
+    anywhere but at the end.
+
+  Reading goes on at the next `BEGIN` line. The rest of the bundle still
+  serves, as it does past a certificate that does not parse (tls.md,
+  3.4). Skipping takes trust away and never adds it, and a damaged bundle
+  should not stop every service on the machine.
+- **The bounds refuse.** They are configuration, so a bundle past them is
+  refused, naming the bound, never cut short to fit it:
+  - the bundle's bytes;
+  - the number of certificates taken out as DER;
+  - each one's bytes, checked as its block decodes. The refusal names
+    the certificate's place among the file's certificate blocks,
+    malformed ones included.
+
+  A block decodes until its first defect or its bound, whichever comes
+  first, and that decides which it is. A malformed block is not kept, so
+  it does not count towards the number of certificates.
+- **Startup says the counts once** on standard error: how many roots
+  were taken; how many `skein-tls` skipped as unparsable; how many blocks
+  were malformed; and how many were others.
+
 ### 6.3 Terminal modes
 
 A service with a person at a terminal (an interactive front end) may
@@ -272,7 +305,10 @@ and changes no code above io:
   hook runs once per iteration, after `iterate`.
 - **Startup reads** (`tests/ring`): a whole file within its maximum, one
   past it, a FIFO and a directory refused; a PEM bundle with certificates,
-  other blocks and a certificate that does not parse; a DER file.
+  other blocks, a certificate that does not parse, and malformed blocks
+  of each kind (invalid base64, unterminated, ended by another label,
+  with headers), each skipped and counted while the rest are taken; a
+  bundle past each bound refused; a DER file.
 - **Terminal modes,** end to end under a pseudo-terminal
   (testing-strategy.md, 2.9): input read a key at a time, the modes found
   again once the binary exits, and a size change heard.
