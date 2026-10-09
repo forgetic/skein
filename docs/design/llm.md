@@ -339,7 +339,8 @@ pub struct Declared {
 ### 4.2 Derived limits
 
 `Limits::derive(&Declared) -> Result<Limits, Violation>` computes every
-limit with checked arithmetic. An overflow, or a relationship of section
+limit, for every dialect, with checked arithmetic: `Limits` holds one set
+per dialect, and a connection takes its endpoint's. An overflow, or a relationship of section
 4.3 that does not hold, is a `Violation` naming it. Two factors are the
 derivation's own:
 
@@ -360,6 +361,7 @@ derivation's own:
 | output items | 2 × calls per response + 2 | blocks in one completion: each call with a reasoning item before it, a text and a refusal; also the content indexes |
 | strings | the larger of answer and reasoning | the longest single string the decoder keeps |
 | retained tokens | the dialect's fixed fields + reasoning | tokens kept from one event: an opaque value takes at most a token per byte |
+| retained text | the largest of answer, input and reasoning, + the dialect's constant for its short kept fields | bytes of text kept from one event, unescaped: the collector's `text` |
 | receiving | answer + output items × reasoning + one event's retained values | what one call holds of its answer at once: its memory reservation, beside its measured request |
 | skip | request + `ESCAPE` × receiving | bytes of one event the dialect scans without keeping: an echo of the request and of the whole answer, escaped once more |
 | tools | request ÷ the dialect's smallest encoded tool | tools in one request |
@@ -394,9 +396,12 @@ refuses the configuration and names the relationship:
 - **connections ≥ conversations** (llm-connection.md, section 7);
 - **demands fit their caps:** the SSE reader's chunk within HTTP's read,
   the tokenizer's largest demand within the reader's data face, HTTP's
-  largest read and room within the transport's;
-- **Anthropic's output** is at most what its route accepts as
-  `max_tokens`.
+  largest read and room within the transport's. These depend on the
+  transport's piece sizes, so they are checked where the connection
+  component is built (llm-connection.md, section 7), not in `derive`;
+- **a model's output** is at most what its route accepts as `max_tokens`,
+  per model, checked where an endpoint of that dialect is composed: a
+  declaration for one dialect is never refused for another's route.
 
 ### 4.4 Selective, streamed decoding
 
@@ -413,9 +418,12 @@ refuses the configuration and names the relationship:
   error and incomplete details. It never keeps `response.output`,
   `instructions`, `tools` or per-item usage attribution, which echo what
   it already has or does not read.
-- **Anthropic keeps** each event type's known fields, thinking and its
-  signature under the reasoning limit, tool input under the input limit,
-  and an unknown native block whole.
+- **Anthropic keeps** each event type's known fields; a thinking block
+  whole, its extension fields included, under the reasoning limit, so
+  that its replay is exact; tool input under the input limit; and an
+  unknown native block whole. Its events are told apart by their SSE
+  event name, so its filter's root is chosen per event, and need not be
+  `Tagged`.
 - **Items and blocks are tagged** (json.md, 5.1): a Codex output item by
   its `type`, an Anthropic content block by its `type`. A known type
   keeps its fields; an unknown one is kept whole under the reasoning cap,
