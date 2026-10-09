@@ -11,6 +11,8 @@ use skein_world::{Host, Inherited, Machine};
 pub enum Act {
     /// The parent asks to start the hosted program.
     Spawn,
+    /// The parent starts a hosted program with a separate stderr pipe too.
+    SpawnStderr,
     /// The script writes these bytes to one inherited pipe.
     Write(usize, &'static [u8]),
     /// The script reads from one inherited pipe, possibly its end.
@@ -125,17 +127,23 @@ impl Script {
 
     fn start(&mut self, act: Act) {
         let kind = match act {
-            Act::Spawn => Op::Spawn {
+            Act::Spawn | Act::SpawnStderr => Op::Spawn {
                 spawn: Box::new(Spawn {
                     program: Box::from(&b"hosted"[..]),
                     args: self.args.clone(),
                     env: Box::new([Box::from(&b"KEY=value"[..])]),
                     root: self.root.expect("parent root"),
                     dir: Box::new([]),
-                    pipes: Box::new([
-                        Pipe { child: 0, way: Way::In, parent: None },
-                        Pipe { child: 1, way: Way::Out, parent: None },
-                    ]),
+                    pipes: {
+                        let mut pipes = vec![
+                            Pipe { child: 0, way: Way::In, parent: None },
+                            Pipe { child: 1, way: Way::Out, parent: None },
+                        ];
+                        if matches!(act, Act::SpawnStderr) {
+                            pipes.push(Pipe { child: 2, way: Way::Out, parent: None });
+                        }
+                        pipes.into_boxed_slice()
+                    },
                 }),
             },
             Act::Write(at, bytes) => Op::PipeWrite { fd: self.fds[at], bytes: Box::from(bytes), from: 0 },
