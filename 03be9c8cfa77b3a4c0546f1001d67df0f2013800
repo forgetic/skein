@@ -11,3 +11,8 @@ Allocator: reader peak exactly112 bytes under chunk24/field16; small64-byte and1
 Stack/protocol: direct tokenizer face, arrays/empty events, JSON whole but SSE cut before dispatch is dropped; shutdown withdrawal routing verified by focused and fuzzy worlds.
 Probes: none required for 05.4 (deterministic tests).
 No push or design/coordinator-file edits.
+
+Change and reason:
+The SSE reader now opens at the first data line and serves data through the lib stream face. It keeps a reusable chunk intake and at most one line piece instead of retaining an event, so peer event size no longer controls reader allocation. End and final dispatch metadata share the blank-line entry point; cut events fail data and never dispatch. Read withdrawal scans and drops the remainder; body terminals validate already delivered line tails before selecting their outcome.
+Whole-event unit observers and the temporary LLM gatherer consume that face. HTTP/protocol stacks feed the tokenizer directly and publish decoded documents only after dispatch; shutdown routes the tokenizer withdrawal even after its Closed event. Intake::clear preserves capacity and resets cached scan progress to support data withdrawal without reallocation.
+Design references: http.md sections4–4.2 (SSE data face and bounds),6 (step/world/memory/stack verification); lib.md section7 (stream read/withdrawal semantics); programming-model.md sections6.2–6.3 (ownership and held-memory bounds),7 (bounded progress),8 (stacking checks); testing-strategy.md sections3 and8 (assert injected outcomes and final gate).
