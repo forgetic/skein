@@ -1,0 +1,7 @@
+01.supervised-stderr final rebased-tip gate heavy729 scripts/check.sh PASS at df67da2309b745796a18239d10b75d8cc61530de, parent 8f490bb41e1f8838b6c3ab09306627ca13078fef.
+Formatting, workspace all-target clippy -D warnings and standalone skein-tls check passed.
+Focused runca7df65b-5899-43bc-86c2-d5118a9ba61b:1632/1632,3.254s.
+Fuzzy runcba3b395-00fa-4df1-b907-4a86fcc4ab63:89/89,9.253s.
+Browser run1f45e8f1-4f88-4ac0-b090-9b36ceaabec1:6/6,4.181s.
+Serial outside observations, lowest-tier unit regressions and the negative seam are in the commit body.
+Consumer benchmark evidence belongs to smith00.8; no credentials/design edits/push.
