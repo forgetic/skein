@@ -352,6 +352,7 @@ impl Actor {
             | io::Event::Output { .. }
             | io::Event::Spawned { .. }
             | io::Event::Exited { .. }
+            | io::Event::Usage { .. }
             | io::Event::Shutdown { .. } => panic!("unexpected positive-world io event: {event:?}"),
         }
     }

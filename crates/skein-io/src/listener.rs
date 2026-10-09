@@ -389,6 +389,7 @@ fn decode(io: &mut Io, landed: Landed) -> Happened {
         | Purpose::Spawn
         | Purpose::Wait
         | Purpose::Signal
+        | Purpose::Usage { .. }
         | Purpose::ReadSignal
         | Purpose::PipeRead
         | Purpose::PipeWrite => {

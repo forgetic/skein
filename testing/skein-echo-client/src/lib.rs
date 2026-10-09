@@ -498,6 +498,7 @@ fn owner(event: &io::Event) -> u32 {
         | io::Event::Accepted { .. }
         | io::Event::Spawned { .. }
         | io::Event::Exited { .. }
+        | io::Event::Usage { .. }
         | io::Event::Shutdown { .. } => unreachable!("the client listens to no one and spawns no child"),
     };
     u32::try_from(owner.raw()).expect("an owner token is a connection's index")

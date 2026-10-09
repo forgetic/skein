@@ -104,6 +104,7 @@ impl Driver {
                 | Event::Accepted { .. }
                 | Event::Connecting { .. }
                 | Event::Connected { .. }
+                | Event::Usage { .. }
                 | Event::Shutdown { .. } => panic!("unexpected event in {what}: {event:?}"),
             }
         }
@@ -381,6 +382,13 @@ fn a_slab_full_of_children_and_pipes_with_each_signal_in_flight_fits_the_bound()
             flights.push(submit);
         }
     }
+    meter.start();
+    skein_io::down(&mut io, &env, Request::Usage { owner: Token::new(99) }, &mut submissions);
+    most = most.max(meter.check(meter.end(), bound, &"process usage beside full entity slab"));
+    while let Some(submit) = submissions.pop() {
+        flights.push(submit);
+    }
+    assert_eq!(flights.iter().filter(|submit| matches!(submit.kind, Op::Usage)).count(), 1);
     assert_eq!(io.sockets(), limits.sockets, "every child and pipe occupies an actual entity slot");
     assert_eq!(flights.iter().filter(|submit| matches!(submit.kind, Op::Signal { .. })).count(), 4);
     assert_eq!(flights.iter().filter(|submit| matches!(submit.kind, Op::Wait { .. })).count(), 4);

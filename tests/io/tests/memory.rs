@@ -104,6 +104,7 @@ impl Driver {
                 | Event::Stream { .. }
                 | Event::Spawned { .. }
                 | Event::Exited { .. }
+                | Event::Usage { .. }
                 | Event::Shutdown { .. }
                 | Event::Failed { .. }
                 | Event::Closed { .. }) => {

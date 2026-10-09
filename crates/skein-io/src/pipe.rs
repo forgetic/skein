@@ -238,6 +238,7 @@ pub(crate) fn landed(
         | Purpose::Spawn
         | Purpose::Wait
         | Purpose::Signal
+        | Purpose::Usage { .. }
         | Purpose::ReadSignal => unreachable!("a pipe only reads, writes, cancels and closes"),
     }
     progress(pipe, id, env, tables, up, subs);

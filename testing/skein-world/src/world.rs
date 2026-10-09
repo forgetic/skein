@@ -274,9 +274,27 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
     /// faults changes the simulator from that batch onward, while `None`
     /// keeps its current configuration. Records and their order are untouched.
     #[must_use]
-    pub fn run_with_faults<F>(mut self, mut faults: F) -> Outcome<P, M>
+    pub fn run_with_faults<F>(self, faults: F) -> Outcome<P, M>
     where
         F: FnMut(usize, Time, &Queue<skein_io::kernel::Submit>) -> Option<skein_sim::Faults>,
+    {
+        self.run_inner(faults, |_, _, _| {})
+    }
+
+    /// Sets scenario-owned model inputs, such as per-process resource usage,
+    /// between iterations. Hosts and their records remain unchanged.
+    #[must_use]
+    pub fn run_with_inputs<F>(self, inputs: F) -> Outcome<P, M>
+    where
+        F: FnMut(&mut Sim, &[Pid], &[P]),
+    {
+        self.run_inner(|_, _, _| None, inputs)
+    }
+
+    fn run_inner<F, I>(mut self, mut faults: F, mut inputs: I) -> Outcome<P, M>
+    where
+        F: FnMut(usize, Time, &Queue<skein_io::kernel::Submit>) -> Option<skein_sim::Faults>,
+        I: FnMut(&mut Sim, &[Pid], &[P]),
     {
         let mut iterations: u32 = 0;
         loop {
@@ -290,6 +308,7 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
             }
             let now = self.sim.now();
             let wall = self.sim.wall();
+            inputs(&mut self.sim, &self.pids, &self.procs);
             self.referee.act(now, &mut self.procs);
             self.deliver_signals();
             let mut at = 0;

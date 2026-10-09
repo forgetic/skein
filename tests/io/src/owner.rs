@@ -386,7 +386,11 @@ impl Owner {
     /// Takes one event io told.
     pub fn on(&mut self, now: Time, event: Event, directory: &mut Directory, requests: &mut VecDeque<Request>) {
         match event {
-            Event::Output { .. } | Event::Spawned { .. } | Event::Exited { .. } | Event::Shutdown { .. } => {
+            Event::Output { .. }
+            | Event::Spawned { .. }
+            | Event::Exited { .. }
+            | Event::Usage { .. }
+            | Event::Shutdown { .. } => {
                 unreachable!("the socket world spawns no child")
             }
             Event::Listening { owner, listener, addr } => {

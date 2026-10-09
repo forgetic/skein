@@ -220,6 +220,7 @@ pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &
         | Purpose::Shutdown
         | Purpose::Discard
         | Purpose::ReadSignal
+        | Purpose::Usage { .. }
         | Purpose::PipeRead
         | Purpose::PipeWrite
         | Purpose::Cancel(_) => unreachable!("a child only spawns, waits, signals and closes"),

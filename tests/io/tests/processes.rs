@@ -38,3 +38,16 @@ fn the_group_story_replays_its_actual_kernel_trace() {
     assert_eq!(first.heap, second.heap);
     assert_ne!(first.trace, run(8, chaos(), Story::SignalExited, Memory::Checked).trace);
 }
+
+#[test]
+fn a_childs_usage_joins_the_childrens_only_at_its_close() {
+    for seed in 0..4 {
+        for config in [Config::calm(), chaos()] {
+            let outcome = skein_io_world::usage::run(seed, config, Memory::Checked);
+            outcome.procs[0].check(true);
+            assert!(
+                outcome.heap.as_ref().expect("memory checked").iter().all(|(peak, bound)| *peak > 0 && peak <= bound)
+            );
+        }
+    }
+}

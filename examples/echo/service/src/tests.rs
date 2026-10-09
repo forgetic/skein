@@ -312,5 +312,5 @@ fn the_worst_case_is_the_sum_of_the_layers_and_the_queues() {
     assert!(wider > total, "and grow with their capacity");
     let huge = skein_io::Limits { sockets: u32::MAX, ..limits.io };
     assert_eq!(worst_case(&Limits { io: huge, ..limits }), None, "past a u64");
-    assert_eq!(operations(&limits), Some(16), "four operations a socket");
+    assert_eq!(operations(&limits), Some(17), "four operations an entity and one process usage slot");
 }

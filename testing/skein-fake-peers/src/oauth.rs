@@ -225,6 +225,7 @@ impl Peer {
             | io::Event::Connected { .. }
             | io::Event::Spawned { .. }
             | io::Event::Exited { .. }
+            | io::Event::Usage { .. }
             | io::Event::Shutdown { .. } => {
                 panic!("issuer only listens and serves classic byte streams");
             }

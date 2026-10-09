@@ -130,3 +130,15 @@ fn a_pipe_output_keeps_the_pipe_face_at_startup() {
     drop(input);
     assert!(child.wait().expect("cat ends at pipe EOF").success());
 }
+
+#[test]
+fn a_childs_cpu_and_peak_join_the_reaped_childrens_usage_at_close() {
+    use skein_io_world::usage::{Judge, Process};
+    use std::os::unix::ffi::OsStrExt;
+    let root = skein_shell::open_root(std::path::Path::new("/tmp")).expect("startup root");
+    let program = std::path::Path::new(env!("CARGO_BIN_EXE_io_process_fixture"));
+    let mut world = skein_world::real::World::new(Judge { simulated: false });
+    world.spawn_with_fds(vec![root], || Process::new(root, program.as_os_str().as_bytes()));
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    outcome.procs[0].check(false);
+}

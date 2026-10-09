@@ -427,6 +427,7 @@ impl World {
                 | IoRequest::Reject { .. }
                 | IoRequest::Output { .. }
                 | IoRequest::Spawn { .. }
+                | IoRequest::Usage { .. }
                 | IoRequest::Signal { .. }) => panic!("unexpected io {other:?}"),
             }
         }

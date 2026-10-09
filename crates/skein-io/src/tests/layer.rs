@@ -76,9 +76,9 @@ fn a_completion_of_an_operation_completed_and_reclaimed_is_a_bug() {
 }
 
 #[test]
-fn the_ring_is_four_operations_per_socket_and_the_worst_case_grows_with_every_limit() {
+fn the_ring_has_four_operations_per_entity_and_one_usage_slot() {
     let base = limits();
-    assert_eq!(operations(&base), Some(8));
+    assert_eq!(operations(&base), Some(9));
     let at = worst_case(&base).expect("tiny limits fit a u64");
     for bigger in [
         Limits { sockets: 3, ..base },
@@ -121,4 +121,39 @@ fn every_limit_of_zero_but_the_sockets_is_unusable() {
         assert!(!unusable.is_usable(), "{unusable:?}");
     }
     assert!(Limits { sockets: 0, backlog: 0, close_timeout: Duration::ZERO, ..base }.is_usable());
+}
+
+#[test]
+fn usage_has_one_owner_terminal_and_no_entity() {
+    for result in [Ok(Done::Usage(crate::kernel::Usage::ZERO)), Err(crate::kernel::Error::Other(5))] {
+        let mut rig = Rig::new(Limits { sockets: 0, ..limits() });
+        let read = rig.down(Request::Usage { owner: owner(7) }).take(Kind::Usage);
+        assert_eq!(rig.io.sockets(), 0);
+        assert_eq!(read.kind, Op::Usage);
+        let measured = match result {
+            Ok(Done::Usage(usage)) => crate::Measured::Read(usage),
+            Err(_) => crate::Measured::Unread,
+            _ => unreachable!(),
+        };
+        assert_eq!(rig.complete(read, result).events, [Event::Usage { owner: owner(7), usage: measured }]);
+        rig.empty();
+    }
+}
+
+#[test]
+#[should_panic(expected = "one Usage request in flight")]
+fn a_second_usage_in_flight_is_a_bug() {
+    let mut rig = Rig::new(limits());
+    let _read = rig.down(Request::Usage { owner: owner(7) });
+    let _other = rig.down(Request::Usage { owner: owner(8) });
+}
+
+#[test]
+fn usage_can_repeat_in_the_same_iteration_before_flights_reclaim() {
+    let mut rig = Rig::new(Limits { sockets: 0, ..limits() });
+    for token in 0..2 {
+        let read = rig.down(Request::Usage { owner: owner(token) }).take(Kind::Usage);
+        assert_eq!(rig.complete(read, Ok(Done::Usage(crate::kernel::Usage::ZERO))).events.len(), 1);
+    }
+    rig.empty();
 }

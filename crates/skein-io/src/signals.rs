@@ -99,6 +99,7 @@ pub(crate) fn landed(
         | Purpose::Spawn
         | Purpose::Wait
         | Purpose::Signal
+        | Purpose::Usage { .. }
         | Purpose::PipeRead
         | Purpose::PipeWrite => unreachable!("a signal source only reads, cancels and closes"),
     }

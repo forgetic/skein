@@ -162,6 +162,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
                 | IoRequest::Reject { .. }
                 | IoRequest::Output { .. }
                 | IoRequest::Spawn { .. }
+                | IoRequest::Usage { .. }
                 | IoRequest::Signal { .. }) => panic!("unexpected io request: {other:?}"),
             }
         }

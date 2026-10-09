@@ -28,6 +28,14 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Some("usage") => {
+            let mut accumulator = 1_u64;
+            for _ in 0..2_000_000 {
+                accumulator = std::hint::black_box(accumulator.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1));
+            }
+            std::hint::black_box(accumulator);
+            ExitCode::SUCCESS
+        }
         Some("exit") => {
             let code = args.next().expect("exit code").parse::<u8>().expect("numeric exit code");
             ExitCode::from(code)

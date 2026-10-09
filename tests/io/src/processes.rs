@@ -153,6 +153,7 @@ impl Process {
             | Event::Accepted { .. }
             | Event::Connecting { .. }
             | Event::Connected { .. }
+            | Event::Usage { .. }
             | Event::Shutdown { .. } => panic!("unexpected process event: {event:?}"),
         }
     }

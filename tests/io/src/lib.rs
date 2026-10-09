@@ -26,4 +26,5 @@ pub mod owner;
 pub mod processes;
 pub mod referee;
 pub mod scenarios;
+pub mod usage;
 pub mod world;

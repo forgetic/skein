@@ -1,7 +1,8 @@
 //! io's state and its entry points (io.md, 2): the slab of sockets, the
 //! operations in flight, the close deadlines, the ready list and the
-//! refusals; `resume`, `up`, `fire` and `down`, which the loop calls in that
-//! order within an iteration, and `Io::reclaim` at its end.
+//! refusals and one independent process usage flight (io.md, section 6.1).
+//! `resume`, `up`, `fire` and `down` run in that order within an iteration,
+//! and `Io::reclaim` runs at its end. The layer never interprets CPU use.
 
 use skein_lib::stream::{Down, OutputDown};
 use skein_lib::{Deadlines, Duration, Env, Id, Queue, Set, Slab, Time, Token};
@@ -11,7 +12,7 @@ use crate::limits::{self, Limits};
 use crate::listener::{self, Listener};
 use crate::pipe::{self, Pipe};
 use crate::process::{self, Child};
-use crate::records::{Error, Event, Request};
+use crate::records::{Error, Event, Measured, Request};
 use crate::signals::{self, Signals};
 use crate::stream::{self, Stream};
 
@@ -46,12 +47,14 @@ pub(crate) struct Tables {
     pub(crate) refused: Queue<Token>,
     /// Accepts armed in this iteration, against `Limits::accepts`.
     pub(crate) armed: u32,
+    /// The process resource read, independently of entity admission.
+    usage: Option<Id<Flight>>,
 }
 
-/// An operation in flight: the entity it is for, and what for.
+/// An operation in flight: its purpose and its entity, absent for process usage.
 #[derive(Debug)]
 pub(crate) struct Flight {
-    pub(crate) entity: Id<Entity>,
+    pub(crate) entity: Option<Id<Entity>>,
     pub(crate) purpose: Purpose,
 }
 
@@ -72,6 +75,7 @@ pub(crate) enum Purpose {
     Spawn,
     Wait,
     Signal,
+    Usage { owner: Token },
     ReadSignal,
     PipeRead,
     PipeWrite,
@@ -126,6 +130,7 @@ impl Io {
                 ready: Ready::with_capacity(limits.sockets),
                 refused: Queue::with_capacity(limits.refusals),
                 armed: 0,
+                usage: None,
             },
         }
     }
@@ -272,7 +277,7 @@ impl Tables {
     ) -> Id<Flight> {
         let flight = self
             .flights
-            .insert(Flight { entity, purpose })
+            .insert(Flight { entity: Some(entity), purpose })
             .expect("the operation table holds twice the most an iteration has in flight");
         subs.push(Submit { op: flight.token(), kind: op });
         flight
@@ -377,6 +382,73 @@ pub fn up(io: &mut Io, env: &Env<Limits>, complete: Complete, up: &mut Queue<Eve
     let flight = Id::<Flight>::from_token(op);
     let Flight { entity, purpose } = *io.tables.flights.get(flight).expect("a completion names an operation in flight");
     io.tables.flights.retire(flight);
+    match purpose {
+        Purpose::Usage { owner } => {
+            assert_eq!(io.tables.usage.take(), Some(flight), "one process usage operation");
+            let usage = match result {
+                Ok(Done::Usage(usage)) => Measured::Read(usage),
+                Err(kernel::Error::Other(_)) => Measured::Unread,
+                Ok(
+                    Done::Nothing
+                    | Done::Count(_)
+                    | Done::Fd(_)
+                    | Done::Accepted { .. }
+                    | Done::Bound(_)
+                    | Done::Stat(_)
+                    | Done::Spawned { .. }
+                    | Done::Exit(_)
+                    | Done::ServiceSignal(_),
+                ) => unreachable!("Usage answers its record (kernel.md, section 6.3)"),
+                Err(
+                    kernel::Error::Refused
+                    | kernel::Error::Reset
+                    | kernel::Error::BrokenPipe
+                    | kernel::Error::NotConnected
+                    | kernel::Error::AddressInUse
+                    | kernel::Error::AddressNotAvailable
+                    | kernel::Error::Unreachable
+                    | kernel::Error::TimedOut
+                    | kernel::Error::TooManyOpenFiles
+                    | kernel::Error::NoBufferSpace
+                    | kernel::Error::InvalidArgument
+                    | kernel::Error::Cancelled
+                    | kernel::Error::TooLate
+                    | kernel::Error::NotFound
+                    | kernel::Error::Exists
+                    | kernel::Error::NotADirectory
+                    | kernel::Error::IsADirectory
+                    | kernel::Error::NotEmpty
+                    | kernel::Error::Permission
+                    | kernel::Error::NoSpace
+                    | kernel::Error::ReadOnly
+                    | kernel::Error::TooManyLinks
+                    | kernel::Error::NameTooLong
+                    | kernel::Error::Escape
+                    | kernel::Error::NotAFile,
+                ) => unreachable!("Usage fails only Other (kernel.md, section 6.3)"),
+            };
+            up.push(Event::Usage { owner, usage });
+            return;
+        }
+        Purpose::Socket
+        | Purpose::Bind
+        | Purpose::Listen
+        | Purpose::Accept
+        | Purpose::Connect
+        | Purpose::Recv
+        | Purpose::Send
+        | Purpose::Shutdown
+        | Purpose::Close
+        | Purpose::Discard
+        | Purpose::Spawn
+        | Purpose::Wait
+        | Purpose::Signal
+        | Purpose::ReadSignal
+        | Purpose::PipeRead
+        | Purpose::PipeWrite
+        | Purpose::Cancel(_) => {}
+    }
+    let entity = entity.expect("every entity operation has its entity");
     let landed = Landed { entity, flight, purpose, kind, result };
     match io.entities.get(entity).expect("an entity outlives its operations") {
         Entity::Stream(_) => {
@@ -441,6 +513,16 @@ pub fn down(io: &mut Io, env: &Env<Limits>, request: Request, subs: &mut Queue<S
         Request::Output { stream, down } => output_request(io, env, stream, down, subs),
         Request::Spawn { owner, spawn } => process::spawn(io, owner, spawn, subs),
         Request::Signal { child, signal, to } => process::signal(io, child, signal, to, subs),
+        Request::Usage { owner } => {
+            assert!(io.tables.usage.is_none(), "one Usage request in flight (io.md, section 6.1)");
+            let flight = io
+                .tables
+                .flights
+                .insert(Flight { entity: None, purpose: Purpose::Usage { owner } })
+                .expect("one operation slot reserved for process usage");
+            io.tables.usage = Some(flight);
+            subs.push(Submit { op: flight.token(), kind: Op::Usage });
+        }
         Request::Close { entity } => close(io, env, entity, false, subs),
         Request::Abort { entity } => close(io, env, entity, true, subs),
     }
