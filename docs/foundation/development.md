@@ -214,16 +214,19 @@ other side never reads half a file.
 
 ### 3.6 The kit
 
-skein's `scripts/dev/` holds the tools every repository uses. `plan check
---fix` links them into `~/.local/bin`, so they are on every agent's
-`PATH`. They read `DEV_ROOT` (default `~/src/rust`), `DEV_TMP`
-(`$DEV_ROOT/tmp`) and `DEV_REPOS` (`skein smith temper`).
+skein's `scripts/dev/` holds the tools every repository uses, and
+`scripts/dev/workspace/` the workspace's own files:
+`~/src/rust/AGENTS.md`, its `CLAUDE.md`, and the coordinator's Codex
+profile. `plan check --fix` links the tools into `~/.local/bin`, so they
+are on every agent's `PATH`, and the files into place. The tools read
+`DEV_ROOT` (default `~/src/rust`), `DEV_TMP` (`$DEV_ROOT/tmp`) and
+`DEV_REPOS` (`skein smith temper`).
 
 | Tool | Does |
 |---|---|
 | `heavy [--gate] [--tail N] command…` | queues a heavy command, waits, prints the tail of its log, exits with its status (section 11) |
 | `land [--docs] [--local] [--gate COMMAND] [--tries N]` | lands the current branch (section 9); `LAND_LOCK` names the lock for `--local` |
-| `plan check [--fix] PLAN_DIR` | checks the machine and the repositories before a run (section 6) |
+| `plan check [--fix] [PLAN_DIR]` | checks the machine and the repositories, and the plan when given one (sections 6 and 12) |
 | `plan claim PLAN_DIR`, `plan release` | start and end the machine's run |
 | `plan worktree [--remove] REPOSITORY NAME` | a session's worktree, at `origin/main` |
 | `plan set STEP KEY=VALUE…` | adds or changes a ledger row |
@@ -916,6 +919,9 @@ that machine.
   keeps a second machine from claiming it (section 6).
 - **The designer of a run works on the run's machine,** where its files
   are.
+- **A new machine** clones the repositories into `~/src/rust/` and runs
+  `skein/scripts/dev/plan check --fix`. It links the tools and the
+  workspace's files, sets up the queue, and names what is still missing.
 - **Shared:** the GitHub repositories, and with them the designs, plans and
   `STATUS.md`. **Per machine:** runs, the queue, the cache, worktrees and
   credentials.

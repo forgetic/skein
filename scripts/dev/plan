@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A plan's run on this machine (development.md, sections 6, 7 and 10).
 #
-#   plan check [--fix] PLAN_DIR   is the machine ready to run the plan?
+#   plan check [--fix] [PLAN_DIR] is the machine ready (to run the plan)?
 #   plan claim PLAN_DIR           make it this machine's active run
 #   plan release                  end the active run
 #   plan worktree REPO NAME       a session's worktree, at origin/main
@@ -57,12 +57,51 @@ locate() {
 check() {
     local fix=0 failed=0
     [[ ${1:-} == --fix ]] && { fix=1; shift; }
-    locate "${1:?plan directory}"
     ok() { echo "ok    $*"; }
     warn() { echo "warn  $*"; }
     fail() { echo "FAIL  $*"; failed=1; }
+    local kit
+    kit=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    (($#)) && check_plan "$1"
 
-    # The plan: complete, committed and on origin.
+    # Every primary checkout: on main, clean, and equal to origin's main.
+    local repo dir ahead behind
+    for repo in $repos; do
+        dir=$root/$repo
+        [[ -d $dir/.git ]] || { warn "$repo: no checkout at $dir"; continue; }
+        if [[ $(git -C "$dir" symbolic-ref --quiet --short HEAD || true) != main ]]; then
+            fail "$repo: primary checkout is not on main"
+            continue
+        fi
+        [[ -z $(git -C "$dir" status --porcelain) ]] ||
+            fail "$repo: primary checkout has changes"
+        git -C "$dir" fetch --quiet origin || { fail "$repo: cannot fetch origin"; continue; }
+        read -r behind ahead < <(git -C "$dir" rev-list --left-right --count origin/main...main)
+        if ((ahead || behind)); then
+            fail "$repo: main is $ahead ahead and $behind behind origin/main"
+        else
+            ok "$repo: main is origin/main"
+        fi
+    done
+
+    # One run per machine.
+    if [[ ! -f $active ]]; then
+        ok "no run is active"
+    elif [[ $(sed -n 1p "$active") == "${name:-}" ]]; then
+        ok "this run is the active one"
+    elif [[ -n ${name:-} ]]; then
+        fail "another run is active: $(sed -n 1p "$active")"
+    else
+        warn "a run is active: $(sed -n 1p "$active")"
+    fi
+
+    check_machine
+    return "$failed"
+}
+
+# The plan: complete, committed, on origin, and ready in STATUS.md.
+check_plan() {
+    locate "$1"
     local file
     git -C "$top_dir" fetch --quiet origin || fail "$project: cannot fetch origin"
     for file in README.md code-organization.md; do
@@ -86,42 +125,17 @@ check() {
     ready | "active on $(hostname)"*) ok "STATUS.md says $state" ;;
     *) fail "STATUS.md says $state" ;;
     esac
+}
 
-    # Every primary checkout: on main, clean, and equal to origin's main.
-    local repo dir ahead behind
-    for repo in $repos; do
-        dir=$root/$repo
-        [[ -d $dir/.git ]] || { warn "$repo: no checkout at $dir"; continue; }
-        if [[ $(git -C "$dir" symbolic-ref --quiet --short HEAD || true) != main ]]; then
-            fail "$repo: primary checkout is not on main"
-            continue
-        fi
-        [[ -z $(git -C "$dir" status --porcelain) ]] ||
-            fail "$repo: primary checkout has changes"
-        git -C "$dir" fetch --quiet origin || { fail "$repo: cannot fetch origin"; continue; }
-        read -r behind ahead < <(git -C "$dir" rev-list --left-right --count origin/main...main)
-        if ((ahead || behind)); then
-            fail "$repo: main is $ahead ahead and $behind behind origin/main"
-        else
-            ok "$repo: main is origin/main"
-        fi
-    done
-
-    # One run per machine.
-    if [[ -f $active && $(sed -n 1p "$active") != "$name" ]]; then
-        fail "another run is active: $(sed -n 1p "$active")"
-    else
-        ok "no other run is active"
-    fi
-
+# The tools, the workspace's files, the queue and room to work.
+check_machine() {
     # Tools.
     local tool
     for tool in git jq pueue flock cargo; do
         command -v "$tool" >/dev/null && ok "has $tool" || fail "no $tool"
     done
     cargo nextest --version >/dev/null 2>&1 && ok "has cargo-nextest" || fail "no cargo-nextest"
-    local kit bin=$HOME/.local/bin
-    kit=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    local bin=$HOME/.local/bin
     for tool in heavy land plan; do
         if [[ $(readlink -f "$bin/$tool" 2>/dev/null) == "$kit/$tool" ]]; then
             ok "$tool is on PATH"
@@ -131,6 +145,34 @@ check() {
             fail "$bin/$tool does not link to $kit/$tool (--fix links it)"
         fi
     done
+
+    # The workspace's own files live in skein, beside the tools.
+    local pair link target
+    for pair in "$root/AGENTS.md=AGENTS.md" "$root/CLAUDE.md=CLAUDE.md" \
+        "${CODEX_HOME:-$HOME/.codex}/coordinator.config.toml=coordinator.config.toml"; do
+        link=${pair%%=*}
+        target=$kit/workspace/${pair#*=}
+        if [[ $(readlink -f "$link" 2>/dev/null) == "$target" ]]; then
+            ok "$link is skein's"
+        elif [[ -e $link && ! -L $link ]]; then
+            fail "$link is a file of its own; replace it with a link to $target"
+        elif ((fix)); then
+            mkdir -p "$(dirname "$link")" && ln -sfn "$target" "$link" && ok "linked $link"
+        else
+            fail "$link does not link to $target (--fix links it)"
+        fi
+    done
+
+    # Cargo reaches the workspace's repositories on GitHub.
+    if grep -qs 'git\.ekanayaka\.io' "$root"/*/Cargo.toml; then
+        git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null |
+            grep -q ' https://git\.ekanayaka\.io/ai/$' &&
+            ok "git rewrites git.ekanayaka.io to GitHub" ||
+            fail "Cargo.toml names git.ekanayaka.io: git config --global url.git@github.com:forgetic/.insteadOf https://git.ekanayaka.io/ai/"
+    fi
+    grep -qs 'git-fetch-with-cli *= *true' "$HOME/.cargo/config.toml" &&
+        ok "cargo fetches with git" ||
+        fail "cargo must fetch with git: [net] git-fetch-with-cli = true in ~/.cargo/config.toml"
     if grep -qs kache "$HOME/.cargo/config.toml"; then
         systemctl --user is-active --quiet kache && ok "kache is running" ||
             warn "kache is configured but not running"
@@ -202,7 +244,6 @@ check() {
     grep -qs max_threads "$profile" && ok "Codex profile coordinator sets max_threads" ||
         fail "no Codex profile at $profile setting [agents] max_threads"
 
-    return "$failed"
 }
 
 claim() {
