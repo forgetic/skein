@@ -204,9 +204,9 @@ fn cancel_while_connecting_waits_for_socket_settlement() {
 
 #[test]
 fn connect_and_whole_deadlines_fail_unsent_calls_once() {
-    for timed in [
-        Deadlines { connect: Some(Duration::from_secs(1)), ..Deadlines::none() },
-        Deadlines { whole: Some(Duration::from_secs(1)), ..Deadlines::none() },
+    for (timed, phase) in [
+        (Deadlines { connect: Some(Duration::from_secs(1)), ..Deadlines::none() }, skein_llm::Phase::Connect),
+        (Deadlines { whole: Some(Duration::from_secs(1)), ..Deadlines::none() }, skein_llm::Phase::Whole),
     ] {
         let mut component = component();
         let mut up = Queue::with_capacity(MAX_OUT.above);
@@ -235,7 +235,7 @@ fn connect_and_whole_deadlines_fail_unsent_calls_once() {
         match up.pop() {
             Some(Event::Failed { call, failure, evidence, .. }) => {
                 assert_eq!(call, Token::new(7));
-                assert_eq!(failure, skein_llm::Failure::TimedOut);
+                assert_eq!(failure, skein_llm::Failure::TimedOut { phase });
                 assert_eq!(evidence, skein_llm::client::Evidence::Unsent);
             }
             other => panic!("expected timeout, got {other:?}"),

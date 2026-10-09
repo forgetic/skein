@@ -505,7 +505,20 @@ pub fn abort(
     below: &mut Queue<Down>,
 ) {
     check_env(client, env);
-    fail(client, failure, bytes::copy_of(b"call aborted by its owner"), above);
+    let detail = match failure {
+        Failure::TimedOut { .. } => Box::new([]),
+        Failure::Unauthorized
+        | Failure::Exhausted { .. }
+        | Failure::RateLimited { .. }
+        | Failure::Overloaded
+        | Failure::Unavailable
+        | Failure::ContextTooLong
+        | Failure::Invalid
+        | Failure::Limit { .. }
+        | Failure::Protocol
+        | Failure::Cancelled => bytes::copy_of(b"call aborted by its owner"),
+    };
+    fail(client, failure, detail, above);
     closing(client, env, above, below);
 }
 
@@ -903,6 +916,7 @@ fn fail(client: &mut Client, failure: Failure, detail: Box<[u8]>, above: &mut Qu
     client.content = None;
     let detail = match failure {
         Failure::Limit { which, bound } => openai::limit_detail(which, bound),
+        Failure::TimedOut { phase } => openai::clip_detail(timeout_detail(phase), client.limits.dialect.detail_bytes),
         Failure::Unauthorized
         | Failure::Exhausted { .. }
         | Failure::RateLimited { .. }
@@ -911,11 +925,21 @@ fn fail(client: &mut Client, failure: Failure, detail: Box<[u8]>, above: &mut Qu
         | Failure::ContextTooLong
         | Failure::Invalid
         | Failure::Protocol
-        | Failure::Cancelled
-        | Failure::TimedOut => detail,
+        | Failure::Cancelled => detail,
     };
     let detail = openai::clip_detail(&detail, client.limits.dialect.detail_bytes);
     above.push(Event::Failed { owner: client.owner, failure, evidence: client.evidence, detail });
+}
+
+/// The deadline's name survives owner aborts, within the configured detail cap.
+fn timeout_detail(phase: crate::Phase) -> &'static [u8] {
+    match phase {
+        crate::Phase::Connect => b"timed out connecting the socket",
+        crate::Phase::Handshake => b"timed out completing the TLS handshake",
+        crate::Phase::Head => b"timed out waiting for the response head",
+        crate::Phase::Idle => b"timed out waiting for a response event",
+        crate::Phase::Whole => b"timed out waiting for the whole call",
+    }
 }
 
 fn error_end(client: &mut Client, env: &Env<Limits>, above: &mut Queue<Event>) {

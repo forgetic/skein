@@ -33,7 +33,7 @@ fn closing_and_stalling_at_seeded_turns_never_duplicates_outcomes() {
         }
         match seed % 3 {
             0 => world.request(client::Request::Cancel),
-            1 => world.abort(Failure::TimedOut),
+            1 => world.abort(Failure::TimedOut { phase: skein_llm::Phase::Whole }),
             2 => world.settle(),
             _ => unreachable!(),
         }

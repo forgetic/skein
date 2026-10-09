@@ -322,14 +322,18 @@ impl Connection {
             Phase::Ready | Phase::Closing => return,
             Phase::Connecting | Phase::Handshaking | Phase::Head | Phase::Streaming => {}
         }
-        // Keep the expired phase at the abort boundary; skein-llm's vocabulary
-        // adds its typed timed-out phase in reliability increment 4.12.
-        match due {
-            Due::Connect | Due::Handshake | Due::Head | Due::Idle | Due::Whole => {}
+        let phase = match due {
+            Due::Call(phase) => phase,
             Due::Keep => unreachable!("keep runs only on an idle connection"),
-        }
+        };
         let llm_env = Env { now: env.now, wall: env.wall, limits: self.llm_limits };
-        llm::abort(&mut self.llm, &llm_env, skein_llm::Failure::TimedOut, &mut self.llm_events, &mut self.plain_down);
+        llm::abort(
+            &mut self.llm,
+            &llm_env,
+            skein_llm::Failure::TimedOut { phase },
+            &mut self.llm_events,
+            &mut self.plain_down,
+        );
     }
 
     #[expect(clippy::too_many_lines, reason = "the bounded routing pass covers both child machines")]

@@ -6,7 +6,7 @@ use skein_io::kernel::Addr;
 use skein_io::{Event as IoEvent, Request as IoRequest};
 use skein_lib::stream::{Down, Up};
 use skein_lib::{Duration, Env, List, Queue, Time, Token};
-use skein_llm::{Failure, client::Evidence};
+use skein_llm::{Failure, Phase, client::Evidence};
 use skein_llm_connection::{Component, Deadlines, Endpoint, Event, Limits, MAX_OUT, Request};
 use skein_llm_connection_world::plaintext::Wire;
 use skein_tls_world::{drive::Wire as TlsWire, pki, server::Server};
@@ -278,10 +278,20 @@ fn complete_request(bytes: &[u8]) -> bool {
 fn assert_failure(world: &World, failure: Failure, evidence: Evidence) {
     assert_eq!(world.terminals.len(), 1);
     match &world.terminals[0] {
-        Event::Failed { call, failure: got, evidence: seen, .. } => {
+        Event::Failed { call, failure: got, evidence: seen, detail } => {
             assert_eq!(*call, Token::new(7));
             assert_eq!(*got, failure);
             assert_eq!(*seen, evidence);
+            if let Failure::TimedOut { phase } = failure {
+                let expected: &[u8] = match phase {
+                    Phase::Connect => b"timed out connecting the socket",
+                    Phase::Handshake => b"timed out completing the TLS handshake",
+                    Phase::Head => b"timed out waiting for the response head",
+                    Phase::Idle => b"timed out waiting for a response event",
+                    Phase::Whole => b"timed out waiting for the whole call",
+                };
+                assert_eq!(detail.as_ref(), expected);
+            }
         }
         other @ (Event::Closed
         | Event::Refused { .. }
@@ -297,7 +307,7 @@ fn run_slow_head_expires_after_first_request_byte(seed: u64) -> World {
     world.run_until_request();
     assert_eq!(world.component.next_deadline(), Some(Time::from_nanos(1_000_000_000)));
     world.at(Time::from_nanos(1_000_000_000));
-    assert_failure(&world, Failure::TimedOut, Evidence::Unknown);
+    assert_failure(&world, Failure::TimedOut { phase: Phase::Head }, Evidence::Unknown);
     let env = world.env();
     world.component.down(&env, Request::Cancel { call: Token::new(7) }, &mut world.up, &mut world.io);
     for _ in 0_u32..1000 {
@@ -313,7 +323,7 @@ fn handshake_deadline_expires_before_any_request_bytes() {
     world.tick();
     assert_eq!(world.component.next_deadline(), Some(Time::from_nanos(1_000_000_000)));
     world.at(Time::from_nanos(1_000_000_000));
-    assert_failure(&world, Failure::TimedOut, Evidence::Unsent);
+    assert_failure(&world, Failure::TimedOut { phase: Phase::Handshake }, Evidence::Unsent);
 }
 
 fn run_cancel_before_a_provider_terminal_waits_for_socket_close(seed: u64) -> World {
@@ -347,7 +357,7 @@ fn run_idle_stall_expires_after_response_head(seed: u64) -> World {
     world.wire.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
     world.run_until_head();
     world.at(Time::from_nanos(1_000_000_000));
-    assert_failure(&world, Failure::TimedOut, Evidence::Response { status: 200 });
+    assert_failure(&world, Failure::TimedOut { phase: Phase::Idle }, Evidence::Response { status: 200 });
     world
 }
 
@@ -375,7 +385,7 @@ fn run_a_provider_ping_rearms_idle_without_consuming_next(seed: u64) -> World {
     world.component.fire(&at_one, &mut world.up, &mut world.io);
     assert!(world.up.is_empty(), "a ping extends the idle interval");
     world.at(Time::from_nanos(1_500_000_000));
-    assert_failure(&world, Failure::TimedOut, Evidence::Response { status: 200 });
+    assert_failure(&world, Failure::TimedOut { phase: Phase::Idle }, Evidence::Response { status: 200 });
     world
 }
 
@@ -444,7 +454,7 @@ fn run_a_slow_upload_keeps_its_head_deadline_alive_by_the_room_it_grants(seed: u
     assert!(complete_request(world.wire.received()));
     let deadline = world.component.next_deadline().expect("head still runs after upload");
     world.at(deadline);
-    assert_failure(&world, Failure::TimedOut, Evidence::Unknown);
+    assert_failure(&world, Failure::TimedOut { phase: Phase::Head }, Evidence::Unknown);
     world
 }
 
@@ -561,4 +571,45 @@ fn a_close_while_handshaking_lets_the_tls_call_complete_and_says_closed_last() {
     assert!(matches!(world.terminals.as_slice(), [Event::Completed { .. }]));
     assert!(!world.component.has_work());
     assert_eq!(world.component.next_deadline(), None);
+}
+
+#[test]
+fn provider_pings_keep_idle_alive_but_do_not_extend_the_whole_call() {
+    assert_replays(7, 8, |seed| {
+        let mut world = World::new(
+            Deadlines { idle: Some(Duration::from_secs(1)), whole: Some(Duration::from_secs(1)), ..Deadlines::none() },
+            seed,
+            false,
+        );
+        world.run_until_request();
+        world.wire.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
+        world.run_until_head();
+        world.now = Time::from_nanos(500_000_000);
+        let ping = b"data: {\"type\":\"ping\"}\n\n";
+        world.wire.write(format!("{:x}\r\n", ping.len()).as_bytes());
+        world.wire.write(ping);
+        world.wire.write(b"\r\n");
+        for _ in 0..1000 {
+            world.tick();
+        }
+        assert!(world.terminals.is_empty());
+        world.at(Time::from_nanos(1_000_000_000));
+        assert_failure(&world, Failure::TimedOut { phase: Phase::Whole }, Evidence::Response { status: 200 });
+        world.report()
+    });
+}
+
+#[test]
+fn a_connect_deadline_keeps_unsent_evidence_through_late_socket_settlement() {
+    for seed in [7, 8] {
+        let mut world =
+            World::new(Deadlines { connect: Some(Duration::from_secs(1)), ..Deadlines::none() }, seed, false);
+        let Some(IoRequest::Connect { owner, .. }) = world.io.pop() else { panic!("initial connect") };
+        world.owner = Some(owner);
+        world.at(Time::from_nanos(1_000_000_000));
+        assert_failure(&world, Failure::TimedOut { phase: Phase::Connect }, Evidence::Unsent);
+        let env = world.env();
+        world.component.up(&env, IoEvent::Connecting { owner, socket: Token::new(100) }, &mut world.up, &mut world.io);
+        let _settled = world.report();
+    }
 }

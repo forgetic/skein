@@ -21,14 +21,10 @@ pub(crate) enum Phase {
     Closed,
 }
 
-/// Which configured wait expired. All produce the client's timed-out failure.
+/// Which deadline passed: a call deadline or an idle connection keep.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Due {
-    Connect,
-    Handshake,
-    Head,
-    Idle,
-    Whole,
+    Call(skein_llm::Phase),
     Keep,
 }
 
@@ -100,15 +96,15 @@ impl Table {
 
     pub(crate) fn due(&self, now: Time) -> Option<Due> {
         if expired(self.connect, now) {
-            Some(Due::Connect)
+            Some(Due::Call(skein_llm::Phase::Connect))
         } else if expired(self.handshake, now) {
-            Some(Due::Handshake)
+            Some(Due::Call(skein_llm::Phase::Handshake))
         } else if expired(self.head, now) {
-            Some(Due::Head)
+            Some(Due::Call(skein_llm::Phase::Head))
         } else if expired(self.idle, now) {
-            Some(Due::Idle)
+            Some(Due::Call(skein_llm::Phase::Idle))
         } else if expired(self.whole, now) {
-            Some(Due::Whole)
+            Some(Due::Call(skein_llm::Phase::Whole))
         } else if expired(self.keep, now) {
             Some(Due::Keep)
         } else {
@@ -201,7 +197,7 @@ mod tests {
         table.arm(Phase::Streaming, Time::ZERO, Duration::from_secs(10));
         table.arm(Phase::Draining, Time::ZERO, Duration::from_secs(10));
         let later = Time::from_nanos(3_000_000_000);
-        assert_eq!(table.due(later), Some(Due::Idle));
+        assert_eq!(table.due(later), Some(Due::Call(skein_llm::Phase::Idle)));
         table.arm(Phase::Closing, later, Duration::from_secs(10));
         assert_eq!(table.next(), None);
         assert_eq!(table.due(later), None);

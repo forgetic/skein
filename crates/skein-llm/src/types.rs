@@ -258,6 +258,22 @@ pub enum Error {
     },
     Unsupported,
 }
+
+/// The owner's deadline that passed (llm.md, section 2.5; llm-connection.md, section 6).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Phase {
+    /// The socket did not connect in time.
+    Connect,
+    /// The TLS handshake did not finish in time.
+    Handshake,
+    /// No response head arrived before the peer's head deadline.
+    Head,
+    /// No response event, including pings, arrived before the idle deadline.
+    Idle,
+    /// The whole call, including its wait, exceeded the owner's deadline.
+    Whole,
+}
+
 /// The terminal outcome of an accepted call. Retry policy belongs to its owner.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Failure {
@@ -279,8 +295,10 @@ pub enum Failure {
     },
     Protocol,
     Cancelled,
-    /// The caller's timer expired and it aborted the call.
-    TimedOut,
+    /// The owner's named deadline passed and ended the accepted call.
+    TimedOut {
+        phase: Phase,
+    },
 }
 /// The wire dialect and HTTP destination; transport/TLS are caller-owned.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]

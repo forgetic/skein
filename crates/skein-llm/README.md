@@ -48,7 +48,8 @@ To drive one call:
    only after it settles. Cancellation ends with `Cancelled`, then `Closed`.
 
 The caller schedules deadlines using `waiting()`, and reports them through
-`abort(..., Failure::TimedOut, ...)`. There are no automatic retries; failures
+`abort(..., Failure::TimedOut { phase }, ...)`. The phase names connect, handshake,
+head, idle or whole. There are no automatic retries; failures
 include structured classification and evidence of whether the request may
 have reached the provider. Limits remain fixed across all entry points and
 connection reuse. Admission `Error::Limit` and active `Failure::Limit` carry

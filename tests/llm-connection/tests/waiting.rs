@@ -27,10 +27,9 @@ fn a_wait_past_its_whole_deadline_fails_unsent() {
     world.finish();
     assert_eq!(world.judge.failed, 1);
     assert!(
-        world
-            .events
-            .iter()
-            .any(|event| event.contains("call: Token(10)") && event.contains("Unsent") && event.contains("TimedOut")),
+        world.events.iter().any(|event| event.contains("call: Token(10)")
+            && event.contains("Unsent")
+            && event.contains("TimedOut { phase: Whole }")),
         "{:?}",
         world.events
     );

@@ -870,3 +870,32 @@ fn inconsistent_usage_on_the_wire_preserves_text_and_completed_terminal() {
         assert!(matches!(&*completion.content, [Block::Text { text, .. }] if text.as_ref() == b"kept"));
     }
 }
+
+#[test]
+fn owner_timeouts_keep_every_phase_and_clip_the_detail_without_repeating_a_terminal() {
+    for (phase, expected) in [
+        (skein_llm::Phase::Connect, b"timed out connecting the socket".as_slice()),
+        (skein_llm::Phase::Handshake, b"timed out completing the TLS handshake".as_slice()),
+        (skein_llm::Phase::Head, b"timed out waiting for the response head".as_slice()),
+        (skein_llm::Phase::Idle, b"timed out waiting for a response event".as_slice()),
+        (skein_llm::Phase::Whole, b"timed out waiting for the whole call".as_slice()),
+    ] {
+        for bound in [7, 128] {
+            let mut caps = limits();
+            caps.dialect.detail_bytes = bound;
+            let mut world = World::new(call(1), caps, text_response(false), 41);
+            let failure = Failure::TimedOut { phase };
+            world.abort(failure);
+            world.assert_once();
+            let [client::Event::Failed { failure: got, evidence, detail, .. }, ..] = world.seen.as_slice() else {
+                panic!("one owner timeout: {:?}", world.seen);
+            };
+            assert_eq!(*got, failure);
+            assert_eq!(*evidence, client::Evidence::Unsent);
+            assert_eq!(detail.as_ref(), &expected[..expected.len().min(usize::try_from(bound).unwrap())]);
+            world.abort(failure);
+            world.settle();
+            world.assert_once();
+        }
+    }
+}
