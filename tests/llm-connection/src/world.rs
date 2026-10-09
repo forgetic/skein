@@ -194,7 +194,7 @@ impl Peer {
         if let Some(event) = self.above.pop() {
             match event {
                 provider::Event::Domain(event) => fake::step(&mut self.domain, &domain_env, event, &mut self.replies),
-                provider::Event::Close | provider::Event::Closed => {}
+                provider::Event::Head { .. } | provider::Event::Close | provider::Event::Closed => {}
             }
         }
         if let Some(reply) = self.replies.pop() {

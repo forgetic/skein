@@ -439,6 +439,13 @@ impl Referee<Process> for Judge {
                                 );
                                 answers += 1;
                             }
+                            llm::Observation::Head { headers, .. } => {
+                                assert!(
+                                    headers.iter().any(|field| field.is(b"content-type")
+                                        && field.value.as_ref() == b"application/json")
+                                );
+                                assert!(headers.iter().any(|field| field.is(b"authorization")));
+                            }
                             llm::Observation::Accepted { .. } | llm::Observation::Closed { .. } => {}
                         }
                     }
@@ -552,7 +559,7 @@ pub fn run_with_shutdown(
             queue: 64,
             plaintext: 32_768,
             ciphertext: 32_768,
-            observations: calls * 4,
+            observations: calls * 5,
             observation_bytes: calls * 32_768,
         };
         let mut peer = llm::Peer::new(

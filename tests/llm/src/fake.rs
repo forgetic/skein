@@ -24,6 +24,10 @@ use skein_llm::{Call, Credential, Endpoint, Provider, client};
 /// sections 2–5; programming-model.md, section 6.3.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ObservationLimits {
+    /// Maximum actual request heads retained beside query observations.
+    pub heads: u32,
+    /// Maximum owned header wrappers, names and values in each retained head.
+    pub head_bytes: u64,
     /// Maximum currently retained Client event wrappers, supplied by the caller.
     /// Contract: docs/design/fake-llm.md, sections 2–5.
     pub events: u32,
@@ -75,6 +79,7 @@ pub fn extra_worst_case(
     let queues = Queue::<client::Event>::worst_case(client::MAX_OUT.above)?
         .checked_add(Queue::<Down>::worst_case(client::MAX_OUT.below)?)?
         .checked_add(Queue::<provider::Event>::worst_case(provider::MAX_UP)?)?
+        .checked_add(u64::from(provider::MAX_UP).checked_mul(provider::head_worst_case(&peer)?)?)?
         .checked_add(Queue::<Down>::worst_case(provider::MAX_DOWN)?)?
         .checked_add(Queue::<fake::Request>::worst_case(fake::MAX_OUT)?)?
         .checked_add(u64::from(fake::MAX_OUT).checked_mul(u64::from(config().answer_bytes))?)?;
@@ -99,6 +104,8 @@ pub fn extra_worst_case(
 
 fn observation_worst_case(observations: &ObservationLimits) -> Option<u64> {
     cells::<client::Event>(observations.events)?
+        .checked_add(cells::<Box<[skein_http::Header]>>(observations.heads)?)?
+        .checked_add(u64::from(observations.heads).checked_mul(observations.head_bytes)?)?
         .checked_add(u64::from(observations.events).checked_mul(observations.event_bytes)?)?
         .checked_add(cells::<api::Query>(observations.queries)?)?
         .checked_add(u64::from(observations.queries).checked_mul(observations.query_bytes)?)?
@@ -237,6 +244,8 @@ pub struct Exchange {
     pub machine: client::Client,
     pub seen: Vec<client::Event>,
     pub queries: Vec<api::Query>,
+    /// Actual ordered HTTP field names and values, before their decoded queries.
+    pub heads: Vec<Box<[skein_http::Header]>>,
     pub requests: Vec<u8>,
     pub responses: Vec<u8>,
     pub env: Env<client::Limits>,
@@ -417,6 +426,7 @@ impl Exchange {
             machine,
             seen: Vec::new(),
             queries: Vec::new(),
+            heads: Vec::new(),
             requests: Vec::new(),
             responses: Vec::new(),
             env: Env { now: Time::ZERO, wall: Wall::EPOCH, limits: bounds },
@@ -455,7 +465,7 @@ impl Exchange {
         assert_eq!(self.machine.waiting(), client::Waiting::Start, "observation ownership precedes Start");
         assert_eq!(self.ticks, 0, "observation ownership precedes progress");
         assert!(self.observations.is_none(), "observation limits are immutable");
-        assert!(self.seen.is_empty() && self.queries.is_empty() && self.pending.is_empty());
+        assert!(self.seen.is_empty() && self.queries.is_empty() && self.heads.is_empty() && self.pending.is_empty());
         assert!(self.requests.is_empty() && self.responses.is_empty());
         // Validate all container/payload products before reserving storage.
         observation_worst_case(&observations).expect("finite configured peer observation ownership");
@@ -474,6 +484,7 @@ impl Exchange {
         if let Some(observations) = self.observations {
             reserve(&mut self.seen, observations.events);
             reserve(&mut self.queries, observations.queries);
+            reserve(&mut self.heads, observations.heads);
             reserve(&mut self.pending, observations.pending);
             reserve(&mut self.requests, observations.request_bytes);
             reserve(&mut self.responses, observations.response_bytes);
@@ -551,6 +562,17 @@ impl Exchange {
         self.take();
     }
 
+    fn observe_head(&mut self, headers: Box<[skein_http::Header]>) {
+        if let Some(observations) = self.observations {
+            assert!(self.heads.len() < index(observations.heads), "head observation ceiling");
+            assert!(
+                provider::head_bytes(&headers).is_some_and(|bytes| bytes <= observations.head_bytes),
+                "head owned-byte ceiling before retention"
+            );
+        }
+        self.heads.push(headers);
+    }
+
     fn take(&mut self) {
         self.reserve_observations();
         while let Some(event) = self.client_above.pop() {
@@ -565,6 +587,7 @@ impl Exchange {
         }
         while let Some(event) = self.peer_above.pop() {
             match event {
+                provider::Event::Head { headers } => self.observe_head(headers),
                 provider::Event::Domain(event) => {
                     match &event {
                         fake::Event::Call { query, .. } => {

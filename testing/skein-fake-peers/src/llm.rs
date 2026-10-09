@@ -23,6 +23,8 @@ use crate::{Error, Limits, Transport};
 pub enum Observation {
     /// The peer accepted this connection from a client.
     Accepted { connection: Token },
+    /// Actual HTTP field names and values received before a query on this connection.
+    Head { connection: Token, headers: Box<[skein_http::Header]> },
     /// The byte peer decoded this complete call before the script domain received it.
     Query { connection: Token, query: api::Query },
     /// The real script domain emitted this terminal, even after the connection closed.
@@ -278,6 +280,12 @@ impl Peer {
                 && let Some(event) = connection.above.pop()
             {
                 match event {
+                    provider::Event::Head { headers } => {
+                        let connection = connection.owner;
+                        let bytes = provider::head_bytes(&headers).expect("bounded actual head");
+                        self.reserve_observation(bytes);
+                        self.observe(Observation::Head { connection, headers }, bytes);
+                    }
                     provider::Event::Domain(domain::Event::Call { reply_to, query }) => {
                         let connection = connection.owner;
                         let bytes = query_bytes(&query).expect("bounded decoded query");
@@ -410,6 +418,7 @@ pub fn worst_case(
         .checked_add(transport::worst_case(limits, transport)?)?
         .checked_add(u64::try_from(size_of::<Connection>()).ok()?)?
         .checked_add(Queue::<provider::Event>::worst_case(limits.queue)?)?
+        .checked_add(u64::from(limits.queue).checked_mul(provider::head_worst_case(peer)?)?)?
         .checked_add(Queue::<Down>::worst_case(limits.queue)?)?
         .checked_add(Queue::<Up>::worst_case(limits.queue)?)?
         .checked_add(

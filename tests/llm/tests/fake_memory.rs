@@ -281,6 +281,8 @@ fn configured_codex_echo_request_and_entry_scratch_fit_the_peer_price() {
     bounds.sse.line = 32768;
     bounds.sse.event = 32768;
     let observations = skein_llm_world::fake::ObservationLimits {
+        heads: 1,
+        head_bytes: 8192,
         events: 64,
         event_bytes: 65536,
         queries: 1,

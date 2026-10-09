@@ -783,3 +783,30 @@ fn byte_peers_can_omit_each_usage_report_without_changing_completion() {
         }
     }
 }
+
+#[test]
+fn actual_request_heads_match_the_independent_http_reader_on_both_dialects() {
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        let mut input = input(provider, 101);
+        input.endpoint.headers = Box::new([skein_http::Header {
+            name: b"x-caller-proof".as_slice().into(),
+            value: b"actual-field-value".as_slice().into(),
+        }]);
+        let mut world = Exchange::new(input, limits(), scripts());
+        world.start();
+        world.run();
+        assert_eq!(world.queries.len(), 1);
+        let [actual] = world.heads.as_slice() else { panic!("one actual request head") };
+        let parsed =
+            skein_http_world::reference::request(&world.requests, &skein_llm_world::fake::limits(&limits()).http);
+        let expected = parsed.head.expect("independent whole HTTP head");
+        let actual: Vec<_> = actual.iter().map(|header| (header.name.to_vec(), header.value.to_vec())).collect();
+        assert_eq!(actual, expected.headers);
+        assert!(
+            actual
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case(b"x-caller-proof") && value == b"actual-field-value")
+        );
+        assert_eq!(completion(&world).stop, skein_llm::Stop::ToolUse);
+    }
+}

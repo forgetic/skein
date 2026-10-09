@@ -100,6 +100,8 @@ pub enum Error {
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
 #[derive(PartialEq, Eq, Debug)]
 pub enum Event {
+    /// Actual HTTP request fields, handed to the owner before its body/query.
+    Head { headers: Box<[Header]> },
     /// Typed request forwarded to the neutral fake provider domain.
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -497,6 +499,7 @@ fn entrance(
     credential: &skein_llm::Credential,
     limits: &Limits,
     call: http::Call,
+    above: &mut Queue<Event>,
 ) {
     let identity = next_response(&mut service.count);
     server.response_id = identity.unwrap_or(0);
@@ -572,6 +575,7 @@ fn entrance(
         http::Body::Length(length) => Some(length),
         http::Body::Chunked => None,
     };
+    above.push(Event::Head { headers: call.headers });
     demand_body(server, limits);
 }
 
@@ -692,7 +696,7 @@ fn http_event(
                 http::Reuse::Close => close(server, service, env, above, below),
             }
         }
-        http::Event::Call(call) => entrance(server, service, credential, &env.limits, call),
+        http::Event::Call(call) => entrance(server, service, credential, &env.limits, call, above),
         http::Event::Ended
         | http::Event::Failed(_)
         | http::Event::Refused(_)
@@ -905,6 +909,26 @@ fn answer_fits(answer: &api::Answer, limits: &documents::Limits) -> bool {
         }
         None => false,
     }
+}
+
+/// Counts all owned field wrappers, names and values in an actual request head.
+#[must_use]
+pub fn head_bytes(headers: &[Header]) -> Option<u64> {
+    let mut bytes = u64::try_from(headers.len().checked_mul(size_of::<Header>())?).ok()?;
+    for header in headers {
+        bytes = bytes
+            .checked_add(u64::try_from(header.name.len()).ok()?)?
+            .checked_add(u64::try_from(header.value.len()).ok()?)?;
+    }
+    Some(bytes)
+}
+
+/// Checked maximum ownership of one admitted HTTP request head.
+#[must_use]
+pub fn head_worst_case(limits: &Limits) -> Option<u64> {
+    u64::from(limits.http.headers)
+        .checked_mul(u64::try_from(size_of::<Header>()).ok()?)?
+        .checked_add(u64::from(limits.http.head))
 }
 
 /// Checked maximum owned bytes under limits, or `None` when counters or containers cannot be bounded.
