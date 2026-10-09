@@ -24,7 +24,7 @@ pub fn step(machine: &mut Machine, call: Call, answers: &mut Queue<Answer>) {
                 match machine.open(opened(root), &dir, How::Directory) {
                     Ok(directory) => machine.close(directory),
                     Err(refusal) => {
-                        answers.push(Answer { ticket, result: Err(error(refusal)) });
+                        answers.push(Answer { ticket, result: Err(kernel_error(refusal)) });
                         return;
                     }
                 }
@@ -33,16 +33,17 @@ pub fn step(machine: &mut Machine, call: Call, answers: &mut Queue<Answer>) {
         }
         Ask::Open { root, path, how } => match machine.open(opened(root), &path, how_of(how)) {
             Ok(file) => Ok(Reply::Opened(Handle::new(file.raw()))),
-            Err(refusal) => Err(error(refusal)),
+            Err(refusal) => Err(kernel_error(refusal)),
         },
         Ask::Read { file, at, len } => match machine.read(opened(file), at, len) {
             Ok(bytes) => Ok(Reply::Read(bytes.into_boxed_slice())),
-            Err(refusal) => Err(error(refusal)),
+            Err(refusal) => Err(kernel_error(refusal)),
         },
         Ask::Write { file, at, bytes } => match machine.write(opened(file), at, &bytes) {
             Ok(()) => Ok(Reply::Done),
-            Err(refusal) => Err(error(refusal)),
+            Err(refusal) => Err(kernel_error(refusal)),
         },
+        Ask::Append { file, bytes } => done(machine.append(opened(file), &bytes)),
         Ask::Sync { file } => {
             machine.sync(opened(file));
             Ok(Reply::Done)
@@ -61,7 +62,7 @@ pub fn step(machine: &mut Machine, call: Call, answers: &mut Queue<Answer>) {
                 }
                 Ok(Reply::Listed(entries))
             }
-            Err(refusal) => Err(error(refusal)),
+            Err(refusal) => Err(kernel_error(refusal)),
         },
         Ask::Close { file } => {
             machine.close(opened(file));
@@ -127,7 +128,7 @@ fn opened(handle: Handle) -> Opened {
 fn done(result: Result<(), Refusal>) -> Result<Reply, Error> {
     match result {
         Ok(()) => Ok(Reply::Done),
-        Err(refusal) => Err(error(refusal)),
+        Err(refusal) => Err(kernel_error(refusal)),
     }
 }
 
@@ -159,8 +160,9 @@ const fn stat(facts: Facts) -> Stat {
     Stat { kind: kind(facts.is), size: facts.size, mode: facts.mode }
 }
 
-/// A refusal as the kernel names it (`skein_io::kernel::Error`).
-const fn error(refusal: Refusal) -> Error {
+/// Translates a filesystem refusal into the kernel boundary's named error.
+#[must_use]
+pub const fn kernel_error(refusal: Refusal) -> Error {
     match refusal {
         Refusal::NotFound => Error::NotFound,
         Refusal::Exists => Error::Exists,

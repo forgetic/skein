@@ -326,6 +326,7 @@ fn native_pipe_close_settles_waiting_output_and_actual_reap_waits_for_both_close
         | Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }

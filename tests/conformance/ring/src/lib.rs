@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::Command;
 
 use skein_conformance::{Backend, Item, Made};
-use skein_io::kernel::{Complete, Fd, Submit};
+use skein_io::kernel::{Complete, Error, Fd, Submit};
 use skein_lib::{Duration, Queue, Time};
 use skein_scratch::Scratch;
 use skein_shell::{Clock, Config, Kernel, OpenError, Wait, open_root};
@@ -108,6 +108,10 @@ impl Backend for Ring {
     fn assert_settled(&self, process: usize) {
         let kernel = self.kernels.get(process).expect("a process of this ring");
         assert_eq!(kernel.in_flight(), 0, "nothing in flight on process {process}");
+    }
+
+    fn append(&mut self, _process: usize, root: Fd, path: &[u8], mode: u32) -> Result<Fd, Error> {
+        skein_shell::open_append(root, path, mode)
     }
 
     /// A scratch directory holding `root`, laid out as `tree` says, and

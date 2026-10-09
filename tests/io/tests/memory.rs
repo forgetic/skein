@@ -225,6 +225,7 @@ fn succeed(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
@@ -253,6 +254,7 @@ fn stopped(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         | Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }

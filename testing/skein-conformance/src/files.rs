@@ -978,3 +978,136 @@ fn open_patiently<B: Backend>(run: &mut Run<'_, B>, process: B::Process, root: F
         }
     }
 }
+
+/// Appends from two startup descriptors, their counts, preserved bytes and startup refusals.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Appending {
+    pub counts: Shortness,
+    pub existing: Vec<u8>,
+    pub created: Vec<u8>,
+    pub modes: [u32; 2],
+    pub refused: [Error; 5],
+    pub positioned: Vec<u8>,
+}
+
+/// Each append lands after what either descriptor previously appended, including existing bytes.
+#[must_use]
+pub fn appending<B: Backend>(backend: &mut B) -> Appending {
+    let mut run = Run::new(backend);
+    let process = run.process();
+    let root = run.root(
+        process,
+        &[
+            Item::file(b"f", b"prefix:").mode(0o604),
+            Item::directory(b"d"),
+            Item::fifo(b"pipe"),
+            Item::link(b"outside", b"../outside/secret"),
+            Item::link(b"inside", b"f"),
+        ],
+    );
+    let a = run.append(process, root, b"inside", 0o600).expect("existing file through a contained link");
+    let b = run.append(process, root, b"f", 0o400).expect("another append descriptor");
+    let mut counts = run.append_all(process, a, b"first").expect("first piece");
+    counts = counts.and(run.append_all(process, b, b"/between/").expect("another descriptor's piece"));
+    counts = counts.and(run.append_all(process, a, b"last").expect("next piece follows both"));
+    let existing_mode = run.stat(process, a).expect("existing file stated").mode;
+    run.close(process, a);
+    run.close(process, b);
+    let existing = run.contents(process, root, b"f").expect("existing bytes read back");
+    let new = run.append(process, root, b"new", 0o400).expect("file made at startup");
+    counts = counts.and(run.append_all(process, new, b"created").expect("created piece"));
+    let new_mode = run.stat(process, new).expect("new file stated").mode;
+    run.close(process, new);
+    let created = run.contents(process, root, b"new").expect("created bytes read back");
+    let refused = [
+        run.append(process, root, b"d", 0o600).expect_err("startup open must be refused"),
+        run.append(process, root, b"pipe", 0o600).expect_err("startup open must be refused"),
+        run.append(process, root, b"outside", 0o600).expect_err("startup open must be refused"),
+        run.append(process, root, b"", 0o600).expect_err("startup open must be refused"),
+        run.append(process, root, b"invalid-mode", 0o10000).expect_err("startup open must be refused"),
+    ];
+    let plain = run.open(process, root, b"position", OpenHow::Create { mode: None }).expect("plain writable file");
+    run.write_all(process, plain, 0, b"000000").expect("offset write does not move descriptor position");
+    run.append_all(process, plain, b"ab").expect("descriptor starts at zero");
+    run.append_all(process, plain, b"cd").expect("descriptor position advances");
+    run.close(process, plain);
+    let positioned = run.contents(process, root, b"position").expect("positioned bytes read back");
+    run.close(process, root);
+    run.finish();
+    Appending { counts, existing, created, modes: [existing_mode, new_mode], refused, positioned }
+}
+
+impl Check for Appending {
+    fn check(&self) {
+        rule(self.existing == b"prefix:first/between/last", "appends preserve the prefix and each other's bytes", self);
+        rule(self.created == b"created", "a startup append creates a missing file", self);
+        rule(self.modes == [0o604, 0o400], "existing mode stays and creation uses the configured mode", self);
+        rule(
+            self.refused
+                == [
+                    Error::IsADirectory,
+                    Error::NotAFile,
+                    Error::Escape,
+                    Error::InvalidArgument,
+                    Error::InvalidArgument,
+                ],
+            "startup append refuses directories, special files, escapes and invalid configuration",
+            self,
+        );
+        rule(self.positioned == b"abcd00", "Append on a plain writable file advances its position", self);
+    }
+}
+
+/// A cancelled append either lands once or leaves the original bytes unchanged.
+#[must_use]
+pub fn cancel_append<B: Backend>(backend: &mut B) -> Cancelling {
+    let mut run = Run::new(backend);
+    let process = run.process();
+    let root = run.root(process, &[Item::file(b"f", b"prefix:")]);
+    let file = run.append(process, root, b"f", 0o600).expect("startup append");
+    let bytes = b"once";
+    let append = run.start(process, Op::append(file, Box::from(&bytes[..]), 0).expect("bytes to append"));
+    let (cancels, target) = run.cancel(process, append);
+    run.close(process, file);
+    let expected = match target.result {
+        Ok(Done::Count(n)) => [
+            b"prefix:".as_slice(),
+            bytes.get(..usize::try_from(n).expect("a count fits")).expect("a count within its bytes"),
+        ]
+        .concat(),
+        Err(Error::Cancelled) => b"prefix:".to_vec(),
+        _ => unexpected("a cancelled append counts or is stopped", &target.result),
+    };
+    let reader = open_patiently(&mut run, process, root);
+    let mut read = Vec::new();
+    loop {
+        let at = u64::try_from(read.len()).expect("file length fits");
+        let token = run.start(process, Op::read(reader, Box::from([0; 16]), at).expect("room to read"));
+        let complete = match run.within(process, token, BRIEFLY) {
+            Some(complete) => complete,
+            None => run.cancel(process, token).1,
+        };
+        match (complete.kind, complete.result) {
+            (_, Ok(Done::Count(0))) => break,
+            (Op::Read { buf, .. }, Ok(Done::Count(n))) => {
+                read.extend_from_slice(
+                    buf.get(..usize::try_from(n).expect("count fits")).expect("a count within its buffer"),
+                );
+            }
+            (_, Err(Error::Cancelled)) => {}
+            (_, other) => unexpected("a Read counts or is cancelled", &other),
+        }
+    }
+    run.close(process, reader);
+    let taken_once = read == expected;
+    run.close(process, root);
+    run.finish();
+    Cancelling {
+        of: Target::Append,
+        cancels,
+        target: target.result,
+        could_complete: true,
+        decided_first: false,
+        taken_once,
+    }
+}

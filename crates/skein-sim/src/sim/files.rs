@@ -20,7 +20,17 @@ const IO_ERROR: i32 = 5;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct File {
     pub(super) handle: Handle,
-    pub(super) how: OpenHow,
+    pub(super) access: Access,
+    pub(super) position: u64,
+}
+
+/// Record opens keep their access; startup append descriptors select the end at each write.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Access {
+    /// Access selected by an Open record.
+    Record(OpenHow),
+    /// Writable startup handle opened with append.
+    Append,
 }
 
 /// A call the machine has yet to answer, and whose operation it is.
@@ -28,7 +38,7 @@ pub(super) struct File {
 pub(super) struct Asked {
     pid: Pid,
     token: Token,
-    /// The bytes a `Read` asked for, or a `Write` gave; 0 otherwise.
+    /// The bytes a `Read` asked for, or a `Write` or `Append` gave; 0 otherwise.
     len: u32,
 }
 
@@ -41,7 +51,16 @@ impl Sim {
             self.fail(pid, "a root past the descriptor limit");
         }
         self.issued(pid, handle);
-        self.open_file(pid, File { handle, how: OpenHow::Directory })
+        self.open_file(pid, File { handle, access: Access::Record(OpenHow::Directory), position: 0 })
+    }
+
+    /// Adopts the machine's writable append handle opened at startup (shell.md, 6).
+    pub fn append(&mut self, pid: Pid, handle: Handle) -> Fd {
+        if self.fds_full(pid) {
+            self.fail(pid, "an append descriptor past the descriptor limit");
+        }
+        self.issued(pid, handle);
+        self.open_file(pid, File { handle, access: Access::Append, position: 0 })
     }
 
     /// Moves the calls waiting for the machine into `calls`, oldest first, as
@@ -91,7 +110,7 @@ impl Sim {
             process.opening = process.opening.checked_add(1).expect("fewer than 2^32 opens");
         }
         let hangs = match op {
-            Op::Open { .. } | Op::Read { .. } | Op::Write { .. } | Op::Sync { .. } => true,
+            Op::Open { .. } | Op::Read { .. } | Op::Write { .. } | Op::Append { .. } | Op::Sync { .. } => true,
             Op::Stat { .. }
             | Op::Rename { .. }
             | Op::Remove { .. }
@@ -142,7 +161,7 @@ impl Sim {
             | Op::Stat { .. }
             | Op::List { .. } => (false, false, false),
             Op::Read { .. } => (false, false, true),
-            Op::Write { .. } => (true, true, true),
+            Op::Write { .. } | Op::Append { .. } => (true, true, true),
             Op::Sync { .. } => (true, false, true),
             Op::Remove { .. } => (false, true, false),
             Op::Close { .. } => return None,
@@ -200,6 +219,20 @@ impl Sim {
                 let given = Box::from(left.get(..len).expect("cut within what was left"));
                 let len = u32::try_from(len).expect("a valid Write's length is a count");
                 (Ask::Write { file: self.handle(pid, *fd), at: *at, bytes: given }, len)
+            }
+            Op::Append { fd, bytes, from } => {
+                let left = bytes.get(usize_of(*from)..).expect("a valid Append has bytes left");
+                let (len, cut_short) = cut(&mut self.rng, self.config.faults.short_write, left.len());
+                if cut_short {
+                    self.record(pid, crate::trace::Event::Fault(Fault::ShortWrite));
+                }
+                let given = Box::from(left.get(..len).expect("cut within what was left"));
+                let file = self.process(pid).files.get(fd).expect("checked a writable file");
+                let ask = match file.access {
+                    Access::Append => Ask::Append { file: file.handle, bytes: given },
+                    Access::Record(_) => Ask::Write { file: file.handle, at: file.position, bytes: given },
+                };
+                (ask, u32::try_from(len).expect("a valid Append's length is a count"))
             }
             Op::Sync { fd } => (Ask::Sync { file: self.handle(pid, *fd) }, 0),
             Op::Stat { fd } => (Ask::Stat { file: self.handle(pid, *fd) }, 0),
@@ -267,7 +300,7 @@ impl Sim {
             (Op::Open { how, .. }, Reply::Opened(handle)) => {
                 let how = *how;
                 self.issued(pid, handle);
-                Done::Fd(self.open_file(pid, File { handle, how }))
+                Done::Fd(self.open_file(pid, File { handle, access: Access::Record(how), position: 0 }))
             }
             (Op::Read { buf, .. }, Reply::Read(bytes)) => {
                 let (Some(slots), true) = (buf.get_mut(..bytes.len()), bytes.len() <= usize_of(len)) else {
@@ -285,6 +318,11 @@ impl Sim {
                 Done::Count(u32::try_from(n).expect("no more than asked"))
             }
             (Op::Write { .. }, Reply::Done) => Done::Count(len),
+            (Op::Append { fd, .. }, Reply::Done) => {
+                let file = self.process_mut(pid).files.get_mut(fd).expect("an append retains its descriptor");
+                file.position = file.position.checked_add(u64::from(len)).expect("descriptor position fits u64");
+                Done::Count(len)
+            }
             (Op::Stat { .. }, Reply::Stat(stat)) => Done::Stat(stat),
             (Op::List { entries, names, .. }, Reply::Listed(listed)) => {
                 let n = fill(entries, names, &listed);

@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use skein_fake_machine::Item;
 use skein_io::kernel::{Complete, Done, Entry, Error, Fd, Op, OpenHow};
-use skein_sim::{Config, Event, Fault, Pid};
+use skein_sim::{Config, Event, Fault, Pid, Summary};
 use skein_sim_tests::World;
 
 /// Submits `op` and lets time pass until it completes; one that hangs, with
@@ -42,6 +42,20 @@ fn write_all(world: &mut World, pid: Pid, file: Fd, bytes: &[u8]) -> Result<(), 
     Ok(())
 }
 
+/// Continues short appends with the original buffer and returns the bytes that landed before any failure.
+fn append_all(world: &mut World, pid: Pid, file: Fd, bytes: &[u8]) -> Vec<u8> {
+    let mut from = 0_u32;
+    while usize::try_from(from).expect("a u32 fits") < bytes.len() {
+        let op = Op::append(file, Box::from(bytes), from).expect("bytes left to append");
+        match settle(world, pid, op).result {
+            Ok(Done::Count(n)) => from = from.checked_add(n).expect("within the original bytes"),
+            Err(_) => break,
+            Ok(other) => panic!("an append counts: {other:?}"),
+        }
+    }
+    bytes[..usize::try_from(from).expect("a count fits")].to_vec()
+}
+
 /// Reads to the end, short reads continued: the bytes, or an error.
 fn read_all(world: &mut World, pid: Pid, file: Fd) -> Result<Vec<u8>, Error> {
     let mut got = Vec::new();
@@ -65,6 +79,21 @@ fn workload(seed: u64) -> World {
     let mut world = World::new(seed, Config::chaos());
     let pid = world.spawn();
     let root = world.root(pid, &[Item::file(b"seed", b"planted"), Item::directory(b"sub")]);
+    let a = world.append(pid, root, b"seed", 0o600);
+    let b = world.append(pid, root, b"seed", 0o600);
+    let mut expected = b"planted".to_vec();
+    for (file, bytes) in [(a, b"first".as_slice()), (b, b"/between/".as_slice()), (a, b"last".as_slice())] {
+        expected.extend(append_all(&mut world, pid, file, bytes));
+    }
+    let _ = settle(&mut world, pid, Op::Close { fd: a });
+    let _ = settle(&mut world, pid, Op::Close { fd: b });
+    let open = Op::Open { root, path: Box::from(&b"seed"[..]), how: OpenHow::Read };
+    if let Ok(Done::Fd(file)) = settle(&mut world, pid, open).result {
+        if let Ok(read) = read_all(&mut world, pid, file) {
+            assert_eq!(read, expected, "seed {seed}: the prefix and each completed append land once");
+        }
+        let _ = settle(&mut world, pid, Op::Close { fd: file });
+    }
     let bytes: Vec<u8> = (0..40_u8).collect();
     for n in 0..4_u8 {
         let open = Op::Open { root, path: name(b'f', n), how: OpenHow::Create { mode: None } };
@@ -114,17 +143,23 @@ fn workload(seed: u64) -> World {
 fn files_under_chaos_keep_the_contract_and_every_fault_falls() {
     let mut faults = BTreeSet::new();
     let mut errors = BTreeSet::new();
+    let mut append_faults = BTreeSet::new();
     for seed in 0..200_u64 {
         let world = workload(seed);
+        let mut appending = false;
         for entry in world.sim.trace() {
             match entry.event {
                 Event::Fault(fault) => {
                     faults.insert(fault);
+                    if appending {
+                        append_faults.insert(fault);
+                    }
                 }
                 Event::Complete { result: Err(error), .. } => {
                     errors.insert(error);
                 }
-                Event::Submit { .. } | Event::Complete { .. } => {}
+                Event::Submit { kind, .. } => appending = matches!(kind, Summary::Append { .. }),
+                Event::Complete { .. } => {}
             }
         }
     }
@@ -139,6 +174,9 @@ fn files_under_chaos_keep_the_contract_and_every_fault_falls() {
         Fault::Hung,
     ] {
         assert!(faults.contains(&fault), "{fault:?} fell in some seed: {faults:?}");
+    }
+    for fault in [Fault::ShortWrite, Fault::Hung, Fault::NoBuffer, Fault::NoSpace, Fault::ReadOnly, Fault::IoError] {
+        assert!(append_faults.contains(&fault), "{fault:?} fell on an Append: {append_faults:?}");
     }
     for error in [Error::NoBufferSpace, Error::NoSpace, Error::ReadOnly, Error::Other(5), Error::Cancelled] {
         assert!(errors.contains(&error), "some operation failed with {error:?}: {errors:?}");

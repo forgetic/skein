@@ -101,6 +101,12 @@ pub enum Summary {
         from: u32,
         at: u64,
     },
+    /// A write at a writable descriptor's position, including startup append files.
+    Append {
+        fd: Fd,
+        len: usize,
+        from: u32,
+    },
     Sync {
         fd: Fd,
     },
@@ -209,6 +215,7 @@ impl Summary {
             Op::Open { root, path, how } => Summary::Open { root: *root, path: Text::of(path), how: *how },
             Op::Read { fd, buf, at } => Summary::Read { fd: *fd, len: buf.len(), at: *at },
             Op::Write { fd, bytes, from, at } => Summary::Write { fd: *fd, len: bytes.len(), from: *from, at: *at },
+            Op::Append { fd, bytes, from } => Summary::Append { fd: *fd, len: bytes.len(), from: *from },
             Op::Sync { fd } => Summary::Sync { fd: *fd },
             Op::Stat { fd } => Summary::Stat { fd: *fd },
             Op::Rename { from_dir, from, to_dir, to } => {
@@ -254,6 +261,7 @@ impl Summary {
             Summary::Open { .. }
             | Summary::Read { .. }
             | Summary::Write { .. }
+            | Summary::Append { .. }
             | Summary::Sync { .. }
             | Summary::Stat { .. }
             | Summary::Rename { .. }
@@ -306,6 +314,7 @@ impl Summary {
             | Summary::Open { .. }
             | Summary::Read { .. }
             | Summary::Write { .. }
+            | Summary::Append { .. }
             | Summary::Sync { .. }
             | Summary::Wait { .. }
             | Summary::PipeRead { .. }
@@ -330,6 +339,7 @@ impl Summary {
             | Summary::Open { root: fd, .. }
             | Summary::Read { fd, .. }
             | Summary::Write { fd, .. }
+            | Summary::Append { fd, .. }
             | Summary::Sync { fd }
             | Summary::Stat { fd }
             | Summary::Remove { dir: fd, .. }

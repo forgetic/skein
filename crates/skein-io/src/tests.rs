@@ -66,6 +66,7 @@ pub(crate) fn buffer(op: &Op) -> (&[u8], u32) {
         | Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
@@ -127,6 +128,7 @@ pub(crate) const fn kind(op: &Op) -> Kind {
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }

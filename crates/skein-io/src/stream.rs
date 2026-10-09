@@ -679,6 +679,7 @@ fn decode(landed: Landed) -> Happened {
             | Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }
@@ -707,6 +708,7 @@ fn decode(landed: Landed) -> Happened {
             | Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }

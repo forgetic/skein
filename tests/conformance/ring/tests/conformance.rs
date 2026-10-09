@@ -224,3 +224,13 @@ fn the_group_is_signalled_after_its_leader_exits() {
 fn usage_counts_the_child_only_after_reaping() {
     skein_conformance::usage(&mut Ring::new(), env!("CARGO_BIN_EXE_process_fixture").as_bytes()).check();
 }
+
+#[test]
+fn appends_preserve_the_prefix_and_follow_the_other_descriptors_bytes() {
+    on_the_ring(skein_conformance::appending);
+}
+
+#[test]
+fn a_cancel_of_an_append_stops_it_or_comes_too_late() {
+    on_the_ring(skein_conformance::cancel_append);
+}

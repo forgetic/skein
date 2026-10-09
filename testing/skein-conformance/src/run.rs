@@ -113,6 +113,7 @@ impl<'b, B: Backend> Run<'b, B> {
             | Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }
@@ -504,6 +505,12 @@ impl<B: Backend> Run<'_, B> {
         fd
     }
 
+    pub(crate) fn append(&mut self, process: B::Process, root: Fd, path: &[u8], mode: u32) -> Result<Fd, Error> {
+        let fd = self.backend.append(process, root, path, mode)?;
+        assert!(self.open.insert((process, fd)), "an append descriptor is new in its process");
+        Ok(fd)
+    }
+
     pub(crate) fn open(&mut self, process: B::Process, root: Fd, path: &[u8], how: OpenHow) -> Result<Fd, Error> {
         match self.call(process, Op::Open { root, path: Box::from(path), how }).result {
             Ok(Done::Fd(fd)) => Ok(fd),
@@ -567,6 +574,23 @@ impl<B: Backend> Run<'_, B> {
                 }
                 Err(error) => return Err(error),
                 other => unexpected("a Write answers with a count", &other),
+            }
+        }
+        Ok(shortness)
+    }
+
+    pub(crate) fn append_all(&mut self, process: B::Process, fd: Fd, bytes: &[u8]) -> Result<Shortness, Error> {
+        let mut from = 0_u32;
+        let mut shortness = Shortness::default();
+        while usize_of(from) < bytes.len() {
+            let op = Op::append(fd, Box::from(bytes), from).expect("bytes left to append");
+            match self.call(process, op).result {
+                Ok(Done::Count(n)) => {
+                    shortness.saw(usize_of(n) < bytes.len().saturating_sub(usize_of(from)));
+                    from = from.checked_add(n).expect("no more than were left");
+                }
+                Err(error) => return Err(error),
+                other => unexpected("an Append answers with a count", &other),
             }
         }
         Ok(shortness)
@@ -692,6 +716,7 @@ enum Summary {
     Open { root: Fd, path: usize, how: OpenHow },
     Read { fd: Fd, len: usize, at: u64 },
     Write { fd: Fd, len: usize, from: u32, at: u64 },
+    Append { fd: Fd, len: usize, from: u32 },
     Sync { fd: Fd },
     Stat { fd: Fd },
     Rename { from_dir: Fd, from: usize, to_dir: Fd, to: usize },
@@ -723,6 +748,7 @@ impl Summary {
             Op::Open { root, path, how } => Summary::Open { root: *root, path: path.len(), how: *how },
             Op::Read { fd, buf, at } => Summary::Read { fd: *fd, len: buf.len(), at: *at },
             Op::Write { fd, bytes, from, at } => Summary::Write { fd: *fd, len: bytes.len(), from: *from, at: *at },
+            Op::Append { fd, bytes, from } => Summary::Append { fd: *fd, len: bytes.len(), from: *from },
             Op::Sync { fd } => Summary::Sync { fd: *fd },
             Op::Stat { fd } => Summary::Stat { fd: *fd },
             Op::Rename { from_dir, from, to_dir, to } => {
@@ -763,7 +789,9 @@ enum Retried {
 fn boxes_of(op: &Op) -> Vec<&[u8]> {
     match op {
         Op::Recv { buf, .. } | Op::Read { buf, .. } | Op::PipeRead { buf, .. } => vec![buf],
-        Op::Send { bytes, .. } | Op::Write { bytes, .. } | Op::PipeWrite { bytes, .. } => vec![bytes],
+        Op::Send { bytes, .. } | Op::Write { bytes, .. } | Op::Append { bytes, .. } | Op::PipeWrite { bytes, .. } => {
+            vec![bytes]
+        }
         Op::Spawn { spawn } => {
             let mut boxes = vec![&*spawn.program, &*spawn.dir];
             for arg in &spawn.args {
@@ -811,6 +839,7 @@ fn entries_of(op: &Op) -> Option<&[Entry]> {
         | Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }

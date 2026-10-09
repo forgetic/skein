@@ -129,6 +129,11 @@
 //!   written from `bytes[from..]` to the file at `at`: at least one, and no
 //!   more than were left. io continues a short one from `from + n` at
 //!   `at + n`. Writing past the end leaves zeros in the gap.
+//! - **`Append` writes at the descriptor's position**, selecting the current
+//!   end for a startup file opened with `O_APPEND`. On an ordinary writable
+//!   file it advances the position after each write. Counts are positive;
+//!   a short append continues from `from + n`. Only one is in flight on a
+//!   descriptor opened to write (kernel.md, 6.1 and 7).
 //! - **`Sync`** flushes the file, or a directory's entries, to storage:
 //!   once it completes, what was written or renamed before it survives a
 //!   crash.
@@ -199,7 +204,7 @@
 //! | the socket operations, and `Close` | any, but `TooLate` and the files' errors below |
 //! | `Open` | `NotFound`, `Exists`, `NotADirectory`, `IsADirectory`, `Permission`, `NoSpace`, `ReadOnly`, `TooManyLinks`, `NameTooLong`, `Escape`, `NotAFile`, `TooManyOpenFiles` |
 //! | `Read` | `IsADirectory` |
-//! | `Write` | `NoSpace`, `ReadOnly` |
+//! | `Write`, `Append` | `NoSpace`, `ReadOnly` |
 //! | `Sync` | `NoSpace` |
 //! | `Stat` | none |
 //! | `Rename` | `NotFound`, `NotADirectory`, `IsADirectory`, `NotEmpty`, `Permission`, `NoSpace`, `ReadOnly`, `TooManyLinks`, `NameTooLong` |
@@ -332,7 +337,7 @@ pub struct Complete {
 /// | `Send` | `Done::Count`, bytes sent from `from`, at least 1 |
 /// | `Open` | `Done::Fd`, the file or directory opened |
 /// | `Read` | `Done::Count`, bytes read into `buf[..n]`, 0 at the end of the file |
-/// | `Write` | `Done::Count`, bytes written from `from`, at least 1 |
+/// | `Write`, `Append` | `Done::Count`, bytes written from `from`, at least 1 |
 /// | `Sync`, `Rename`, `Remove`, `MakeDirectory` | `Done::Nothing` |
 /// | `Stat` | `Done::Stat`, the kind and size of what is open |
 /// | `List` | `Done::Count`, entries listed into `entries[..n]`, 0 at the end |
@@ -410,6 +415,12 @@ pub enum Op {
         bytes: Box<[u8]>,
         from: u32,
         at: u64,
+    },
+    /// A stream write at the descriptor's position, at the end when opened with append.
+    Append {
+        fd: Fd,
+        bytes: Box<[u8]>,
+        from: u32,
     },
     /// Flushes what was written to the file, or to the directory's entries.
     Sync {
@@ -892,9 +903,17 @@ impl Op {
         Ok(Op::Write { fd, bytes, from, at })
     }
 
+    /// An `Append` of `bytes[from..]`, or the bytes returned when no valid count remains.
+    pub fn append(fd: Fd, bytes: Box<[u8]>, from: u32) -> Result<Op, Box<[u8]>> {
+        if u32::try_from(bytes.len()).is_err() || left(&bytes, from).is_none() {
+            return Err(bytes);
+        }
+        Ok(Op::Append { fd, bytes, from })
+    }
+
     /// Whether the record is one the kernel can be handed: a `Recv`, `Send`,
-    /// `Read` or `Write` that [`Op::recv`], [`Op::send`], [`Op::read`] and
-    /// [`Op::write`] would build; an `Open` whose path has no NUL byte, and
+    /// `Read`, `Write` or `Append` that [`Op::recv`], [`Op::send`], [`Op::read`],
+    /// [`Op::write`] and [`Op::append`] would build; an `Open` whose path has no NUL byte, and
     /// whose mode, to create, holds only [`PERMISSIONS`]; a
     /// `Rename`, `Remove` or `MakeDirectory` of names that are each an
     /// [`is_name`]; a `List` with room for an entry, `names` of at least
@@ -904,7 +923,7 @@ impl Op {
     pub fn is_valid(&self) -> bool {
         match self {
             Op::Recv { buf, .. } | Op::PipeRead { buf, .. } => !buf.is_empty() && u32::try_from(buf.len()).is_ok(),
-            Op::Send { bytes, from, .. } | Op::PipeWrite { bytes, from, .. } => {
+            Op::Send { bytes, from, .. } | Op::PipeWrite { bytes, from, .. } | Op::Append { bytes, from, .. } => {
                 u32::try_from(bytes.len()).is_ok() && left(bytes, *from).is_some()
             }
             Op::Open { path, how, .. } => {
@@ -966,6 +985,7 @@ impl Op {
             | Op::Send { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::List { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. } => Shape::Count,
@@ -993,7 +1013,7 @@ impl Op {
         match self {
             Op::Open { .. } => Some(Files::Open),
             Op::Read { .. } => Some(Files::Read),
-            Op::Write { .. } => Some(Files::Write),
+            Op::Write { .. } | Op::Append { .. } => Some(Files::Write),
             Op::Sync { .. } => Some(Files::Sync),
             Op::Stat { .. } => Some(Files::Stat),
             Op::Rename { .. } => Some(Files::Rename),
@@ -1301,6 +1321,7 @@ fn fits(op: &Op, done: &Done) -> bool {
             | Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }
@@ -1346,6 +1367,7 @@ fn binds(op: &Op, bound: &Addr) -> bool {
         | Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
@@ -1368,12 +1390,13 @@ fn binds(op: &Op, bound: &Addr) -> bool {
 fn counts(op: &Op, n: usize) -> bool {
     match op {
         Op::Recv { buf, .. } | Op::Read { buf, .. } | Op::PipeRead { buf, .. } => n <= buf.len(),
-        Op::Send { bytes, from, .. } | Op::Write { bytes, from, .. } | Op::PipeWrite { bytes, from, .. } => {
-            match left(bytes, *from) {
-                Some(left) => n >= 1 && n <= left,
-                None => false,
-            }
-        }
+        Op::Send { bytes, from, .. }
+        | Op::Write { bytes, from, .. }
+        | Op::Append { bytes, from, .. }
+        | Op::PipeWrite { bytes, from, .. } => match left(bytes, *from) {
+            Some(left) => n >= 1 && n <= left,
+            None => false,
+        },
         Op::List { entries, names, .. } => match entries.get(..n) {
             Some(listed) => lists(listed, names),
             None => false,

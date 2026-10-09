@@ -4,6 +4,7 @@
 //! - [`Kernel`]: the io_uring backend of io's kernel records
 //!   (`skein_io::kernel`; shell.md, 3), opened once, then submitted to
 //!   and reaped from once per iteration.
+//! - [`open_append`]: a regular file opened beneath a root for output at startup.
 //! - [`open_root`]: a directory opened at startup as a root for io's files.
 //! - [`open_termination_signals`]: the blocked SIGINT/SIGTERM source io adopts.
 //! - [`Clock`]: monotonic and wall time, read together once per iteration.
@@ -27,7 +28,8 @@ pub use clock::{Clock, Now};
 pub use drive::{Host, drive};
 pub use ring::{
     Config, HostedPipes, Kernel, OpenError, Wait, abandon_binary, close_keeper_fd, hosted_pipes, make_subreaper,
-    open_cgroup, open_pidfd, open_root, open_signal_pipe, open_termination_signals, poll_child, signal_current_thread,
-    signal_kept_child, start_binary, start_binary_in_cgroup, wait_cgroup_change, write_service_signal,
+    open_append, open_cgroup, open_pidfd, open_root, open_signal_pipe, open_termination_signals, poll_child,
+    signal_current_thread, signal_kept_child, start_binary, start_binary_in_cgroup, wait_cgroup_change,
+    write_service_signal,
 };
 pub use seed::seed;

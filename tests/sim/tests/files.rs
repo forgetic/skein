@@ -433,3 +433,64 @@ fn a_ticket_and_a_handle_are_plain_values() {
     let _ = Token::new(1);
     let _: Option<Ticket> = None;
 }
+
+#[test]
+fn two_append_descriptors_select_the_end_when_the_machine_receives_each_piece() {
+    let (mut world, pid, root) = rooted();
+    let a = world.append(pid, root, b"a.txt", 0o600);
+    let b = world.append(pid, root, b"a.txt", 0o600);
+    world.serving = false;
+    let first = world.submit(pid, Op::append(a, Box::from(&b"-first"[..]), 0).unwrap());
+    let second = world.submit(pid, Op::append(b, Box::from(&b"-second"[..]), 0).unwrap());
+    let mut calls = Queue::with_capacity(2);
+    world.sim.calls(&mut calls);
+    let first_call = calls.pop().unwrap();
+    let second_call = calls.pop().unwrap();
+    assert!(matches!(first_call.ask, Ask::Append { .. }));
+    assert!(matches!(second_call.ask, Ask::Append { .. }));
+    // Deliver in reverse order: the end is selected at execution, not submission.
+    let mut answers = Queue::with_capacity(2);
+    skein_fake_machine::step(&mut world.machine, second_call, &mut answers);
+    skein_fake_machine::step(&mut world.machine, first_call, &mut answers);
+    world.sim.answer(&mut answers);
+    let completed = world.reap(pid);
+    assert_eq!(completed.len(), 2);
+    assert!(completed.iter().any(|complete| complete.op == first && complete.result == Ok(Done::Count(6))));
+    assert!(completed.iter().any(|complete| complete.op == second && complete.result == Ok(Done::Count(7))));
+    world.serving = true;
+    let reader = world.open(pid, root, b"a.txt", OpenHow::Read).unwrap();
+    assert_eq!(world.read(pid, reader, 0, 64).unwrap(), b"hello-second-first");
+    close_all(&mut world, pid, &[a, b, reader, root]);
+}
+
+#[test]
+fn a_hung_append_asks_the_machine_nothing_and_is_stopped_by_cancel() {
+    let (mut world, pid, root) = faulty(Faults { hung: 1000, ..Faults::NONE });
+    let file = world.append(pid, root, b"a.txt", 0o600);
+    let target = world.submit(pid, Op::append(file, Box::from(&b"unwritten"[..]), 0).unwrap());
+    assert_eq!(world.sim.calls_waiting(), 0);
+    assert!(world.reap(pid).is_empty());
+    let cancel = world.submit(pid, Op::Cancel { target });
+    let completed = world.reap(pid);
+    assert_eq!(completed.len(), 2);
+    assert!(completed.iter().any(|complete| complete.op == target && complete.result == Err(Error::Cancelled)));
+    assert!(completed.iter().any(|complete| complete.op == cancel && complete.result == Ok(Done::Nothing)));
+    close_all(&mut world, pid, &[file, root]);
+}
+
+#[test]
+#[should_panic(expected = "a second Append in flight")]
+fn a_second_append_in_flight_breaks_the_contract() {
+    let (mut world, pid, root) = faulty(Faults { hung: 1000, ..Faults::NONE });
+    let file = world.append(pid, root, b"a.txt", 0o600);
+    world.submit(pid, Op::append(file, Box::from(&b"a"[..]), 0).unwrap());
+    world.submit(pid, Op::append(file, Box::from(&b"b"[..]), 0).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "an Append on a descriptor not opened to write")]
+fn an_append_on_a_read_descriptor_breaks_the_contract() {
+    let (mut world, pid, root) = rooted();
+    let file = world.open(pid, root, b"a.txt", OpenHow::Read).unwrap();
+    world.submit(pid, Op::append(file, Box::from(&b"a"[..]), 0).unwrap());
+}

@@ -754,6 +754,12 @@ fn prepare(
             let len = u32::try_from(left.len()).expect("a valid Write's length is a count");
             opcode::Write::new(types::Fd(fd.raw()), left.as_ptr(), len).offset(*at).build()
         }
+        Op::Append { fd, bytes, from } => {
+            let from = usize::try_from(*from).expect("a u32 fits in a usize");
+            let left = bytes.get(from..).expect("a valid Append has bytes left");
+            let len = u32::try_from(left.len()).expect("a valid Append counts bytes");
+            opcode::Write::new(types::Fd(fd.raw()), left.as_ptr(), len).offset(u64::MAX).build()
+        }
         Op::Sync { fd } => opcode::Fsync::new(types::Fd(fd.raw())).build(),
         Op::Stat { fd } => opcode::Statx::new(types::Fd(fd.raw()), EMPTY.as_ptr(), statx.get().cast())
             .flags(libc::AT_EMPTY_PATH)
@@ -859,6 +865,7 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
         | Op::Send { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. } => Ok(Done::Count(u32::try_from(res).expect("a non-negative i32 fits in a u32"))),
         Op::Open { .. } => opened(res),
@@ -919,6 +926,7 @@ fn error(kind: &Op, errno: i32, cancelled: bool) -> Error {
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
@@ -1009,6 +1017,7 @@ fn operation_error(kind: &Op, errno: i32) -> Error {
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
@@ -1050,7 +1059,7 @@ fn file_error(kind: &Op, errno: i32) -> Error {
             libc::EISDIR => Some(Error::IsADirectory),
             _ => None,
         },
-        Op::Write { .. } => match errno {
+        Op::Write { .. } | Op::Append { .. } => match errno {
             libc::ENOSPC | libc::EDQUOT => Some(Error::NoSpace),
             libc::EROFS => Some(Error::ReadOnly),
             _ => None,
@@ -1502,6 +1511,33 @@ pub fn open_root(path: &Path) -> Result<Fd, i32> {
     // SAFETY: `path` is a NUL-terminated string that lives across the call.
     let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
     if fd < 0 { Err(last_errno()) } else { Ok(Fd::new(fd)) }
+}
+
+/// Opens a regular file beneath `root` for append, creating it with `mode` if absent
+/// (shell.md, 6). Existing contents and mode remain; links cannot escape the root.
+pub fn open_append(root: Fd, path: &[u8], mode: u32) -> Result<Fd, Error> {
+    if mode & !PERMISSIONS != 0 || path.is_empty() {
+        return Err(Error::InvalidArgument);
+    }
+    let path_c = CString::new(path).map_err(|_| Error::InvalidArgument)?;
+    let flags = libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
+    // The syscall layout is three u64 fields, as Linux's struct open_how.
+    let how = [
+        u64::try_from(flags).expect("positive flags"),
+        u64::from(mode),
+        libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS,
+    ];
+    // SAFETY: both pointers remain live for the call; the kernel reads the
+    // NUL-terminated path and exactly these three initialized u64 fields.
+    let fd = unsafe { libc::syscall(libc::SYS_openat2, root.raw(), path_c.as_ptr(), how.as_ptr(), size_of_val(&how)) };
+    if fd < 0 {
+        let kind = Op::Open { root, path: Box::from(path), how: OpenHow::Create { mode: Some(mode) } };
+        return Err(file_error(&kind, last_errno()));
+    }
+    let Done::Fd(fd) = opened(i32::try_from(fd).expect("a descriptor fits i32"))? else {
+        unreachable!("opened returns a descriptor");
+    };
+    Ok(fd)
 }
 
 /// Releases a descriptor the adapter made but cannot hand up. The descriptor

@@ -396,8 +396,10 @@ impl Sim {
             Summary::Spawn { .. } => {
                 if process.files.get(&fd).is_none_or(|file| {
                     !matches!(
-                        file.how,
-                        skein_io::kernel::OpenHow::Directory | skein_io::kernel::OpenHow::DirectoryNoFollow
+                        file.access,
+                        super::files::Access::Record(
+                            skein_io::kernel::OpenHow::Directory | skein_io::kernel::OpenHow::DirectoryNoFollow
+                        )
                     )
                 }) {
                     self.fail(pid, &format!("Spawn root {fd:?} is not an open directory"));

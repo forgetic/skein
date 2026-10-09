@@ -275,3 +275,19 @@ fn groups_and_usage_under_chaos() {
     chaos(|world| skein_conformance::groups(world, b"process_fixture"));
     chaos(|world| skein_conformance::usage(world, b"process_fixture"));
 }
+
+#[test]
+fn appends_continue_short_counts_and_cancel_meets_every_pairing() {
+    let mut shorts = Shortness::default();
+    let mut pairings = BTreeSet::new();
+    for seed in 0..CHAOS {
+        let seen = skein_conformance::appending(&mut Simulated::new(seed, loopback_chaos()));
+        seen.check();
+        shorts = shorts.and(seen.counts);
+        let cancel = skein_conformance::cancel_append(&mut Simulated::new(seed, file_cancel_chaos()));
+        cancel.check();
+        pairings.insert(cancel.pairing());
+    }
+    assert_eq!(shorts, Shortness { short: true, full: true });
+    assert_eq!(pairings, BTreeSet::from([Pairing::Stopped, Pairing::Interrupted, Pairing::Completed, Pairing::RanOn]));
+}

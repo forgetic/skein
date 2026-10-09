@@ -74,6 +74,8 @@ pub enum Ask {
     Read { file: Handle, at: u64, len: u32 },
     /// `bytes`, every one, written at `at`: [`Reply::Done`].
     Write { file: Handle, at: u64, bytes: Box<[u8]> },
+    /// `bytes` written whole at the file's end when this call is delivered: [`Reply::Done`].
+    Append { file: Handle, bytes: Box<[u8]> },
     /// [`Reply::Done`].
     Sync { file: Handle },
     /// [`Reply::Stat`].

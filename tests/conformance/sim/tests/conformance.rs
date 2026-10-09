@@ -277,3 +277,15 @@ fn the_group_is_signalled_after_its_leader_exits() {
 fn usage_counts_the_child_only_after_reaping() {
     calm_and_chaos(|world| skein_conformance::usage(world, b"process_fixture"));
 }
+
+#[test]
+fn appends_preserve_the_prefix_and_follow_the_other_descriptors_bytes() {
+    calm_and_chaos(skein_conformance::appending);
+}
+
+#[test]
+fn a_cancel_of_an_append_stops_it_or_comes_too_late() {
+    each_seed(Config::calm(), CALM, skein_conformance::cancel_append);
+    each_seed(loopback_chaos(), SMOKE, skein_conformance::cancel_append);
+    each_seed(file_cancel_chaos(), SMOKE, skein_conformance::cancel_append);
+}

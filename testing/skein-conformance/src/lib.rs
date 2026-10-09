@@ -35,13 +35,13 @@ mod scenarios;
 
 use alloc::vec::Vec;
 
-use skein_io::kernel::{Complete, Fd, Submit};
+use skein_io::kernel::{Complete, Error, Fd, Submit};
 use skein_lib::{Duration, Queue, Time};
 
 pub use files::{
-    Entries, Escapes, FileLifecycle, Listing, MakeDirectories, Nested, OpenLimit, Permissions, Removes, Renames,
-    Shortness, cancel_read, escapes, file_lifecycle, list, make_directory, nested_roots,
-    open_past_the_descriptor_limit, permissions, remove, rename,
+    Appending, Entries, Escapes, FileLifecycle, Listing, MakeDirectories, Nested, OpenLimit, Permissions, Removes,
+    Renames, Shortness, appending, cancel_append, cancel_read, escapes, file_lifecycle, list, make_directory,
+    nested_roots, open_past_the_descriptor_limit, permissions, remove, rename,
 };
 pub use processes::{Groups, Processes, ResourcesCheck, groups, processes, usage};
 
@@ -95,6 +95,9 @@ pub trait Backend {
     /// shell opens a root at startup (kernel.md, 6.1): a descriptor the
     /// scenario closes with a `Close`.
     fn root(&mut self, process: Self::Process, tree: &[Item]) -> Fd;
+
+    /// A startup descriptor for appending beneath a root, released by a `Close`.
+    fn append(&mut self, process: Self::Process, root: Fd, path: &[u8], mode: u32) -> Result<Fd, Error>;
 }
 
 /// One thing a scenario's root holds when it starts: its path, relative to

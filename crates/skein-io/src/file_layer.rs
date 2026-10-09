@@ -753,6 +753,7 @@ fn write_finished(complete: &Complete) -> bool {
         | Op::Close { .. }
         | Op::Open { .. }
         | Op::Read { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }

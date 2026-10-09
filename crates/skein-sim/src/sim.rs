@@ -486,6 +486,7 @@ impl Sim {
             Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }
@@ -601,6 +602,7 @@ impl Sim {
             | Summary::Open { .. }
             | Summary::Read { .. }
             | Summary::Write { .. }
+            | Summary::Append { .. }
             | Summary::Sync { .. }
             | Summary::Stat { .. }
             | Summary::Rename { .. }
@@ -647,20 +649,46 @@ impl Sim {
         let Some(fd) = kind.fd() else {
             self.bug("an operation on files names a descriptor");
         };
-        let how = process.files.get(&fd).expect("checked open, and not a socket's").how;
+        let how = process.files.get(&fd).expect("checked open, and not a socket's").access;
         let broken = match kind {
-            Summary::Read { .. } if !matches!(how, OpenHow::Read | OpenHow::ReadNoFollow) => {
+            Summary::Read { .. } if !matches!(how, files::Access::Record(OpenHow::Read | OpenHow::ReadNoFollow)) => {
                 Some("a Read on a descriptor not opened to read")
             }
-            Summary::Write { .. } if !matches!(how, OpenHow::Create { .. } | OpenHow::CreateNoFollow { .. }) => {
+            Summary::Write { .. }
+                if !matches!(how, files::Access::Record(OpenHow::Create { .. } | OpenHow::CreateNoFollow { .. })) =>
+            {
                 Some("a Write on a descriptor not opened to create")
             }
-            Summary::List { .. } if matches!(how, OpenHow::Create { .. } | OpenHow::CreateNoFollow { .. }) => {
+            Summary::Append { .. }
+                if !matches!(
+                    how,
+                    files::Access::Append
+                        | files::Access::Record(OpenHow::Create { .. } | OpenHow::CreateNoFollow { .. })
+                ) =>
+            {
+                Some("an Append on a descriptor not opened to write")
+            }
+            Summary::Append { fd, .. }
+                if process
+                    .flights
+                    .values()
+                    .any(|flight| matches!(flight.kind, Summary::Append { fd: other, .. } if other == fd)) =>
+            {
+                Some("a second Append in flight")
+            }
+            Summary::List { .. }
+                if matches!(
+                    how,
+                    files::Access::Append
+                        | files::Access::Record(OpenHow::Create { .. } | OpenHow::CreateNoFollow { .. })
+                ) =>
+            {
                 Some("a List on a descriptor opened to create")
             }
             Summary::Open { .. }
             | Summary::Read { .. }
             | Summary::Write { .. }
+            | Summary::Append { .. }
             | Summary::Sync { .. }
             | Summary::Stat { .. }
             | Summary::Rename { .. }
@@ -992,7 +1020,7 @@ impl Sim {
     fn withdraw(&mut self, pid: Pid, token: Token, op: &Op) {
         // A hung operation on files waits on nothing; an Open gives back
         // the place it held.
-        if let Op::Open { .. } | Op::Read { .. } | Op::Write { .. } | Op::Sync { .. } = op {
+        if let Op::Open { .. } | Op::Read { .. } | Op::Write { .. } | Op::Append { .. } | Op::Sync { .. } = op {
             if let Op::Open { .. } = op {
                 let process = self.process_mut(pid);
                 process.opening = process.opening.checked_sub(1).expect("an Open waiting holds a place");
@@ -1036,6 +1064,7 @@ impl Sim {
             | Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }

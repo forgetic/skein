@@ -37,7 +37,7 @@ fn complete(kind: Op, result: Result<Done, Error>) -> Complete {
 
 /// One of every operation, valid. A new operation makes the match in
 /// `documented` fail to build until it is added there, and here.
-fn every_op() -> [Op; 25] {
+fn every_op() -> [Op; 26] {
     [
         Op::Socket { family: Family::Ipv4 },
         Op::Bind { fd: FD, addr: v4() },
@@ -51,6 +51,7 @@ fn every_op() -> [Op; 25] {
         Op::Open { root: FD, path: name(b"a/b"), how: OpenHow::Read },
         Op::Read { fd: FD, buf: bytes(4), at: 9 },
         Op::Write { fd: FD, bytes: bytes(4), from: 1, at: 9 },
+        Op::Append { fd: FD, bytes: bytes(4), from: 1 },
         Op::Sync { fd: FD },
         Op::Stat { fd: FD },
         Op::Rename { from_dir: FD, from: name(b"a"), to_dir: NEW, to: name(b"b") },
@@ -77,6 +78,7 @@ fn documented(op: &Op) -> Done {
         | Op::Send { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. } => Done::Count(1),
         Op::List { .. } => Done::Count(0),
@@ -144,6 +146,7 @@ fn the_shapes_are_as_the_table_on_op_says() {
         open,
         read,
         write,
+        append,
         sync,
         stat,
         rename,
@@ -168,7 +171,7 @@ fn the_shapes_are_as_the_table_on_op_says() {
     assert_eq!(usage.shape(), Shape::Usage);
     assert_eq!(child_signal.shape(), Shape::Nothing);
     assert_eq!(group_signal.shape(), Shape::Nothing);
-    for op in [recv, send, read, write, list] {
+    for op in [recv, send, read, write, append, list] {
         assert_eq!(op.shape(), Shape::Count);
     }
     for op in [listen, connect, shutdown, close, sync, rename, remove, make_directory, cancel] {
@@ -291,7 +294,7 @@ fn named(op: &Op) -> &'static [Error] {
             Error::TooManyOpenFiles,
         ],
         Op::Read { .. } => &[Error::IsADirectory],
-        Op::Write { .. } => &[Error::NoSpace, Error::ReadOnly],
+        Op::Write { .. } | Op::Append { .. } => &[Error::NoSpace, Error::ReadOnly],
         Op::Sync { .. } => &[Error::NoSpace],
         Op::Rename { .. } => &[
             Error::NotFound,
@@ -372,6 +375,7 @@ fn cancellable(op: &Op) -> bool {
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Socket { .. }
         | Op::Bind { .. }
@@ -449,10 +453,11 @@ fn an_operation_on_sockets_never_answers_a_files_error() {
 
 #[test]
 fn the_operations_on_files_are_those_on_names_beneath_a_root() {
-    let files: [bool; 19] = [
+    let files = [
         false, false, false, false, false, false, false, false, false, true, true, true, true, true, true, true, true,
-        true, false,
+        true, true, false, false, false, false, false, false, false,
     ];
+    assert_eq!(every_op().len(), files.len(), "the classification table covers every fixture");
     for (op, file) in every_op().into_iter().zip(files) {
         assert_eq!(op.is_file(), file, "{op:?}");
     }
@@ -645,4 +650,18 @@ fn spawn_parent_slots_are_empty_until_a_successful_completion() {
     spawn.pipes[0].parent = None;
     complete.kind = kind;
     assert!(complete.is_valid(), "a failed spawn returns empty parent slots");
+}
+
+#[test]
+fn an_append_validates_remaining_bytes_and_counts() {
+    assert_eq!(Op::append(FD, bytes(3), 1), Ok(Op::Append { fd: FD, bytes: bytes(3), from: 1 }));
+    for from in [3, 4, u32::MAX] {
+        assert_eq!(Op::append(FD, bytes(3), from), Err(bytes(3)));
+        assert!(!Op::Append { fd: FD, bytes: bytes(3), from }.is_valid());
+    }
+    assert_eq!(Op::append(FD, bytes(0), 0), Err(bytes(0)));
+    for (n, valid) in [(0, false), (1, true), (3, true), (4, false)] {
+        let answer = complete(Op::Append { fd: FD, bytes: bytes(4), from: 1 }, Ok(Done::Count(n)));
+        assert_eq!(answer.is_valid(), valid, "append count {n}");
+    }
 }

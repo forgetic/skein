@@ -72,6 +72,8 @@ pub enum How {
     Create { mode: u32 },
     /// A new file, refusing every symbolic link in its parent path.
     CreateNoFollow { mode: u32 },
+    /// An existing file to append, or a new file made with the given permission bits less the umask.
+    Append { mode: u32 },
 }
 
 /// What a name names.
@@ -326,6 +328,33 @@ impl Machine {
                 }
                 node
             }
+            How::Append { mode } => {
+                let found = self.resolve(root, path, false, false)?;
+                if found.slash {
+                    return Err(Refusal::IsADirectory);
+                }
+                match found.node {
+                    Some(node) => {
+                        match &self.node(node).body {
+                            Body::Directory { .. } => return Err(Refusal::IsADirectory),
+                            Body::Special(_) => return Err(Refusal::NotAFile),
+                            Body::File(_) => {}
+                            Body::Link(_) => fail("resolution follows links"),
+                        }
+                        if !self.may(node, WRITE) {
+                            return Err(Refusal::Permission);
+                        }
+                        node
+                    }
+                    None => {
+                        let name = found.name.ok_or(Refusal::NotFound)?;
+                        if !self.may(found.parent, WRITE) {
+                            return Err(Refusal::Permission);
+                        }
+                        self.make(found.parent, name, Body::File(Vec::new()), mode & !UMASK)
+                    }
+                }
+            }
             How::Create { mode } | How::CreateNoFollow { mode } => {
                 let found = self.resolve(root, path, true, matches!(how, How::CreateNoFollow { .. }))?;
                 // A path that ends at a directory of no name of its own
@@ -377,6 +406,15 @@ impl Machine {
         contents.get_mut(start..end).expect("resized to hold it").copy_from_slice(bytes);
         self.pending_writes.entry(node).or_default().push((at, bytes.to_vec()));
         Ok(())
+    }
+
+    /// Writes each piece whole at the file's current end, preserving earlier bytes.
+    pub fn append(&mut self, file: Opened, bytes: &[u8]) -> Result<(), Refusal> {
+        let at = match &self.node(self.handle(file).node).body {
+            Body::File(contents) => u64::try_from(contents.len()).expect("a file's length fits u64"),
+            Body::Directory { .. } | Body::Link(_) | Body::Special(_) => fail("only a file is opened to append"),
+        };
+        self.write(file, at, bytes)
     }
 
     /// Makes this file's bytes or this directory's entries durable.

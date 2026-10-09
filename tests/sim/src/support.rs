@@ -2,9 +2,10 @@
 //! minimal fake machine, and calls that submit one record and reap what came
 //! of it.
 
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 
-use skein_fake_machine::{Item, Machine, serve};
+use skein_fake_machine::{How, Item, Machine, Opened, serve};
 use skein_io::kernel::{Addr, Complete, Done, Entry, Error, Family, Fd, Kind, Op, OpenHow, Stat, Submit};
 use skein_lib::{Queue, Token};
 use skein_sim::{Config, Handle, Pid, Sim};
@@ -20,12 +21,13 @@ pub struct World {
     /// Whether a submit is followed by the machine answering what it was
     /// asked, as a world does; off, the calls wait.
     pub serving: bool,
+    roots: BTreeMap<(Pid, Fd), Opened>,
 }
 
 impl World {
     #[must_use]
     pub fn new(seed: u64, config: Config) -> World {
-        World { sim: Sim::new(seed, config), next: 1, machine: Machine::new(), serving: true }
+        World { sim: Sim::new(seed, config), next: 1, machine: Machine::new(), serving: true, roots: BTreeMap::new() }
     }
 
     #[must_use]
@@ -180,7 +182,16 @@ impl World {
     /// one at startup.
     pub fn root(&mut self, pid: Pid, items: &[Item]) -> Fd {
         let opened = self.machine.lay(items);
-        self.sim.root(pid, Handle::new(opened.raw()))
+        let fd = self.sim.root(pid, Handle::new(opened.raw()));
+        self.roots.insert((pid, fd), opened);
+        fd
+    }
+
+    /// Opens a file to append in the startup machine and adopts its fresh handle.
+    pub fn append(&mut self, pid: Pid, root: Fd, path: &[u8], mode: u32) -> Fd {
+        let root = *self.roots.get(&(pid, root)).expect("a startup root");
+        let opened = self.machine.open(root, path, How::Append { mode }).expect("a writable append file");
+        self.sim.append(pid, Handle::new(opened.raw()))
     }
 
     pub fn open(&mut self, pid: Pid, root: Fd, path: &[u8], how: OpenHow) -> Result<Fd, Error> {
