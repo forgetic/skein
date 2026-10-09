@@ -52,7 +52,7 @@ pub use program::{
 };
 pub use referee::{Controls, Expectation, Expectations, Referee};
 pub use skein_shell::{Host, drive};
-pub use world::{Killed, Outcome, World};
+pub use world::{Cut, Killed, Outcome, World};
 pub use writer_pipe::{PipeCapture, PipeHost, PipeWriter};
 
 /// Fails the world, loudly, with what it found: a world fails its test as

@@ -23,7 +23,7 @@ use crate::Host;
 use crate::heap::{Heap, Memory};
 use crate::program::Startup;
 use crate::referee::{Controls, Referee};
-use crate::{HostedProgram, Inherited, Machine, NoMachine, StartupAppends, StartupRoots};
+use crate::{HostedProgram, Inherited, Machine, NoMachine, StartupAppends, StartupRoot, StartupRoots};
 
 /// The most iterations a world runs before it is declared stuck.
 const STEPS: u32 = 1_000_000;
@@ -35,6 +35,28 @@ const TAIL: usize = 80;
 struct PreparedStartup {
     roots: Vec<(Box<[u8]>, Handle)>,
     appends: Vec<(Box<[u8]>, Handle)>,
+}
+
+/// How a scenario cuts its processes (simulator.md, 3.3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cut {
+    /// Cuts one process, keeping every machine operation that completed.
+    Kill,
+    /// Cuts every process, keeping the seeded machine crash model's state.
+    PowerLoss,
+}
+
+struct Restart<P> {
+    roots: Vec<StartupRoot>,
+    make: fn(&Inherited) -> P,
+}
+
+#[derive(Clone, Copy)]
+struct PlannedCut {
+    host: usize,
+    before: u32,
+    cut: Cut,
+    done: bool,
 }
 
 /// A world: the simulator, its processes, and the referee.
@@ -54,6 +76,9 @@ pub struct World<P, R, M = NoMachine> {
     pending_startup: BTreeMap<(Pid, skein_lib::Token), PreparedStartup>,
     hosted: Vec<Option<usize>>,
     finished: Vec<bool>,
+    restart: Vec<Option<Restart<P>>>,
+    submissions: Vec<u32>,
+    cuts: Vec<PlannedCut>,
     machine: M,
     killed: Vec<Killed>,
     calls: Queue<skein_sim::Call>,
@@ -104,6 +129,8 @@ pub struct Outcome<P, M = NoMachine> {
     /// What each process held of its own once settled, by index, when memory
     /// was checked: what dropping it must free.
     pub held: Option<Vec<i64>>,
+    /// Actual submissions over each surviving process's life, across restarts.
+    pub submissions: Vec<u32>,
 }
 
 impl<P, M> Drop for Outcome<P, M> {
@@ -167,6 +194,9 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             pending_startup: BTreeMap::new(),
             hosted: Vec::new(),
             finished: Vec::new(),
+            restart: Vec::new(),
+            submissions: Vec::new(),
+            cuts: Vec::new(),
             machine: NoMachine,
             killed: Vec::new(),
             calls: Queue::with_capacity(256),
@@ -191,6 +221,9 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             pending_startup: self.pending_startup,
             hosted: self.hosted,
             finished: self.finished,
+            restart: self.restart,
+            submissions: self.submissions,
+            cuts: self.cuts,
             machine,
             killed: self.killed,
             calls: self.calls,
@@ -226,6 +259,48 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
         self.admit(pid, None, || make(root))
     }
 
+    /// Adds a process whose factory owns independently opened named roots
+    /// and a signal source. A cut restarts it at the same index over these
+    /// root paths (simulator.md, 3.3).
+    pub fn spawn_restartable(&mut self, roots: Vec<StartupRoot>, make: fn(&Inherited) -> P) -> usize {
+        crate::program::check_roots(&roots);
+        let pid = self.sim.spawn_process();
+        let inherited = self.restart_inherited(pid, &roots);
+        self.signals.insert(self.next_host, (pid, inherited.signal));
+        let at = self.admit(pid, None, || make(&inherited));
+        *self.restart.get_mut(at).expect("a slot per process") = Some(Restart { roots, make });
+        at
+    }
+
+    /// Cuts `host` once before its zero-based `before`th submission.
+    /// Its factory must be restartable; power loss requires factories for
+    /// every admitted process because it restarts the whole machine.
+    pub fn cut(&mut self, host: usize, before: u32, cut: Cut) {
+        assert!(self.restart.get(host).is_some_and(Option::is_some), "a cut needs a restart factory");
+        if cut == Cut::PowerLoss {
+            assert!(self.restart.iter().all(Option::is_some), "power loss needs every process's restart factory");
+        }
+        assert!(!self.cuts.iter().any(|planned| planned.host == host), "a host is cut once");
+        self.cuts.push(PlannedCut { host, before, cut, done: false });
+    }
+
+    fn restart_inherited(&mut self, pid: Pid, declarations: &[StartupRoot]) -> Inherited {
+        let mut opened = Vec::new();
+        for declaration in declarations {
+            match self.machine.open_root(&declaration.path) {
+                Ok(handle) => opened.push((declaration.name.clone(), handle)),
+                Err(error) => {
+                    for (_, handle) in opened {
+                        self.machine.close_root(handle);
+                    }
+                    crate::fail(&format!("a restartable startup root opens: {error:?}"));
+                }
+            }
+        }
+        let roots = opened.into_iter().map(|(name, handle)| (name, self.sim.root(pid, handle))).collect();
+        Inherited { roots, pipes: Vec::new(), appends: Vec::new(), signal: self.sim.open_signal_source(pid) }
+    }
+
     /// Adds a process with an append file the scenario's machine opened at startup.
     pub fn spawn_append<F: FnOnce(Fd) -> P>(&mut self, file: Handle, make: F) -> usize {
         let pid = self.sim.spawn_process();
@@ -258,6 +333,8 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
         self.procs.push(proc);
         self.hosted.push(hosted);
         self.finished.push(false);
+        self.restart.push(None);
+        self.submissions.push(0);
         self.procs.len().checked_sub(1).expect("just pushed")
     }
 
@@ -346,6 +423,7 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
                 }
             }
         }
+        assert!(self.cuts.iter().all(|cut| cut.done), "each chosen cut point was reached");
         assert!(self.pending_startup.is_empty(), "all prepared startup descriptors were admitted or rolled back");
         for (proc, pid) in self.procs.iter().zip(&self.pids) {
             assert!(proc.is_empty(), "seed {}: {pid} holds nothing once settled", self.seed);
@@ -363,6 +441,7 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
             held: self.heap.as_ref().map(Heap::held),
             procs: self.procs,
             iterations,
+            submissions: self.submissions,
         }
     }
 
@@ -442,6 +521,26 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
         if let Some(faults) = faults(at, now, proc.submissions()) {
             self.sim.set_faults(faults);
         }
+        let batch = proc.submissions().len();
+        let count = *self.submissions.get(at).expect("a counter per process");
+        let end = count.checked_add(batch).expect("submission count fits u32");
+        let planned =
+            self.cuts.iter().position(|cut| !cut.done && cut.host == at && cut.before >= count && cut.before < end);
+        if let Some(planned) = planned {
+            let before = self.cuts.get(planned).expect("selected cut").before;
+            let prefix = before.checked_sub(count).expect("the cut is in this batch");
+            let mut submits = Queue::with_capacity(prefix);
+            for _ in 0..prefix {
+                submits.push(proc.submissions().pop().expect("a submission in the selected prefix"));
+            }
+            if prefix > 0 {
+                self.sim.submit(pid, &mut submits);
+            }
+            *self.submissions.get_mut(at).expect("the same counter") = before;
+            self.perform_cut(planned);
+            return;
+        }
+        *self.submissions.get_mut(at).expect("the same counter") = end;
         self.sim.submit(pid, proc.submissions());
         if self.hosted.get(at).expect("a status per process").is_some()
             && let Some(exit) = proc.exit()
@@ -486,6 +585,8 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
         self.pids.remove(at);
         self.hosted.remove(at);
         self.finished.remove(at);
+        self.restart.remove(at);
+        self.submissions.remove(at);
         self.sim.close_exited_service(pid);
         self.serve_machine();
         let mut closed = Queue::with_capacity(self.sim.in_flight(pid));
@@ -496,6 +597,58 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
         self.sim.assert_quiescent(pid);
         self.sim.assert_no_open_fds(pid);
         self.killed.push(Killed { pid, exit, heap });
+    }
+
+    fn perform_cut(&mut self, planned: usize) {
+        let cut = *self.cuts.get(planned).expect("selected cut");
+        self.cuts.get_mut(planned).expect("selected cut").done = true;
+        let affected: Vec<_> = match cut.cut {
+            Cut::Kill => vec![cut.host],
+            Cut::PowerLoss => {
+                assert!(self.restart.iter().all(Option::is_some), "power loss needs every live process's factory");
+                (0..self.procs.len()).collect()
+            }
+        };
+        let mut handles = Vec::new();
+        for at in &affected {
+            let pid = *self.pids.get(*at).expect("a pid per process");
+            let heap = &mut self.heap;
+            let held = self.sim.cut_with(pid, |op| match heap {
+                Some(heap) => heap.around(*at, || drop(op)),
+                None => drop(op),
+            });
+            handles.extend_from_slice(&held);
+            let pending: Vec<_> = self.pending_startup.keys().filter(|(owner, _)| *owner == pid).copied().collect();
+            for key in pending {
+                let prepared = self.pending_startup.remove(&key).expect("selected prepared startup");
+                handles.extend(prepared.roots.into_iter().chain(prepared.appends).map(|(_, handle)| handle));
+            }
+            self.sim.assert_quiescent(pid);
+            self.sim.assert_no_open_fds(pid);
+        }
+        self.machine.cut(cut.cut, &handles, self.seed);
+        for at in affected {
+            let old_pid = *self.pids.get(at).expect("a pid per process");
+            let declaration =
+                self.restart.get_mut(at).expect("a slot per process").take().expect("a factory for a cut");
+            let pid = self.sim.spawn_process();
+            let inherited = self.restart_inherited(pid, &declaration.roots);
+            let old = self.procs.remove(at);
+            let make = declaration.make;
+            let proc = match &mut self.heap {
+                Some(heap) => heap.restart(at, old, || make(&inherited), P::worst_case),
+                None => {
+                    drop(old);
+                    make(&inherited)
+                }
+            };
+            self.procs.insert(at, proc);
+            *self.pids.get_mut(at).expect("same process index") = pid;
+            *self.finished.get_mut(at).expect("same process index") = false;
+            self.signals.retain(|_, (owner, _)| *owner != old_pid);
+            self.signals.insert(at, (pid, inherited.signal));
+            *self.restart.get_mut(at).expect("same factory slot") = Some(declaration);
+        }
     }
 
     fn serve_machine(&mut self) {

@@ -7,8 +7,9 @@
 //! the referee and the harness run between those calls, so the simulator's
 //! trace and network and the harness's heap are left out. This holds while
 //! nothing a process owns is allocated or freed outside its calls: the
-//! backend hands every buffer back and never drops, copies or replaces one
-//! (`skein_io::kernel`); the queues it fills and drains are the process's
+//! backend hands every buffer back and never copies or replaces one
+//! (`skein_io::kernel`); a crash cut destroys its original records under
+//! their owner's span. The queues it fills and drains are the process's
 //! own, bounded and made with it; and the referee changes a process only
 //! through flags that allocate nothing. Once settled, the harness checks it:
 //! each process, dropped, frees exactly what was metered as its own
@@ -46,6 +47,8 @@ struct Held {
     most: i64,
     /// Its worst case.
     bound: i64,
+    /// The largest provision across this process's incarnations, for reports.
+    largest_bound: i64,
 }
 
 impl Heap {
@@ -69,7 +72,7 @@ impl Heap {
         let proc = make();
         let grown = span.end();
         let bound = i64::try_from(worst_case(&proc)).expect("a worst case within an i64");
-        self.procs.push(Held { now: 0, most: 0, bound });
+        self.procs.push(Held { now: 0, most: 0, bound, largest_bound: bound });
         let at = self.procs.len().checked_sub(1).expect("just pushed");
         self.check(at, grown);
         proc
@@ -97,7 +100,29 @@ impl Heap {
                 held.now
             ));
         }
-        (u64::try_from(held.most).expect("a nonnegative peak"), u64::try_from(held.bound).expect("a nonnegative bound"))
+        (
+            u64::try_from(held.most).expect("a nonnegative peak"),
+            u64::try_from(held.largest_bound).expect("a nonnegative bound"),
+        )
+    }
+
+    /// Drops a cut process and meters its replacement in the same slot.
+    pub(crate) fn restart<T, F: FnOnce() -> T>(&mut self, at: usize, proc: T, make: F, worst_case: fn(&T) -> u64) -> T {
+        let old = *self.procs.get(at).expect("a process admitted");
+        let span = Span::start();
+        drop(proc);
+        let freed = span.end().net.checked_neg().expect("heap fits i64");
+        assert_eq!(freed, old.now, "the cut process releases exactly its remaining owned heap");
+        let span = Span::start();
+        let proc = make();
+        let grown = span.end();
+        let bound = i64::try_from(worst_case(&proc)).expect("worst case fits i64");
+        *self.procs.get_mut(at).expect("the same process slot") = Held { now: 0, most: 0, bound, largest_bound: bound };
+        self.check(at, grown);
+        let held = self.procs.get_mut(at).expect("the replacement's meter");
+        held.most = held.most.max(old.most);
+        held.largest_bound = held.largest_bound.max(old.largest_bound);
+        proc
     }
 
     fn check(&mut self, at: usize, grown: Grown) {
@@ -126,7 +151,7 @@ impl Heap {
     pub(crate) fn report(&self) -> Vec<(u64, u64)> {
         let mut report = Vec::with_capacity(self.procs.len());
         for held in &self.procs {
-            report.push((u64::try_from(held.most).unwrap_or(0), u64::try_from(held.bound).unwrap_or(0)));
+            report.push((u64::try_from(held.most).unwrap_or(0), u64::try_from(held.largest_bound).unwrap_or(0)));
         }
         report
     }

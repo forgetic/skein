@@ -590,32 +590,51 @@ impl Sim {
                 }
             }
             Op::Close { fd } => {
-                if let Some(pipe) = self.process_mut(pid).inherited_pipes.get_mut(&fd) {
-                    pipe.process_open = false;
-                    if pipe.readable {
-                        pipe.bytes.clear();
-                    }
-                    if let Some(bound) = pipe.bound {
-                        self.close_bound(bound);
-                    }
-                } else if let Some(end) = self.process_mut(pid).pipe_fds.remove(&fd) {
-                    let pipe = &mut self.process_mut(pid).children.get_mut(&end.child).expect("pipe names child").pipes
-                        [end.index];
-                    pipe.open = false;
-                    pipe.bytes.clear();
-                    if pipe.spec.way == Way::In {
-                        self.end_input(pid, end);
-                    }
-                    self.wake_bound(end, pid);
-                } else if self.process_mut(pid).signal_fds.remove(&fd).is_some() {
-                    // All reads settled before closing this source.
-                } else {
-                    let child_id = self.process_mut(pid).pidfds.remove(&fd).expect("a pidfd");
-                    self.process_mut(pid).children.get_mut(&child_id).expect("pidfd names child").pidfd_open = false;
-                }
+                self.close_process_fd(pid, fd);
                 self.complete(pid, token, Op::Close { fd }, Ok(Done::Nothing));
             }
             _ => self.bug("a non-process operation was routed here"),
+        }
+    }
+
+    pub(super) fn cut_process_descriptors(&mut self, pid: Pid) {
+        let process = self.process(pid);
+        let descriptors: Vec<_> = process
+            .pipe_fds
+            .keys()
+            .chain(process.pidfds.keys())
+            .chain(process.signal_fds.keys())
+            .copied()
+            .chain(process.inherited_pipes.iter().filter_map(|(fd, pipe)| pipe.process_open.then_some(*fd)))
+            .collect();
+        for fd in descriptors {
+            self.close_process_fd(pid, fd);
+        }
+    }
+
+    fn close_process_fd(&mut self, pid: Pid, fd: Fd) {
+        if let Some(pipe) = self.process_mut(pid).inherited_pipes.get_mut(&fd) {
+            pipe.process_open = false;
+            if pipe.readable {
+                pipe.bytes.clear();
+            }
+            if let Some(bound) = pipe.bound {
+                self.close_bound(bound);
+            }
+        } else if let Some(end) = self.process_mut(pid).pipe_fds.remove(&fd) {
+            let pipe =
+                &mut self.process_mut(pid).children.get_mut(&end.child).expect("pipe names child").pipes[end.index];
+            pipe.open = false;
+            pipe.bytes.clear();
+            if pipe.spec.way == Way::In {
+                self.end_input(pid, end);
+            }
+            self.wake_bound(end, pid);
+        } else if self.process_mut(pid).signal_fds.remove(&fd).is_some() {
+            // All reads settled or discarded before closing this source.
+        } else {
+            let child_id = self.process_mut(pid).pidfds.remove(&fd).expect("a pidfd");
+            self.process_mut(pid).children.get_mut(&child_id).expect("pidfd names child").pidfd_open = false;
         }
     }
 

@@ -88,6 +88,12 @@ pub(crate) fn check_roots(roots: &[StartupRoot]) {
 
 /// Machine calls a simulated world forwards when no hosted program matches.
 pub trait Machine {
+    /// Settles the cut's handles; power loss applies the machine's seeded
+    /// crash model (simulator.md, 3.3). A cutting world implements this.
+    fn cut(&mut self, _cut: crate::Cut, _held: &[skein_sim::Handle], _seed: u64) {
+        crate::fail("a world with cuts implements its machine's cut settlement");
+    }
+
     /// Opens a fresh independently owned directory handle for a startup path.
     /// A machine with no startup directories refuses by default.
     fn open_root(&mut self, _path: &[u8]) -> Result<skein_sim::Handle, skein_io::kernel::Error> {

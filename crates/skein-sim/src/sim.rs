@@ -16,7 +16,7 @@ use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, OpenHow, Ser
 use skein_lib::{Duration, Queue, Rng, Time, Token, Wall};
 
 use crate::config::Config;
-use crate::machine::{Call, Ticket};
+use crate::machine::{Call, Handle, Ticket};
 use crate::net::{
     EPHEMERAL_FIRST, EPHEMERAL_LAST, Fate, Listener, Socket, SocketId, State, Stream, bindable, loopback, mapped,
     overlaps,
@@ -218,6 +218,88 @@ impl Sim {
             deferred: VecDeque::new(),
         });
         pid
+    }
+
+    /// Cuts a process with every record it owns, never completing them,
+    /// and releases its descriptors (simulator.md, 3.3). The world settles
+    /// the returned file handles; calls discarded by this cut are not answered.
+    pub fn cut(&mut self, pid: Pid) -> Box<[Handle]> {
+        self.cut_with(pid, drop)
+    }
+
+    /// As [`Sim::cut`], disposing each original record through `discard` so
+    /// a world can charge its buffers to their owner's destruction span.
+    /// Simulator metadata and returned handles belong to the harness.
+    #[doc(hidden)]
+    pub fn cut_with<F: FnMut(Op)>(&mut self, pid: Pid, mut discard: F) -> Box<[Handle]> {
+        let scheduled: Vec<_> = self
+            .schedule
+            .iter()
+            .filter_map(|(key, due)| {
+                let owner = match due {
+                    Due::Post { pid, .. } | Due::Land { pid, .. } | Due::Expire { pid, .. } => *pid,
+                };
+                (owner == pid).then_some(*key)
+            })
+            .collect();
+        for key in scheduled {
+            match self.schedule.remove(&key).expect("a selected scheduled item") {
+                Due::Post { complete, .. } => discard(complete.kind),
+                Due::Land { .. } | Due::Expire { .. } => {}
+            }
+        }
+        while let Some(complete) = self.process_mut(pid).ready.pop_front() {
+            discard(complete.kind);
+        }
+        let waiting: Vec<_> = self.process(pid).flights.keys().copied().collect();
+        for token in waiting {
+            let flight = self.process_mut(pid).flights.remove(&token).expect("a selected flight");
+            if let Some(op) = flight.held {
+                match &op {
+                    Op::Accept { .. }
+                    | Op::Connect { .. }
+                    | Op::Recv { .. }
+                    | Op::Send { .. }
+                    | Op::Wait { .. }
+                    | Op::ReadSignal { .. }
+                    | Op::PipeRead { .. }
+                    | Op::PipeWrite { .. } => self.withdraw(pid, token, &op),
+                    Op::Socket { .. }
+                    | Op::Bind { .. }
+                    | Op::Listen { .. }
+                    | Op::Shutdown { .. }
+                    | Op::Close { .. }
+                    | Op::Open { .. }
+                    | Op::Read { .. }
+                    | Op::Write { .. }
+                    | Op::Append { .. }
+                    | Op::Sync { .. }
+                    | Op::Stat { .. }
+                    | Op::Rename { .. }
+                    | Op::Remove { .. }
+                    | Op::MakeDirectory { .. }
+                    | Op::List { .. }
+                    | Op::Spawn { .. }
+                    | Op::Signal { .. }
+                    | Op::Usage
+                    | Op::Cancel { .. } => {}
+                }
+                discard(op);
+            }
+        }
+        let held = self.cut_files(pid);
+        self.spawn_asked.retain(|_, (owner, _)| *owner != pid);
+        let sockets: Vec<_> = self.process(pid).fds.iter().map(|(fd, socket)| (*fd, *socket)).collect();
+        for (fd, socket) in sockets {
+            self.close_socket(pid, fd, socket);
+        }
+        self.cut_process_descriptors(pid);
+        let process = self.process_mut(pid);
+        process.opening = 0;
+        process.spawning = 0;
+        process.deferred.clear();
+        self.settle();
+        held
     }
 
     /// Installs a simulated signalfd before a service loop starts.
@@ -927,6 +1009,11 @@ impl Sim {
     }
 
     fn close(&mut self, pid: Pid, token: Token, op: Op, fd: Fd, id: SocketId) {
+        self.close_socket(pid, fd, id);
+        self.complete(pid, token, op, Ok(Done::Nothing));
+    }
+
+    fn close_socket(&mut self, pid: Pid, fd: Fd, id: SocketId) {
         self.process_mut(pid).fds.remove(&fd);
         let socket = self.sockets.remove(&id).expect("checked at submit");
         match socket.state {
@@ -965,7 +1052,6 @@ impl Sim {
                 }
             }
         }
-        self.complete(pid, token, op, Ok(Done::Nothing));
     }
 
     fn cancel(&mut self, pid: Pid, token: Token, op: Op, target: Token) {

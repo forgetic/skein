@@ -3,7 +3,9 @@
 //! and each [`Answer`] made into its completion (simulator.md, 3).
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::format;
+use alloc::vec::Vec;
 
 use skein_io::kernel::{Done, Entry, Error, Fd, Op, OpenHow};
 use skein_lib::{Queue, Token};
@@ -40,6 +42,8 @@ pub(super) struct Asked {
     token: Token,
     /// The bytes a `Read` asked for, or a `Write` or `Append` gave; 0 otherwise.
     len: u32,
+    /// A close has already removed this handle from the descriptor table.
+    closing: Option<Handle>,
 }
 
 impl Sim {
@@ -141,7 +145,21 @@ impl Sim {
         }
         let (ask, len) = self.ask(pid, &op);
         let ticket = Ticket(serial);
-        self.asked.insert(ticket, Asked { pid, token, len });
+        let closing = match &ask {
+            Ask::Close { file } => Some(*file),
+            Ask::Spawn { .. }
+            | Ask::Open { .. }
+            | Ask::Read { .. }
+            | Ask::Write { .. }
+            | Ask::Append { .. }
+            | Ask::Sync { .. }
+            | Ask::Stat { .. }
+            | Ask::Rename { .. }
+            | Ask::Remove { .. }
+            | Ask::MakeDirectory { .. }
+            | Ask::List { .. } => None,
+        };
+        self.asked.insert(ticket, Asked { pid, token, len, closing });
         self.park(pid, token, op);
         self.calls.push_back(Call { ticket, ask });
     }
@@ -286,7 +304,7 @@ impl Sim {
             self.answered_spawn(ticket, result);
             return;
         }
-        let Some(Asked { pid, token, len }) = self.asked.remove(&ticket) else {
+        let Some(Asked { pid, token, len, closing: _ }) = self.asked.remove(&ticket) else {
             self.machine(&format!("an answer to {ticket:?}, which is no call waiting"));
         };
         let mut op = self.unpark(pid, token);
@@ -370,6 +388,28 @@ impl Sim {
         process.next_fd = process.next_fd.checked_add(1).expect("fewer than 2^31 descriptors");
         process.files.insert(fd, file);
         fd
+    }
+
+    /// Detaches cut file descriptors and outstanding machine calls. A
+    /// close not yet answered still owns the handle it removed from fds.
+    pub(super) fn cut_files(&mut self, pid: Pid) -> Box<[Handle]> {
+        let tickets: BTreeSet<_> = self
+            .asked
+            .iter()
+            .filter_map(|(ticket, asked)| (asked.pid == pid).then_some(*ticket))
+            .chain(self.spawn_asked.iter().filter_map(|(ticket, (owner, _))| (*owner == pid).then_some(*ticket)))
+            .collect();
+        let mut handles: Vec<_> =
+            core::mem::take(&mut self.process_mut(pid).files).into_values().map(|file| file.handle).collect();
+        for ticket in &tickets {
+            if let Some(asked) = self.asked.remove(ticket)
+                && let Some(handle) = asked.closing
+            {
+                handles.push(handle);
+            }
+        }
+        self.calls.retain(|call| !tickets.contains(&call.ticket));
+        handles.into_boxed_slice()
     }
 
     /// Fails the world on an answer the machine should not have given.
