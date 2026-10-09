@@ -572,6 +572,7 @@ fn client_limits() -> skein_llm::client::Limits {
         },
         error_bytes: 4096,
         drop_reasoning: false,
+        declared_output_tokens: 4096,
     }
 }
 

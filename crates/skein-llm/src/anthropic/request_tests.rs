@@ -1,4 +1,4 @@
-use super::{DEFAULT_MAX_TOKENS, encode_request, measure_request};
+use super::{encode_request, measure_request};
 use crate::{Block, Error, Json, Message, Prompt, Provider, Replay, Role, Tool, openai};
 use alloc::boxed::Box;
 use skein_json::Token;
@@ -46,14 +46,13 @@ fn reasoning(value: &[u8]) -> Block {
 #[test]
 fn minimal_request_is_native_streaming_messages_with_a_bounded_output_cap() {
     let prompt = prompt(Role::User, text(b"hello\n\"Claude\""));
-    let wire = encode_request(&prompt, &LIMITS).expect("bounded request");
+    let wire = encode_request(&prompt, 4096, &LIMITS).expect("bounded request");
     assert_eq!(
         wire.as_ref(),
         br#"{"model":"claude-sonnet-4-6","max_tokens":4096,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hello\n\"Claude\""}]}]}"#
     );
-    assert_eq!(DEFAULT_MAX_TOKENS, 4096);
     assert_eq!(
-        usize::try_from(measure_request(&prompt, &LIMITS).expect("measurement")).expect("u32 fits usize"),
+        usize::try_from(measure_request(&prompt, 4096, &LIMITS).expect("measurement")).expect("u32 fits usize"),
         wire.len()
     );
 }
@@ -97,7 +96,7 @@ fn signed_and_redacted_reasoning_tool_calls_and_native_error_results_replay_in_o
             }]),
         },
     ]);
-    let wire = encode_request(&prompt, &LIMITS).expect("replay encodes");
+    let wire = encode_request(&prompt, 12000, &LIMITS).expect("replay encodes");
     assert_eq!(wire.as_ref(), br#"{"model":"claude-sonnet-4-6","max_tokens":9000,"stream":true,"system":"actual client instructions","tools":[{"name":"read","description":"read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}}],"messages":[{"role":"user","content":[{"type":"text","text":"read"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"consider","signature":"opaque-signature"},{"type":"redacted_thinking","data":"opaque-redacted"},{"type":"text","text":"checking"},{"type":"tool_use","id":"toolu_1","name":"read","input":{"path":"file"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"denied","is_error":true}]}]}"#);
 }
 
@@ -106,23 +105,23 @@ fn effort_is_explicit_and_unsupported_fields_are_rejected() {
     for effort in [b"low".as_slice(), b"medium", b"high", b"max"] {
         let mut prompt = prompt(Role::User, text(b"hello"));
         prompt.reasoning_effort = Some(bytes::copy_of(effort));
-        let wire = encode_request(&prompt, &LIMITS).expect("supported adaptive effort");
+        let wire = encode_request(&prompt, 4096, &LIMITS).expect("supported adaptive effort");
         assert!(bytes::find(&wire, br#""thinking":{"type":"adaptive"}"#).is_some(), "effort enables adaptive thinking");
         assert!(bytes::find(&wire, br#""output_config":{"effort":""#).is_some(), "effort goes into output_config");
     }
     let mut prompt = prompt(Role::User, text(b"hello"));
     prompt.reasoning_effort = Some(bytes::copy_of(b"off"));
-    let wire = encode_request(&prompt, &LIMITS).expect("thinking disabled");
+    let wire = encode_request(&prompt, 4096, &LIMITS).expect("thinking disabled");
     assert!(bytes::find(&wire, br#""thinking":{"type":"disabled"}"#).is_some(), "off disables thinking");
     assert_eq!(bytes::find(&wire, b"output_config"), None);
     prompt.reasoning_effort = Some(bytes::copy_of(b"unknown"));
-    assert_eq!(measure_request(&prompt, &LIMITS), Err(Error::Unsupported));
+    assert_eq!(measure_request(&prompt, 4096, &LIMITS), Err(Error::Unsupported));
     prompt.reasoning_effort = None;
     prompt.cache_key = Some(bytes::copy_of(b"affinity"));
-    assert_eq!(measure_request(&prompt, &LIMITS), Err(Error::Unsupported));
+    assert_eq!(measure_request(&prompt, 4096, &LIMITS), Err(Error::Unsupported));
     prompt.cache_key = None;
     prompt.max_output_tokens = Some(0);
-    assert_eq!(measure_request(&prompt, &LIMITS), Err(Error::Invalid));
+    assert_eq!(measure_request(&prompt, 4096, &LIMITS), Err(Error::Invalid));
 }
 
 #[test]
@@ -135,14 +134,14 @@ fn malformed_unsigned_and_duplicate_reasoning_cannot_replay() {
         br#"{"type":"redacted_thinking","data":""}"#,
         br#"{"type":"text","text":"cannot masquerade as opaque"}"#,
     ] {
-        assert_eq!(measure_request(&prompt(Role::Assistant, reasoning(value)), &LIMITS), Err(Error::Invalid));
+        assert_eq!(measure_request(&prompt(Role::Assistant, reasoning(value)), 4096, &LIMITS), Err(Error::Invalid));
     }
     let replay = Replay {
         provider: Provider::OpenAiCodex,
         value: Json::from_bytes(br#"{"type":"thinking","thinking":"a","signature":"s"}"#, &LIMITS).expect("JSON"),
     };
     assert_eq!(
-        measure_request(&prompt(Role::Assistant, Block::Reasoning { replay }), &LIMITS),
+        measure_request(&prompt(Role::Assistant, Block::Reasoning { replay }), 4096, &LIMITS),
         Err(Error::Unsupported)
     );
 }
@@ -155,12 +154,12 @@ fn roles_utf8_object_arguments_and_tool_identifiers_are_checked_before_encoding(
         arguments: bytes::copy_of(b"{}"),
         replay: None,
     };
-    assert_eq!(measure_request(&prompt(Role::User, tool), &LIMITS), Err(Error::Invalid));
+    assert_eq!(measure_request(&prompt(Role::User, tool), 4096, &LIMITS), Err(Error::Invalid));
     let result = Block::ToolResult { id: bytes::copy_of(b"id"), text: bytes::copy_of(b"result"), is_error: false };
-    assert_eq!(measure_request(&prompt(Role::Assistant, result), &LIMITS), Err(Error::Invalid));
+    assert_eq!(measure_request(&prompt(Role::Assistant, result), 4096, &LIMITS), Err(Error::Invalid));
     let signed = reasoning(br#"{"type":"thinking","thinking":"a","signature":"s"}"#);
-    assert_eq!(measure_request(&prompt(Role::User, signed), &LIMITS), Err(Error::Invalid));
-    assert_eq!(measure_request(&prompt(Role::User, text(&[0xff])), &LIMITS), Err(Error::Invalid));
+    assert_eq!(measure_request(&prompt(Role::User, signed), 4096, &LIMITS), Err(Error::Invalid));
+    assert_eq!(measure_request(&prompt(Role::User, text(&[0xff])), 4096, &LIMITS), Err(Error::Invalid));
     for arguments in [b"broken".as_slice(), b"[]", b"null"] {
         let tool = Block::ToolCall {
             id: bytes::copy_of(b"id"),
@@ -168,7 +167,7 @@ fn roles_utf8_object_arguments_and_tool_identifiers_are_checked_before_encoding(
             arguments: bytes::copy_of(arguments),
             replay: None,
         };
-        assert_eq!(measure_request(&prompt(Role::Assistant, tool), &LIMITS), Err(Error::Invalid));
+        assert_eq!(measure_request(&prompt(Role::Assistant, tool), 4096, &LIMITS), Err(Error::Invalid));
     }
     for id in [b"bad|id".as_slice(), b""] {
         let tool = Block::ToolCall {
@@ -177,31 +176,31 @@ fn roles_utf8_object_arguments_and_tool_identifiers_are_checked_before_encoding(
             arguments: bytes::copy_of(b"{}"),
             replay: None,
         };
-        assert_eq!(measure_request(&prompt(Role::Assistant, tool), &LIMITS), Err(Error::Invalid));
+        assert_eq!(measure_request(&prompt(Role::Assistant, tool), 4096, &LIMITS), Err(Error::Invalid));
     }
     let replay = Replay { provider: Provider::Anthropic, value: Json::from_bytes(b"{}", &LIMITS).expect("JSON") };
     let block = Block::Text { text: bytes::copy_of(b"a"), replay: Some(replay) };
-    assert_eq!(measure_request(&prompt(Role::Assistant, block), &LIMITS), Err(Error::Unsupported));
+    assert_eq!(measure_request(&prompt(Role::Assistant, block), 4096, &LIMITS), Err(Error::Unsupported));
 }
 
 #[test]
 fn escaped_wire_bytes_string_tokens_blocks_arguments_and_depth_have_hard_bounds() {
     let request = prompt(Role::User, text(b"\\\"\n"));
-    let length = measure_request(&request, &LIMITS).expect("full request");
+    let length = measure_request(&request, 4096, &LIMITS).expect("full request");
     let mut limits = LIMITS;
     limits.request_bytes = length;
-    assert_eq!(measure_request(&request, &limits), Ok(length));
+    assert_eq!(measure_request(&request, 4096, &limits), Ok(length));
     limits.request_bytes = length.checked_sub(1).expect("nonempty request");
-    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Request, limits.request_bytes)));
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Request, limits.request_bytes)));
     limits = LIMITS;
     limits.string_bytes = 2;
-    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::String, 2)));
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::String, 2)));
     limits = LIMITS;
     limits.parts = 0;
-    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Parts, 0)));
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Parts, 0)));
     limits = LIMITS;
     limits.depth = 3;
-    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Depth, 3)));
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Depth, 3)));
     let tool = Block::ToolCall {
         id: bytes::copy_of(b"id"),
         name: bytes::copy_of(b"read"),
@@ -211,10 +210,10 @@ fn escaped_wire_bytes_string_tokens_blocks_arguments_and_depth_have_hard_bounds(
     let prompt = prompt(Role::Assistant, tool);
     limits = LIMITS;
     limits.string_bytes = 2;
-    assert_eq!(measure_request(&prompt, &limits), Err(Error::limit(crate::Cap::String, 2)));
+    assert_eq!(measure_request(&prompt, 4096, &limits), Err(Error::limit(crate::Cap::String, 2)));
     limits = LIMITS;
     limits.tokens = 2;
-    assert_eq!(measure_request(&prompt, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
+    assert_eq!(measure_request(&prompt, 4096, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
 }
 
 #[test]
@@ -223,10 +222,10 @@ fn prebuilt_replay_and_schema_obey_the_current_admission_limits() {
     let mut request = prompt(Role::Assistant, reasoning(signed));
     let mut limits = LIMITS;
     limits.opaque_bytes = 10;
-    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Opaque, 10)));
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Opaque, 10)));
     limits = LIMITS;
     limits.tokens = 2;
-    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
     request.messages = Box::new([Message { role: Role::User, content: Box::new([text(b"hello")]) }]);
     request.tools = Box::new([Tool {
         name: bytes::copy_of(b"custom_tool"),
@@ -237,24 +236,24 @@ fn prebuilt_replay_and_schema_obey_the_current_admission_limits() {
         )
         .expect("schema JSON"),
     }]);
-    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
     limits = LIMITS;
     limits.document_bytes = 2;
-    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Document, 2)));
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Document, 2)));
 }
 
 #[test]
 fn assistant_refusal_is_a_native_text_block_and_empty_history_is_invalid() {
     let mut request = prompt(Role::Assistant, Block::Refusal { text: bytes::copy_of(b"no"), replay: None });
-    let wire = encode_request(&request, &LIMITS).expect("refusal can appear in assistant history");
+    let wire = encode_request(&request, 4096, &LIMITS).expect("refusal can appear in assistant history");
     assert!(
         bytes::find(&wire, br#"{"type":"text","text":"no"}"#).is_some(),
         "Anthropic refusals have native text content"
     );
     request.messages = Box::new([]);
-    assert_eq!(measure_request(&request, &LIMITS), Err(Error::Invalid));
+    assert_eq!(measure_request(&request, 4096, &LIMITS), Err(Error::Invalid));
     request.messages = Box::new([Message { role: Role::User, content: Box::new([]) }]);
-    assert_eq!(measure_request(&request, &LIMITS), Err(Error::Invalid));
+    assert_eq!(measure_request(&request, 4096, &LIMITS), Err(Error::Invalid));
 }
 
 #[test]
@@ -267,11 +266,11 @@ fn historical_identity_is_explicit_and_is_the_first_separate_system_block() {
     );
     let mut request = prompt(Role::User, text(b"hello"));
     request.instructions = instructions;
-    let wire = encode_request(&request, &LIMITS).expect("explicit identity request");
+    let wire = encode_request(&request, 4096, &LIMITS).expect("explicit identity request");
     assert!(bytes::find(&wire, br#""system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"actual\n\"instructions\""}]"#).is_some(), "identity precedes unchanged caller instructions in a separate block");
     request.instructions = super::identity::instructions(b"").expect("identity alone");
     assert_eq!(request.instructions.as_ref(), super::identity::CLAUDE_CODE_SYSTEM_IDENTITY);
-    let wire = encode_request(&request, &LIMITS).expect("identity-only request");
+    let wire = encode_request(&request, 4096, &LIMITS).expect("identity-only request");
     assert!(
         bytes::find(
             &wire,
@@ -281,14 +280,14 @@ fn historical_identity_is_explicit_and_is_the_first_separate_system_block() {
         "an empty extra prompt has only the identity block"
     );
     request.instructions = bytes::copy_of(b"You are Claude Code, Anthropic's official CLI for Claude.\nsimilar prefix");
-    let wire = encode_request(&request, &LIMITS).expect("generic instructions");
+    let wire = encode_request(&request, 4096, &LIMITS).expect("generic instructions");
     assert!(
         bytes::find(&wire, br#""system":"You are Claude Code, Anthropic's official CLI for Claude.\nsimilar prefix""#)
             .is_some(),
         "only the exact opt-in separator selects identity blocks"
     );
     request.instructions = bytes::copy_of(extra);
-    let wire = encode_request(&request, &LIMITS).expect("actual client instructions");
+    let wire = encode_request(&request, 4096, &LIMITS).expect("actual client instructions");
     assert!(
         bytes::find(&wire, br#""system":"actual\n\"instructions\"""#).is_some(),
         "generic instructions retain their string representation"
@@ -300,18 +299,18 @@ fn historical_identity_is_explicit_and_is_the_first_separate_system_block() {
 fn explicit_identity_blocks_remain_subject_to_instruction_and_wire_limits() {
     let mut request = prompt(Role::User, text(b"hello"));
     request.instructions = super::identity::instructions(b"extra").expect("identity instructions");
-    let length = measure_request(&request, &LIMITS).expect("identity request measurement");
+    let length = measure_request(&request, 4096, &LIMITS).expect("identity request measurement");
     let mut limits = LIMITS;
     limits.request_bytes = length;
-    assert_eq!(measure_request(&request, &limits), Ok(length));
+    assert_eq!(measure_request(&request, 4096, &limits), Ok(length));
     limits.request_bytes = length.checked_sub(1).expect("nonempty identity request");
-    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Request, limits.request_bytes)));
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Request, limits.request_bytes)));
     limits = LIMITS;
     limits.string_bytes = u32::try_from(request.instructions.len().checked_sub(1).expect("nonempty instructions"))
         .expect("small instructions");
-    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::String, limits.string_bytes)));
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::String, limits.string_bytes)));
     request.instructions = super::identity::instructions(&[0xff]).expect("owned instructions");
-    assert_eq!(measure_request(&request, &LIMITS), Err(Error::Invalid));
+    assert_eq!(measure_request(&request, 4096, &LIMITS), Err(Error::Invalid));
 }
 
 #[test]
@@ -321,10 +320,10 @@ fn opaque_extension_fields_survive_native_replay_and_bound_admission() {
         br#"{"type":"redacted_thinking","data":"opaque","provider_hint":[1,null]}"#,
     ] {
         let input = prompt(Role::Assistant, reasoning(value));
-        let wire = encode_request(&input, &LIMITS).expect("bounded replay with provider extension");
+        let wire = encode_request(&input, 4096, &LIMITS).expect("bounded replay with provider extension");
         assert!(bytes::find(&wire, value).is_some(), "the complete opaque value survives");
         let limits = openai::Limits { opaque_bytes: 1, ..LIMITS };
-        assert_eq!(measure_request(&input, &limits), Err(Error::limit(crate::Cap::Opaque, 1)));
+        assert_eq!(measure_request(&input, 4096, &limits), Err(Error::limit(crate::Cap::Opaque, 1)));
     }
 }
 
@@ -335,7 +334,7 @@ fn peer_request_admits_native_core_before_corrupted_controls() {
     let decoded = super::decode_request(&value, &LIMITS).expect("native core admitted");
     assert_eq!(decoded.model.as_ref(), b"model");
     assert_eq!(decoded.tools.len(), 1);
-    assert!(encode_request(&decoded, &LIMITS).is_ok(), "peer uses actual native core admission");
+    assert!(encode_request(&decoded, 4096, &LIMITS).is_ok(), "peer uses actual native core admission");
     for (old, replacement) in [
         ("\"stream\":true,", ""),
         ("\"stream\":true", "\"stream\":false"),
@@ -372,7 +371,7 @@ fn tool_choice_none_is_native_and_auto_and_only_are_omitted() {
             schema: Json::from_bytes(b"{}", &LIMITS).expect("schema object"),
         }]);
         prompt.choice = choice.clone();
-        let wire = encode_request(&prompt, &LIMITS).expect("choice is bounded");
+        let wire = encode_request(&prompt, 4096, &LIMITS).expect("choice is bounded");
         let value = Json::from_bytes(&wire, &LIMITS).expect("request document");
         let decoded = super::decode_request(&value, &LIMITS).expect("peer decodes choice");
         assert_eq!(decoded.tools, prompt.tools);
@@ -407,5 +406,21 @@ fn dropped_blocks_and_their_empty_turns_emit_no_anthropic_history() {
         Message { role: Role::Assistant, content: Box::new([Block::Dropped { bytes: 999 }]) },
         Message { role: Role::User, content: Box::new([Block::Dropped { bytes: 999 }, text(b"kept")]) },
     ]);
-    assert_eq!(encode_request(&actual, &LIMITS).unwrap(), encode_request(&expected, &LIMITS).unwrap());
+    assert_eq!(encode_request(&actual, 4096, &LIMITS).unwrap(), encode_request(&expected, 4096, &LIMITS).unwrap());
+}
+
+#[test]
+fn declared_output_sets_the_default_and_admits_only_caps_at_or_below_it() {
+    let declared = 12345;
+    let mut request = prompt(Role::User, text(b"hello"));
+    let wire = encode_request(&request, declared, &LIMITS).unwrap();
+    let decoded = super::decode_request(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap();
+    assert_eq!(decoded.max_output_tokens, Some(declared));
+    request.max_output_tokens = Some(declared);
+    assert_eq!(encode_request(&request, declared, &LIMITS).unwrap(), wire);
+    request.max_output_tokens = Some(declared + 1);
+    assert_eq!(measure_request(&request, declared, &LIMITS), Err(Error::limit(crate::Cap::Output, declared)));
+    assert_eq!(encode_request(&request, declared, &LIMITS), Err(Error::limit(crate::Cap::Output, declared)));
+    request.max_output_tokens = None;
+    assert_eq!(measure_request(&request, 0, &LIMITS), Err(Error::Invalid));
 }

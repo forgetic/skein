@@ -30,6 +30,8 @@ pub struct Limits {
     pub error_bytes: u32,
     /// Drop Codex reasoning past the opaque cap; Anthropic thinking still fails.
     pub drop_reasoning: bool,
+    /// The endpoint model's declared completion ceiling, in tokens.
+    pub declared_output_tokens: u32,
 }
 
 /// The owner's byte bounds on bearer and account values at one endpoint.
@@ -246,9 +248,9 @@ impl Client {
                 (headers, body)
             }
             Provider::Anthropic => {
-                let length = anthropic::measure_request(&input.prompt, &limits.dialect)?;
+                let length = anthropic::measure_request(&input.prompt, limits.declared_output_tokens, &limits.dialect)?;
                 let headers = headers(&input.endpoint, &input.credential, limits, length)?;
-                let body = anthropic::encode_request(&input.prompt, &limits.dialect)?;
+                let body = anthropic::encode_request(&input.prompt, limits.declared_output_tokens, &limits.dialect)?;
                 (headers, body)
             }
         };

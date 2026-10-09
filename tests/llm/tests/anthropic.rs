@@ -465,3 +465,33 @@ fn owner_reasoning_drop_never_discards_anthropic_thinking_past_the_cap() {
         assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Limit { which: skein_llm::Cap::Opaque, bound }, .. } if *bound == u64::from(bounds.dialect.opaque_bytes))));
     }
 }
+
+#[test]
+fn actual_anthropic_peer_reads_the_declared_output_default_and_the_admission_edge() {
+    let mut bounds = limits();
+    bounds.declared_output_tokens = 37;
+    for cap in [None, Some(37)] {
+        let mut input = anthropic_call(1);
+        input.prompt.max_output_tokens = cap;
+        let cue = input.prompt.instructions.clone();
+        let scripts = Box::new([skein_fake_llm_domain::api::Script {
+            cue,
+            turns: Box::new([skein_fake_llm_domain::api::Turn {
+                lines: Box::new([skein_fake_llm_domain::api::Line::Text { text: b"ok".as_slice().into() }]),
+                finish: skein_fake_llm_domain::api::Finish::Stop,
+                tokens: 1,
+            }]),
+        }]);
+        let mut world = skein_llm_world::fake::Exchange::new(input, bounds, scripts);
+        world.start();
+        world.run();
+        assert_eq!(world.queries[0].max_tokens, 37);
+        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Completed { .. })));
+    }
+    let mut input = anthropic_call(1);
+    input.prompt.max_output_tokens = Some(38);
+    assert!(matches!(
+        client::Client::prepare(input, &bounds),
+        Err(Error::Limit { which: skein_llm::Cap::Output, bound: 37 })
+    ));
+}

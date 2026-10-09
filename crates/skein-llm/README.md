@@ -135,3 +135,7 @@ caller-owned. Shared independent scripts and HTTP/SSE peers are described in
 Owners may enable `client::Limits.drop_reasoning` to receive `Block::Dropped`
 for Codex reasoning beyond the opaque cap. Dropped blocks emit no history item;
 Anthropic thinking and other opaque Codex items retain typed limit failures.
+
+Anthropic output uses `client::Limits.declared_output_tokens` when the prompt
+has no cap. A prompt cap above that declaration is refused as `Cap::Output`.
+Native Anthropic request encoding and measurement take the declaration explicitly.

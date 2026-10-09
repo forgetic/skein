@@ -710,11 +710,11 @@ mod tests {
         ] {
             prompt.choice = crate::ToolChoice::Only(names.into());
             assert_eq!(request(prompt.clone(), Provider::OpenAiCodex, &LIMITS), Err(Error::Invalid));
-            assert_eq!(crate::anthropic::encode_request(&prompt, &LIMITS), Err(Error::Invalid));
+            assert_eq!(crate::anthropic::encode_request(&prompt, 4096, &LIMITS), Err(Error::Invalid));
         }
         prompt.choice = crate::ToolChoice::Only(Box::new([bytes::copy_of(b"read")]));
         request(prompt.clone(), Provider::OpenAiCodex, &LIMITS).expect("offered name accepted");
-        crate::anthropic::encode_request(&prompt, &LIMITS).expect("offered name accepted");
+        crate::anthropic::encode_request(&prompt, 4096, &LIMITS).expect("offered name accepted");
     }
     #[test]
     fn oversize_and_cut_are_outcomes_and_neither_can_be_replayed() {
@@ -724,7 +724,7 @@ mod tests {
         ] {
             let prompt = prompt(Role::Assistant, block);
             assert_eq!(request(prompt.clone(), Provider::OpenAiCodex, &LIMITS), Err(Error::Invalid));
-            assert_eq!(crate::anthropic::encode_request(&prompt, &LIMITS), Err(Error::Invalid));
+            assert_eq!(crate::anthropic::encode_request(&prompt, 4096, &LIMITS), Err(Error::Invalid));
         }
         for cut in [false, true] {
             let native = openai::Part::ToolCall {

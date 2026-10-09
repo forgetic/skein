@@ -103,7 +103,8 @@ pub struct Prompt {
     pub reasoning_effort: Option<Box<[u8]>>,
     /// Optional provider prompt-cache affinity key; it does not enable storage.
     pub cache_key: Option<Box<[u8]>>,
-    /// Anthropic's `max_tokens`; `None` uses 4096. Codex subscription calls
+    /// Anthropic's `max_tokens`; `None` uses the endpoint's declared output.
+    /// A cap above the declaration is refused. Codex subscription calls
     /// require `None` because that route does not support token caps.
     pub max_output_tokens: Option<u32>,
 }
@@ -194,6 +195,8 @@ pub enum Cap {
     Opaque,
     /// The configured bound on completion or history parts.
     Parts,
+    /// The endpoint model's declared completion ceiling in tokens.
+    Output,
     /// The configured bound on completion answer.
     Answer,
     /// The configured bound on provider error body.
@@ -221,6 +224,7 @@ impl Cap {
             Cap::Number => b"JSON numeral",
             Cap::Opaque => b"opaque replay",
             Cap::Parts => b"completion or history parts",
+            Cap::Output => b"declared output tokens",
             Cap::Answer => b"completion answer",
             Cap::ErrorBody => b"provider error body",
             Cap::AccessToken => b"access token",

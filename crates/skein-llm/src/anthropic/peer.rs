@@ -106,7 +106,7 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeErr
         choice,
         max_output_tokens: Some(max),
     };
-    match super::request::validate(&prompt, limits) {
+    match super::request::validate(&prompt, u32::MAX, limits) {
         Ok(()) => Ok(prompt),
         Err(crate::Error::Limit { which, bound }) => Err(DecodeError::TooLarge { which, bound }),
         Err(crate::Error::Invalid | crate::Error::Unsupported) => Err(DecodeError::Malformed),

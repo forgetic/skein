@@ -4,27 +4,31 @@ use crate::{Block, Error, Json, Prompt, Provider, Replay, Role, Tool, openai};
 use alloc::boxed::Box;
 use skein_json::{Token, writer};
 
-/// Default output cap when the caller leaves `Prompt::max_output_tokens` unset.
-pub const DEFAULT_MAX_TOKENS: u32 = 4096;
-
-pub fn encode_request(prompt: &Prompt, limits: &openai::Limits) -> Result<Box<[u8]>, Error> {
-    let length = measure_request(prompt, limits)?;
+/// Encode the request under the endpoint's nonzero declared output ceiling.
+pub fn encode_request(prompt: &Prompt, declared_output: u32, limits: &openai::Limits) -> Result<Box<[u8]>, Error> {
+    let length = measure_request(prompt, declared_output, limits)?;
     let bounded = writer::Limits { depth: limits.depth, length: limits.request_bytes };
     let mut out = writer::Encoder::write(length, &bounded);
-    write_request(&mut out, prompt, limits)?;
+    write_request(&mut out, prompt, declared_output, limits)?;
     Ok(out.finish())
 }
 
 /// Validates the prompt and measures its escaped wire representation before allocating it.
-pub fn measure_request(prompt: &Prompt, limits: &openai::Limits) -> Result<u32, Error> {
-    validate(prompt, limits)?;
+pub fn measure_request(prompt: &Prompt, declared_output: u32, limits: &openai::Limits) -> Result<u32, Error> {
+    validate(prompt, declared_output, limits)?;
     let bounded = writer::Limits { depth: limits.depth, length: limits.request_bytes };
     let mut out = writer::Encoder::measure(&bounded);
-    write_request(&mut out, prompt, limits)?;
+    write_request(&mut out, prompt, declared_output, limits)?;
     measured(out, bounded, crate::Cap::Request)
 }
 
-pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), Error> {
+pub(super) fn validate(prompt: &Prompt, declared_output: u32, limits: &openai::Limits) -> Result<(), Error> {
+    if declared_output == 0 {
+        return Err(Error::Invalid);
+    }
+    if prompt.max_output_tokens.unwrap_or(declared_output) > declared_output {
+        return Err(Error::limit(crate::Cap::Output, declared_output));
+    }
     let count = usize::try_from(limits.parts).expect("u32 fits usize");
     if prompt.model.is_empty() || prompt.messages.is_empty() || prompt.max_output_tokens == Some(0) {
         return Err(Error::Invalid);
@@ -243,12 +247,17 @@ fn measured(out: writer::Encoder, limits: writer::Limits, cap: crate::Cap) -> Re
     }
 }
 
-fn write_request(out: &mut writer::Encoder, prompt: &Prompt, limits: &openai::Limits) -> Result<(), Error> {
+fn write_request(
+    out: &mut writer::Encoder,
+    prompt: &Prompt,
+    declared_output: u32,
+    limits: &openai::Limits,
+) -> Result<(), Error> {
     out.object_start();
     out.key(b"model");
     out.string(&prompt.model);
     out.key(b"max_tokens");
-    out.unsigned(u64::from(prompt.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS)));
+    out.unsigned(u64::from(prompt.max_output_tokens.unwrap_or(declared_output)));
     out.key(b"stream");
     out.boolean(true);
     if !prompt.instructions.is_empty() {
