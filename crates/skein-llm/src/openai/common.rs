@@ -217,40 +217,65 @@ pub fn classify(status: u16, error: Option<&ProviderError>, rate: RateLimit, wal
         None => b"",
     };
     let delay = rate.delay(error, wall);
-    if status == 401 || kind == b"authentication_error" || kind == b"invalid_api_key" {
-        return Failure::Unauthorized;
+    // An HTTP status decides retryability. A parsed body may refine that
+    // class. Zero or a successful head carries a native SSE error event.
+    match status {
+        401 => Failure::Unauthorized,
+        403 | 404 | 422 => Failure::Invalid,
+        429 => limited(kind, rate.exhausted, delay),
+        529 => Failure::Overloaded,
+        500..=599 => {
+            if kind == b"overloaded_error" {
+                Failure::Overloaded
+            } else {
+                Failure::Unavailable
+            }
+        }
+        400 | 413 => {
+            if context(kind, error) {
+                Failure::ContextTooLong
+            } else {
+                Failure::Invalid
+            }
+        }
+        0 | 200..=299 => native_failure(kind, error, rate.exhausted, delay),
+        _ => Failure::Unavailable,
     }
-    if status == 403 {
-        return Failure::Invalid;
+}
+
+fn limited(kind: &[u8], exhausted: bool, delay: Duration) -> Failure {
+    if exhausted || kind == b"usage_limit_reached" {
+        Failure::Exhausted { retry_after: delay }
+    } else {
+        Failure::RateLimited { retry_after: delay }
     }
-    if status == 429 || kind == b"rate_limit_error" || kind == b"rate_limit_exceeded" || kind == b"usage_limit_reached"
-    {
-        return if rate.exhausted || kind == b"usage_limit_reached" {
-            Failure::Exhausted { retry_after: delay }
-        } else {
-            Failure::RateLimited { retry_after: delay }
-        };
-    }
-    if status == 529 || status == 503 || kind == b"overloaded_error" {
-        return Failure::Overloaded;
-    }
-    if status == 500 || status == 502 || status == 504 || kind == b"api_error" || kind == b"server_error" {
-        return Failure::Unavailable;
-    }
-    let context = kind == b"context_length_exceeded"
+}
+
+fn context(kind: &[u8], error: Option<&ProviderError>) -> bool {
+    kind == b"context_length_exceeded"
         || kind == b"request_too_large"
         || match error {
             Some(error) => bytes::find(&error.message, b"prompt is too long").is_some(),
             None => false,
-        };
-    if (status == 400 || status == 413 || status == 0) && context {
+        }
+}
+
+fn native_failure(kind: &[u8], error: Option<&ProviderError>, exhausted: bool, delay: Duration) -> Failure {
+    if kind == b"authentication_error" || kind == b"invalid_api_key" {
+        return Failure::Unauthorized;
+    }
+    if kind == b"rate_limit_error" || kind == b"rate_limit_exceeded" || kind == b"usage_limit_reached" {
+        return limited(kind, exhausted, delay);
+    }
+    if kind == b"overloaded_error" {
+        return Failure::Overloaded;
+    }
+    if context(kind, error) {
         return Failure::ContextTooLong;
     }
-    match status {
-        400 | 404 | 413 | 422 => Failure::Invalid,
-        _ => Failure::Unavailable,
-    }
+    Failure::Unavailable
 }
+
 pub(crate) fn decimal(bytes: &[u8]) -> Option<u64> {
     let mut n: u64 = 0;
     if bytes.is_empty() {

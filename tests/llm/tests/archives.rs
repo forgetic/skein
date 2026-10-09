@@ -2,7 +2,7 @@
 //! Provenance travels with fixtures; these tests establish no live admission.
 
 use skein_llm::{Block, Completion, Stop, client};
-use skein_llm_world::{World, call, limits};
+use skein_llm_world::{World, call, limits_for};
 
 fn archive(scenario: &str, file: &str) -> Vec<u8> {
     std::fs::read(
@@ -49,7 +49,7 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
             strings: 32768,
             tokens: 4096,
             output_items: 64,
-            ..limits().native()
+            ..limits_for(skein_llm::Provider::Anthropic).native()
         };
         let captured_request = archive(scenario, "request.json");
         let wrapper =
@@ -85,7 +85,7 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
         input.prompt.max_output_tokens = Some(4096);
         let mut wire = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
         wire.extend_from_slice(&archive(scenario, "response.sse"));
-        let mut world = World::new(input, limits(), wire, 7);
+        let mut world = World::new(input, limits_for(skein_llm::Provider::Anthropic), wire, 7);
         world.fragmentation(23, 1);
         world.request(client::Request::Start);
         world.run();

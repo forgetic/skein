@@ -245,7 +245,7 @@ fn selective_known_events_ignore_seeded_extensions_and_field_order() {
                 &skein_llm_world::events(&refs),
                 seed % 2 == 0,
             );
-            let mut bounds = limits();
+            let mut bounds = skein_llm_world::limits_for(provider);
             bounds.tokens = 64;
             bounds.retained = 512;
             bounds.strings = 64;

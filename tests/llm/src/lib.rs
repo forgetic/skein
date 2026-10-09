@@ -1,37 +1,34 @@
 //! Deterministic, demand-checking plaintext stream world. Wire fixtures are
 //! handwritten independently of the product encoders.
-use skein_http::{Header, client as http, sse};
+use skein_http::{Header, client as http};
 use skein_lib::stream::{Down, Read, Up};
 use skein_lib::{Env, Intake, Queue, Rng, Time, Token, Wall};
 use skein_llm::{Block, Call, Credential, Endpoint, Message, Prompt, Role, client};
 
+/// Small declared model used by ordinary protocol stories.
+pub const TINY_DECL: skein_llm::Declared = skein_llm::Declared {
+    window: 171,
+    output: 4096,
+    reasoning_item: 2048,
+    tool_payload: 342,
+    calls_per_response: 7,
+    conversations: 1,
+};
+
+#[must_use]
+pub fn limits_for(provider: skein_llm::Provider) -> client::Limits {
+    let mut limits = skein_llm::Limits::derive(&TINY_DECL).expect("tiny declaration").dialect(provider);
+    // The world's transport supplies its pieces; stories may lower a bound.
+    limits.http.request = 4096;
+    limits.http.read = 256;
+    limits.http.send = 31;
+    limits.sse.chunk = 128;
+    limits
+}
+
 #[must_use]
 pub fn limits() -> client::Limits {
-    client::Limits {
-        http: http::Limits { request: 4096, head: 4096, headers: 32, read: 256, send: 31 },
-        sse: sse::Limits { line: 4096, event: 8192, field: 128, chunk: 128 },
-
-        request: 8192,
-        retained: 8192,
-        strings: 4096,
-        depth: 32,
-        tokens: 1024,
-        output_items: 16,
-        input: 2048,
-        reasoning: 2048,
-        answer: 8192,
-        detail_bytes: 256,
-
-        tools: 16,
-        history_items: 16,
-        metadata: 2048,
-        receiving: 1_048_576,
-        skip: 8192,
-
-        error_bytes: 4096,
-        drop_reasoning: false,
-        declared_output_tokens: 4096,
-    }
+    limits_for(skein_llm::Provider::OpenAiCodex)
 }
 
 #[must_use]

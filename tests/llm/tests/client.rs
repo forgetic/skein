@@ -144,7 +144,7 @@ fn provider_error_body_end_and_http_done_share_one_terminal() {
             r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#,
             Failure::RateLimited { retry_after: Duration::from_secs(13) },
         ),
-        (503, r#"{"error":{"code":"server_error","message":"offline"}}"#, Failure::Overloaded),
+        (503, r#"{"error":{"code":"server_error","message":"offline"}}"#, Failure::Unavailable),
     ] {
         let mut world = World::new(
             call(1),
@@ -433,10 +433,10 @@ fn independent_caps_bound_requests_errors_deltas_and_tool_arguments() {
     assert!(world.seen.iter().any(|e| matches!(
         e,
         client::Event::Failed {
-            failure: Failure::Limit { which: skein_llm::Cap::ErrorBody, bound: 16 },
+            failure: Failure::RateLimited { retry_after },
             evidence: client::Evidence::Response { status: 429 },
             ..
-        }
+        } if *retry_after == Duration::from_secs(4)
     )));
     world.settle();
     world.assert_once();
@@ -653,24 +653,67 @@ fn non_json_errors_keep_their_status_and_exact_error_body_bound() {
                 .collect();
             let [(failure, evidence, detail)] = failed.as_slice() else { panic!("one failed terminal") };
             assert_eq!(*evidence, client::Evidence::Response { status });
+            let expected = match status {
+                401 => Failure::Unauthorized,
+                429 => Failure::RateLimited { retry_after: Duration::ZERO },
+                503 => Failure::Unavailable,
+                _ => unreachable!(),
+            };
+            assert_eq!(*failure, expected);
             if bound < body.len() {
-                assert_eq!(
-                    *failure,
-                    Failure::Limit { which: skein_llm::Cap::ErrorBody, bound: u64::try_from(bound).unwrap() }
-                );
-                assert_eq!(detail.as_ref(), format!("provider error body exceeds bound {bound}").as_bytes());
+                let expected_detail = [b"error body cut: ".as_slice(), &body[..bound]].concat();
+                assert_eq!(detail.as_ref(), expected_detail);
             } else {
-                let expected = match status {
-                    401 => Failure::Unauthorized,
-                    429 => Failure::RateLimited { retry_after: Duration::ZERO },
-                    503 => Failure::Overloaded,
-                    _ => unreachable!(),
-                };
-                assert_eq!(*failure, expected);
                 assert_eq!(detail.as_ref(), format!("provider HTTP error {status}").as_bytes());
             }
         }
     }
+}
+
+#[test]
+fn an_oversized_error_body_keeps_unparsed_detail_and_closes_without_draining() {
+    let json = br#"{"error":{"code":"usage_limit_reached","message":"unparsed prefix"}}"#;
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        for (status, expected) in
+            [(503, Failure::Unavailable), (429, Failure::RateLimited { retry_after: Duration::from_secs(4) })]
+        {
+            for chunked in [false, true] {
+                let mut bounds = skein_llm_world::limits_for(provider);
+                bounds.error_bytes = u32::try_from(json.len()).unwrap();
+                bounds.detail_bytes = 48;
+                let mut body = json.to_vec();
+                body.extend_from_slice(&[b' '; 2048]);
+                let wire = response(status, "Retry-After: 4\r\n", &body, chunked);
+                let wire_length = wire.len();
+                let mut input = call(11);
+                if provider == skein_llm::Provider::Anthropic {
+                    input.endpoint = skein_llm::Endpoint::anthropic();
+                    input.credential = skein_llm::Credential::anthropic(b"fixture".as_slice().into());
+                    input.prompt.affinity = None;
+                }
+                let mut world = World::new(input, bounds, wire, 11);
+                world.fragmentation(1, 1);
+                world.request(client::Request::Start);
+                world.run();
+                world.settle();
+                world.assert_once();
+                assert!(world.source_at < wire_length, "the remaining page is not drained");
+                assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure, evidence: client::Evidence::Response { status: observed }, detail, .. } if *failure == expected && *observed == status && detail.len() == 48 && detail.starts_with(b"error body cut: {\"error\":{\"code\":\"usage_limit"))));
+                assert!(world.seen.iter().any(|event| matches!(event, client::Event::Close)));
+                assert!(!world.seen.iter().any(|event| matches!(event, client::Event::Reusable)));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_zero_error_body_policy_is_still_named_at_admission() {
+    let mut bounds = limits();
+    bounds.error_bytes = 0;
+    assert!(matches!(
+        client::Client::prepare(call(11), &bounds),
+        Err(Error::Limit { which: skein_llm::Cap::ErrorBody, bound: 0 })
+    ));
 }
 
 #[test]
@@ -805,7 +848,7 @@ fn header_fields_and_sse_fields_keep_their_own_exact_bounds() {
 }
 
 #[test]
-fn an_error_documents_retained_token_limit_keeps_the_http_status() {
+fn receiving_token_limits_do_not_change_an_error_body_class() {
     let mut bounds = limits();
     bounds.tokens = 2;
     let wire = response(
@@ -822,7 +865,7 @@ fn an_error_documents_retained_token_limit_keeps_the_http_status() {
     assert!(world.seen.iter().any(|event| matches!(
         event,
         client::Event::Failed {
-            failure: Failure::Limit { which: skein_llm::Cap::Tokens, bound: 2 },
+            failure: Failure::Unauthorized,
             evidence: client::Evidence::Response { status: 401 },
             ..
         }

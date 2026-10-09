@@ -100,6 +100,10 @@ impl Component {
             if sse > destination.limits.http.read {
                 return Err(EndpointError::SseChunkHttpRead { demand: sse, cap: destination.limits.http.read });
             }
+            let tokenizer = llm::client::largest_event_demand(&destination.limits);
+            if tokenizer > sse {
+                return Err(EndpointError::TokenizerDemandSseChunk { demand: tokenizer, cap: sse });
+            }
             match &destination.transport {
                 Transport::Tls { .. } => {
                     if read > limits.tls.read {

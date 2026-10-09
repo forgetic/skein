@@ -1378,3 +1378,20 @@ fn both_native_filters_and_their_receiving_bounds_are_unambiguous() {
         );
     }
 }
+
+#[test]
+fn an_http_error_body_refines_class_without_changing_status_retryability() {
+    for (status, kind, expected) in [
+        (503, b"authentication_error".as_slice(), Failure::Unavailable),
+        (400, b"api_error".as_slice(), Failure::Invalid),
+        (401, b"rate_limit_error".as_slice(), Failure::Unauthorized),
+        (429, b"authentication_error".as_slice(), Failure::RateLimited { retry_after: Duration::from_secs(7) }),
+        (503, b"overloaded_error".as_slice(), Failure::Overloaded),
+        (400, b"context_length_exceeded".as_slice(), Failure::ContextTooLong),
+    ] {
+        let error =
+            ProviderError { kind: owned(kind), message: owned(b"detail"), resets_at: None, resets_in_seconds: None };
+        let rate = RateLimit { retry_after: Some(Duration::from_secs(7)), ..RateLimit::NONE };
+        assert_eq!(classify(status, Some(&error), rate, Wall::EPOCH), expected);
+    }
+}

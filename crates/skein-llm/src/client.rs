@@ -105,9 +105,25 @@ pub fn check_credential(credential: &crate::Credential, limits: &CredentialLimit
     Ok(())
 }
 
+/// Largest collector demand the endpoint's SSE data face must admit.
+#[must_use]
+pub fn largest_event_demand(limits: &Limits) -> u32 {
+    tokenizer::largest_demand(&filter::collector(limits).tokenizer)
+}
+
 /// Measure the largest request head from endpoint configuration and owner bounds
 /// (llm-connection.md, section 3), without copying a credential or body.
 pub fn request_head(endpoint: &Endpoint, credential: &CredentialLimits, limits: &Limits) -> Result<u32, Error> {
+    // The native Messages grammar admits nonzero u32 max_tokens; Codex does
+    // not send this route field (llm.md, sections 4.3 and 4.5).
+    match endpoint.provider {
+        Provider::OpenAiCodex => {}
+        Provider::Anthropic => {
+            if limits.declared_output_tokens == 0 {
+                return Err(Error::limit(crate::Cap::Output, limits.declared_output_tokens));
+            }
+        }
+    }
     if credential.access_token == 0 {
         return Err(Error::Invalid);
     }
@@ -796,12 +812,7 @@ fn body_event(client: &mut Client, event: Up, env: &Env<Limits>, above: &mut Que
                     client.error.push(byte).expect("error bytes are within their cap");
                 }
                 if data.len() > room {
-                    fail(
-                        client,
-                        Failure::Limit { which: crate::Cap::ErrorBody, bound: u64::from(env.limits.error_bytes) },
-                        bytes::copy_of(b""),
-                        above,
-                    );
+                    error_cut(client, env, above);
                     closing(client, env, above, below);
                 } else {
                     client.requests.push(http::Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
@@ -1122,21 +1133,12 @@ fn timeout_detail(phase: crate::Phase) -> &'static [u8] {
 }
 
 fn error_end(client: &mut Client, env: &Env<Limits>, above: &mut Queue<Event>) {
-    let mut limits = env.limits.native();
-    limits.skip = env.limits.error_bytes;
-    let decoded = match openai::Json::from_bytes(client.error.as_slice(), &limits.document()) {
+    let limits = env.limits.native();
+    let decoded = match openai::Json::from_bytes(client.error.as_slice(), &error_document(&env.limits)) {
         Ok(json) => openai::decode_error(&json, &limits),
         Err(error) => Err(error),
     };
-    let error = match decoded {
-        Ok(error) => Some(error),
-        Err(openai::DecodeError::TooLarge { which, bound }) => {
-            client.error.clear();
-            fail(client, Failure::Limit { which, bound }, bytes::copy_of(b""), above);
-            return;
-        }
-        Err(openai::DecodeError::Malformed | openai::DecodeError::Missing | openai::DecodeError::WrongType) => None,
-    };
+    let error = decoded.ok();
     let failure = translate::failure(openai::classify(client.status, error.as_ref(), client.rate, env.wall));
     let detail = match error {
         Some(error) => error.message,
@@ -1154,6 +1156,36 @@ fn error_end(client: &mut Client, env: &Env<Limits>, above: &mut Queue<Event>) {
     };
     client.error.clear();
     fail(client, failure, detail, above);
+}
+
+fn error_document(limits: &Limits) -> crate::DocumentLimits {
+    crate::DocumentLimits {
+        bytes: limits.error_bytes,
+        strings: limits.error_bytes,
+        tokens: limits.error_bytes,
+        depth: limits.depth,
+    }
+}
+
+// An oversized body contributes bounded, unparsed detail. Status and head
+// classify it; closing immediately leaves the remaining proxy page unread.
+fn error_cut(client: &mut Client, env: &Env<Limits>, above: &mut Queue<Event>) {
+    let marker = b"error body cut: ";
+    let maximum = marker
+        .len()
+        .checked_add(client.error.as_slice().len())
+        .expect("marker and u32-bounded body fit usize")
+        .min(usize::try_from(env.limits.detail_bytes).expect("u32 fits usize"));
+    let mut detail = Writer::new(maximum);
+    let label = marker.get(..marker.len().min(maximum)).expect("bounded marker prefix");
+    detail.put(label).expect("marker within measured detail");
+    let room = maximum.checked_sub(label.len()).expect("marker fits detail");
+    let prefix =
+        client.error.as_slice().get(..client.error.as_slice().len().min(room)).expect("bounded unparsed body prefix");
+    detail.put(prefix).expect("prefix within measured detail");
+    let failure = translate::failure(openai::classify(client.status, None, client.rate, env.wall));
+    client.error.clear();
+    fail(client, failure, detail.finish(), above);
 }
 
 fn clear_requests(client: &mut Client) {
@@ -1264,6 +1296,7 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(Queue::<collector::Event>::worst_case(1)?)?
         .checked_add(Queue::<Down>::worst_case(1)?)?
         .checked_add(u64::from(limits.error_bytes).checked_mul(4)?)?
+        .checked_add(crate::document::worst_case(&error_document(limits))?)?
         .checked_add(Queue::<http::Event>::worst_case(HTTP_EVENTS)?)?
         .checked_add(Queue::<sse::Event>::worst_case(SSE_EVENTS)?)?
         .checked_add(Queue::<dialect::Output>::worst_case(dialect::MAX_OUT)?)?

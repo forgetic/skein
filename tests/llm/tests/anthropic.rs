@@ -5,7 +5,11 @@ use skein_lib::{Duration, Token};
 use skein_llm::{
     Block, Completion, Credential, Delta, Endpoint, Error, Failure, Message, Provider, Role, Stop, client,
 };
-use skein_llm_world::{World, call, limits, response};
+use skein_llm_world::{World, call, limits_for, response};
+
+fn limits() -> client::Limits {
+    limits_for(Provider::Anthropic)
+}
 
 const START: &str = r#"{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"fixture-model","content":[],"stop_reason":null,"usage":{"input_tokens":7,"cache_read_input_tokens":11,"cache_creation_input_tokens":13,"output_tokens":1}}}"#;
 const TEXT_START: &str = r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
@@ -506,7 +510,7 @@ fn explicit_call_reasoning_policy_never_drops_anthropic_thinking() {
         r#"{"type":"message_stop"}"#,
     ];
     for enabled in [false, true] {
-        let mut bounds = skein_llm_world::limits();
+        let mut bounds = limits();
         bounds.drop_reasoning = !enabled;
         bounds.reasoning = 24;
         let mut input = skein_llm_world::call(78);

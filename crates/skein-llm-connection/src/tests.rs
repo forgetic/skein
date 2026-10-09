@@ -704,7 +704,7 @@ fn two_endpoints_drive_uploads_with_their_own_client_limits() {
 
 #[test]
 fn construction_names_each_stream_capacity_relationship() {
-    for check in 0_u32..7 {
+    for check in 0_u32..8 {
         let mut config = limits();
         let mut destination = endpoint();
         let read = skein_llm::client::largest_read(&destination.limits);
@@ -741,7 +741,11 @@ fn construction_names_each_stream_capacity_relationship() {
                 destination.limits.sse.chunk = 257;
                 EndpointError::SseChunkHttpRead { demand: 257, cap: 256 }
             }
-            _ => unreachable!("seven relationships"),
+            7 => {
+                destination.limits.sse.chunk = 3;
+                EndpointError::TokenizerDemandSseChunk { demand: 4, cap: 3 }
+            }
+            _ => unreachable!("eight relationships"),
         };
         let mut endpoints = List::with_capacity(1);
         endpoints.push(destination).expect("endpoint");

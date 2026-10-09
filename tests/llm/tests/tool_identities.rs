@@ -161,6 +161,7 @@ fn pipe_and_escaped_ids_complete_restore_and_pair_exactly_on_actual_continuation
 #[test]
 fn actual_both_maximum_id_payloads_and_new_wrapper_fit_counted_client_bound() {
     let mut bounds = limits();
+    bounds.strings = 4096; // Independent maximum identity cap in this memory story.
     bounds.retained = 32768;
     bounds.request = 32768;
     bounds.answer = 32768;

@@ -69,6 +69,8 @@ pub enum EndpointError {
     HttpSendIoOutput { demand: u32, cap: u32 },
     /// An SSE read demand exceeds the HTTP body's delivery cap.
     SseChunkHttpRead { demand: u32, cap: u32 },
+    /// A tokenizer demand exceeds the SSE data face's delivery cap.
+    TokenizerDemandSseChunk { demand: u32, cap: u32 },
     /// Plaintext was configured for an address outside loopback.
     PlaintextAddress,
 }

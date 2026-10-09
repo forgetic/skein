@@ -130,7 +130,7 @@ fn actual_prepared_codex_owner_and_request_survive_raw_world_adoption() {
 
 #[test]
 fn actual_prepared_anthropic_owner_and_request_survive_raw_world_adoption() {
-    let bounds = limits();
+    let bounds = skein_llm_world::limits_for(skein_llm::Provider::Anthropic);
     let mut input = call(99);
     input.endpoint = Endpoint::anthropic();
     input.credential = Credential::anthropic(b"fixture-token".as_slice().into());

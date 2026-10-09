@@ -477,6 +477,7 @@ fn opaque_envelope_and_extended_thinking_transit_fit_counted_bounds() {
 fn actual_scripted_byte_peer_and_client_fit_the_composed_heap_envelope() {
     use skein_fake_llm_domain::api::{Finish, Line, Script, Turn};
     let mut bounds = limits();
+    bounds.strings = 4096; // This story reaches the fake domain's scripted text cap.
     // A string at its 4096-byte cap is emitted inside a larger JSON event and
     // a `data: ` line. Admit the entire document plus its six framing bytes.
     bounds.skip = bounds.retained.checked_add(6).expect("bounded data-line framing");

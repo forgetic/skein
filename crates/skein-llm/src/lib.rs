@@ -11,6 +11,7 @@ extern crate alloc;
 mod affinity;
 pub mod anthropic;
 pub mod client;
+mod derive;
 mod dialect;
 mod document;
 mod filter;
@@ -19,6 +20,7 @@ mod replay;
 mod translate;
 mod types;
 
+pub use derive::{Declared, ESCAPE, Limits, Rule, TOKEN_BYTES, Violation};
 pub use document::DocumentLimits;
 /// Bounded document admission errors, independent of the configured wire dialect.
 /// Callers use `document_error` to retain limit versus invalid-input refusal.
