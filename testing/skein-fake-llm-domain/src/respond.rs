@@ -294,32 +294,9 @@ fn said(messages: &[Message]) -> usize {
     said
 }
 
-/// What a call with `completion_tokens` in its answer took: all of the prompt
-/// but its last message from the cache, which the call before wrote, and the
-/// last message afresh, which this call writes for the next.
-///
-/// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
-fn usage(query: &Query, output: u64) -> Usage {
-    let mut cached = 0;
-    let mut fresh = len(&query.system);
-    if let Some((last, earlier)) = query.messages.split_last() {
-        // The first call has nothing cached, the system text included.
-        if !earlier.is_empty() {
-            cached = fresh;
-            fresh = 0;
-        }
-        for message in earlier {
-            cached = cached.saturating_add(text_of(message));
-        }
-        fresh = fresh.saturating_add(text_of(last));
-    }
-    Usage {
-        input: Some(0),
-        cache_read: Some(cached / 4),
-        cache_write: Some(fresh / 4),
-        output: Some(output),
-        reasoning: Some(0),
-    }
+/// Output accounting; the domain fills prompt accounting from its actual cache table.
+fn usage(_query: &Query, output: u64) -> Usage {
+    Usage { input: None, cache_read: None, cache_write: None, output: Some(output), reasoning: Some(0) }
 }
 
 /// Whether the conversation ends with a user message, and every user message's
@@ -469,27 +446,6 @@ fn calls_any(parts: &[Part]) -> bool {
     false
 }
 
-/// The bytes of text in a message, which a rough count turns into tokens.
-///
-/// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
-fn text_of(message: &Message) -> u64 {
-    let mut bytes: u64 = 0;
-    for part in &message.parts {
-        let size = match part {
-            Part::Text { text } => len(text),
-            Part::Opaque { bytes } => len(bytes),
-            Part::ToolCall { id: _, name, arguments } => len(name).saturating_add(len(arguments)),
-            Part::ToolOutput { id: _, output, is_error: _ } => len(output),
-        };
-        bytes = bytes.saturating_add(size);
-    }
-    bytes
-}
-
-fn len(bytes: &[u8]) -> u64 {
-    u64::try_from(bytes.len()).expect("a usize fits in a u64")
-}
-
 /// "call_" and sixteen hex digits of `n`.
 ///
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -536,6 +492,9 @@ mod tests {
         malformed: 0,
         outside_choice: 0,
         tool_rounds: 1,
+        cache_lifetime: Duration::from_secs(300),
+        cache_entries: 8,
+        unscoped_reads: 0,
     };
 
     fn menu() -> crate::api::Menu {
@@ -571,7 +530,7 @@ mod tests {
     fn query(messages: Box<[Message]>) -> Query {
         let tool = ToolSpec { name: copy_of(b"ls"), description: copy_of(b""), parameters: copy_of(b"{}") };
         Query {
-            cache_scope: None,
+            caching: crate::api::Caching::Unscoped,
             model: copy_of(b"fake"),
             system: copy_of(b""),
             tools: Box::new([tool]),
@@ -697,25 +656,6 @@ mod tests {
         let answer = respond(&mut rng, &mut minted, &config, &[], &menu(), &first).expect("a valid query");
         assert_eq!(answer.finish, Finish::Stop);
         assert!(answer.usage.output.expect("fake reports output") <= 2, "within the configured answer");
-    }
-
-    #[test]
-    fn all_but_the_last_message_is_read_from_the_cache() {
-        let mut rng = Rng::new(1);
-        let mut minted = 0;
-        let asked = || user(Box::new([Part::Text { text: copy_of(b"12345678") }]));
-        let answer =
-            respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &query(Box::new([asked()]))).expect("a valid query");
-        let usage = answer.usage;
-        assert_eq!((usage.input, usage.cache_read, usage.cache_write), (Some(0), Some(0), Some(2)));
-        let id = b"call_0000000000000001";
-        drop(answer);
-        let messages = Box::new([asked(), assistant(Box::new([call(id)])), user(Box::new([output(id)]))]);
-        let usage =
-            respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &query(messages)).expect("a valid query").usage;
-        // The prompt and the call ("ls", "{}") from the cache; the output "ok"
-        // afresh.
-        assert_eq!((usage.input, usage.cache_read, usage.cache_write), (Some(0), Some(3), Some(0)));
     }
 
     #[test]

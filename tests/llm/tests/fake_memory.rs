@@ -36,7 +36,7 @@ fn menu() -> Menu {
 
 fn query() -> Query {
     Query {
-        cache_scope: None,
+        caching: skein_fake_llm_domain::api::Caching::Unscoped,
         model: Box::new([]),
         system: b"cue".as_slice().into(),
         tools: Box::new([]),
@@ -332,4 +332,42 @@ fn configured_codex_echo_request_and_entry_scratch_fit_the_peer_price() {
     let settled = meter.end();
     meter.check(settled, bound, &"closed echo peer reclamation");
     assert_eq!(meter.held(), 0, "every echo/request owner releases its bounded storage");
+}
+
+#[test]
+fn the_cache_table_reaches_its_bound_under_the_counted_domain_footprint() {
+    use skein_fake_llm_domain::api::Caching;
+    let config = Config { cache_entries: 3, query_bytes: caps().query_bytes + 4, ..caps() };
+    let bound = worst_case(&config).unwrap();
+    let mut out = Queue::with_capacity(MAX_OUT);
+    let meter = Meter::new();
+    meter.start();
+    let mut domain = Domain::new(&config, 5);
+    let measured = meter.end();
+    meter.check(measured, bound, &"fixed cache capacity at construction");
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: config };
+    for scope in 1..=4 {
+        let mut query = query();
+        query.caching = Caching::Scope([scope; 16]);
+        query.messages[0].parts = Box::new([Part::Text { text: b"abcd".as_slice().into() }]);
+        let env = Env { now: Time::from_nanos(u64::from(scope) * 2_000_000_000), ..env };
+        meter.start();
+        step(&mut domain, &env, Event::Call { reply_to: ReplyTo::new(Token::new(u64::from(scope))), query }, &mut out);
+        let measured = meter.end();
+        meter.check(measured, bound, &"full prefix table and oldest replacement");
+        let later = Env { now: env.now.saturating_add(Duration::from_secs(1)), ..env };
+        meter.start();
+        fire(&mut domain, &later, &mut out);
+        let measured = meter.end();
+        let Request::Reply { result, .. } = out.pop().unwrap();
+        let answer = result.unwrap();
+        assert_eq!(answer.usage.cache_read, Some(0));
+        drop(answer);
+        domain.reclaim();
+        meter.check(measured, bound, &"real delayed answer and retained full cache");
+    }
+    meter.start();
+    drop(domain);
+    let measured = meter.end();
+    assert_eq!(measured.held(), 0, "the cache retains no ownership after its domain is dropped");
 }

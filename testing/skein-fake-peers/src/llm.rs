@@ -454,6 +454,9 @@ fn query_bytes(query: &api::Query) -> Option<u64> {
             }
         }
     }
+    if let api::Caching::Marks(marks) = &query.caching {
+        bytes = bytes.checked_add(u64::try_from(marks.len().checked_mul(size_of::<api::Mark>())?).ok()?)?;
+    }
     for tool in &query.tools {
         bytes = bytes.checked_add(
             u64::try_from(tool.name.len().checked_add(tool.description.len())?.checked_add(tool.parameters.len())?)

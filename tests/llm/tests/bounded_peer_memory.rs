@@ -349,7 +349,8 @@ fn exact_query_observation_capacity_copies_the_whole_query_and_one_less_copies_n
         + bytes(CUE)
         + u64::try_from(LARGE).expect("bounded text")
         + size::<skein_fake_llm_domain::api::Message>()
-        + size::<skein_fake_llm_domain::api::Part>();
+        + size::<skein_fake_llm_domain::api::Part>()
+        + 2 * size::<skein_fake_llm_domain::api::Mark>();
     let mut caps = observations(&bounds);
     caps.query_bytes = exact;
     let mut positive = Exchange::new(input(1, Provider::Anthropic), bounds, scripts());

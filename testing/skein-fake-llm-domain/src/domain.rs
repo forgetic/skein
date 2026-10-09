@@ -8,7 +8,7 @@ use core::mem;
 use skein_lib::{Deadlines, Duration, Env, Id, Queue, ReplyTo, Rng, Slab, Time};
 
 use crate::api::{Answer, Error, Query, Script};
-use crate::{limits, respond};
+use crate::{cache, limits, respond};
 
 /// The most requests an entry point emits per call.
 ///
@@ -101,6 +101,12 @@ pub struct Config {
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
     pub tool_rounds: u32,
+    /// Lifetime from a prefix's write at injected monotonic time.
+    pub cache_lifetime: Duration,
+    /// Maximum written prefixes retained in the cache table.
+    pub cache_entries: u32,
+    /// Chance per mille that a request with no scope reads existing prefixes.
+    pub unscoped_reads: u32,
 }
 
 /// protocol -> domain
@@ -163,6 +169,7 @@ pub struct Domain {
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
     scripts: Box<[Script]>,
     menu: crate::api::Menu,
+    cache: cache::Cache,
 }
 
 /// A call being answered.
@@ -235,6 +242,7 @@ impl Domain {
             minted: 0,
             scripts,
             menu,
+            cache: cache::Cache::new(config.cache_entries, config.cache_lifetime),
         })
     }
 
@@ -304,7 +312,9 @@ fn call(domain: &mut Domain, env: &Env<Config>, reply_to: ReplyTo, query: &Query
         return;
     }
     let config = &env.limits;
-    let result = if limits::fits(limits::query(query), config.query_bytes) {
+    let mut result = if !cache::valid(query) {
+        Err(Error::InvalidRequest)
+    } else if limits::fits(limits::query(query), config.query_bytes) {
         match respond::respond(&mut domain.rng, &mut domain.minted, config, &domain.scripts, &domain.menu, query) {
             Ok(answer) if limits::fits(limits::answer(&answer), config.answer_bytes) => Ok(answer),
             Ok(_) => Err(Error::ContextTooLong),
@@ -313,6 +323,23 @@ fn call(domain: &mut Domain, env: &Env<Config>, reply_to: ReplyTo, query: &Query
     } else {
         Err(Error::ContextTooLong)
     };
+    if let Ok(answer) = &mut result {
+        let allowed = match query.caching {
+            crate::api::Caching::Unscoped => domain.rng.chance(config.unscoped_reads),
+            crate::api::Caching::Scope(_) | crate::api::Caching::Marks(_) => true,
+        };
+        let read = if allowed { cache::read(&domain.cache, query, env.now) } else { 0 };
+        let written = cache::write(&mut domain.cache, query, env.now, read);
+        answer.usage.input = Some(
+            cache::tokens(query)
+                .checked_sub(read)
+                .expect("read within prompt")
+                .checked_sub(written)
+                .expect("write within uncached prompt"),
+        );
+        answer.usage.cache_read = Some(read);
+        answer.usage.cache_write = Some(written);
+    }
     let latency = domain.rng.between(config.latency_min.as_nanos(), config.latency_max.as_nanos());
     let call = Call { state: State::Thinking { reply_to, result } };
     let id = domain.calls.insert(call).expect("checked for room above");

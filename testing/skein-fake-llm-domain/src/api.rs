@@ -147,13 +147,33 @@ pub enum ToolChoice {
     Only(Box<[Box<[u8]>]>),
 }
 
+/// Cache routing read by the byte peer and supplied with a domain query.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Caching {
+    /// Automatic prefix caching within the caller's shared conversation scope.
+    Scope([u8; 16]),
+    /// Automatic writes; reads require the configured seeded routing chance.
+    Unscoped,
+    /// Only prefixes bounded by these native request positions, at most four.
+    Marks(Box<[Mark]>),
+}
+
+/// A cache boundary supplied by the peer in prompt order.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Mark {
+    /// After the tools and system text.
+    System,
+    /// After one part of a conversation message.
+    Part { message: u32, part: u32 },
+}
+
 /// A request for the next assistant message.
 ///
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Query {
-    /// Independent cache routing scope read from the actual Codex request.
-    pub cache_scope: Option<[u8; 16]>,
+    /// Cache instructions in the fake's own terms, independent of wire headers.
+    pub caching: Caching,
     /// Provider model name, treated as bytes by the domain.
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.

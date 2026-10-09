@@ -153,6 +153,10 @@ fn query_bytes(query: &api::Query) -> Option<u64> {
             }
         }
     }
+    if let api::Caching::Marks(marks) = &query.caching {
+        owned = owned
+            .checked_add(u64::try_from(marks.len()).ok()?.checked_mul(u64::try_from(size_of::<api::Mark>()).ok()?)?)?;
+    }
     for tool in &query.tools {
         owned = owned
             .checked_add(bytes(&tool.name)?)?
@@ -298,6 +302,9 @@ pub fn config() -> fake::Config {
         malformed: 0,
         outside_choice: 0,
         tool_rounds: 0,
+        cache_lifetime: skein_lib::Duration::from_secs(300),
+        cache_entries: 16,
+        unscoped_reads: 0,
     }
 }
 

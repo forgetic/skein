@@ -131,7 +131,17 @@ fn choice(choice: skein_llm::ToolChoice) -> api::ToolChoice {
 
 fn anthropic_request(data: &[u8], limits: &anthropic::Limits) -> Result<api::Query, Error> {
     let json = anthropic::Json::from_bytes(data, limits).or(Err(Error::Malformed))?;
-    let request = anthropic::decode_request(&json, limits).or(Err(Error::Malformed))?.prompt;
+    let request = anthropic::decode_request(&json, limits).or(Err(Error::Malformed))?;
+    let mut marks = List::with_capacity(4);
+    for mark in request.marks {
+        marks
+            .push(match mark {
+                anthropic::Mark::System { .. } => api::Mark::System,
+                anthropic::Mark::Message { message, block } => api::Mark::Part { message, part: block },
+            })
+            .expect("native marks already bounded");
+    }
+    let request = request.prompt;
     let mut tools = List::with_capacity(limits.parts);
     for tool in request.tools {
         let parameters = tool.schema.to_bytes(limits).or(Err(Error::Malformed))?;
@@ -167,7 +177,7 @@ fn anthropic_request(data: &[u8], limits: &anthropic::Limits) -> Result<api::Que
         messages.push(api::Message { role, parts: parts.into_boxed() }).or(Err(Error::TooLarge))?;
     }
     Ok(api::Query {
-        cache_scope: None,
+        caching: api::Caching::Marks(marks.into_boxed()),
         model: request.model,
         system: request.instructions,
         tools: tools.into_boxed(),
@@ -236,7 +246,10 @@ fn openai_request(data: &[u8], limits: &Limits) -> Result<api::Query, Error> {
         messages.push(api::Message { role, parts: parts.into_boxed() }).or(Err(Error::TooLarge))?;
     }
     Ok(api::Query {
-        cache_scope,
+        caching: match cache_scope {
+            Some(key) => api::Caching::Scope(key),
+            None => api::Caching::Unscoped,
+        },
         model: request.model,
         system: request.instructions,
         tools: tools.into_boxed(),

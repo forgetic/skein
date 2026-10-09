@@ -55,6 +55,12 @@ pub(crate) fn query(query: &Query) -> Option<u64> {
             }
         }
     }
+    match &query.caching {
+        crate::api::Caching::Scope(_) | crate::api::Caching::Unscoped => {}
+        crate::api::Caching::Marks(marks) => {
+            total = total.checked_add(array(marks.len(), size_of::<crate::api::Mark>())?)?;
+        }
+    }
     for tool in &query.tools {
         total = total
             .checked_add(bytes(&tool.name)?)?
@@ -167,5 +173,6 @@ pub fn worst_case(config: &Config) -> Option<u64> {
         .checked_add(Deadlines::<Id<Call>>::worst_case(config.calls)?)?
         .checked_add(scripts)?
         .checked_add(u64::from(config.calls).checked_mul(u64::from(config.answer_bytes))?)?
-        .checked_add(scratch)
+        .checked_add(scratch)?
+        .checked_add(crate::cache::worst_case(config.cache_entries)?)
 }

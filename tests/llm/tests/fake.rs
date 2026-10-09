@@ -52,6 +52,25 @@ fn scripts() -> Box<[Script]> {
     }])
 }
 
+fn prompt_tokens(query: &skein_fake_llm_domain::api::Query) -> u64 {
+    use skein_fake_llm_domain::api::Part;
+    let mut bytes = query.system.len();
+    for tool in &query.tools {
+        bytes += tool.name.len() + tool.description.len() + tool.parameters.len();
+    }
+    for message in &query.messages {
+        for part in &message.parts {
+            bytes += match part {
+                Part::Text { text } => text.len(),
+                Part::Opaque { bytes } => bytes.len(),
+                Part::ToolCall { id, name, arguments } => id.len() + name.len() + arguments.len(),
+                Part::ToolOutput { id, output, .. } => id.len() + output.len(),
+            };
+        }
+    }
+    u64::try_from(bytes).expect("bounded query text fits u64") / 4
+}
+
 fn completion(world: &Exchange) -> &Completion {
     let values: Vec<_> = world
         .seen
@@ -430,7 +449,7 @@ fn actual_byte_peer_preserves_opaque_extensions_refusal_stop_and_continuation_re
         let [query] = world.queries.as_slice() else {
             panic!("one outside request");
         };
-        let fresh = u64::try_from(query.system.len() + 5).expect("Hello and actual system bytes") / 4;
+        let fresh = prompt_tokens(query);
         assert_eq!(answer.usage.input, Some(0));
         assert_eq!(answer.usage.output, Some(17));
         assert_eq!(answer.usage.cache_read, Some(0));
@@ -440,6 +459,7 @@ Some(fresh)
         );
         let mut next = input(provider, 2);
         next.prompt.messages = Box::new([
+            input(provider, 2).prompt.messages[0].clone(),
             Message { role: Role::Assistant, content: answer.content },
             Message {
                 role: Role::User,
@@ -456,7 +476,7 @@ Some(fresh)
             panic!("one outside continuation request");
         };
         let [skein_fake_llm_domain::api::Part::Opaque { bytes }, skein_fake_llm_domain::api::Part::Text { text }] =
-            &*query.messages[0].parts
+            &*query.messages[1].parts
         else {
             panic!("opaque and visible prior completion reached native request peer");
         };
@@ -475,13 +495,11 @@ Some(fresh)
         assert_eq!(terminal.usage.output, Some(3));
         assert_eq!(
             terminal.usage.cache_read,
-Some(            u64::try_from(query.system.len() + bytes.len() + b"actual refusal".len())
-                .expect("exact prior content bytes")
-                / 4)
+Some(            fresh)
         );
         assert_eq!(
             terminal.usage.cache_write,
-Some(2)
+Some(prompt_tokens(query) - fresh)
         );
     }
 }
@@ -885,7 +903,9 @@ fn affinity_is_fixed_across_calls_and_threads_are_distinct_on_the_actual_wire() 
             };
             assert_eq!(affinity_head(head, b"thread-id"), Some(expected));
         }
-        assert!(world.queries.iter().all(|query| query.cache_scope == Some([0x42; 16])));
+        assert!(
+            world.queries.iter().all(|query| query.caching == skein_fake_llm_domain::api::Caching::Scope([0x42; 16]))
+        );
         assert_eq!(completion(&world).stop, skein_llm::Stop::ToolUse);
     }
 }
@@ -902,7 +922,16 @@ fn absent_affinity_sends_none_and_anthropic_ignores_it_on_the_actual_wire() {
         assert_eq!(affinity_head(head, b"session-id"), None);
         assert_eq!(affinity_head(head, b"thread-id"), None);
         assert!(!String::from_utf8_lossy(&world.requests).contains("prompt_cache_key"));
-        assert_eq!(world.queries[0].cache_scope, None);
+        assert_eq!(
+            world.queries[0].caching,
+            match provider {
+                skein_llm::Provider::OpenAiCodex => skein_fake_llm_domain::api::Caching::Unscoped,
+                skein_llm::Provider::Anthropic => skein_fake_llm_domain::api::Caching::Marks(Box::new([
+                    skein_fake_llm_domain::api::Mark::System,
+                    skein_fake_llm_domain::api::Mark::Part { message: 0, part: 0 }
+                ])),
+            }
+        );
         if provider == skein_llm::Provider::Anthropic {
             let mut with = input(provider, 162);
             with.prompt.affinity = Some(skein_llm::Affinity { key: [0x17; 16], thread: 31 });
@@ -1018,7 +1047,10 @@ fn independent_peer_refuses_mismatched_affinity_and_malformed_thread_before_disp
     world.run();
     let wire = String::from_utf8(world.requests).expect("valid bounded affinity control");
     let (accepted, response) = peer_native_request(wire.as_bytes(), skein_llm::Provider::OpenAiCodex);
-    assert_eq!(accepted.expect("valid bounded affinity control").cache_scope, Some([0x42; 16]));
+    assert_eq!(
+        accepted.expect("valid bounded affinity control").caching,
+        skein_fake_llm_domain::api::Caching::Scope([0x42; 16])
+    );
     assert!(response.is_empty());
     for (from, to) in [
         ("session-id: 42424242", "session-id: 43434343"),
@@ -1117,5 +1149,63 @@ fn growing_conversations_preserve_native_content_and_encode_twice_identically() 
             });
             conversation.prompt.messages = messages.into_boxed_slice();
         }
+    }
+}
+
+#[test]
+fn actual_scopes_and_marked_tails_read_only_written_prefixes_and_unscoped_reads_use_the_chance() {
+    use skein_fake_llm_domain::{Domain, Request, fire, step};
+    use skein_lib::{Env, Queue, Time, Wall};
+    for (dialect, affinity, chance) in [
+        (skein_llm::Provider::OpenAiCodex, true, 0),
+        (skein_llm::Provider::OpenAiCodex, false, 0),
+        (skein_llm::Provider::OpenAiCodex, false, 1000),
+        (skein_llm::Provider::Anthropic, false, 0),
+    ] {
+        let mut first = input(dialect, 211);
+        if !affinity {
+            first.prompt.affinity = None;
+        }
+        let mut prompt = first.prompt.clone();
+        let mut world = Exchange::new(first, limits(), Box::new([]));
+        world.manual_replies = true;
+        let config = skein_fake_llm_domain::Config { unscoped_reads: chance, ..skein_llm_world::fake::config() };
+        let mut domain = Domain::scripted(&config, 7, scripts());
+        let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: config };
+        let mut out = Queue::<Request>::with_capacity(skein_fake_llm_domain::MAX_OUT);
+        let mut previous = 0;
+        world.start();
+        for turn in 0..3 {
+            awaiting_domain(&mut world);
+            let total = prompt_tokens(world.queries.last().unwrap());
+            step(&mut domain, &env, world.pending.pop().unwrap(), &mut out);
+            fire(&mut domain, &env, &mut out);
+            domain.reclaim();
+            world.reply(out.pop().unwrap());
+            world.run();
+            let usage = completion(&world).usage;
+            let expected_read =
+                if affinity || dialect == skein_llm::Provider::Anthropic || chance == 1000 { previous } else { 0 };
+            assert_eq!(usage.cache_read, Some(expected_read), "turn {turn}, {dialect:?}, chance {chance}");
+            assert_eq!(usage.cache_write, Some(total - expected_read));
+            assert_eq!(usage.input, Some(0));
+            previous = total;
+            if turn < 2 {
+                let mut messages = prompt.messages.into_vec();
+                messages.push(Message {
+                    role: Role::User,
+                    content: Box::new([Block::Text { text: b"new text".as_slice().into(), replay: None }]),
+                });
+                prompt.messages = messages.into_boxed_slice();
+                let mut next = input(dialect, 212 + turn);
+                next.prompt = prompt.clone();
+                assert!(world.machine.next_call(client::Client::prepare(next, &limits()).unwrap()).is_ok());
+                world.seen.clear();
+                world.request(client::Request::Start);
+            }
+        }
+        world.request(client::Request::Close);
+        world.settle();
+        assert_eq!(domain.calls(), 0);
     }
 }

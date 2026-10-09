@@ -741,8 +741,12 @@ fn requested(server: &mut Server, service: &mut Service, env: &Env<Limits>, abov
     }
     match query {
         Ok(query) => {
+            let scope = match query.caching {
+                api::Caching::Scope(key) => Some(key),
+                api::Caching::Unscoped | api::Caching::Marks(_) => None,
+            };
             if service.config.provider == documents::Provider::OpenAi
-                && (query.cache_scope != server.session || query.cache_scope.is_some() != server.thread.is_some())
+                && (scope != server.session || scope.is_some() != server.thread.is_some())
             {
                 server.body.clear();
                 response_error(server, service, env, api::Error::InvalidRequest);
