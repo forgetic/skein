@@ -11,13 +11,13 @@ use skein_tls_world::pki;
 #[global_allocator]
 static HEAP: Counting = Counting;
 
-#[test]
-fn full_pool_stays_within_its_checked_bound() {
-    let limits = Limits {
+fn full_pool_limits() -> Limits {
+    Limits {
         endpoints: 1,
         connections: 2,
         calls: 2,
         per_endpoint: 2,
+        memory: 16 * 1024 * 1024,
         idle_keep: Duration::from_secs(10),
         io: skein_io::Limits {
             sockets: 2,
@@ -32,7 +32,12 @@ fn full_pool_stays_within_its_checked_bound() {
             retry: Duration::from_millis(10),
         },
         tls: skein_tls::client::Limits { read: 4096, send: 4096, records: skein_tls::client::MAX_RECORD },
-    };
+    }
+}
+
+#[test]
+fn full_pool_stays_within_its_checked_bound() {
+    let mut limits = full_pool_limits();
     let meter = Meter::new();
     meter.start();
     let mut endpoints = List::with_capacity(1);
@@ -49,6 +54,11 @@ fn full_pool_stays_within_its_checked_bound() {
         })
         .expect("one endpoint");
     let first = skein_llm_world::call(7);
+    let destination = endpoints.get(0).unwrap();
+    let mut client = destination.limits;
+    client.http.request = skein_llm::client::request_head(&destination.llm, &destination.credential, &client).unwrap();
+    let measured = skein_llm::client::measure(&first.prompt, &first.credential, &destination.llm, &client).unwrap();
+    limits.memory = 2 * skein_llm::client::reservation(measured, &client).unwrap();
     let second = skein_llm_world::call(8);
     let third = skein_llm_world::call(9);
     let mut up = Queue::with_capacity(MAX_OUT.above);
@@ -83,6 +93,7 @@ fn full_pool_stays_within_its_checked_bound() {
         &mut io,
     );
     assert_eq!(io.len(), 2, "both physical slots are occupied");
+    assert_eq!(component.reserved(), limits.memory, "both calls fill the memory pool exactly");
     component.down(
         &env,
         Request::Start {
@@ -177,16 +188,35 @@ fn an_owner_close_in_each_phase_fits_the_checked_pool_bound() {
 }
 
 #[test]
-fn every_declared_waiting_record_and_its_prepared_client_fit_the_checked_bound() {
+fn every_declared_waiting_start_fits_the_checked_bound() {
     use skein_llm_connection_world::world::{Point, World};
     let meter = Meter::new();
     meter.start();
-    let mut world = World::configured(59, 8, 1, 1);
+    let mut input = skein_llm_world::call(7);
+    input.endpoint = skein_llm::Endpoint::codex();
+    input.prompt.instructions = b"close-world".as_slice().into();
+    let mut bounds = skein_llm_world::limits();
+    bounds.http.request = skein_llm::client::request_head(
+        &input.endpoint,
+        &skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
+        &bounds,
+    )
+    .unwrap();
+    let measured = skein_llm::client::measure(&input.prompt, &input.credential, &input.endpoint, &bounds).unwrap();
+    let memory = 2 * skein_llm::client::reservation(measured, &bounds).unwrap();
+    drop(input);
+    let mut world = World::empty_with_memory(59, 8, 1, 1, memory);
+    for token in 7..15 {
+        world.start(token);
+    }
+    assert_eq!(world.component.reserved(), memory);
     let bound = world.component.worst_case().expect("pool bound");
     world.until(Point::Head);
+    assert_eq!(world.connections(), 1, "one running call, one connection wait, six memory waits");
     world.request(Request::Close);
     world.finish();
     assert_eq!(world.judge.completed, 8);
+    assert_eq!(world.component.reserved(), 0);
     let sample = meter.end();
     assert!(sample.peak() <= bound, "waiting peak {} exceeds {bound}", sample.peak());
     drop(world);

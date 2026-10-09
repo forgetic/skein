@@ -304,7 +304,7 @@ fn configured_codex_echo_request_and_entry_scratch_fit_the_peer_price() {
         .collect();
     let extra =
         skein_llm_world::fake::extra_worst_case(&bounds, &observations, &input.endpoint, &input.credential).unwrap();
-    let bound = extra + skein_llm::client::worst_case(&bounds).unwrap() + 32768;
+    let bound = extra + skein_llm::client::call_worst_case(&bounds).unwrap() + 32768;
     let scripts = Box::new([Script {
         cue: input.prompt.instructions.clone(),
         turns: Box::new([Turn {

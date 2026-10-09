@@ -292,7 +292,7 @@ fn routing_scripts() -> Box<[Script]> {
 
 fn routing_bound() -> u64 {
     let peer = skein_llm_world::fake::limits(&limits());
-    let one = client::worst_case(&limits()).expect("client bound")
+    let one = client::call_worst_case(&limits()).expect("client bound")
         + skein_fake_llm_protocol::provider::worst_case(&peer).expect("one Server and Service bound")
         + skein_fake_llm_domain::worst_case(&skein_llm_world::fake::config()).expect("internal script domain bound");
     2 * one

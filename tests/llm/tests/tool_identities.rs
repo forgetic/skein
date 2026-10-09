@@ -167,7 +167,7 @@ fn actual_both_maximum_id_payloads_and_new_wrapper_fit_counted_client_bound() {
     bounds.answer = 32768;
     bounds.metadata = 8192;
     bounds.skip = 32768;
-    let bound = client::worst_case(&bounds).expect("checked enlarged wrapper and simultaneous payload bound");
+    let bound = client::call_worst_case(&bounds).expect("checked enlarged wrapper and simultaneous payload bound");
     let meter = Meter::new();
     let id = "|".repeat(usize::try_from(bounds.strings).expect("bounded maximum ID"));
     let added = format!(

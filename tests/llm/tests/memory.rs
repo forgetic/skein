@@ -12,7 +12,7 @@ static HEAP: Counting = Counting;
 fn preparation_and_streaming_stay_within_the_declared_bound() {
     for chunked in [false, true] {
         let bounds = limits();
-        let bound = client::worst_case(&bounds).unwrap();
+        let bound = client::call_worst_case(&bounds).unwrap();
         let input = call(1);
         let span = Span::start();
         let prepared = client::Client::prepare(input, &bounds).ok().unwrap();
@@ -52,7 +52,7 @@ fn preparation_and_streaming_stay_within_the_declared_bound() {
 fn cancellation_releases_owned_buffers() {
     for stage in 0..3 {
         let bounds = limits();
-        let bound = client::worst_case(&bounds).unwrap();
+        let bound = client::call_worst_case(&bounds).unwrap();
         let meter = Meter::new();
         let mut world = World::new(call(1), bounds, text_response(true), 19);
         if stage > 0 {
@@ -74,7 +74,7 @@ fn cancellation_releases_owned_buffers() {
 #[test]
 fn bounded_error_body_and_protocol_failure_release_all_storage() {
     let bounds = limits();
-    let bound = client::worst_case(&bounds).unwrap();
+    let bound = client::call_worst_case(&bounds).unwrap();
     for body in [br#"{"error":{"code":"rate_limit_exceeded","message":"later"}}"#.as_slice(), b"not json".as_slice()] {
         let meter = Meter::new();
         let wire = skein_llm_world::response(429, "Content-Type: application/json\r\nRetry-After: 9\r\n", body, false);
@@ -102,7 +102,7 @@ fn large_schema_request_reasoning_and_answer_fit_the_same_bound() {
     let mut bounds = limits();
     bounds.output_items = 4;
     bounds.reasoning = 4096;
-    let bound = client::worst_case(&bounds).unwrap();
+    let bound = client::call_worst_case(&bounds).unwrap();
     let meter = Meter::new();
     let mut request = call(1);
     // Request escaping nearly doubles these instructions; a large schema
@@ -168,7 +168,7 @@ fn large_schema_request_reasoning_and_answer_fit_the_same_bound() {
 #[test]
 fn almost_full_error_buffer_and_partial_request_are_bounded() {
     let bounds = limits();
-    let bound = client::worst_case(&bounds).unwrap();
+    let bound = client::call_worst_case(&bounds).unwrap();
     let meter = Meter::new();
     let detail = "x".repeat(3800);
     let body = format!(r#"{{"error":{{"code":"rate_limit_exceeded","message":"{detail}"}}}}"#);
@@ -199,7 +199,7 @@ fn multiple_unknown_items_with_many_empty_tokens_fit_the_bound() {
     let mut bounds = limits();
     bounds.output_items = 4;
     bounds.reasoning = 4096;
-    let bound = client::worst_case(&bounds).unwrap();
+    let bound = client::call_worst_case(&bounds).unwrap();
     let meter = Meter::new();
     // Near 1024 tokens per event and near 8192 bytes across the answer, while
     // Empty strings have no payload allocation; fixed records still cost bytes.
@@ -256,7 +256,7 @@ fn thirty_two_unknown_arrays_exercise_the_compact_record_bound() {
     bounds.strings = 64;
     bounds.answer = 140_000;
     bounds.request = 1024;
-    let bound = client::worst_case(&bounds).unwrap();
+    let bound = client::call_worst_case(&bounds).unwrap();
     let meter = Meter::new();
     let tiny_values = vec!["0"; 1900].join(",");
     let mut documents = Vec::new();
@@ -312,7 +312,7 @@ fn anthropic_signed_thinking_tool_input_and_replay_fit_the_declared_bound() {
             let mut bounds = limits();
             bounds.output_items = 4;
             bounds.reasoning = 4096;
-            let bound = client::worst_case(&bounds).unwrap();
+            let bound = client::call_worst_case(&bounds).unwrap();
             let input = memory_anthropic_call(1);
             let span = Span::start();
             let prepared = client::Client::prepare(input, &bounds).ok().unwrap();
@@ -483,7 +483,7 @@ fn actual_scripted_byte_peer_and_client_fit_the_composed_heap_envelope() {
     bounds.skip = bounds.retained.checked_add(6).expect("bounded data-line framing");
     let peer = skein_llm_world::fake::limits(&bounds);
     let config = skein_llm_world::fake::config();
-    let core = client::worst_case(&bounds)
+    let core = client::call_worst_case(&bounds)
         .expect("client bound")
         .checked_add(skein_fake_llm_protocol::provider::worst_case(&peer).expect("peer bound"))
         .expect("composed peer bound")
@@ -578,7 +578,7 @@ fn an_oversized_call_completes_within_the_declared_bound() {
         body.extend_from_slice(b"\n\n");
     }
     let wire = skein_llm_world::response(200, "Content-Type: text/event-stream\r\n", &body, false);
-    let bound = client::worst_case(&bounds).expect("checked receiving bound");
+    let bound = client::call_worst_case(&bounds).expect("checked receiving bound");
     drop(body);
     meter.start();
     let mut world = World::new(call(1), bounds, wire, 3);
@@ -659,7 +659,7 @@ fn selective_peak(size: usize, call_arguments: bool) -> u64 {
     bounds.input = 3;
     bounds.reasoning = 128;
     bounds.skip = 8_000_000;
-    let bound = client::worst_case(&bounds).expect("checked selective receiving bound");
+    let bound = client::call_worst_case(&bounds).expect("checked selective receiving bound");
     // The wire tape is world-owned and allocated before the meter's base.
     // Its unchanged allocation stays alive throughout every measured step.
     let meter = Meter::new();
@@ -700,4 +700,25 @@ fn selective_oversize_call_high_water_is_independent_of_the_argument_size() {
     let short = selective_peak(64, true);
     let long = selective_peak(1_048_576, true);
     assert_eq!(short, long, "discarded arguments retain only their length");
+}
+
+#[test]
+fn measurement_refuses_large_starts_without_copying_their_owned_bytes() {
+    for anthropic in [false, true] {
+        let mut input = call(1);
+        if anthropic {
+            input.endpoint = skein_llm::Endpoint::anthropic();
+            input.credential = skein_llm::Credential::anthropic(b"synthetic-token".as_slice().into());
+        }
+        input.prompt.instructions = vec![b'x'; 1024 * 1024].into();
+        let bounds = limits();
+        let span = Span::start();
+        let result = client::measure(&input.prompt, &input.credential, &input.endpoint, &bounds);
+        let measured = span.end();
+        assert!(result.is_err());
+        assert!(
+            measured.peak < i64::try_from(input.prompt.instructions.len()).unwrap(),
+            "only bounded filter-planning scratch is allocated; the oversized prompt is never copied or encoded"
+        );
+    }
 }

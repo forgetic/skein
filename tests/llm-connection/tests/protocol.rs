@@ -16,6 +16,7 @@ fn limits() -> Limits {
         connections: 1,
         calls: 1,
         per_endpoint: 1,
+        memory: 16 * 1024 * 1024,
         idle_keep: Duration::from_secs(10),
         io: skein_io::Limits {
             sockets: 1,

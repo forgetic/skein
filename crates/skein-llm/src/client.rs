@@ -18,7 +18,8 @@ use skein_lib::stream::{Down, Read, Up};
 use skein_lib::{Decimal, Env, List, Queue, Token, Writer, bytes};
 
 use crate::{
-    Block, Call, Completion, Delta, Endpoint, Error, Failure, Provider, anthropic, dialect, filter, openai, translate,
+    Block, Call, Completion, Credential, Delta, Endpoint, Error, Failure, Prompt, Provider, anthropic, dialect, filter,
+    openai, translate,
 };
 
 /// Startup bounds, unchanged for a client's lifetime and reuse.
@@ -95,7 +96,7 @@ pub struct CredentialLimits {
 }
 
 /// Check credential bytes before constructing the bounded request head.
-pub fn check_credential(credential: &crate::Credential, limits: &CredentialLimits) -> Result<(), Error> {
+pub fn check_credential(credential: &Credential, limits: &CredentialLimits) -> Result<(), Error> {
     if credential.access_token.len() > usize::try_from(limits.access_token).expect("u32 fits usize") {
         return Err(Error::limit(crate::Cap::AccessToken, limits.access_token));
     }
@@ -294,6 +295,71 @@ pub struct Client {
     sse_closed: bool,
     evidence: Evidence,
     activity: u64,
+    measured: Measured,
+}
+
+/// One admitted request's wire lengths, before its encoded body exists.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Measured {
+    /// Encoded HTTP request head bytes.
+    pub head: u32,
+    /// Encoded JSON request body bytes.
+    pub body: u32,
+}
+
+/// Validate exactly the preparation entrance, without allocating its body.
+/// The borrowed prompt and credential remain the owner's while it waits.
+pub fn measure(
+    prompt: &Prompt,
+    credential: &Credential,
+    endpoint: &Endpoint,
+    limits: &Limits,
+) -> Result<Measured, Error> {
+    check_preparation(limits)?;
+    let body = match endpoint.provider {
+        Provider::OpenAiCodex => {
+            let request = translate::request(prompt, endpoint.provider, &limits.native())?;
+            match openai::measure_request(&request, &limits.native()) {
+                Ok(length) => length,
+                Err(error) => return Err(admission(error)),
+            }
+        }
+        Provider::Anthropic => anthropic::measure_request(prompt, limits.declared_output_tokens, &limits.native())?,
+    };
+    let head = measure_headers(endpoint, credential, prompt.affinity, limits, body)?;
+    Ok(Measured { head, body })
+}
+
+/// Bytes one call holds from the grant until its terminal (llm-connection.md, 7).
+#[must_use]
+pub fn reservation(measured: Measured, limits: &Limits) -> Option<u64> {
+    u64::from(measured.head).checked_add(u64::from(measured.body))?.checked_add(u64::from(limits.receiving))
+}
+
+/// The pool must hold one request at its endpoint's largest declared bounds.
+#[must_use]
+pub fn largest_reservation(limits: &Limits) -> Option<u64> {
+    reservation(Measured { head: limits.http.request, body: limits.request }, limits)
+}
+
+fn check_preparation(limits: &Limits) -> Result<(), Error> {
+    if limits.http.headers < 6 {
+        return Err(Error::limit(crate::Cap::ResponseFields, limits.http.headers));
+    }
+    for (which, bound) in [
+        (crate::Cap::ErrorBody, limits.error_bytes),
+        (crate::Cap::OutputItems, limits.output_items),
+        (crate::Cap::Depth, limits.depth),
+        (crate::Cap::Tokens, limits.tokens),
+    ] {
+        if bound == 0 {
+            return Err(Error::limit(which, bound));
+        }
+    }
+    if worst_case(limits).is_none() {
+        return Err(Error::Invalid);
+    }
+    Ok(())
 }
 
 impl Client {
@@ -307,27 +373,12 @@ impl Client {
     /// the typed limit failure even when the endpoint default permits dropping.
     /// Stored endpoint bounds remain unchanged for connection reuse.
     pub fn prepare_with_reasoning_drop(input: Call, limits: &Limits, enabled: bool) -> Result<Client, Error> {
-        if limits.http.headers < 6 {
-            return Err(Error::limit(crate::Cap::ResponseFields, limits.http.headers));
-        }
-        for (which, bound) in [
-            (crate::Cap::ErrorBody, limits.error_bytes),
-            (crate::Cap::OutputItems, limits.output_items),
-            (crate::Cap::Depth, limits.depth),
-            (crate::Cap::Tokens, limits.tokens),
-        ] {
-            if bound == 0 {
-                return Err(Error::limit(which, bound));
-            }
-        }
-        if worst_case(limits).is_none() {
-            return Err(Error::Invalid);
-        }
+        check_preparation(limits)?;
         let provider = input.endpoint.provider;
         let affinity = input.prompt.affinity;
         let (headers, body) = match provider {
             Provider::OpenAiCodex => {
-                let request = translate::request(input.prompt, provider, &limits.native())?;
+                let request = translate::request(&input.prompt, provider, &limits.native())?;
                 let length = match openai::measure_request(&request, &limits.native()) {
                     Ok(length) => length,
                     Err(error) => return Err(admission(error)),
@@ -346,6 +397,16 @@ impl Client {
                 let body = anthropic::encode_request(&input.prompt, limits.declared_output_tokens, &limits.native())?;
                 (headers, body)
             }
+        };
+        let measured = Measured {
+            head: measure_headers(
+                &input.endpoint,
+                &input.credential,
+                affinity,
+                limits,
+                u32::try_from(body.len()).expect("admitted body"),
+            )?,
+            body: u32::try_from(body.len()).expect("admitted body"),
         };
         let call = http::Call {
             method: Method::Post,
@@ -391,7 +452,14 @@ impl Client {
             sse_closed: false,
             evidence: Evidence::Unsent,
             activity: 0,
+            measured,
         })
+    }
+
+    /// The exact request lengths admitted and encoded by this client.
+    #[must_use]
+    pub const fn measured(&self) -> Measured {
+        self.measured
     }
 
     #[must_use]
@@ -1265,8 +1333,9 @@ pub fn largest_room(limits: &Limits) -> u32 {
     http::largest_room(&limits.http)
 }
 
-/// A conservative bound on held and temporary storage, including output
-/// copies until handed to the caller; excludes the caller's input prompt.
+/// Fixed machine, table and buffer capacities, excluding the pool's request
+/// and receiving reservation and the caller-owned prompt/output payloads.
+/// Standalone owners add `largest_reservation` and their entry-point scratch.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
     if limits.error_bytes == 0
@@ -1279,15 +1348,22 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     {
         return None;
     }
+    let mut http_fixed = limits.http;
+    http_fixed.request = 0; // The admitted encoded head belongs to the reservation.
+    let native = limits.native();
+    let decoder = openai::response::decoder_fixed_worst_case(&native)?
+        .max(anthropic::decoder_worst_case(&native)?.checked_sub(u64::from(limits.answer))?);
+    // Replay records are fixed-capacity storage beside the pool's payload text.
+    let replay_records = List::<skein_json::Compact>::worst_case(limits.tokens)?
+        .checked_mul(u64::from(limits.output_items))?
+        .checked_mul(2)?;
     u64::try_from(size_of::<Client>())
         .ok()?
-        .checked_add(http::worst_case(&limits.http)?)?
+        .checked_add(http::worst_case(&http_fixed)?)?
         .checked_add(sse::worst_case(&event_stream(limits))?)?
-        .checked_add(openai::worst_case(&limits.native())?.max(anthropic::worst_case(&limits.native())?))?
+        .checked_add(decoder)?
+        .checked_add(replay_records)?
         .checked_add(List::<Block>::worst_case(limits.output_items)?.checked_mul(3)?)?
-        .checked_add(u64::from(limits.answer).checked_mul(4)?)?
-        .checked_add(u64::from(limits.request).checked_mul(4)?)?
-        .checked_add(u64::from(limits.http.request).checked_mul(4)?)?
         .checked_add(
             collector::worst_case(&filter::collector(limits), &filter::caps(limits), &openai::filter::EVENT)?.max(
                 collector::worst_case(&filter::collector(limits), &filter::caps(limits), &anthropic::filter::EVENT)?,
@@ -1305,6 +1381,15 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(Queue::<http::Request>::worst_case(REQUESTS)?)?
         .checked_add(Queue::<Down>::worst_case(1)?)
 }
+/// A standalone call's fixed state, largest reservation and one entrance's
+/// preparation/reuse overlap and codec scratch; a pool prices the scratch once.
+#[must_use]
+pub fn call_worst_case(limits: &Limits) -> Option<u64> {
+    worst_case(limits)?
+        .checked_mul(2)?
+        .checked_add(largest_reservation(limits)?)?
+        .checked_add(openai::worst_case(&limits.native())?.max(anthropic::worst_case(&limits.native())?))
+}
 
 fn admission(error: openai::DecodeError) -> Error {
     match error {
@@ -1316,13 +1401,13 @@ fn admission(error: openai::DecodeError) -> Error {
 }
 
 #[expect(clippy::manual_map, reason = "the strict subset excludes closure-taking maps")]
-fn headers(
+fn measure_headers(
     endpoint: &Endpoint,
-    credential: &crate::Credential,
+    credential: &Credential,
     affinity: Option<crate::Affinity>,
     limits: &Limits,
     body_length: u32,
-) -> Result<Box<[Header]>, Error> {
+) -> Result<u32, Error> {
     if endpoint.authority.is_empty()
         || credential.access_token.is_empty()
         || !header_value(&credential.access_token)
@@ -1363,6 +1448,23 @@ fn headers(
     {
         return Err(Error::limit(crate::Cap::ResponseFields, limits.http.headers));
     }
+    u32::try_from(total).or(Err(Error::limit(crate::Cap::RequestHead, limits.http.request)))
+}
+
+#[expect(clippy::manual_map, reason = "the strict subset excludes closure-taking maps")]
+fn headers(
+    endpoint: &Endpoint,
+    credential: &Credential,
+    affinity: Option<crate::Affinity>,
+    limits: &Limits,
+    body_length: u32,
+) -> Result<Box<[Header]>, Error> {
+    measure_headers(endpoint, credential, affinity, limits, body_length)?;
+    let rendered = match affinity {
+        Some(affinity) => Some(crate::affinity::rendered(affinity)),
+        None => None,
+    };
+    let fields = provider_headers(endpoint, &credential.account_id, rendered.as_ref());
     let mut headers = List::with_capacity(limits.http.headers);
     for (name, value) in [
         (b"Host".as_slice(), endpoint.authority.as_ref()),

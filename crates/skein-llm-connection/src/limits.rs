@@ -11,6 +11,8 @@ pub struct Limits {
     pub connections: u32,
     pub calls: u32,
     pub per_endpoint: u32,
+    /// Bytes calls may reserve at once from the owner's LLM memory pool.
+    pub memory: u64,
     pub idle_keep: Duration,
     pub io: skein_io::Limits,
     pub tls: skein_tls::client::Limits,
@@ -33,30 +35,38 @@ pub fn worst_case(limits: &Limits, endpoints: &List<crate::Endpoint>) -> Option<
         .checked_add(Queue::<skein_lib::stream::Down>::worst_case(256)?.checked_mul(2)?)?
         .checked_add(Queue::<skein_tls::client::Event>::worst_case(64)?)?;
     let mut largest = 0_u64;
-    let mut prepared = 0_u64;
+    let mut scratch = 0_u64;
     for endpoint in endpoints {
         let mut client = endpoint.limits;
         client.http.request = match skein_llm::client::request_head(&endpoint.llm, &endpoint.credential, &client) {
             Ok(head) => head,
             Err(_) => return None,
         };
-        let each = skein_tls::client::worst_case(&limits.tls)?
-            .checked_add(skein_llm::client::worst_case(&client)?)?
-            .checked_add(routes)?
-            .checked_add(u64::from(client.answer).checked_mul(64)?)?
-            .checked_add(u64::from(client.http.request.max(client.http.send)).checked_mul(256)?)?
-            .checked_add(
-                u64::from(skein_tls::client::largest_room(&limits.tls).max(skein_llm::client::largest_room(&client)))
-                    .checked_mul(256)?,
-            )?;
+        if skein_llm::client::largest_reservation(&client)? > limits.memory {
+            return None;
+        }
+        let fixed = skein_llm::client::worst_case(&client)?;
+        let transport = match &endpoint.transport {
+            crate::Transport::Tls { .. } => skein_tls::client::worst_case(&limits.tls)?,
+            crate::Transport::Plaintext => 0,
+        };
+        let each = transport.checked_add(fixed)?.checked_add(routes)?;
         largest = largest.max(each);
-        prepared = prepared.max(skein_llm::client::worst_case(&client)?);
+        // One entrance measures or prepares one call, never one per connection.
+        // Its borrowed prompt remains the owner's; translated codec tables,
+        // validated replay copies and temporary JSON belong to this scratch.
+        scratch = scratch.max(
+            skein_llm::openai::worst_case(&client.native())?
+                .max(skein_llm::anthropic::worst_case(&client.native())?)
+                .checked_add(fixed)?,
+        );
     }
     let pool = largest.checked_mul(u64::from(limits.connections))?;
-    pool.checked_add(Slab::<Connection>::worst_case(limits.connections)?)?
+    pool.checked_add(limits.memory)?
+        .checked_add(scratch)?
+        .checked_add(Slab::<Connection>::worst_case(limits.connections)?)?
         .checked_add(List::<Option<Id<Connection>>>::worst_case(limits.connections)?)?
         .checked_add(List::<Option<crate::component::Waiting>>::worst_case(limits.calls)?)?
-        .checked_add(prepared.checked_mul(u64::from(limits.calls))?)?
         .checked_add(List::<crate::Endpoint>::worst_case(limits.endpoints)?)?
         .checked_add(skein_io::worst_case(&limits.io)?)
 }

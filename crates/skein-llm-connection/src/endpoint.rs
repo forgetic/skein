@@ -71,6 +71,8 @@ pub enum EndpointError {
     SseChunkHttpRead { demand: u32, cap: u32 },
     /// A tokenizer demand exceeds the SSE data face's delivery cap.
     TokenizerDemandSseChunk { demand: u32, cap: u32 },
+    /// The pool cannot admit one largest call to this endpoint.
+    MemoryLargestCall { memory: u64, call: u64 },
     /// Plaintext was configured for an address outside loopback.
     PlaintextAddress,
 }

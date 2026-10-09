@@ -24,6 +24,7 @@ fn limits(calls: u32) -> Limits {
         connections: calls,
         calls,
         per_endpoint: calls,
+        memory: 16 * 1024 * 1024,
         idle_keep: Duration::from_secs(300),
         io: io::Limits {
             sockets: calls,

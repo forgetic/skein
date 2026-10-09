@@ -205,7 +205,7 @@ fn actual_native_peer_and_client_fit_checked_prices_until_every_owner_drops() {
         // and target; its other cloned endpoint fields exist during adoption.
         let caller = input_bytes(&input) + endpoint_bytes(&input.endpoint);
         let extra = extra_worst_case(&bounds, &caps, &input.endpoint, &input.credential).expect("checked peer price");
-        let client_price = client::worst_case(&bounds).expect("one Client price");
+        let client_price = client::call_worst_case(&bounds).expect("one Client price");
         let bound = client_price
             .checked_add(extra)
             .expect("composition")
@@ -429,7 +429,7 @@ fn exact_head_observation_capacity_retains_actual_fields_and_one_less_retains_no
         meter.start();
         let call_input = input(1, provider);
         let caller = input_bytes(&call_input) + endpoint_bytes(&call_input.endpoint);
-        let bound = client::worst_case(&bounds).expect("client price")
+        let bound = client::call_worst_case(&bounds).expect("client price")
             + extra_worst_case(&bounds, &caps, &call_input.endpoint, &call_input.credential).expect("peer price")
             + caller;
         let mut positive = Exchange::new(call_input, bounds, scripts());

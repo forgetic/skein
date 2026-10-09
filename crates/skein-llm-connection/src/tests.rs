@@ -5,12 +5,13 @@ use skein_lib::bytes;
 use skein_lib::{Duration, Env, List, Queue, Time, Token, Wall};
 use skein_llm::{Block, Credential, Message, Prompt, Role};
 
-fn limits() -> Limits {
+pub(crate) fn limits() -> Limits {
     Limits {
         endpoints: 1,
         connections: 1,
         calls: 1,
         per_endpoint: 1,
+        memory: 16 * 1024 * 1024,
         idle_keep: Duration::from_secs(10),
         io: skein_io::Limits {
             sockets: 1,
@@ -28,7 +29,7 @@ fn limits() -> Limits {
     }
 }
 
-fn endpoint() -> Endpoint {
+pub(crate) fn endpoint() -> Endpoint {
     let mut roots = skein_tls::RootCertStore::empty();
     roots
         .add(skein_tls::CertificateDer::from(
@@ -47,7 +48,7 @@ fn endpoint() -> Endpoint {
     }
 }
 
-fn prompt() -> Prompt {
+pub(crate) fn prompt() -> Prompt {
     Prompt {
         model: bytes::copy_of(b"test-model"),
         instructions: Box::new([]),
@@ -63,7 +64,7 @@ fn prompt() -> Prompt {
     }
 }
 
-fn credential() -> Credential {
+pub(crate) fn credential() -> Credential {
     Credential { access_token: bytes::copy_of(b"secret"), account_id: bytes::copy_of(b"account") }
 }
 
@@ -117,7 +118,7 @@ fn startup_rejects_impossible_limits() {
     assert_eq!(Component::new(endpoints, &config).err(), Some(EndpointError::TooMany));
 }
 
-fn component() -> Component {
+pub(crate) fn component() -> Component {
     let mut endpoints = List::with_capacity(1);
     endpoints.push(endpoint()).expect("one endpoint fits");
     Component::new(endpoints, &limits()).expect("valid component")
@@ -160,7 +161,9 @@ fn failed_connect_has_one_unsent_terminal_and_settles() {
     let mut io = Queue::with_capacity(MAX_OUT.below);
     let owner = start(&mut component, &mut up, &mut io);
     let env = Env { now: Time::ZERO, wall: Wall::from_nanos(1_893_456_000_000_000_000), limits: limits() };
+    assert!(component.reserved() > 0);
     component.up(&env, LowerEvent::Failed { owner, error: skein_io::Error::Refused }, &mut up, &mut io);
+    assert_eq!(component.reserved(), 0, "failure releases memory before socket settlement");
     match up.pop().expect("one failure") {
         Event::Failed { call, failure, evidence, .. } => {
             assert_eq!(call, Token::new(7));
@@ -751,4 +754,56 @@ fn construction_names_each_stream_capacity_relationship() {
         endpoints.push(destination).expect("endpoint");
         assert_eq!(Component::new(endpoints, &config).err(), Some(expected));
     }
+}
+
+#[test]
+fn construction_names_the_largest_call_that_does_not_fit_memory() {
+    let destination = endpoint();
+    let mut client = destination.limits;
+    client.http.request = skein_llm::client::request_head(&destination.llm, &destination.credential, &client).unwrap();
+    let largest = skein_llm::client::largest_reservation(&client).unwrap();
+    let mut config = limits();
+    config.memory = largest - 1;
+    let mut endpoints = List::with_capacity(1);
+    endpoints.push(destination).unwrap();
+    assert_eq!(
+        Component::new(endpoints, &config).err(),
+        Some(EndpointError::MemoryLargestCall { memory: largest - 1, call: largest })
+    );
+    config.memory = largest;
+    let mut endpoints = List::with_capacity(1);
+    endpoints.push(endpoint()).unwrap();
+    drop(Component::new(endpoints, &config).expect("one largest call fits exactly"));
+}
+
+#[test]
+fn a_whole_deadline_due_at_admission_fails_without_preparing_a_binding() {
+    let mut component = component();
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits() };
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    component.down(
+        &env,
+        Request::Start {
+            call: Token::new(7),
+            endpoint: 0,
+            prompt: prompt(),
+            credential: credential(),
+            deadlines: Deadlines { whole: Some(Duration::ZERO), ..Deadlines::none() },
+            drop_reasoning: false,
+        },
+        &mut up,
+        &mut io,
+    );
+    assert!(io.is_empty(), "an expired start never prepares or opens its binding");
+    component.fire(&env, &mut up, &mut io);
+    match up.pop() {
+        Some(Event::Failed { call, failure, evidence, .. }) => {
+            assert_eq!(call, Token::new(7));
+            assert_eq!(failure, skein_llm::Failure::TimedOut { phase: skein_llm::Phase::Whole });
+            assert_eq!(evidence, skein_llm::client::Evidence::Unsent);
+        }
+        other => panic!("expected unsent whole timeout, got {other:?}"),
+    }
+    assert_eq!(component.reserved(), 0);
 }

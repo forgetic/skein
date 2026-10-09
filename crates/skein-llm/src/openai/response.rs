@@ -1086,12 +1086,17 @@ fn write_item(out: &mut Encoder, item: &Item) {
     }
 }
 
-pub(crate) fn decoder_worst_case(limits: &Limits) -> Option<u64> {
+/// Fixed slot and argument-buffer capacities, excluding admitted answer bytes.
+pub(crate) fn decoder_fixed_worst_case(limits: &Limits) -> Option<u64> {
     let slots = List::<Opened>::worst_case(limits.output_items)?;
     let identifiers =
         u64::from(limits.output_items).checked_mul(u64::from(limits.strings.min(limits.retained)))?.checked_mul(3)?;
     let inputs = u64::from(limits.output_items).checked_mul(u64::from(limits.input))?;
-    slots.checked_add(identifiers)?.checked_add(inputs)?.checked_add(u64::from(limits.answer))
+    slots.checked_add(identifiers)?.checked_add(inputs)
+}
+
+pub(crate) fn decoder_worst_case(limits: &Limits) -> Option<u64> {
+    decoder_fixed_worst_case(limits)?.checked_add(u64::from(limits.answer))
 }
 
 /// Fake-server completion with the instructions/tools echo that the real Codex

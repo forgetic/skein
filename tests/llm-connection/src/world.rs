@@ -88,6 +88,7 @@ pub fn limits(calls: u32) -> Limits {
         connections: calls,
         calls,
         per_endpoint: calls,
+        memory: 16 * 1024 * 1024,
         idle_keep: Duration::from_secs(300),
         io: skein_io::Limits {
             sockets: calls,
@@ -300,9 +301,20 @@ impl World {
     /// Configure endpoint concurrency independently of the declared conversations.
     #[must_use]
     pub fn configured(seed: u64, calls: u32, per_endpoint: u32, endpoint_count: u32) -> Self {
+        let mut world = Self::empty_with_memory(seed, calls, per_endpoint, endpoint_count, limits(calls).memory);
+        for call in 7..7 + u64::from(calls) {
+            world.start(call);
+        }
+        world
+    }
+
+    /// The same byte-peer world, with a pool selected by a memory story.
+    #[must_use]
+    pub fn empty_with_memory(seed: u64, calls: u32, per_endpoint: u32, endpoint_count: u32, memory: u64) -> Self {
         let mut limits = limits(calls);
         limits.per_endpoint = per_endpoint;
         limits.endpoints = endpoint_count;
+        limits.memory = memory;
         let mut endpoints = List::with_capacity(endpoint_count);
         for endpoint in 0..endpoint_count {
             let mut client_limits = skein_llm_world::limits();
@@ -321,7 +333,7 @@ impl World {
                 })
                 .expect("endpoint");
         }
-        let mut world = Self {
+        Self {
             component: Component::new(endpoints, &limits).expect("component"),
             judge: Judge::default(),
             events: Vec::new(),
@@ -336,11 +348,7 @@ impl World {
             hold_tail: false,
             delay_close: false,
             aborts: 0,
-        };
-        for call in 7..7 + u64::from(calls) {
-            world.start(call);
         }
-        world
     }
 
     /// Submit a start; closing refusals are independent of an existing call token.
@@ -352,16 +360,21 @@ impl World {
     pub fn start_at(&mut self, token: u64, endpoint: u32, deadlines: Deadlines) {
         let mut call = skein_llm_world::call(token);
         call.prompt.instructions = b"close-world".as_slice().into();
+        self.start_prompt(token, endpoint, call.prompt, call.credential, deadlines);
+    }
+
+    /// An owner's custom prompt through the ordinary entrance and referee.
+    pub fn start_prompt(
+        &mut self,
+        token: u64,
+        endpoint: u32,
+        prompt: skein_llm::Prompt,
+        credential: Credential,
+        deadlines: Deadlines,
+    ) {
         self.component.down(
             &self.env,
-            Request::Start {
-                drop_reasoning: false,
-                call: Token::new(token),
-                endpoint,
-                prompt: call.prompt,
-                credential: call.credential,
-                deadlines,
-            },
+            Request::Start { drop_reasoning: false, call: Token::new(token), endpoint, prompt, credential, deadlines },
             &mut self.above,
             &mut self.below,
         );

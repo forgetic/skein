@@ -130,3 +130,131 @@ fn two_endpoints_with_different_client_limits_each_complete_and_replay() {
         (world.trace, world.events)
     });
 }
+
+fn memory_request(token: u64) -> skein_llm::Call {
+    let mut call = skein_llm_world::call(token);
+    call.endpoint = skein_llm::Endpoint::codex();
+    call.prompt.instructions = b"close-world".as_slice().into();
+    call
+}
+
+fn request_reservation() -> u64 {
+    let mut bounds = skein_llm_world::limits();
+    let input = memory_request(7);
+    bounds.http.request = skein_llm::client::request_head(
+        &input.endpoint,
+        &skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
+        &bounds,
+    )
+    .expect("the world request fits its declared endpoint");
+    let measured = skein_llm::client::measure(&input.prompt, &input.credential, &input.endpoint, &bounds)
+        .expect("the world request fits its declared endpoint");
+    skein_llm::client::reservation(measured, &bounds).expect("the world request fits its declared endpoint")
+}
+
+#[test]
+fn a_full_memory_pool_makes_a_call_wait_for_anothers_terminal() {
+    assert_replays(101, 103, |seed| {
+        let reservation = request_reservation();
+        let memory = 2 * reservation;
+        let mut world = World::empty_with_memory(seed, 3, 3, 1, memory);
+        for token in 7..10 {
+            world.start(token);
+        }
+        assert_eq!(world.component.reserved(), memory, "two calls fill the pool exactly");
+        world.until(Point::Head);
+        assert_eq!(world.connections(), 2, "the third call holds no prepared connection");
+        assert_eq!(world.judge.completed, 0);
+        world.request(Request::Close);
+        world.finish();
+        assert_eq!(world.judge.completed, 3);
+        assert_eq!(world.judge.refused, 0);
+        assert_eq!(world.component.reserved(), 0);
+        (world.trace, world.events)
+    });
+}
+
+#[test]
+fn a_small_call_does_not_pass_an_older_large_one_in_the_memory_pool() {
+    assert_replays(107, 109, |seed| {
+        let reservation = request_reservation();
+        let mut world = World::empty_with_memory(seed, 3, 3, 2, 2 * reservation);
+        world.start(7);
+        let mut larger = memory_request(8);
+        // The cue stays literal; additional history enlarges only the measured request.
+        let mut messages = larger.prompt.messages.to_vec();
+        messages.push(skein_llm::Message {
+            role: skein_llm::Role::User,
+            content: Box::new([skein_llm::Block::Text { text: vec![b'x'; 1024].into(), replay: None }]),
+        });
+        larger.prompt.messages = messages.into_boxed_slice();
+        world.start_prompt(8, 1, larger.prompt, larger.credential, Deadlines::none());
+        world.start(9);
+        assert_eq!(world.component.reserved(), reservation, "a younger fitting call cannot bypass the large wait");
+        world.until(Point::Head);
+        assert_eq!(world.connections(), 1);
+        world.request(Request::Close);
+        world.finish();
+        let terminals: Vec<_> = world.events.iter().filter(|event| event.starts_with("Completed")).collect();
+        assert_eq!(terminals.len(), 3);
+        for (event, token) in terminals.into_iter().zip([7, 8, 9]) {
+            assert!(event.contains(&format!("call: Token({token})")), "{event}");
+        }
+        assert_eq!(world.component.reserved(), 0);
+        (world.trace, world.events)
+    });
+}
+
+#[test]
+fn cancel_and_whole_expiry_release_both_waiting_stages() {
+    for token in [8, 9] {
+        for cancel in [false, true] {
+            let reservation = request_reservation();
+            let mut world = World::empty_with_memory(113, 3, 1, 1, 2 * reservation);
+            world.start(7);
+            for waiting in [8, 9] {
+                let deadlines = if waiting == token && !cancel {
+                    Deadlines { whole: Some(Duration::from_secs(1)), ..Deadlines::none() }
+                } else {
+                    Deadlines::none()
+                };
+                world.start_at(waiting, 0, deadlines);
+            }
+            assert_eq!(world.component.reserved(), 2 * reservation);
+            if cancel {
+                world.request(Request::Cancel { call: Token::new(token) });
+            } else {
+                world.advance(Time::from_nanos(1_000_000_000));
+            }
+            world.request(Request::Close);
+            world.finish();
+            assert_eq!(world.judge.completed, 2);
+            assert_eq!(world.judge.cancelled, u32::from(cancel));
+            assert_eq!(world.judge.failed, u32::from(!cancel));
+            assert_eq!(world.component.reserved(), 0);
+            if !cancel {
+                assert!(
+                    world.events.iter().any(|event| event.contains(&format!("call: Token({token})"))
+                        && event.contains("Unsent")
+                        && event.contains("TimedOut { phase: Whole }")),
+                    "{:?}",
+                    world.events
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn abort_cancels_memory_and_connection_waits_without_granting_again() {
+    let reservation = request_reservation();
+    let mut world = World::empty_with_memory(127, 3, 1, 1, 2 * reservation);
+    for token in 7..10 {
+        world.start(token);
+    }
+    world.request(Request::Abort);
+    world.finish();
+    assert_eq!(world.judge.cancelled, 3);
+    assert_eq!(world.judge.completed, 0);
+    assert_eq!(world.component.reserved(), 0);
+}

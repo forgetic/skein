@@ -58,6 +58,8 @@ pub enum Refusal {
     Endpoint,
     /// The owner already has its declared number of conversations outstanding.
     Calls { bound: u32 },
+    /// No wait can admit a call larger than the whole pool.
+    Memory { reservation: u64, bound: u64 },
     /// The LLM client rejected the call before touching the stream.
     Client(llm::Error),
 }

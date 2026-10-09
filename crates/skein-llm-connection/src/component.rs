@@ -33,9 +33,32 @@ pub(crate) struct Waiting {
     call: Token,
     endpoint: u32,
     order: u64,
-    prepared: llm::client::Client,
+    prompt: Prompt,
+    credential: Credential,
+    drop_reasoning: bool,
+    measured: llm::client::Measured,
+    reservation: u64,
+    stage: Stage,
     deadlines: crate::deadlines::Table,
     asked: bool,
+}
+
+/// A granted start prepared for an available binding; terminal releases it.
+struct Prepared {
+    client: llm::client::Client,
+    call: Token,
+    reservation: u64,
+    deadlines: crate::deadlines::Table,
+    asked: bool,
+}
+
+/// Memory grants are global arrival order; connections are per endpoint.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stage {
+    /// Holds its owner's start and no pool reservation.
+    Memory,
+    /// Holds its reservation while awaiting an endpoint's connection.
+    Connection,
 }
 
 /// The owner's bounded call pool; Close or Abort ends it with one Closed.
@@ -49,6 +72,7 @@ pub struct Component {
     lifecycle: Lifecycle,
     waiting: List<Option<Waiting>>,
     arrival: u64,
+    reserved: u64,
 }
 
 /// The most owner events and io requests from one component entrance.
@@ -94,6 +118,10 @@ impl Component {
                     Ok(head) => head,
                     Err(error) => return Err(EndpointError::Client(error)),
                 };
+            let largest = llm::client::largest_reservation(&destination.limits).ok_or(EndpointError::Limits)?;
+            if largest > limits.memory {
+                return Err(EndpointError::MemoryLargestCall { memory: limits.memory, call: largest });
+            }
             let read = llm::client::largest_read(&destination.limits);
             let send = llm::client::largest_room(&destination.limits);
             let sse = destination.limits.sse.chunk;
@@ -150,10 +178,11 @@ impl Component {
             lifecycle: Lifecycle::Live,
             waiting,
             arrival: 0,
+            reserved: 0,
         })
     }
 
-    /// Check a call before touching the stream; down retains the prepared client.
+    /// Check and prepare a standalone call; down measures starts and prepares on running.
     pub fn admit(
         &self,
         call: Token,
@@ -184,22 +213,8 @@ impl Component {
         credential: Credential,
         drop_reasoning: Option<bool>,
     ) -> Result<llm::client::Client, Refusal> {
-        assert!(self.lifecycle != Lifecycle::Closed, "an owner must not request work after Closed");
-        match self.lifecycle {
-            Lifecycle::Live => {}
-            Lifecycle::Closing | Lifecycle::Aborting => return Err(Refusal::Closed),
-            Lifecycle::Closed => unreachable!("an owner must not request work after Closed"),
-        }
-        let Some(destination) = self.endpoints.get(endpoint) else {
-            return Err(Refusal::Endpoint);
-        };
-        if self.outstanding() >= self.limits.calls {
-            return Err(Refusal::Calls { bound: self.limits.calls });
-        }
-        match llm::client::check_credential(&credential, &destination.credential) {
-            Ok(()) => {}
-            Err(error) => return Err(Refusal::Client(error)),
-        }
+        self.measure_start(endpoint, &prompt, &credential)?;
+        let destination = self.endpoints.get(endpoint).expect("measured endpoint");
         let input = Call { owner: call, prompt, credential, endpoint: destination.llm.clone() };
         let enabled = match drop_reasoning {
             Some(enabled) => enabled,
@@ -211,8 +226,133 @@ impl Component {
         }
     }
 
+    fn measure_start(
+        &self,
+        endpoint: u32,
+        prompt: &Prompt,
+        credential: &Credential,
+    ) -> Result<llm::client::Measured, Refusal> {
+        match self.lifecycle {
+            Lifecycle::Live => {}
+            Lifecycle::Closing | Lifecycle::Aborting => return Err(Refusal::Closed),
+            Lifecycle::Closed => unreachable!("an owner must not request work after Closed"),
+        }
+        let destination = self.endpoints.get(endpoint).ok_or(Refusal::Endpoint)?;
+        if self.outstanding() >= self.limits.calls {
+            return Err(Refusal::Calls { bound: self.limits.calls });
+        }
+        match llm::client::check_credential(credential, &destination.credential) {
+            Ok(()) => {}
+            Err(error) => return Err(Refusal::Client(error)),
+        }
+        let measured = match llm::client::measure(prompt, credential, &destination.llm, &destination.limits) {
+            Ok(measured) => measured,
+            Err(error) => return Err(Refusal::Client(error)),
+        };
+        let reservation =
+            llm::client::reservation(measured, &destination.limits).expect("admitted largest reservation");
+        if reservation > self.limits.memory {
+            return Err(Refusal::Memory { reservation, bound: self.limits.memory });
+        }
+        Ok(measured)
+    }
+
+    /// Bytes currently granted to waiting and running calls.
+    #[must_use]
+    pub const fn reserved(&self) -> u64 {
+        self.reserved
+    }
+
+    /// Release each running terminal once, then grant waiting memory in arrival order.
+    fn refresh_memory(&mut self) {
+        for slot in &self.slots {
+            match slot {
+                Some(id) => match self.connections.get_mut(*id) {
+                    Some(connection) if connection.call.is_none() => {
+                        self.reserved =
+                            self.reserved.checked_sub(connection.reservation).expect("running reservation held");
+                        connection.reservation = 0;
+                    }
+                    Some(_) | None => {}
+                },
+                None => {}
+            }
+        }
+        match self.lifecycle {
+            Lifecycle::Aborting | Lifecycle::Closed => {
+                self.refresh_waiting();
+                return;
+            }
+            Lifecycle::Live | Lifecycle::Closing => {}
+        }
+        for _ in 0..self.waiting.len() {
+            let mut oldest = u64::MAX;
+            let mut selected = None;
+            for index in 0..self.waiting.len() {
+                match self.waiting.get(index).expect("waiting index") {
+                    Some(waiting) => match waiting.stage {
+                        Stage::Memory => {
+                            if waiting.order < oldest {
+                                oldest = waiting.order;
+                                selected = Some(index);
+                            }
+                        }
+                        Stage::Connection => {}
+                    },
+                    None => {}
+                }
+            }
+            let Some(index) = selected else {
+                break;
+            };
+            let waiting = self.waiting.get_mut(index).expect("waiting index").as_mut().expect("oldest memory wait");
+            let remaining = self.limits.memory.checked_sub(self.reserved).expect("grants fit the pool");
+            if waiting.reservation > remaining {
+                break;
+            }
+            self.reserved = self.reserved.checked_add(waiting.reservation).expect("grant fits memory");
+            waiting.stage = Stage::Connection;
+        }
+        self.refresh_waiting();
+    }
+
+    fn release_waiting(&mut self, waiting: &Waiting) {
+        match waiting.stage {
+            Stage::Memory => {}
+            Stage::Connection => {
+                self.reserved = self.reserved.checked_sub(waiting.reservation).expect("waiting grant held");
+            }
+        }
+    }
+
+    fn prepare_waiting(&self, waiting: Waiting) -> Prepared {
+        let destination = self.endpoints.get(waiting.endpoint).expect("admitted endpoint");
+        let input = Call {
+            owner: waiting.call,
+            prompt: waiting.prompt,
+            credential: waiting.credential,
+            endpoint: destination.llm.clone(),
+        };
+        let prepared =
+            llm::client::Client::prepare_with_reasoning_drop(input, &destination.limits, waiting.drop_reasoning)
+                .expect("measurement made every preparation refusal");
+        assert_eq!(prepared.measured(), waiting.measured, "admitted lengths encode identically");
+        Prepared {
+            client: prepared,
+            call: waiting.call,
+            reservation: waiting.reservation,
+            deadlines: waiting.deadlines,
+            asked: waiting.asked,
+        }
+    }
+
     /// Takes an owner's call or demand. Reserve [`MAX_OUT`] first.
     pub fn down(&mut self, env: &Env<Limits>, request: Request, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
+        self.down_event(env, request, up, io);
+        self.refresh_memory();
+    }
+
+    fn down_event(&mut self, env: &Env<Limits>, request: Request, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
         assert!(self.lifecycle != Lifecycle::Closed, "an owner must not send requests after Closed");
         match request {
             Request::Close => {
@@ -264,7 +404,13 @@ impl Component {
                 for index in 0..self.waiting.len() {
                     match self.waiting.get(index).expect("waiting index") {
                         Some(waiting) if waiting.call == call => {
-                            self.waiting.get_mut(index).expect("waiting index").take();
+                            let waiting = self
+                                .waiting
+                                .get_mut(index)
+                                .expect("waiting index")
+                                .take()
+                                .expect("cancelled waiting call");
+                            self.release_waiting(&waiting);
                             up.push(Event::Cancelled { call });
                             self.refresh_waiting();
                             return;
@@ -290,6 +436,11 @@ impl Component {
 
     /// Routes an io answer by the component token echoed as its owner.
     pub fn up(&mut self, env: &Env<Limits>, event: IoEvent, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
+        self.up_event(env, event, up, io);
+        self.refresh_memory();
+    }
+
+    fn up_event(&mut self, env: &Env<Limits>, event: IoEvent, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
         let owner = match &event {
             IoEvent::Connecting { owner, .. }
             | IoEvent::Connected { owner }
@@ -338,6 +489,7 @@ impl Component {
                     Some(connection) => connection.closed(env, owner, up, io),
                     None => return,
                 }
+                self.refresh_memory();
                 for index in 0..self.slots.len() {
                     let slot = self.slots.get_mut(index).expect("the index is within the slot table");
                     match slot {
@@ -360,10 +512,17 @@ impl Component {
 
     /// Runs buffered child work and closes idle bindings after their keep time.
     pub fn fire(&mut self, env: &Env<Limits>, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
+        self.refresh_memory();
+        self.fire_event(env, up, io);
+        self.refresh_memory();
+    }
+
+    fn fire_event(&mut self, env: &Env<Limits>, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
         for index in 0..self.waiting.len() {
             match self.waiting.get(index).expect("waiting index") {
                 Some(waiting) if self.lifecycle == Lifecycle::Aborting || waiting.deadlines.due(env.now).is_some() => {
                     let waiting = self.waiting.get_mut(index).expect("waiting index").take().expect("waiting call");
+                    self.release_waiting(&waiting);
                     if self.lifecycle == Lifecycle::Aborting {
                         up.push(Event::Cancelled { call: waiting.call });
                     } else {
@@ -529,21 +688,35 @@ impl Component {
         up: &mut Queue<Event>,
         io: &mut Queue<IoRequest>,
     ) {
-        let prepared = match self.admit_with_reasoning_drop(call, endpoint, prompt, credential, drop_reasoning) {
-            Ok(client) => client,
+        let measured = match self.measure_start(endpoint, &prompt, &credential) {
+            Ok(measured) => measured,
             Err(why) => {
                 up.push(Event::Refused { call, why });
                 return;
             }
         };
+        let destination = self.endpoints.get(endpoint).expect("admitted endpoint");
+        let reservation = llm::client::reservation(measured, &destination.limits).expect("measured largest call fits");
         let mut table = crate::deadlines::Table::new(deadlines, env.now);
         table.arm(crate::deadlines::Phase::Waiting, env.now, self.limits.idle_keep);
-        let waiting = Waiting { call, endpoint, order: self.arrival, prepared, deadlines: table, asked: false };
+        let waiting = Waiting {
+            call,
+            endpoint,
+            order: self.arrival,
+            prompt,
+            credential,
+            drop_reasoning,
+            measured,
+            reservation,
+            stage: Stage::Memory,
+            deadlines: table,
+            asked: false,
+        };
         self.arrival = self.arrival.checked_add(1).expect("arrival counter fits the process lifetime");
         for index in 0..self.waiting.len() {
             if self.waiting.get(index).expect("waiting index").is_none() {
                 *self.waiting.get_mut(index).expect("waiting index") = Some(waiting);
-                self.refresh_waiting();
+                self.refresh_memory();
                 self.serve_waiting(env, up, io);
                 return;
             }
@@ -585,7 +758,10 @@ impl Component {
                         connection.waiting = false;
                         for waiting in &self.waiting {
                             match waiting {
-                                Some(waiting) if waiting.endpoint == connection.endpoint => connection.waiting = true,
+                                Some(waiting) if waiting.endpoint == connection.endpoint => match waiting.stage {
+                                    Stage::Memory => {}
+                                    Stage::Connection => connection.waiting = true,
+                                },
                                 Some(_) | None => {}
                             }
                         }
@@ -607,6 +783,11 @@ impl Component {
         for index in 0..self.waiting.len() {
             match self.waiting.get(index).expect("waiting index") {
                 Some(waiting) => {
+                    match waiting.stage {
+                        Stage::Memory => continue,
+                        Stage::Connection => {}
+                    }
+
                     let mut count = 0_u32;
                     let mut reusable = false;
                     let mut evictable = false;
@@ -642,40 +823,61 @@ impl Component {
         selected
     }
 
-    fn serve_waiting(&mut self, env: &Env<Limits>, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) -> bool {
-        let index = match self.runnable_waiting() {
-            Some(index) => index,
-            None => return false,
-        };
-        let endpoint = self.waiting.get(index).expect("waiting index").as_ref().expect("waiting call").endpoint;
+    fn reusable_connection(&self, endpoint: u32) -> Option<Id<Connection>> {
         for slot in &self.slots {
             match slot {
-                Some(id) => match self.connections.get_mut(*id) {
+                Some(id) => match self.connections.get(*id) {
                     Some(connection)
                         if connection.endpoint == endpoint
                             && (connection.phase == Phase::Idle || connection.phase == Phase::Ready) =>
                     {
-                        let waiting = self.waiting.get_mut(index).expect("waiting index").take().expect("waiting call");
-                        match connection.llm.next_call(waiting.prepared) {
-                            Ok(()) => {}
-                            Err(_) => unreachable!("a reusable client accepts the prepared call"),
-                        }
-                        connection.call = Some(waiting.call);
-                        connection.phase = Phase::Head;
-                        connection.idle_at = None;
-                        connection.deadlines = waiting.deadlines;
-                        connection.sync_deadlines(env);
-                        if waiting.asked {
-                            connection.next(env, id.token(), up, io);
-                        }
-                        connection.start_call(env, id.token(), up, io);
-                        self.refresh_waiting();
-                        return true;
+                        return Some(*id);
                     }
                     Some(_) | None => {}
                 },
                 None => {}
             }
+        }
+        None
+    }
+
+    fn serve_waiting(&mut self, env: &Env<Limits>, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) -> bool {
+        let index = match self.runnable_waiting() {
+            Some(index) => index,
+            None => return false,
+        };
+        let waiting = self.waiting.get(index).expect("waiting index").as_ref().expect("waiting call");
+        if waiting.deadlines.due(env.now).is_some() {
+            return false; // fire answers the expired wait before preparing it.
+        }
+        let endpoint = waiting.endpoint;
+        let reusable = self.reusable_connection(endpoint);
+        let prepared = if reusable.is_some() || !self.connections.is_full() {
+            let waiting = self.waiting.get_mut(index).expect("waiting index").take().expect("waiting call");
+            Some(self.prepare_waiting(waiting))
+        } else {
+            None
+        };
+        let mut prepared = prepared;
+        if let Some(id) = reusable {
+            let waiting = prepared.take().expect("reusable client prepared");
+            let connection = self.connections.get_mut(id).expect("selected reusable binding");
+            match connection.llm.next_call(waiting.client) {
+                Ok(()) => {}
+                Err(_) => unreachable!("a reusable client accepts the prepared call"),
+            }
+            connection.reservation = waiting.reservation;
+            connection.call = Some(waiting.call);
+            connection.phase = Phase::Head;
+            connection.idle_at = None;
+            connection.deadlines = waiting.deadlines;
+            connection.sync_deadlines(env);
+            if waiting.asked {
+                connection.next(env, id.token(), up, io);
+            }
+            connection.start_call(env, id.token(), up, io);
+            self.refresh_waiting();
+            return true;
         }
         if self.connections.is_full() {
             for slot in &self.slots {
@@ -693,7 +895,7 @@ impl Component {
             }
             return false;
         }
-        let waiting = self.waiting.get_mut(index).expect("waiting index").take().expect("waiting call");
+        let waiting = prepared.take().expect("new client prepared");
         let destination = self.endpoints.get(endpoint).expect("admitted endpoint");
         let tls = match &destination.transport {
             Transport::Tls { server_name, trust } => {
@@ -705,11 +907,12 @@ impl Component {
             endpoint,
             waiting.call,
             tls,
-            waiting.prepared,
+            waiting.client,
             destination.limits,
             crate::Deadlines::none(),
             env.now,
         );
+        connection.reservation = waiting.reservation;
         connection.deadlines = waiting.deadlines;
         connection.sync_deadlines(env);
         if self.lifecycle == Lifecycle::Closing {
@@ -737,5 +940,83 @@ impl Component {
         }
         self.refresh_waiting();
         true
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use crate::tests::{component, credential, endpoint, limits, prompt};
+
+    #[test]
+    fn an_entrance_larger_than_the_pool_is_refused_before_preparing() {
+        // Construction normally excludes this case; lower the private pool to
+        // exercise the entrance guard independently of startup validation.
+        let mut component = component();
+        let destination = component.endpoints.get(0).unwrap();
+        let input = prompt();
+        let secret = credential();
+        let measured = skein_llm::client::measure(&input, &secret, &destination.llm, &destination.limits).unwrap();
+        let reservation = skein_llm::client::reservation(measured, &destination.limits).unwrap();
+        component.limits.memory = reservation - 1;
+        assert_eq!(
+            component.admit(Token::new(7), 0, input, secret).err(),
+            Some(Refusal::Memory { reservation, bound: reservation - 1 })
+        );
+        assert_eq!(component.reserved(), 0);
+    }
+
+    #[test]
+    fn a_younger_fitting_start_stays_behind_an_older_memory_wait() {
+        let destination = endpoint();
+        let mut bounds = destination.limits;
+        bounds.http.request = llm::client::request_head(&destination.llm, &destination.credential, &bounds).unwrap();
+        let measured = llm::client::measure(&prompt(), &credential(), &destination.llm, &bounds).unwrap();
+        let reservation = llm::client::reservation(measured, &bounds).unwrap();
+        let mut config = limits();
+        config.calls = 3;
+        config.connections = 3;
+        config.per_endpoint = 3;
+        config.io.sockets = 3;
+        config.memory = 2 * reservation;
+        let mut endpoints = List::with_capacity(1);
+        endpoints.push(destination).unwrap();
+        let mut pool = Component::new(endpoints, &config).unwrap();
+        let env = Env { now: skein_lib::Time::ZERO, wall: skein_lib::Wall::EPOCH, limits: config };
+        let mut up = Queue::with_capacity(MAX_OUT.above);
+        let mut io = Queue::with_capacity(MAX_OUT.below);
+        for token in [7, 8, 9] {
+            let mut input = prompt();
+            if token == 8 {
+                input.instructions = Box::new([b'x'; 1024]);
+            }
+            pool.down(
+                &env,
+                Request::Start {
+                    call: Token::new(token),
+                    endpoint: 0,
+                    prompt: input,
+                    credential: credential(),
+                    deadlines: crate::Deadlines::none(),
+                    drop_reasoning: false,
+                },
+                &mut up,
+                &mut io,
+            );
+        }
+        assert_eq!(pool.reserved(), reservation);
+        assert_eq!(io.len(), 1, "only the first call prepares and connects");
+        assert_eq!(pool.waiting_count(), 2);
+        pool.down(&env, Request::Cancel { call: Token::new(8) }, &mut up, &mut io);
+        assert_eq!(pool.reserved(), 2 * reservation, "removing the older wait grants the younger call");
+        assert_eq!(pool.waiting_count(), 1);
+    }
+
+    #[test]
+    fn increasing_pool_memory_adds_exactly_that_many_bytes_to_the_bound() {
+        let mut pool = component();
+        let before = pool.worst_case().unwrap();
+        pool.limits.memory += 1024;
+        assert_eq!(pool.worst_case().unwrap() - before, 1024);
     }
 }

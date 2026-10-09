@@ -50,6 +50,7 @@ enum Control {
 pub(crate) struct Connection {
     pub(crate) endpoint: u32,
     pub(crate) call: Option<Token>,
+    pub(crate) reservation: u64,
     pub(crate) socket: Option<Token>,
     pub(crate) phase: Phase,
     pub(crate) tls: Option<tls::Client>,
@@ -91,6 +92,7 @@ impl Connection {
         Connection {
             endpoint,
             call: Some(call),
+            reservation: 0,
             socket: None,
             phase: Phase::Connecting,
             tls,
