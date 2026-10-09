@@ -19,6 +19,7 @@
 
 extern crate alloc;
 
+pub mod collector;
 pub mod document;
 mod number;
 mod string;

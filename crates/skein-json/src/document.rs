@@ -239,6 +239,44 @@ impl Builder {
         Ok(())
     }
 
+    pub(crate) fn len(&self) -> u32 {
+        self.tokens.len()
+    }
+
+    pub(crate) fn text_len(&self) -> u32 {
+        self.text.len()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.tokens.clear();
+        self.text.clear();
+    }
+
+    pub(crate) fn document(&self) -> Document {
+        Document { text: self.text.to_boxed(), tokens: self.tokens.to_boxed() }
+    }
+
+    pub(crate) fn token(&self, index: u32) -> Option<&Compact> {
+        self.tokens.get(index)
+    }
+
+    pub(crate) fn text(&self, record: &Compact) -> &[u8] {
+        let start = usize::try_from(record.start).expect("u32 fits usize");
+        let end = usize::try_from(record.end().expect("the builder checked each text append")).expect("u32 fits usize");
+        self.text.as_slice().get(start..end).expect("the builder's own text offsets")
+    }
+
+    pub(crate) fn push_long(&mut self, length: u64) -> Result<(), Error> {
+        if self.tokens.room() == 0 {
+            return Err(Error::TooManyTokens);
+        }
+        let Ok(len) = u32::try_from(length) else {
+            return Err(Error::TooMuchText);
+        };
+        self.tokens.push(Compact { kind: Kind::Long, start: 0, len }).expect("the record count was admitted");
+        Ok(())
+    }
+
     fn into_document(self) -> Document {
         Document { text: self.text.into_boxed(), tokens: self.tokens.into_boxed() }
     }

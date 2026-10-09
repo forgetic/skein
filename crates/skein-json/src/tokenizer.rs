@@ -231,6 +231,40 @@ impl Tokenizer {
         }
     }
 
+    /// Starts a new stream after Done or Failed, retaining every capacity.
+    pub fn restart(&mut self) {
+        match self.state {
+            State::Over => self.reset(),
+            State::Idle(_) | State::Reading(_) | State::Closed => unreachable!("restart follows a document outcome"),
+        }
+    }
+
+    /// Delivered bytes in the outstanding skip, excluding its leading separators.
+    pub(crate) fn skip_progress(&self) -> u64 {
+        match self.document.mode {
+            Mode::Skip { start: Some(start), .. } => {
+                u64::from(self.document.read.checked_sub(start).expect("the skip starts within delivered bytes"))
+            }
+            Mode::Skip { start: None, .. } | Mode::Next | Mode::Text(_) => 0,
+        }
+    }
+
+    /// The collector may also reset a tokenizer it stopped after its own count failure.
+    pub(crate) fn reset(&mut self) {
+        match self.state {
+            State::Idle(_) | State::Over | State::Closed => {}
+            State::Reading(_) => unreachable!("reset has no outstanding stream demand"),
+        }
+        for _ in 0..self.document.open.len() {
+            self.document.open.pop().expect("the current open container count");
+        }
+        self.document.text.reset(Retention::Discard);
+        self.document.expect = Expect::Value;
+        self.document.mode = Mode::Next;
+        self.document.read = 0;
+        self.state = State::Idle(Held::Nothing);
+    }
+
     /// What it is waiting for: a function of its state alone.
     #[must_use]
     pub fn waiting(&self) -> Waiting {

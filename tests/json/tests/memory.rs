@@ -278,3 +278,69 @@ fn a_compact_document_at_its_counts_costs_its_text_and_one_record_per_token() {
         drop(document);
     }
 }
+
+/// Collector entry points met by the existing intake, measured separately
+/// from the neighbour and its queues. The returned document is handed out.
+fn collect_memory(
+    document: &[u8],
+    filter: skein_json::collector::Filter,
+    limits: skein_json::collector::Limits,
+) -> (u64, u64) {
+    use skein_json::collector::{self, Collector, Event, Request};
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
+    let mut above = Queue::with_capacity(1);
+    let mut below = Queue::with_capacity(1);
+    let mut intake = Intake::with_capacity(
+        (u32::try_from(document.len()).expect("bounded document")).max(json::largest_demand(&limits.tokenizer)),
+    );
+    intake.append(document).expect("all bytes fit");
+    let bound = collector::worst_case(&limits).expect("priced limits");
+    let meter = Meter::new();
+    meter.start();
+    let mut collector = Collector::new(filter, &limits);
+    let mut most = meter.end().peak();
+    let mut demand = None;
+    for step in 0..8 * document.len() + 64 {
+        let delivery = demand.take().map(|read| intake.meet(read).map_or(Up::End, Up::Bytes));
+        meter.start();
+        if let Some(event) = delivery {
+            collector::up(&mut collector, &env, event, &mut above, &mut below);
+        } else {
+            assert_eq!(step, 0);
+            collector::down(&mut collector, &env, Request::Collect, &mut above, &mut below);
+        }
+        let measured = meter.end();
+        most = most.max(measured.peak());
+        assert!(most <= bound, "{most} <= {bound}");
+        if let Some(event) = above.pop() {
+            assert!(matches!(event, Event::Collected(_)), "{event:?}");
+            drop(event);
+            let span = skein_heap::Span::start();
+            collector.restart(filter);
+            assert_eq!(span.end(), skein_heap::Grown { peak: 0, net: 0 }, "restart keeps every buffer");
+            return (most, bound);
+        }
+        match below.pop().expect("unfinished collect demands bytes") {
+            Down::Demand { read, room: 0 } => demand = Some(read),
+            other @ (Down::Demand { .. } | Down::Send(_) | Down::Finish) => panic!("{other:?}"),
+        }
+    }
+    panic!("bounded progress")
+}
+#[test]
+fn collector_skipped_megabytes_add_no_memory_and_full_counts_reach_the_bound() {
+    use skein_json::collector::{Filter, Keep, Key, Limits, Node};
+    let limits = Limits {
+        tokenizer: json::Limits { depth: 4, string: 8, number: 8, chunk: 32, length: 2 << 20 },
+        tokens: 4,
+        text: 5,
+        skip: 2 << 20,
+    };
+    let filter = Filter { root: Keep::Into(&[Node { key: Key::Field(b"keep"), keep: Keep::Value }]) };
+    let small = format!("{{\"keep\":1,\"omit\":\"{}\"}}", "a".repeat(64));
+    let large = format!("{{\"keep\":1,\"omit\":\"{}\"}}", "a".repeat(1 << 20));
+    assert_eq!(collect_memory(small.as_bytes(), filter, limits).0, collect_memory(large.as_bytes(), filter, limits).0);
+    let exact = Limits { tokenizer: json::Limits { chunk: 4, ..limits.tokenizer }, tokens: 4, text: 5, ..limits };
+    let (peak, bound) = collect_memory(br#"{"keep":1}"#, filter, exact);
+    assert_eq!(peak, bound, "one full reusable document and its full emitted copy");
+}

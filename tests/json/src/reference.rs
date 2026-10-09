@@ -460,3 +460,159 @@ pub fn demands(
     events.push(Event::Done);
     (requests, events)
 }
+
+/// Prunes independently parsed value spans through a filter, including exact
+/// source byte counts for every removed value and decoded lengths for Long.
+#[must_use]
+pub fn prune(
+    document: &[u8],
+    filter: skein_json::collector::Filter,
+    limits: &skein_json::collector::Limits,
+) -> Option<(skein_json::collector::Event, u64, Vec<Token>)> {
+    use skein_json::collector::Event;
+    let mut parser = Parser {
+        input: document,
+        at: 0,
+        limits: Limits { string: u32::MAX, ..limits.tokenizer },
+        depth: 0,
+        visible: 0,
+        tokens: Vec::new(),
+        values: Vec::new(),
+    };
+    if parser.document().is_err() {
+        return None;
+    }
+    let mut result = Pruned {
+        parser: &parser,
+        tokens: Vec::new(),
+        text: Vec::new(),
+        skipped: 0,
+        skipped_values: Vec::new(),
+        limits,
+    };
+    let outcome = match result.value(0, filter.root) {
+        Ok(_) => Event::Collected(
+            skein_json::Document::from_parts(
+                result.text.into(),
+                result.tokens.into(),
+                &skein_json::document::Limits { tokens: limits.tokens, text: limits.text },
+            )
+            .expect("test value fits its admitted bounds"),
+        ),
+        Err(error) => Event::Failed(error),
+    };
+    Some((outcome, result.skipped, result.skipped_values))
+}
+struct Pruned<'a> {
+    parser: &'a Parser<'a>,
+    tokens: Vec<skein_json::Compact>,
+    text: Vec<u8>,
+    skipped: u64,
+    skipped_values: Vec<Token>,
+    limits: &'a skein_json::collector::Limits,
+}
+impl Pruned<'_> {
+    fn push(&mut self, token: &Token, long: bool) -> Result<(), skein_json::collector::Error> {
+        use skein_json::collector::Error;
+        use skein_json::{Compact, Kind};
+        if self.tokens.len() == self.limits.tokens as usize {
+            return Err(Error::TooManyTokens);
+        }
+        let (kind, bytes) = match token {
+            Token::ObjectStart => (Kind::ObjectStart, &[][..]),
+            Token::ObjectEnd => (Kind::ObjectEnd, &[][..]),
+            Token::ArrayStart => (Kind::ArrayStart, &[][..]),
+            Token::ArrayEnd => (Kind::ArrayEnd, &[][..]),
+            Token::Key(bytes) => (Kind::Key, bytes.as_ref()),
+            Token::String(bytes) => (if long { Kind::Long } else { Kind::String }, bytes.as_ref()),
+            Token::Number(bytes) => (Kind::Number, bytes.as_ref()),
+            Token::True => (Kind::True, &[][..]),
+            Token::False => (Kind::False, &[][..]),
+            Token::Null => (Kind::Null, &[][..]),
+        };
+        let mut start = 0;
+        if matches!(kind, Kind::Key | Kind::String | Kind::Number) {
+            if self.text.len() + bytes.len() > self.limits.text as usize {
+                return Err(Error::TooMuchText);
+            }
+            start = u32::try_from(self.text.len()).expect("retained under u32 text");
+            self.text.extend_from_slice(bytes);
+        }
+        self.tokens.push(Compact { kind, start, len: u32::try_from(bytes.len()).expect("a generated bounded string") });
+        Ok(())
+    }
+    fn value(&mut self, at: usize, keep: skein_json::collector::Keep) -> Result<usize, skein_json::collector::Error> {
+        use skein_json::collector::{Error, Keep, Key};
+        let span =
+            self.parser.values.iter().find(|span| span.token == at).expect("test value fits its admitted bounds");
+        let token = &self.parser.tokens[at];
+        if keep == Keep::Value {
+            for token in &self.parser.tokens[at..span.end_token] {
+                self.push(token, false)?;
+            }
+            return Ok(span.end_token);
+        }
+        match token {
+            Token::String(bytes) => {
+                self.push(
+                    token,
+                    matches!(keep,Keep::Text(cap) if bytes.len() > cap.min(self.limits.tokenizer.string) as usize),
+                )?;
+            }
+            Token::ObjectStart | Token::ArrayStart => {
+                if let Keep::Text(_) = keep {
+                    return self.value(at, Keep::Value);
+                }
+                let Keep::Into(nodes) = keep else { unreachable!() };
+                self.push(token, false)?;
+                let object = matches!(token, Token::ObjectStart);
+                let mut child = at + 1;
+                let mut seen = std::collections::BTreeSet::new();
+                while child < span.end_token - 1 {
+                    let key = if object {
+                        let Token::Key(bytes) = &self.parser.tokens[child] else { unreachable!() };
+                        Some(bytes.as_ref())
+                    } else {
+                        None
+                    };
+                    let selected = nodes.iter().find(|node| match node.key {
+                        Key::Field(name) => key == Some(name),
+                        Key::Each => !object,
+                    });
+                    let value = child + usize::from(object);
+                    if let Some(node) = selected {
+                        if let Some(key) = key {
+                            if !seen.insert(key) {
+                                return Err(Error::Duplicate);
+                            }
+                            self.push(&self.parser.tokens[child], false)?;
+                        }
+                        child = self.value(value, node.keep)?;
+                    } else {
+                        let dropped = self
+                            .parser
+                            .values
+                            .iter()
+                            .find(|span| span.token == value)
+                            .expect("test value fits its admitted bounds");
+                        self.skipped_values.push(self.parser.tokens[value].clone());
+                        self.skipped += dropped.bytes as u64;
+                        if self.skipped > self.limits.skip {
+                            return Err(Error::SkippedTooLong);
+                        }
+                        child = dropped.end_token;
+                    }
+                }
+                self.push(&self.parser.tokens[span.end_token - 1], false)?;
+            }
+            Token::ObjectEnd
+            | Token::ArrayEnd
+            | Token::Key(_)
+            | Token::Number(_)
+            | Token::True
+            | Token::False
+            | Token::Null => self.push(token, false)?,
+        }
+        Ok(span.end_token)
+    }
+}

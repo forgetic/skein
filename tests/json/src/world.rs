@@ -617,3 +617,139 @@ pub fn check_demands(document: &[u8], settings: &Settings, seed: u64) -> Run {
     assert_eq!(run.answers, expected, "seed {seed}: {}", document.escape_ascii());
     run
 }
+
+/// One selective collector between the same delayed byte source and owner.
+/// The byte neighbour uses the tokenizer world's demand referee and intake.
+#[derive(Clone, Debug)]
+pub struct CollectedRun {
+    pub outcome: Option<skein_json::collector::Event>,
+    pub counts: skein_json::collector::Counts,
+    pub closed_while: skein_json::collector::Waiting,
+    pub failed: Option<Fault>,
+}
+
+/// Collects with random arrivals, stalls, end/fault crossings and close timing.
+#[must_use]
+pub fn collect(
+    document: &[u8],
+    filter: skein_json::collector::Filter,
+    limits: skein_json::collector::Limits,
+    settings: &Settings,
+    seed: u64,
+) -> CollectedRun {
+    use skein_json::collector::{self, Collector, Event, Request, Waiting};
+    assert_eq!(limits.tokenizer, settings.limits);
+    let mut rng = Rng::new(seed);
+    let mut below = Below {
+        unsent: settings.sent(document),
+        intake: Intake::with_capacity(settings.cap),
+        demand: None,
+        life: Life::Open,
+        failed: None,
+        fell: Fell::default(),
+        withdrawn: None,
+    };
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
+    let mut collector = Collector::new(filter, &limits);
+    let mut events = Queue::with_capacity(8);
+    let mut requests = Queue::with_capacity(8);
+    let mut outcome = None;
+    let mut pending = false;
+    for iteration in 0..64 * (document.len() as u64 + 16) + settings.stall.map_or(0, |(_, n)| n) {
+        let stalled = settings.stall.is_some_and(|(from, n)| (from..from + n).contains(&iteration));
+        let closing = !stalled
+            && (settings.close.is_some_and(|at| iteration >= at)
+                || outcome.is_some() && rng.chance(settings.eagerness));
+        let before = collector.waiting();
+        let counts = collector.counts();
+        if closing {
+            collector::down(&mut collector, &env, Request::Close, &mut events, &mut requests);
+        } else if !pending && !stalled && rng.chance(settings.eagerness) {
+            pending = true;
+            collector::down(&mut collector, &env, Request::Collect, &mut events, &mut requests);
+        } else {
+            let delivery = collector_delivery(&mut below, settings, &mut rng, iteration);
+            if let Some(delivery) = delivery {
+                collector::up(&mut collector, &env, delivery, &mut events, &mut requests);
+            }
+        }
+        assert!(events.len() <= 1 && requests.len() <= 1, "collector MAX_OUT");
+        while let Some(event) = events.pop() {
+            match event {
+                Event::Collected(_) | Event::Failed(_) => {
+                    assert!(pending && outcome.is_none());
+                    outcome = Some(event);
+                }
+                Event::Closed => {
+                    assert!(closing);
+                    while let Some(request) = requests.pop() {
+                        below.receive(&request, true, &limits.tokenizer);
+                    }
+                    if let Some(read) = below.withdrawn.take()
+                        && let Some(bytes) = below.intake.meet(read)
+                    {
+                        collector::up(&mut collector, &env, Up::Bytes(bytes), &mut events, &mut requests);
+                    }
+                    collector::up(&mut collector, &env, Up::End, &mut events, &mut requests);
+                    assert!(events.is_empty() && requests.is_empty());
+                    return CollectedRun { outcome, counts, closed_while: before, failed: below.failed };
+                }
+            }
+        }
+        while let Some(request) = requests.pop() {
+            let withdrawal = matches!(request, Down::Demand { read: Read::Nothing, .. });
+            below.receive(&request, withdrawal, &limits.tokenizer);
+        }
+        let observed = if outcome.is_some() {
+            Waiting::Close
+        } else if pending {
+            Waiting::Bytes
+        } else {
+            Waiting::Collect
+        };
+        assert_eq!(collector.waiting(), observed);
+        assert_eq!(below.demand.is_some(), observed == Waiting::Bytes);
+    }
+    panic!("seed {seed}: collector world settles: {settings:?}");
+}
+
+fn collector_delivery(below: &mut Below<'_>, settings: &Settings, rng: &mut Rng, iteration: u64) -> Option<Up> {
+    if !below.unsent.is_empty() && below.intake.room() > 0 && rng.chance(settings.arrival) {
+        let count = usize::try_from(rng.between(1, u64::from(settings.piece)))
+            .expect("a bounded arrival")
+            .min(below.intake.room() as usize)
+            .min(below.unsent.len());
+        let (piece, rest) = below.unsent.split_at(count);
+        below.intake.append(piece).expect("test value fits its admitted bounds");
+        below.unsent = rest;
+    }
+    if let Some((at, fault)) = settings.failure.filter(|(at, _)| iteration >= *at && below.failed.is_none()) {
+        let _ = at;
+        below.failed = Some(fault);
+        below.life = Life::Over;
+        below.demand = None;
+        Some(Up::Failed(fault))
+    } else if below.life == Life::Over {
+        None
+    } else if below.life == Life::Ending {
+        below.life = Life::Over;
+        below.demand = None;
+        Some(Up::End)
+    } else if let Some(read) = below.demand {
+        if let Some(bytes) = below.intake.meet(read) {
+            below.demand = None;
+            Some(Up::Bytes(bytes))
+        } else if below.unsent.is_empty() {
+            below.life = Life::Over;
+            below.demand = None;
+            Some(Up::End)
+        } else {
+            None
+        }
+    } else if below.unsent.is_empty() && below.intake.is_empty() && rng.chance(settings.idle_end) {
+        below.life = Life::Ending;
+        None
+    } else {
+        None
+    }
+}
