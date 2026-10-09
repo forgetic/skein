@@ -275,7 +275,7 @@ The connection's states and transitions are:
 | Prepared | sized request head/body | Start -> Head; Cancel/Close -> Closing |
 | Head | HTTP upload and final head | room -> next upload piece; response -> Streaming or ErrorBody |
 | Streaming | SSE reader, selective decoder, completion, at most one demand | Next -> consume one output or demand a read; provider terminal -> Draining; fault -> Closing |
-| ErrorBody | bounded HTTP error document | bytes/end -> classified Failed; limit -> Failed and Closing |
+| ErrorBody | bounded HTTP error document | bytes/end -> classified Failed; past its bound -> classified by its status and head alone, its detail saying it was cut, and Closing |
 | Draining | terminal already emitted, HTTP body discarded | HTTP Done(Keep) -> Idle; Done(Close) -> Closing |
 | Idle | retained HTTP client | replace with admitted call -> Prepared; Close -> Closing |
 | Closing | machines stopped, actual stream still owned below | caller's settled `closed` -> Closed |
@@ -380,6 +380,15 @@ derivation's own:
   (llm-connection.md, section 3). The response head and its field count
   are the dialect's constants, sized for its provider's header set.
 - **The error body** and the failure detail are the dialect's constants.
+  An error body is evidence for the failure's detail and its finer class
+  (a context too long, a retry hint in the body). It never decides
+  whether a failure is retryable: the status does. A body past its bound
+  is kept up to the bound and not parsed. The call fails with the class
+  its status and head give, as a non-JSON body's does, its detail says
+  that the body was cut, and the connection closes rather than drain the
+  rest. So a large proxy page in front of a 503 stays `Unavailable`, not
+  a local `Limit`. `Cap::ErrorBody` still names a zero bound refused at
+  admission.
 
 ### 4.3 Relationships checked at startup
 
@@ -631,10 +640,16 @@ unless marked:
   within Codex's `input_tokens`, as cached tokens are, is not yet seen on
   the wire. Section 4.6 assumes it is; a capture that shows otherwise
   changes only the dialect's arithmetic.
-- **`TOKEN_BYTES`** and the dialects' smallest tool and item, response
-  head and error body constants are set from captures, and checked
-  against fresh captures as models change, which a consumer's benchmarks
-  can take.
+- **`TOKEN_BYTES`** and the dialects' smallest tool and item, and
+  response head constants, are set from captures, and checked against
+  fresh captures as models change, which a consumer's benchmarks can
+  take.
+- **The error body's bound is a policy value,** since a body past it
+  changes no class (4.2): 16 KiB for each dialect. That holds any
+  provider's JSON error with room to spare, at a worst case the memory
+  pool counts per call. Named captures of non-success answers, where
+  they exist, check that each fits within a quarter of it. The failure
+  detail's bound is the same kind of value where no capture settles it.
 - **`Only` on Codex.** The public Responses API expresses `Only` as an
   allowed-tools choice; whether the subscription route accepts it waits
   for a capture. Until then Codex renders `Auto`.
