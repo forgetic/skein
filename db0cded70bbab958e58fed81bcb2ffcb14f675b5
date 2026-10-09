@@ -1,6 +1,6 @@
 Final rebased-tip gate: db0cded70bbab958e58fed81bcb2ffcb14f675b5
 Parent: 126c80012c2a5f0b18e22c42b58ce76bbcff7c68
-heavy task 1078, scripts/check.sh, 2026-10-09 15:57:24–15:57:54 UTC.
+heavy task 1080, scripts/check.sh, 2026-10-09 15:57:24–15:57:54 UTC.
 Formatting, workspace clippy all targets with warnings denied, and skein-tls check passed.
 Focused: 1716 passed, 0 skipped, 3.368 s (15 s budget).
 Fuzzy: 91 passed, 0 skipped, 9.136 s (60 s budget).
