@@ -254,6 +254,7 @@ fn connect_and_whole_deadlines_fail_unsent_calls_once() {
             other => panic!("expected timeout, got {other:?}"),
         }
         assert_eq!(component.next_deadline(), None);
+        assert!(!component.has_work(), "only io settlement remains, without a past-due wake");
         component.up(&fire, LowerEvent::Connecting { owner, socket: Token::new(19) }, &mut up, &mut io);
         component.up(&fire, LowerEvent::Closed { owner }, &mut up, &mut io);
         assert!(up.is_empty(), "late settlement cannot repeat a timeout");

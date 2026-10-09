@@ -417,3 +417,118 @@ fn a_provider_ping_rearms_idle_without_consuming_next() {
 fn truncated_response_has_one_failed_terminal() {
     assert_replays(7, 8, |seed| run_truncated_response_has_one_failed_terminal(seed).report());
 }
+
+fn run_a_slow_upload_keeps_its_head_deadline_alive_by_the_room_it_grants(seed: u64) -> World {
+    let mut world = World::new(Deadlines { head: Some(Duration::from_secs(1)), ..Deadlines::none() }, seed, false);
+    for tick in 0..20_000 {
+        world.now = Time::from_nanos(tick * 100_000_000);
+        world.tick();
+        let env = world.env();
+        world.component.fire(&env, &mut world.up, &mut world.io);
+        assert!(world.terminals.is_empty(), "upload grants keep head alive");
+        if complete_request(world.wire.received()) {
+            break;
+        }
+    }
+    assert!(world.now > Time::from_nanos(1_000_000_000), "the upload outlasts its progress interval");
+    assert!(complete_request(world.wire.received()));
+    let deadline = world.component.next_deadline().expect("head still runs after upload");
+    world.at(deadline);
+    assert_failure(&world, Failure::TimedOut, Evidence::Unknown);
+    world
+}
+
+fn run_a_steady_stream_outlasts_any_fixed_bound_and_completes(seed: u64) -> World {
+    let mut world = World::new(Deadlines { idle: Some(Duration::from_secs(1)), ..Deadlines::none() }, seed, false);
+    world.run_until_request();
+    world.wire.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
+    world.run_until_head();
+    for tick in 1..=20 {
+        world.now = Time::from_nanos(tick * 500_000_000);
+        let ping = b"data: {\"type\":\"ping\"}\n\n";
+        world.wire.write(format!("{:x}\r\n", ping.len()).as_bytes());
+        world.wire.write(ping);
+        world.wire.write(b"\r\n");
+        let expected = Some(world.now.saturating_add(Duration::from_secs(1)));
+        for _ in 0..20_000 {
+            world.tick();
+            if world.component.next_deadline() == expected {
+                break;
+            }
+        }
+        assert_eq!(world.component.next_deadline(), expected);
+        let env = world.env();
+        world.component.fire(&env, &mut world.up, &mut world.io);
+        assert!(world.terminals.is_empty());
+    }
+    let response = skein_llm_world::text_response(true);
+    let body = response.windows(4).position(|part| part == b"\r\n\r\n").expect("response head") + 4;
+    world.wire.write(&response[body..]);
+    for _ in 0..20_000 {
+        world.tick();
+        if !world.terminals.is_empty() {
+            break;
+        }
+    }
+    assert!(matches!(world.terminals.as_slice(), [Event::Completed { .. }]));
+    // Let the ordinary idle keep settle the reusable socket in this progress story.
+    world.now = Time::from_nanos(30_000_000_000);
+    for _ in 0..1000 {
+        world.tick();
+        let env = world.env();
+        world.component.fire(&env, &mut world.up, &mut world.io);
+        if world.closed {
+            break;
+        }
+    }
+    world
+}
+
+fn run_a_stalled_drain_is_closed_by_idleness_without_a_second_terminal(seed: u64) -> World {
+    let mut world = World::new(
+        Deadlines { idle: Some(Duration::from_secs(1)), whole: Some(Duration::from_secs(5)), ..Deadlines::none() },
+        seed,
+        false,
+    );
+    world.run_until_request();
+    let response = skein_llm_world::text_response(true);
+    assert!(response.ends_with(b"0\r\n\r\n"));
+    world.wire.write(&response[..response.len() - 5]);
+    for _ in 0..20_000 {
+        world.tick();
+        if !world.terminals.is_empty() {
+            break;
+        }
+    }
+    assert!(matches!(world.terminals.as_slice(), [Event::Completed { .. }]));
+    assert_eq!(world.component.next_deadline(), Some(Time::from_nanos(1_000_000_000)));
+    world.now = Time::from_nanos(1_000_000_000);
+    let env = world.env();
+    world.component.fire(&env, &mut world.up, &mut world.io);
+    for _ in 0..1000 {
+        world.tick();
+        if world.closed {
+            break;
+        }
+    }
+    assert!(world.closed, "idleness closes a stalled drain");
+    assert_eq!(world.terminals.len(), 1);
+    assert_eq!(world.component.next_deadline(), None);
+    assert!(!world.component.has_work());
+    world
+}
+
+#[test]
+fn a_slow_upload_keeps_its_head_deadline_alive_by_the_room_it_grants() {
+    assert_replays(7, 8, |seed| run_a_slow_upload_keeps_its_head_deadline_alive_by_the_room_it_grants(seed).report());
+}
+
+#[test]
+fn a_steady_stream_outlasts_any_fixed_bound_and_completes() {
+    assert_replays(7, 8, |seed| run_a_steady_stream_outlasts_any_fixed_bound_and_completes(seed).report());
+}
+
+#[test]
+fn a_stalled_drain_is_closed_by_idleness_without_a_second_terminal() {
+    assert_replays(7, 8, |seed| run_a_stalled_drain_is_closed_by_idleness_without_a_second_terminal(seed).report());
+}

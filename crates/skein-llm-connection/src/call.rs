@@ -20,7 +20,7 @@ use skein_llm::client as llm;
 use skein_tls::client as tls;
 
 use crate::boundary::{Deadlines, Event};
-use crate::deadlines::Table;
+use crate::deadlines::{Due, Phase as DeadlinePhase, Table};
 use crate::limits::Limits;
 
 /// The physical stream's lifecycle, independent of the call's terminal.
@@ -28,7 +28,9 @@ use crate::limits::Limits;
 pub(crate) enum Phase {
     Connecting,
     Handshaking,
-    Calling,
+    Head,
+    Streaming,
+    Draining,
     Idle,
     Closing,
 }
@@ -58,7 +60,7 @@ impl Connection {
             || !self.plain_down.is_empty()
             || !self.tls_events.is_empty()
             || !self.cipher_down.is_empty()
-            || (self.phase == Phase::Calling && self.llm.has_work())
+            || (self.calling() && self.llm.has_work())
     }
 
     pub(crate) fn new(
@@ -88,6 +90,33 @@ impl Connection {
         }
     }
 
+    fn calling(&self) -> bool {
+        match self.phase {
+            Phase::Head | Phase::Streaming | Phase::Draining => true,
+            Phase::Connecting | Phase::Handshaking | Phase::Idle | Phase::Closing => false,
+        }
+    }
+
+    fn terminal(&mut self) {
+        match self.phase {
+            Phase::Head | Phase::Streaming => self.phase = Phase::Draining,
+            Phase::Connecting | Phase::Handshaking | Phase::Draining | Phase::Idle | Phase::Closing => {}
+        }
+    }
+
+    pub(crate) fn sync_deadlines(&mut self, env: &Env<Limits>) {
+        let phase = match self.phase {
+            Phase::Connecting => DeadlinePhase::Connecting,
+            Phase::Handshaking => DeadlinePhase::Handshaking,
+            Phase::Head => DeadlinePhase::Head,
+            Phase::Streaming => DeadlinePhase::Streaming,
+            Phase::Draining => DeadlinePhase::Draining,
+            Phase::Idle => DeadlinePhase::Idle,
+            Phase::Closing => DeadlinePhase::Closing,
+        };
+        self.deadlines.arm(phase, env.now, env.limits.idle_keep);
+    }
+
     pub(crate) fn connected(
         &mut self,
         env: &Env<Limits>,
@@ -97,15 +126,14 @@ impl Connection {
     ) {
         match &mut self.tls {
             Some(client) => {
-                self.deadlines.connected(env.now);
                 self.phase = Phase::Handshaking;
                 let tls_env = Env { now: env.now, wall: env.wall, limits: env.limits.tls };
                 tls::down(client, &tls_env, tls::Request::Handshake, &mut self.tls_events, &mut self.cipher_down);
                 self.route(env, owner, up, io);
             }
             None => {
-                self.phase = Phase::Calling;
-                self.deadlines.ready();
+                self.phase = Phase::Head;
+                self.sync_deadlines(env);
                 self.start_call(env, owner, up, io);
             }
         }
@@ -173,6 +201,7 @@ impl Connection {
         let llm_env = Env { now: env.now, wall: env.wall, limits: env.limits.llm };
         llm::closed(&mut self.llm, &llm_env, &mut self.llm_events, &mut self.plain_down);
         self.route(env, owner, up, io);
+        self.deadlines.arm(DeadlinePhase::Closed, env.now, env.limits.idle_keep);
     }
 
     pub(crate) fn close_socket(&mut self, io: &mut Queue<IoRequest>) {
@@ -206,14 +235,22 @@ impl Connection {
         }
     }
 
-    pub(crate) fn close_idle(&mut self, env: &Env<Limits>, io: &mut Queue<IoRequest>) {
-        if self.phase == Phase::Idle {
-            self.close_transport(env, io);
+    pub(crate) fn timeout(&mut self, env: &Env<Limits>, due: Due, io: &mut Queue<IoRequest>) {
+        match self.phase {
+            Phase::Draining | Phase::Idle => {
+                self.close_transport(env, io);
+                self.sync_deadlines(env);
+                return;
+            }
+            Phase::Closing => return,
+            Phase::Connecting | Phase::Handshaking | Phase::Head | Phase::Streaming => {}
         }
-    }
-
-    pub(crate) fn timeout(&mut self, env: &Env<Limits>) {
-        self.deadlines.terminal();
+        // Keep the expired phase at the abort boundary; skein-llm's vocabulary
+        // adds its typed timed-out phase in reliability increment 4.8.
+        match due {
+            Due::Connect | Due::Handshake | Due::Head | Due::Idle | Due::Whole => {}
+            Due::Keep => unreachable!("keep runs only on an idle connection"),
+        }
         let llm_env = Env { now: env.now, wall: env.wall, limits: env.limits.llm };
         llm::abort(&mut self.llm, &llm_env, skein_llm::Failure::TimedOut, &mut self.llm_events, &mut self.plain_down);
     }
@@ -230,24 +267,24 @@ impl Connection {
                     llm::Event::Completed { owner: call, completion } => {
                         up.push(Event::Completed { call, completion });
                         self.call = None;
-                        self.deadlines.terminal();
+                        self.terminal();
                     }
                     llm::Event::Failed { owner: call, failure, evidence, detail } => {
                         up.push(Event::Failed { call, failure, evidence, detail });
                         self.call = None;
-                        self.deadlines.terminal();
+                        self.terminal();
                     }
                     llm::Event::Cancelled { owner: call } => {
                         up.push(Event::Cancelled { call });
                         self.call = None;
-                        self.deadlines.terminal();
+                        self.terminal();
                     }
                     llm::Event::Reusable => {
                         self.phase = Phase::Idle;
                         self.idle_at = Some(env.now);
                     }
                     llm::Event::Close => match self.phase {
-                        Phase::Handshaking | Phase::Calling | Phase::Idle => {
+                        Phase::Handshaking | Phase::Head | Phase::Streaming | Phase::Draining | Phase::Idle => {
                             self.close_transport(env, io);
                         }
                         Phase::Connecting => self.close_socket(io),
@@ -256,9 +293,11 @@ impl Connection {
                     llm::Event::Closed => {}
                 }
             } else if let Some(down) = self.plain_down.pop() {
-                if self.phase == Phase::Calling || self.phase == Phase::Idle {
+                if self.calling() || self.phase == Phase::Idle {
                     match &down {
-                        Down::Send(bytes) if !bytes.is_empty() => self.deadlines.sent(env.now),
+                        Down::Send(bytes) if !bytes.is_empty() && self.phase == Phase::Head => {
+                            self.deadlines.sent(env.now);
+                        }
                         Down::Send(_) | Down::Demand { .. } | Down::Finish => {}
                     }
                     match &mut self.tls {
@@ -275,8 +314,8 @@ impl Connection {
             } else if let Some(event) = self.tls_events.pop() {
                 match event {
                     tls::Event::Ready(_) => {
-                        self.phase = Phase::Calling;
-                        self.deadlines.ready();
+                        self.phase = Phase::Head;
+                        self.sync_deadlines(env);
                         llm::down(
                             &mut self.llm,
                             &llm_env,
@@ -307,19 +346,20 @@ impl Connection {
                     Some(socket) => io.push(IoRequest::Stream { stream: socket, down }),
                     None => {}
                 }
-            } else if self.llm.has_work() && self.phase == Phase::Calling {
+            } else if self.llm.has_work() && self.calling() {
                 llm::resume(&mut self.llm, &llm_env, &mut self.llm_events, &mut self.plain_down);
             } else {
                 break;
             }
         }
-        if self.call.is_some() && self.llm.response_received() {
-            self.deadlines.response(env.now);
+        if self.phase == Phase::Head && self.llm.response_received() {
+            self.phase = Phase::Streaming;
         }
         let activity = self.llm.activity();
-        if self.call.is_some() && activity != self.activity {
+        if activity != self.activity {
             self.activity = activity;
             self.deadlines.activity(env.now);
         }
+        self.sync_deadlines(env);
     }
 }

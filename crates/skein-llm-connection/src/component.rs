@@ -222,19 +222,8 @@ impl Component {
                 Some(Some(id)) => match self.connections.get_mut(*id) {
                     Some(connection) => {
                         match connection.deadlines.due(env.now) {
-                            Some(
-                                crate::deadlines::Due::Connect
-                                | crate::deadlines::Due::Handshake
-                                | crate::deadlines::Due::Head
-                                | crate::deadlines::Due::Idle
-                                | crate::deadlines::Due::Whole,
-                            ) => connection.timeout(env),
-                            None => match connection.idle_at {
-                                Some(then) if env.now >= then.saturating_add(env.limits.idle_keep) => {
-                                    connection.close_idle(env, io);
-                                }
-                                Some(_) | None => {}
-                            },
+                            Some(due) => connection.timeout(env, due, io),
+                            None => {}
                         }
                         connection.route(env, id.token(), up, io);
                         break;
@@ -269,12 +258,7 @@ impl Component {
             match slot {
                 Some(id) => match self.connections.get(*id) {
                     Some(connection) => {
-                        let next = match connection.idle_at {
-                            Some(then) if connection.phase == Phase::Idle => {
-                                Some(then.saturating_add(self.limits.idle_keep))
-                            }
-                            Some(_) | None => connection.deadlines.next(),
-                        };
+                        let next = connection.deadlines.next();
                         earliest = match earliest {
                             Some(prior) => match next {
                                 Some(next) => Some(prior.min(next)),
@@ -326,10 +310,10 @@ impl Component {
                                 match connection.llm.next_call(prepared) {
                                     Ok(()) => {
                                         connection.call = Some(call);
-                                        connection.phase = Phase::Calling;
+                                        connection.phase = Phase::Head;
                                         connection.idle_at = None;
                                         connection.deadlines = crate::deadlines::Table::new(deadlines, env.now);
-                                        connection.deadlines.ready();
+                                        connection.sync_deadlines(env);
                                         connection.start_call(env, id.token(), up, io);
                                         return;
                                     }
