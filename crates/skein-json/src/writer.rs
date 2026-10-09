@@ -39,9 +39,9 @@ use alloc::boxed::Box;
 
 use skein_lib::{Decimal, Stack, Writer};
 
-use crate::Token;
 use crate::number;
 use crate::utf8::Utf8;
+use crate::{Document, Kind, Token};
 
 /// The writer's limits (programming-model.md, 7), the same for both passes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -262,6 +262,28 @@ impl Encoder {
             Token::True => self.boolean(true),
             Token::False => self.boolean(false),
             Token::Null => self.null(),
+        }
+    }
+
+    /// Writes the compact document's records in order (json.md, section 4).
+    /// A `Long` retains no text and is the caller's bug, asserted.
+    pub fn document(&mut self, document: &Document) {
+        for index in 0..document.len() {
+            let record = document.token(index).expect("within the retained record count");
+            let text = document.text(record).expect("the document admitted its offsets");
+            match record.kind {
+                Kind::ObjectStart => self.object_start(),
+                Kind::ObjectEnd => self.object_end(),
+                Kind::ArrayStart => self.array_start(),
+                Kind::ArrayEnd => self.array_end(),
+                Kind::Key => self.key(text),
+                Kind::String => self.string(text),
+                Kind::Number => self.number(text),
+                Kind::True => self.boolean(true),
+                Kind::False => self.boolean(false),
+                Kind::Null => self.null(),
+                Kind::Long => unreachable!("Long has no text to write"),
+            }
         }
     }
 

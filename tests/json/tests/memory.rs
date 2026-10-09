@@ -248,3 +248,33 @@ fn skipped_megabytes_and_long_text_keep_the_same_bounded_buffer() {
         assert_eq!(large.most, small.most, "discarded text adds no retained memory");
     }
 }
+
+#[test]
+fn a_compact_document_at_its_counts_costs_its_text_and_one_record_per_token() {
+    use skein_json::document::{self, Limits};
+    for seed in 0..100 {
+        let mut rng = Rng::new(seed);
+        let tokens = generate::tokens(&mut rng, Shape { depth: 5, width: 5, string: 12 });
+        let text = tokens
+            .iter()
+            .map(|token| match token {
+                Token::Key(bytes) | Token::String(bytes) | Token::Number(bytes) => bytes.len(),
+                Token::ObjectStart
+                | Token::ObjectEnd
+                | Token::ArrayStart
+                | Token::ArrayEnd
+                | Token::True
+                | Token::False
+                | Token::Null => 0,
+            })
+            .sum::<usize>();
+        let limits = Limits { tokens: tokens.len().try_into().unwrap(), text: text.try_into().unwrap() };
+        let bound = document::worst_case(&limits).unwrap();
+        let meter = Meter::new();
+        meter.start();
+        let document = skein_json::Document::from_tokens(&tokens, &limits).unwrap();
+        let measured = meter.end();
+        assert_eq!(meter.check(measured, bound, &"compact document at both counts"), bound);
+        drop(document);
+    }
+}

@@ -5,6 +5,7 @@
 
 #![expect(clippy::disallowed_types, reason = "a test collects what it reads in a Vec")]
 
+mod document;
 mod text;
 mod tokenizer;
 mod writer;

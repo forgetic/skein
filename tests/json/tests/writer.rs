@@ -75,3 +75,20 @@ fn what_the_tokenizer_refuses_the_writer_refuses_to_write() {
     let decoded = reference::parse(&deep, &Limits { depth: 65, ..READER });
     assert_eq!(write(&decoded.tokens, &WRITER), Err(Refusal::TooDeep));
 }
+
+#[test]
+fn generated_compact_documents_write_and_read_back_the_same() {
+    for seed in 0..100 {
+        let mut rng = Rng::new(seed);
+        let tokens = generate::tokens(&mut rng, Shape { depth: 5, width: 5, string: 12 });
+        let document =
+            skein_json::Document::from_tokens(&tokens, &skein_json::document::Limits { tokens: 4096, text: 1 << 20 })
+                .unwrap();
+        let mut measure = writer::Encoder::measure(&WRITER);
+        measure.document(&document);
+        let mut out = writer::Encoder::write(measure.measured().unwrap(), &WRITER);
+        out.document(&document);
+        let bytes = out.finish();
+        assert_eq!(read_back(&bytes, seed), Decoded { tokens, outcome: Outcome::Done });
+    }
+}
