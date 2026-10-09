@@ -1,13 +1,11 @@
-Redacted subject recordings copied from the adjacent tongs repository,
-`crates/tongs/tests/fixtures/codex/*/recordings/tongs`. Each `meta.json`
-records capture 2026-06-13, tongs client 0.1.0 and recorder f4e0a2b.
-The online `subject_record.rs` harness forwards through a loopback capture
-pump to the real ChatGPT Codex route, explaining the loopback request Host.
-`response.sse` retains the HTTP chunk framing and provider SSE bytes.
-The recorder redacts bearer, account, session and request identities.
+Redacted recordings of successful requests to ChatGPT's Codex route,
+copied from tongs (`crates/tongs/tests/fixtures/codex/*/recordings/tongs`);
+each `meta.json` records when and by which recorder. tongs'
+`subject_record.rs` harness forwarded through a loopback capture pump,
+hence the loopback request Host. `response.sse` keeps the HTTP chunk
+framing around the provider's SSE bytes. Bearer, account, session and
+request identities are redacted.
 
-These are successful historical tongs requests and actual provider responses,
-not captures of Codex itself and not fresh temper captures. They do not
-establish current subscription identity. The single-text archive includes encrypted reasoning. This archive has no
-Codex parallel call scenario; parallel ordering remains covered by labeled
-synthetic tests until a real capture is available.
+They show the provider's response grammar, not what a subscription admits
+today. The single-text archive includes encrypted reasoning. There is no
+capture of parallel calls; synthetic tests cover their ordering.

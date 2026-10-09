@@ -1,8 +1,9 @@
 # redb over Skein's loop
 
-Draft, 2026-10-05. A possible single-threaded redb integration. This is
-an exploration, not yet a contract for skein-io or a decision to add redb
-to skein. Read it with [the programming model](../../foundation/programming-model.md),
+Draft, 2026-10-05. A possible single-threaded redb integration, not
+taken: skein's store is kv.md's, and this stays as the way past a dataset
+too large for memory (kv.md, section 12). Read it with
+[the programming model](../../foundation/programming-model.md),
 [the testing strategy](../../foundation/testing-strategy.md), and
 [the file design](../io.md).
 
@@ -141,13 +142,11 @@ Neither variant allows another process to open or modify the physical
 file during operation. Multi-process redb locking and cache
 invalidation are outside this draft.
 
-The current `skein-io` high-level file requests have not been built, and
-the kernel records lack some operations needed for in-place redb replay,
-such as opening an existing file read-write and changing its length.
-Adding those records, their ring and simulator implementations, and the
-file machine above them is part of this approach. The whole-image
-variant instead uses the planned atomic replacement sequence in
-`io.md` section 5.
+The kernel records lack some operations in-place replay needs, such as
+opening an existing file read-write and changing its length. Adding
+them, with their ring and simulator implementations and the file machine
+above them, is part of this approach. The whole-image variant instead
+uses io's atomic replacement (io.md, section 5).
 
 ## 5. Failure and visibility
 

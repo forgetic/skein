@@ -191,15 +191,10 @@ and changes no code above io:
 
 ## 11. Not built yet
 
-- **Startup** (section 6): blocking the termination signals, names, and
-  TLS's configuration. The ring's probe is built, and so is `open_root`
-  for roots; the echo's `main` runs the rest of startup as a service's
-  would (examples.md, 4):
-  its limits checked, each machine's largest demand within io's caps, and
-  the sum of the worst cases within the memory configured, before the
-  seed and the kernel. Startup is each service's `main`, with the kit, so
-  the kit holds no startup function of its own.
-- **The operations for processes,** and the synchronous ones (spawning,
-  signalling, making a pipe), when io pulls them. Sockets and files are
-  built, listing a directory, the first synchronous one, among them.
+- **Startup** (section 6): resolving names, and reading TLS's
+  configuration. The ring's probe is built, and so are `open_root` for
+  roots and `open_termination_signals`; the echo's `main` runs the rest of
+  startup as a service's would (examples.md, 4). Startup is each
+  service's `main`, with the kit, so the kit holds no startup function of
+  its own.
 - **The readiness backend** and the deferred optimisations.

@@ -57,9 +57,9 @@ failure is fixed.
 
 Every tier between step tests and end to end is a world: one thread,
 whose one loop drives the code under test, its fakes and the referee,
-iteration by iteration, and runs its checks between iterations. What sits under the loop is what
-changes from tier to tier: nothing, byte streams between two ends, the
-simulator, or the real ring.
+iteration by iteration, and runs its checks between iterations. What sits
+under the loop is what changes from tier to tier: nothing, byte streams
+between two ends, the simulator, or the real ring.
 
 | Tier | Real | Faked | Whose | Replays |
 |---|---|---|---|---|
@@ -153,8 +153,8 @@ may start another service in the same world.
 It is the first tier where the loop runs, so it tests what the loop adds:
 the two passes, `MAX_OUT` reserved at every stage, deadlines across
 layers, and requests made in the down pass reaped in a later iteration.
-skein's simulated worlds run small example services. A service's run the
-service, with skein's as their template.
+skein's simulated worlds run small example services; a service's run the
+service itself, with skein's as their template.
 
 ### 2.8 The real loop
 
@@ -402,11 +402,12 @@ same. Then it moves into skein.
 
 - **Focused tests** check what the code is expected to do: the step
   tests, each world's scenarios, referee tests, replay, and memory at the
-  worst case, and the end-to-end tests against fakes. A scenario that needs randomness runs the few seeds
-  that show its behaviour, and a cheap random world may stand as a smoke
-  test. They run by default (`cargo nextest run --workspace`), and the
-  suite takes at most **15 seconds**, so it can serve as quick feedback
-  during development, as often as is useful.
+  worst case, and the end-to-end tests against fakes. A scenario that
+  needs randomness runs the few seeds that show its behaviour, and a cheap
+  random world may stand as a smoke test. They run by default
+  (`cargo nextest run --workspace`), and the suite takes at most
+  **15 seconds**, so it can serve as quick feedback during development,
+  as often as is useful.
 - **Fuzzy tests** look for what no scenario names: sweeps of many random
   worlds, each settled under every invariant; domains driven at random
   against their worst case; conformance over many seeds of faults; a
@@ -435,8 +436,8 @@ an ignored test until it is.
 
 - **In the lowest tier that shows it.** A failure found end to end, in
   the real loop or in a simulated world is reproduced lower down, where
-  it replays and where the cause is closest, and fixed there. The lower scenario stays,
-  as its regression test.
+  it replays and where the cause is closest, and fixed there. The lower
+  scenario stays, as its regression test.
 - **In skein, when it comes from skein.** A service's tiers stand on
   skein's and do not retest the kit. A failure in a service's world that
   comes from io, a machine or the simulator is reproduced in skein's own

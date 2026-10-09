@@ -3,11 +3,8 @@
 ## 1. Ownership and use
 
 `skein-fake-checkout` is a dependency-free ordinary-Rust test kit
-(programming-model.md, section 10.2; testing-strategy.md, section 4.3).
-Its initial implementation was extracted without behavioral changes from
-`temper` commit `246164f`, `tests/fake-checkout/src/{lib,git}.rs`, when
-smith became its second user. The source's historical `.git/temper-*`
-bookkeeping names remain part of this compatibility extraction.
+(programming-model.md, section 10.2; testing-strategy.md, section 4.3),
+shared by temper's and smith's worlds.
 
 It keeps byte-path files, directories, links and special nodes, registered
 roots, fresh file versions, command scripts and local git metadata. It
@@ -122,7 +119,8 @@ creating an object or changing that metadata.
 Local markers are `.git/objects/COMMIT` with decimal IDs, checked-out head
 is `.git/temper-head` with eight little-endian bytes, second parent is
 `.git/MERGE_HEAD`, and conflict paths are values beneath
-`.git/temper-conflicts/INDEX`. Preserve these bytes across legacy adoption.
+`.git/temper-conflicts/INDEX`, names kept from temper, the kit's first
+user; existing worlds depend on these bytes.
 
 Push asserts local object presence, then delegates with `None` for the
 old-head condition. `push_expected` forwards `Some(expected)` unchanged.
@@ -134,16 +132,15 @@ world, not this crate.
 
 ## 5. Coverage and budgets
 
-Focused leaf tests exercise contracts previously covered by consuming
-worlds: versioned stores and nonmutation, link/root refusals, sorted
-bounded scans/searches, command script isolation and protected writes,
-tree replacement, ancestry, local-only commits, merges and conditional
-push forwarding. The remote fixture is private and deliberately small;
-it tests this boundary rather than implementing a reusable forge.
+Focused leaf tests exercise versioned stores and nonmutation, link/root
+refusals, sorted bounded scans/searches, command script isolation and
+protected writes, tree replacement, ancestry, local-only commits, merges
+and conditional push forwarding. The remote fixture is private and
+deliberately small; it tests this boundary rather than implementing a
+reusable forge.
 
 The fuzzy binary sweeps small independent line edits and conflicts, checks
 expected trees/parents/object presence and compares the complete checkout
 and remote fixture on replay. Existing services retain their worlds and
-referees. New tests run under the existing focused 15-second and fuzzy
-one-minute suites (testing-strategy.md, section 8). Timings are measured
-at the integration gate; this extraction makes no unmeasured budget claim.
+referees. Its tests run within the focused 15-second and fuzzy one-minute
+suites (testing-strategy.md, section 8).

@@ -54,8 +54,9 @@ runs against it in `tests/conformance/sim` (testing.md, 6).
   to the next thing due (a late completion, a raced cancel, a connect's
   timeout), or to a given instant. A world that hosts services moves it
   to the earlier of what the simulator has due and the services' earliest
-  deadline, so an idle world jumps straight there. The wall clock starts
-  at a fixed date, so it replays too.
+  deadline, once no process has work or deferred work, so an idle world
+  jumps straight there. The wall clock starts at a fixed date, so it
+  replays too.
 - **The machine seam.** File and process operations go to the embedder's
   fake machine, which answers the file operations and runs the programs.
   A spawned program may be another service, which the world then starts
@@ -169,24 +170,4 @@ was metered as its own, which also finds a leak.
 
 ## 7. Not built yet
 
-- **Processes,** and with them hosting the services a spawn starts, and
-  the seam's calls for programs, when io pulls them. Sockets and files are
-  built, with the machine seam for files.
-- **Files in the world harness.** `skein-world` hosts processes over the
-  simulator but does not yet answer the machine's calls: a world whose
-  services open files serves the seam after each submit, as the
-  conformance suite's backend does, once a service pulls files.
-- **A state digest** in the trace, beside the records (lib.md, 11).
-
-Hosting services is built for sockets: `skein-world` (testing.md, 5)
-hosts each process's `iterate` over the simulator, moving time to the
-earlier of `next_due` and the processes' earliest deadline only when no
-process has work and none has deferred work (section 3), and the echo's
-worlds run on it (examples.md, 6). So is the check of memory at every
-iteration, which is the harness's, not the simulator's (section 5): it
-meters around the processes' own calls, building each and each
-`iterate`, with the counting allocator's span, so that what grew within
-the simulator's calls and the harness's own is left out, and checks once
-settled that each process, dropped, frees what was metered as its own.
-The harness's own tests (`tests/world`) show it holds time while deferred
-work waits, and catches a process past its worst case and one that leaks.
+- **A state digest** in the trace, beside the records (lib.md, 12).

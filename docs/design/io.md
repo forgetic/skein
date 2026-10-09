@@ -45,7 +45,6 @@ pub enum Request {
     Output  { stream: Token, down: stream::OutputDown }, // independent output reservation
     Spawn   { owner: Token, spawn: Spawn },
     Signal  { child: Token, signal: Signal },
-    // File { owner, root, op }
     Close   { entity: Token },                        // graceful (section 3); one Closed follows
     Abort   { entity: Token },
 }
@@ -59,7 +58,7 @@ pub enum Event {
     Output     { owner: Token, up: stream::OutputUp },
     Spawned   { owner: Token, child: Token, pipes: Box<[Token]> },
     Exited    { owner: Token, exit: Exit },
-    // File { owner, result }, Shutdown { signal }
+    Shutdown  { signal: ServiceSignal },              // section 7
     Failed     { owner: Token, error: Error },
     Closed     { owner: Token },                      // terminal
 }
@@ -68,17 +67,18 @@ pub enum Error { Refused, Unreachable, TimedOut, Reset, Busy, Other }
 ```
 
 An accepted socket is announced to the listener's owner, which binds to
-it or rejects it (programming-model.md, 4.2).
+it or rejects it (programming-model.md, 4.2). Files have requests and
+events of their own, `skein_io::file`'s (section 5).
 
-The loop drives io through four entry points, each declaring its
-`MAX_OUT` (programming-model.md, section 2): `resume` takes one entry of
-the ready list, `up` one completion, `fire` one expired deadline (a
-graceful close's, or a retry's), and `down` one request. io's stage in the up pass is `resume` until the
-ready list is empty, then `up` for each completion, then `fire` while a
-deadline is due; the loop hands io no completion while the ready list
-holds something, so what the down pass made is told first. Requests to
-the kernel go out as `Submit` records into the queue the loop hands the
-kernel.
+The loop drives io through four entry points, each declaring its `MAX_OUT`
+(programming-model.md, section 2): `resume` takes one entry of the ready
+list, `up` one completion, `fire` one expired deadline (a graceful
+close's, or a retry's), and `down` one request. io's stage in the up pass
+is `resume` until the ready list is empty, then `up` for each completion,
+then `fire` while a deadline is due; the loop hands io no completion while
+the ready list holds something, so what the down pass made is told first.
+Requests to the kernel go out as `Submit` records into the queue the loop
+hands the kernel.
 
 **Decisions.**
 
@@ -256,16 +256,15 @@ they are not admitted after failure or closing. Cancelling an admitted
 pending reservation stages its exact terminal for the next up pass.
 Close/Abort likewise stages Cancelled before Closed; a genuine stream
 failure emits the pending reservation's Failed terminal before classic
-Failed. A previously emitted Granted is never answered again. Existing
-Close/Abort's promise of only Closed applies to the classic face; the
-independent face additionally owes its already admitted pending terminal.
+Failed. A previously emitted Granted is never answered again. Close and
+Abort's promise of only Closed applies to the classic face; the
+independent face also owes its already admitted pending terminal.
 
 The loop reserves the declared maximum for all simultaneous events,
 including Bytes, End and an independent output terminal. The extra cell,
 staged terminal and actual enum layouts enter io's checked worst-case
-bound. IO support alone does not establish TLS support: a TLS consumer
-must implement this face natively at both its plaintext and ciphertext
-boundaries before a framed connection uses it.
+bound. Over TLS, a framed connection uses TLS's native face (tls.md, 3.6),
+which implements it at both its plaintext and ciphertext boundaries.
 
 | State | Holds | In flight | Serves | Deadline |
 |---|---|---|---|---|
@@ -467,7 +466,7 @@ caller budgets the command buffers it supplies to `Spawn`.
   cancelled operation completes, as for a socket (section 3). Settling
   entities still hold their slots and their operations, so io caps the
   operations on files in flight, and refuses at its entrance past the
-  cap: that cap is part of io's files, the next task.
+  cap.
 - **File streams come later,** when a user needs to read a file by demand
   because it is too large to hold.
 
@@ -555,16 +554,7 @@ Built, for sockets:
 
 ## 9. Remaining work
 
-Sockets and processes with pipes are built. Socket io worlds are built.
-The remaining order follows what temper pulls:
-
-1. files for the worker: io's whole-file operations (section 5), over
-   the kernel records for files, which are built, as are the simulator's
-   files, its machine seam and the minimal fake machine's files
-   (kernel.md, 6.1; simulator.md, 3.1; testing.md, 4);
-2. signals to the service, with the shell's startup.
-
-A child's process group of its own (section 6) is not built yet. File
-streams and datagram sockets come when a user needs them.
-Transition coverage of the handlers (testing-strategy.md, 6) waits for
-`cargo llvm-cov`, which is not installed.
+Sockets, processes with pipes, whole-file operations and signals to the
+service are built. File streams and datagram sockets come when a user
+needs them. Transition coverage of the handlers (testing-strategy.md, 6)
+waits for `cargo llvm-cov`.

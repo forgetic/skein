@@ -73,19 +73,19 @@ worlds need a minimal one:
 It lives with skein's tests, and stays that small. A service's fake
 machine is the service's.
 
-Its files are built: `skein-fake-machine`, in `testing/`. A world lays a
-root in it from a scenario's items (files, directories, symbolic links,
-each with its mode) and gives its handle to a process as the shell would
-a root opened at startup; after each submit, the world takes the
-simulator's calls and has the machine answer each (simulator.md, 3.1).
-The machine resolves paths beneath a root as `openat2` with
-`RESOLVE_BENEATH` does, follows the links that stay beneath it, keeps its
-owner's permissions, and refuses what a real filesystem refuses, in the
-order Linux checks; the conformance suite holds it, through the
-simulator, to the real kernel in a scratch directory. It keeps a step
-machine's shape, a call in and an answer out, in a vocabulary of its own
-that a face translates to and from the simulator's. Its programs come
-with processes.
+It is `skein-fake-machine`, in `testing/`. A world lays a root in it from
+a scenario's items (files, directories, symbolic links, each with its
+mode) and gives its handle to a process as the shell would a root opened
+at startup; after each submit, the world takes the simulator's calls and
+has the machine answer each (simulator.md, 3.1). The machine resolves
+paths beneath a root as `openat2` with `RESOLVE_BENEATH` does, follows the
+links that stay beneath it, keeps its owner's permissions, and refuses
+what a real filesystem refuses, in the order Linux checks; the conformance
+suite holds it, through the simulator, to the real kernel in a scratch
+directory. It keeps a step machine's shape, a call in and an answer out,
+in a vocabulary of its own that a face translates to and from the
+simulator's. Its programs (`echo`, `exit`, `never`) answer the simulator's
+spawns.
 
 A separate dependency-free kit, `skein-fake-checkout`, supplies generic
 byte-path files, scripted commands and local git mechanics for domain
@@ -150,7 +150,13 @@ testing/skein-heap              the counting allocator, the meter that checks a 
 testing/skein-scratch           a scratch directory beneath the system's temporary one, removed when dropped, for tests of files on the real kernel
 testing/skein-world             the world harness: processes' iterate over the simulator or the real ring, the referee, the trace, the heap
 testing/skein-echo-client       the fake echo client, a step machine
-testing/skein-fake-machine      the minimal fake machine: files beneath a root, and its face behind the simulator
+testing/skein-fake-machine      the minimal fake machine: files beneath a root, its programs, and its face behind the simulator
+testing/skein-fake-checkout     files, scripted commands and local git for a service's domain worlds (fake-checkout.md)
+testing/skein-fake-llm-*        the shared scripted LLM peer: its domain and its byte peer (fake-llm.md)
+testing/skein-fake-oauth        an independent rotating OAuth issuer (oauth.md, 5)
+testing/skein-fake-peers        the LLM and OAuth peers hosted on loopback io
+testing/skein-fake-channel      a scripted framed peer for a service's protocol worlds (channel.md)
+testing/skein-codegen           the codec generator, run by a consumer's tests (codec.md)
 testing/skein-browser           the browser kit, a step machine: headless Chromium over the DevTools protocol on a pipe (browser.md)
 tests/heap                      the counting allocator's own tests, skein-heap-tests
 tests/echo                      the echo's simulated worlds and its real loop, skein-echo-world
@@ -167,6 +173,11 @@ tests/http                      the HTTP client's and server's and the event str
 tests/http/transcripts          its transcripts, responses and, in requests/, requests, each with what it must decode to
 tests/protocol                  the protocol worlds: an LLM client's stack against a server's, joined by bytes cut at random, skein-protocol-world
 tests/llm                       skein-llm's subscription protocol worlds, fragmentation and fault sweeps, and bounds against the counting allocator, skein-llm-world
+tests/llm-connection            the LLM connection component's worlds, skein-llm-connection-world
+tests/oauth                     the OAuth client against the independent issuer, skein-oauth-world
+tests/channel                   the framed channel's machine and protocol worlds, skein-channel-world
+tests/codec                     a generated sample codec and its worlds, skein-codec-tests
+tests/kv                        the store over file io, the simulated kernel and a crashing fake disk, skein-kv-tests
 tests/browser                   the browser kit's machine world against a fake browser, its tests against real Chromium, and its worst case against the counting allocator, skein-browser-world
 tests/tls                       the TLS client's machine worlds against a rustls server in memory, the HTTP client stacked on it, and its worst case against the counting allocator, skein-tls-world
 tests/tls/fixtures              its certificates and key, and the script that makes them
@@ -174,7 +185,6 @@ tests/**/tests/*.rs             a crate's focused tests
 tests/**/tests/fuzzy_*.rs       its fuzzy tests: sweeps over many seeds
 tests/clippy.toml               what the crates under tests/ may not use
 examples/echo/*                 the echo: its domain, protocol layer, service and shell, a crate each (examples.md, 2)
-fuzz/                           one target per machine
 ```
 
 No crate under `crates/` has a `tests/` directory: its step tests are
@@ -218,212 +228,40 @@ suite, with nextest (section 7).
 
 ## 7. Where things stand
 
-As of 2026-10-04.
-
-| Tier | Built |
-|---|---|
-| step tests | lib: every container and value type; io: the kernel records' rules, and every cell of its listener and stream; JSON: the tokenizer and the writer; HTTP: the client and the server, the event stream reader and the writer; TLS: its limits and configuration, and the client fed by hand; the echo: its domain, every cell of its connection and listener, its `iterate`, its startup checks, and its fake client |
-| machine worlds | JSON: the tokenizer, with its transcripts, and the writer against it; HTTP: the client and the server, with their transcripts of responses and of requests, and the event stream reader and the writer, the writer read back by the reader; TLS: the client against a rustls server in memory, not replayed |
-| protocol worlds | an LLM client's stack (the HTTP client, the event stream reader, JSON) against a server's (the HTTP server, the event stream writer, JSON), seven scenarios |
-| io worlds | sockets, over the simulator; one exchange over the ring |
-| simulated worlds | the echo and its fake clients, seven scenarios |
-| real loop | the echo and its fake clients, on loopback |
-| conformance | sockets and files, against the simulator and the ring |
-| the simulator's and the ring's own tests | sockets and files |
-| the counting allocator | built, with its own tests; lib's worst cases checked against it |
-
-The simulator plays the kernel for sockets and files, with every fault
-of simulator.md, 4, files through its machine seam to the minimal fake
-machine. Its own tests submit records by hand, and a client and a server
-exchange bytes, calm and replayed in the focused suite, and under chaos
-over 200 seeds in the fuzzy one; for files, each broken invariant of the
-records and of the seam, each fault, and a replay in the focused suite,
-and a workload of every operation on files under chaos over 200 seeds in
-the fuzzy one, every fault of files falling. The conformance suite covers
-sockets: a connection's lifecycle over IPv4 and IPv6, graceful close, a
-send after the peer closed, refused connects, `AddressInUse`, IPv6-only
-sockets, the wrong-state records, a full accept queue, closes with bytes
-unread, a reset after the end of stream, a client closed before accept,
-a listener closing on waiting connections, backpressure, and cancels of
-every waiting operation and every race (kernel.md, 8). It covers files
-beneath a root each scenario lays out for itself, a scratch directory on
-the ring and the minimal fake machine in the simulator: a file's life at
-its offsets, renames, removals, new directories, listings, a root beneath
-a root, paths that escape their root and paths that stay, and
-permissions, each error its operations can be made to answer on a
-healthy scratch directory, and an `Open` past the descriptor limit on
-the simulator. Against the simulator, the focused suite runs each
-scenario over 16 calm seeds and 4 of chaos, and the fuzzy suite over 200
-of chaos, counting the pairings each race shows over them, and the short
-and whole counts of reads and writes; against the ring, each runs once,
-in the focused suite.
-
-The JSON tokenizer runs in a machine world between a stream below that
-cuts the peer's bytes at random, ends early, idle or not, and fails, and
-a user above that demands slowly, stops, and closes in every state,
-checking the machine's contracts as it goes; every run is checked
-against a reference parser (json.md, 6). Its transcripts, nine in the
-shape of an LLM provider's and a forge's answers and thirty hostile ones,
-decode to their expectations in the focused suite, with the writer
-reading back what it writes. The fuzzy suite runs 20,000 generated and mutated
-documents and 5,000 cut and mutated transcripts under neighbours drawn
-from each seed, and writes 5,000 documents and reads them back.
-
-The HTTP client runs in a machine world for one exchange after another
-on a connection, between a server's stream that cuts its bytes at
-random, grants room late, ends early and fails, and a user that uploads
-within the room granted, reads with demands of every shape, withdraws,
-discards, stops, and closes in every state, checking both of the
-client's streams as it goes; the event stream reader runs in one of its
-own (http.md, 6). Each run is held to a reference reader. Forty-seven
-transcripts, in the shape of two LLM providers' streams, a forge's
-answers (one captured from a real forge) and responses curl accepts,
-and hostile ones, decode to their
-expectations in the focused suite, and the LLM ones go up the client,
-the reader and a JSON tokenizer per event, stacked. The fuzzy suite runs
-20,000 connections of generated, mutated and corrupted exchanges, 12,000
-event streams, and the transcripts cut and mutated, asserting that every
-fault fell.
-
-The HTTP server runs in a machine world of its own, for one request
-after another, between a client's stream that cuts its bytes at random,
-pipelines or waits, holds a body back for a 100 (Continue), grants room
-late, ends and fails, and a service that reads, discards, withdraws, and
-responds at every moment, now and then with a response the server must
-refuse; each call is held to a reference reader of requests, and what
-the server wrote, byte for byte, to a writer of the test's own. The event
-stream writer runs in one too, and what it writes reads back, by the
-reference reader and by the reader's own world, as it was written.
-Thirty-six request transcripts, curl's, two LLM SDKs' JSON POSTs, and
-hostile ones, come to their expectations in the focused suite. The fuzzy
-suite runs 10,000 connections of generated, mutated and corrupted
-requests, the request transcripts cut and mutated, and 5,000 runs of the
-writer, asserting that every outcome, rejection, refusal and fault fell.
-
-The protocol worlds (http.md, 6) build both ends of an LLM streaming
-exchange as two services would, the client's stack and the server's, a
-scripted user at each top, joined by a stream each way cut and joined at
-random, in one loop with `skein-world`'s referee, which holds what each
-top sent to what the other received, token for token, the reader's last
-event ID and reconnection time to the events', and the bytes the writer
-runs ahead of the reader to the caps between them, and each scenario's
-goals to their deadlines. Seven scenarios run in the focused suite: an
-answer streamed whole, two or three calls on one connection, a slow
-reader that stops the writer, a slow consumer that stops the upload, a
-response that comes mid-upload, an end closing while the other sends,
-and the wire resetting at any moment; 300 runs of them under caps drawn
-down to the least the stacks allow run in the fuzzy suite. They keep a
-loop of their own, as `skein-world`'s drives processes over the
-simulator's kernel records, which a world joined by bytes has none of.
-
-The TLS client runs in a machine world against rustls's own server, in
-memory, with a test root, an intermediate and the server's certificates
-as fixtures (tls.md, 5): the server's ciphertext cut at random, room
-granted late, ended or failed below; a user above that reads with demands
-of every shape, slowly, writes within the room granted, finishes, and
-closes in every state. Each run is held to its scenario: the plaintext
-each side received, the server's ending (`close_notify`, a truncation, a
-corrupted record), certificates refused at the wall time handed in, and
-`close_notify` sent on a finish or a close. Focused tests handshake each
-version, retry, agree ALPN, refuse a certificate for each reason the
-client names and a chain longer than the records held, cut the
-ciphertext a byte at a time, refuse a renegotiation sealed by hand in
-front of the side above's data, and stack the HTTP client on the TLS
-client; the fuzzy suite runs 400 drawn scenarios, asserting that the
-outcomes it draws and each oddity of the neighbours fell. No test reaches
-rustls failing for a reason of its own (tls.md, 5).
-
-io's worlds run io over the simulator with a scripted owner above it and
-a referee beside it, every process in one loop (io.md, 8). Their harness
-checks `MAX_OUT` and the accept batch at every call, both halves of the
-stream contract as it goes, and, once settled, every slab empty, nothing
-in flight and every descriptor closed. Thirteen scenarios, with slabs of
-two to four sockets and caps of a few dozen bytes, reach every admission
-point, each checking its trace for the evidence: accept, bind and reject;
-connects made, refused for a slot and by the peer; connects waiting on a
-full backlog, cancelled; descriptors run out; two listeners under one
-accept batch; a socket discarded for want of a slot; a burst of connects
-past the slab and the refusals; an exchange both ways under demands of
-every kind; backpressure; a refusal mid-upload that still reaches the
-peer; abort; the close deadline; closes and aborts at random moments, in
-every state.
-The focused suite runs each over 4 calm seeds and 3 of chaos, and the
-fuzzy suite over 150 of each, asserting that every fault of the
-simulator fell and that a cancel of each operation io cancels was seen
-to stop it, to come too late and to go unsubmitted. One exchange runs
-through io over the real ring, in the focused suite.
-
-The echo's worlds (examples.md, 7) run the echo and its fake clients as
-processes of the simulator, each through its own `iterate`, over the
-world harness, with a referee holding each scenario's expectations on
-what the clients saw. Under tiny limits (two sessions, three connections,
-five sockets, lines of sixteen bytes), nine scenarios: many clients
-refused at both entrances and retried until served; a line too long; a
-peer told busy at the domain's entrance and one rejected at the protocol
-layer's; idle connections closed at their deadline and not before; a
-client that stops reading, held by backpressure to what the buffers
-between them hold, then idled out; closes, aborts and resets in every
-state, with a shutdown among them; a shutdown while connections live; a
-half-close with lines unanswered, every whole line answered before the
-end; and the echo at its worst case. The focused suite runs each over 3
-calm seeds and 3 of chaos, with a chaos seed pinned for a rare cell (a
-stream failing while its line is out with the domain); the fuzzy suite
-over 300 of each, asserting that every fault of the simulator fell and
-that every outcome a client can see came of some connection. io holds
-the echo, as every owner, to the room it was granted (io.md, 3.3). The
-real loop runs the echo and two fake clients on loopback, one shared ring, in
-half a second. The world harness has tests of its own (`tests/world`),
-over scripted processes of raw records.
+How each part is tested, and what its worlds cover, is in the part's own
+document; the echo's worlds are examples.md, 7.
 
 The two suites of testing-strategy.md, section 8, are
 `.config/nextest.toml`'s profiles, each with its budget as a global
 timeout: the focused suite by default, within 15 seconds, and the fuzzy
 suite, the `fuzzy_*` binaries, with `--profile fuzzy`, within a minute.
-lib's comparisons of the byte search with a naive one and of the intake
-with a plain reference run 300 random cases as step tests, and 20,000
-from the same seeds in the fuzzy suite.
+Two profiles stay out of both: `browser`, the browser kit against real
+Chromium (`cargo nextest run --workspace --profile browser`), and `live`,
+skein-llm against real subscription endpoints, with credentials from the
+environment. `measure` runs a suite with no budget, to time each test.
 
 Replay: a seed replays to the same trace of submissions and completions,
 and a JSON world, an HTTP world, an io world and an echo world to the
 same run; a TLS world does not, as rustls draws from the kernel. No state
 digest yet.
 
-Memory: the counting allocator is temper's heap meter, ported with its
-own tests. Each of lib's containers is checked against its worst case
-(lib.md, 10), in the focused suite, and so are the JSON tokenizer's and
-writer's, the HTTP client's and server's, and the event stream reader's
-and writer's, a call of an entry point at a time (json.md, 6; http.md,
-6), and the TLS client's, rustls's heap included, with the server it
-talks to measured apart by a span (tls.md, 5), and io (io.md,
-8): driven by hand to its limits and back, every call a step of the
-meter, as an io world's simulator would allocate on the same thread. The
-echo's simulated worlds check memory at every iteration: each process's
-heap, what grew within its own calls, measured with the allocator's span,
-at its peak within each call, against its own worst case (simulator.md,
-5); and once settled, each process, dropped, must free exactly what was
-metered as its own, which finds a leak, and heap made or freed outside
-its calls. The scenarios leave slack: the echo peaks about a third below
-its worst case, the fake clients a quarter below theirs, and a part that
-held more than it should within that slack would pass the check unseen.
-Driven to its limits (every connection's intake, receive and output full
-at once), the echo still holds only about three fifths of its worst case:
-the rest is the bookkeeping of io's and the protocol layer's B-tree
-tables (deadlines, ready lists), whose worst cases count a full table's
-nodes while a world arms a few timers. A focused test holds that world
-to at least half its worst case, so that it keeps reaching the limits.
-
-The browser kit (browser.md) now has a fake machine world, bounded memory
-and fuzzy suites, and a separate real Chromium suite over io's process
-pipes. Run the latter with `cargo nextest run --workspace --profile
-browser`.
+Memory: each part's worst case is checked against the counting allocator
+in its own tier, a call of an entry point at a time; the echo's simulated
+worlds check it at every iteration (examples.md, 6). The scenarios leave
+slack: the echo peaks about a third below its worst case, the fake
+clients a quarter below theirs, and a part that held more than it should
+within that slack would pass unseen. Driven to its limits (every
+connection's intake, receive and output full at once), the echo still
+holds only about three fifths of its worst case: the rest is the
+bookkeeping of io's and the protocol layer's B-tree tables (deadlines,
+ready lists), whose worst cases count a full table's nodes while a world
+arms a few timers. A focused test holds that world to at least half its
+worst case, so that it keeps reaching the limits.
 
 ## 8. Not built yet
 
-By tier, in the order temper pulls the parts (README.md):
-
-- **Broader io worlds for files and processes.** The simulator's process
-  model and minimal machine programs are built, as are process conformance
-  cases on the simulator and ring. More combined world scenarios remain.
+- **io worlds for files and processes,** beyond their step tests, memory
+  tests and conformance cases.
 - **Conformance against the readiness backend,** if that backend is built.
 - **Fuzz targets** for every machine, JSON's, HTTP's and TLS's included,
   when a nightly toolchain is installed; and the heap metered in the
@@ -432,27 +270,16 @@ By tier, in the order temper pulls the parts (README.md):
 - **TLS in the real loop,** a loopback exchange through the shell against
   a local rustls server (tls.md, 8). A TLS that replays is an open
   question (notes.md).
-- **The HTTP examples' simulated worlds and real loop,** with skein-http.
-  The echo's are built; the real loop hosts spawned services over real
-  pipes and delivers signals through signalfd and per-service pipes.
-  Scratch-directory worlds and TLS wait for the parts that pull them.
+- **The HTTP examples,** their simulated worlds and real loop
+  (examples.md, 8).
+- **The referee's purity** in the echo's simulated worlds: it reads
+  `svc.listening()` and calls `svc.shutdown()` (examples.md, 6).
 
-By check: state digests for replay, transition coverage, fuzzing.
-Transition coverage of io's handlers needs `cargo llvm-cov`, which is not
-installed.
-
-In the echo's worlds, the referee's purity: it reads the echo's address
-from `svc.listening()`, standing in for the fact `main` prints, which the
-service will emit; and it calls `svc.shutdown()`, standing in for the
-termination signal, which will come as io's `Shutdown` event (io.md, 7).
-Both move out of the referee once those are built (examples.md, 6).
+By check: state digests for replay, transition coverage (it needs
+`cargo llvm-cov`), fuzzing.
 
 ## 9. Open questions
 
-- **The world harness.** It is skein's now, `skein-world` (section 5),
-  ordinary Rust, as small as the echo needs. How much of temper's own
-  harness (its schedule, its ledger of requests) joins it is settled when
-  temper moves its worlds onto it.
 - **Heap handed between services in one thread.** A world checks each
   service against its own worst case by metering around its own calls
   (simulator.md, 5), which holds while nothing one service allocates is

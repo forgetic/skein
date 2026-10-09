@@ -60,7 +60,7 @@ one more kind of file entity beside them, a file held open:
 ### 2.2 A disk that crashes (skein-sim, skein-fake-machine)
 
 The simulator's files, and the minimal fake machine's, gain what a crash
-keeps (draft, section 8):
+keeps (kv.md, section 8):
 
 - **Durable and pending state per file:** a write lands in pending, a
   `Sync` of the file makes its pending writes durable; a directory's
@@ -391,8 +391,7 @@ Its engine's store protocol layer uses `skein-kv` and owns what is
 temper's: the record codecs, the key layout and indexes (temper's
 `domain/engine.md`, section 5), a second store for secrets in a `0o600`
 root, retention, and, after section 6, transcripts as payload logs.
-Temper's plan for the store's protocol and io (its
-`docs/plans/next-domain/08-after.md`, section 3) cites this one.
+temper's `docs/design/store/` builds that layer on this plan.
 
 ## 9. Later
 

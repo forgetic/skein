@@ -145,8 +145,9 @@ pub struct Limits {
   buffer for the text being read, the longer of `string` and `number`,
   both allocated with the tokenizer, and the delivery it reads, at most
   `largest_demand`: a delivery is made to the tokenizer's demand, so it
-  counts it, held for the step that reads it (testing.md, 5). A token's box is the side above's to
-  count once emitted. `None` for a `chunk` of zero.
+  counts it, held for the step that reads it (testing.md, 5). A token's
+  box is the side above's to count once emitted. `None` for a `chunk` of
+  zero.
 - **`largest_demand(&limits)`** is the larger of `chunk` and 4 (the rest
   of `false`). Whoever stacks the tokenizer checks at startup that it fits
   the cap of the side below: a demand past that cap could never be met,

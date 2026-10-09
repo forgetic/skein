@@ -30,6 +30,7 @@ starts from.
 | the shell kit | `skein-shell` | the io_uring backend, the clock, the seed, startup | [shell.md](docs/design/shell.md) |
 | the simulator | `skein-sim` | the simulated kernel and its faults; beside it, the conformance suite (`skein-conformance`) | [simulator.md](docs/design/simulator.md) |
 | the fake LLM | `skein-fake-llm-domain`, `skein-fake-llm-protocol` | shared bounded scripts and independent byte peers; application worlds supply tools and policy | [fake-llm.md](docs/design/fake-llm.md) |
+| the key-value store | `skein-kv` | ordered byte keys and values in memory, made durable by a commit log and snapshots on io's files | [kv.md](docs/design/kv.md) |
 | the fake checkout | `skein-fake-checkout` | for tests: deterministic files, scripted commands and local git mechanics; worlds own policy and delivery | [fake-checkout.md](docs/design/fake-checkout.md) |
 | the counting allocator | `skein-heap` | for tests: the heap counted, and each step checked against its worst case | [testing.md](docs/design/testing.md) |
 | the world harness | `skein-world` | for tests: each process's `iterate` in one loop, over the simulator or the ring, with a referee | [examples.md](docs/design/examples.md) |
@@ -60,6 +61,7 @@ skein-fake-oauth lib, json, oauth
 skein-browser  lib, json
 skein-shell    lib, io, io-uring, libc
 skein-sim      lib, io
+skein-kv       lib, io
 ```
 
 The crates from outside skein are few, and each is an exception the
@@ -80,24 +82,16 @@ among them for its cryptography, the TLS client's.
 - **Counted and bounded throughout.** Every part exports its `Limits` and
   its `worst_case`, and a service adds them up.
 - **Built when pulled.** A part is built when its first user needs it,
-  and that user is its first test. temper is the first user, and what it
-  builds decides the order:
-
-  | temper builds | which pulls from skein |
-  |---|---|
-  | the agent's LLM client | io sockets, the ring, the simulator, the HTTP client, server-sent events, JSON, the TLS client |
-  | the fake LLM provider, as a service | the HTTP server, the server-sent events writer, the JSON writer |
-  | the worker's processes and workspaces | io processes, pipes and files |
-  | the engine's forge client and its webhooks | the HTTP client and server |
+  and that user is its first test.
 
 ## Not in skein
 
 - **Domains, and protocols only one application speaks:** a forge's API,
   temper's protocol between worker and
   engine. They are built on skein's machines.
-- LLM calls shared by services are in `skein-llm`; a service still owns its
-  tool schemas and execution, OAuth renewal, connection/TLS ownership and
-  retry policy.
+- **What a service does with an LLM:** its tools and their execution,
+  when to sign in or refresh a credential, and whether to retry. The
+  calls, their connections and OAuth's documents are skein's.
 - **A service's wiring:** its `iterate`, the sum of its worst cases, its
   `main`.
 - **What a simulated program does.** The simulator plays the kernel; the

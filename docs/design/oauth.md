@@ -158,8 +158,8 @@ with and without a new refresh token, expiry and skew, refusals, malformed
 answers, and every limit boundary. A separate fake issuer drives sign-in,
 refresh, revocation, delay, replay, and transport faults through the real
 client machine. It also runs as a process on loopback, as the fake LLM peer
-does (fake-llm.md, 3). Randomized cases use the fuzzy profile. Memory high water is
-checked against `worst_case`.
+does (fake-llm.md, 3). Randomized cases use the fuzzy profile. Memory high
+water is checked against `worst_case`.
 
 The protocol choices follow [RFC 7636](https://www.rfc-editor.org/rfc/rfc7636.html),
 [RFC 8252](https://www.rfc-editor.org/rfc/rfc8252.html), and

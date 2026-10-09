@@ -70,8 +70,7 @@ constants and static headers. A caller choosing that compatibility profile
 explicitly uses `claude_code_headers()` and `identity::instructions()` to
 place the identity in a separate first system block, and supplies its own
 session/request IDs. Skein sends the
-caller's tool names unchanged. These historical values do not establish current
-live subscription admission.
+caller's tool names unchanged. The archived values may be out of date.
 
 The low-level `openai` and `anthropic` modules expose bounded document codecs
 for fakes and specialized protocol stacks. Both share `Json` and dialect limits.
@@ -81,8 +80,7 @@ The Anthropic event vocabulary follows the
 The [design](../../docs/design/llm.md) defines lifecycle and memory contracts.
 `cargo nextest run -p skein-llm -p skein-llm-world` checks codecs and the full
 stack; the world crate's fuzzy profile varies fragmentation, flow control and
-close races. Archived response fixtures document their capture provenance.
-Offline verification does not claim current live subscription admission.
+close races. The archived response fixtures say where they came from.
 
 The opt-in live suite exercises `client::Client` against the real Codex and
 Anthropic OAuth endpoints over certificate-verified TLS. It checks streamed

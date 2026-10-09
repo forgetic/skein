@@ -4,7 +4,7 @@ Implemented core, 2026-10-05. A built-in store for a service whose durable
 dataset fits in memory: ordered keys and values held in memory, an
 append-only commit log, and snapshots, all as a Skein machine on Skein's
 file I/O. Large append-only payloads go beside it, in logs of their own
-whose committed lengths the store records (section 6, planned separately).
+whose committed lengths the store records (section 6, not built yet).
 Read it with [the programming model](../foundation/programming-model.md),
 [the testing strategy](../foundation/testing-strategy.md), and
 [the file design](io.md).
@@ -144,8 +144,8 @@ transcripts), and so are not held in memory:
 
 ## 8. What it needs of io
 
-io.md's whole-file operations hold a file's content in one request, and
-"file streams come later". The store needs, as io entities:
+io.md's whole-file operations hold a file's content in one request. The
+store needs more of io, which its file requests (`skein_io::file`) give:
 
 - **an open file written at its end and synced,** kept open across
   requests: the log segments and the payload logs;
@@ -154,7 +154,7 @@ io.md's whole-file operations hold a file's content in one request, and
 - **reads by offset** up to a stated length: recovery, and payload logs
   read back;
 - **creating a file with given permission bits** (a store of secrets is
-  `0o600`), and removing and listing, as io.md already plans.
+  `0o600`), and removing and listing.
 
 The simulator's disk must model what a crash keeps: synced data; nothing
 unsynced in any order, a write torn at any byte; a directory entry only
@@ -171,8 +171,9 @@ short writes, and failed syncs.
   model's.
 - **Snapshots under load:** commits racing a snapshot at every chunk,
   crashes at each phase of its replacement.
-- **Payload logs, later:** a crash between the data's sync and the commit leaves
-  the extent as it was, and the next append overwrites the tail.
+- **Payload logs, later:** a crash between the data's sync and the
+  commit leaves the extent as it was, and the next append overwrites the
+  tail.
 - **Over the real ring:** a scratch-directory integration test commits,
   closes, reopens on the same root descriptor and verifies the value.
   Power-loss behavior is checked in the simulator's crash model.
@@ -241,21 +242,20 @@ tightens first, then redb.md's approach or an on-disk index.
 - **Restart** reads a snapshot of a few hundred megabytes, about a
   second from an SSD, and a log bounded by the snapshot's trigger.
 
-## 11. Effort and risk
+## 11. Where the risk is
 
 The store itself is small: a map, a frame codec, group commit, a
-recovery rule, a chunked snapshot and payload logs' extents. Most of the
-work, and the risk, is around it:
+recovery rule, a chunked snapshot and payload logs' extents. The risk is
+around it:
 
-- **io's file entities** (section 8) and their simulator, which skein
-  needs for any durable state, redb included (redb.md, section 4);
 - **a faithful crash model** in the simulator, since the tests are only
-  as good as what it says a crash keeps;
-- **sync failures** handled as fatal, everywhere a sync is awaited;
-- **the fuzzy snapshot's argument,** written down and tested, as it is
-  the one part that is not obvious;
+  as good as what it says a crash keeps (section 8);
+- **sync failures** handled as fatal, everywhere a sync is awaited
+  (section 4);
+- **the fuzzy snapshot's argument** (section 5), the one part that is not
+  obvious;
 - **memory accounting** close enough to the allocator's to make the
-  budget mean something.
+  budget mean something (section 7).
 
 ## 12. Settled choices and later work
 
@@ -265,7 +265,6 @@ work, and the risk, is around it:
   for each file request. A hung kernel operation is cancelled; its owner
   receives one terminal failure after the operation settles.
 - One store owns one directory and one file driver. Payload logs and
-  sharing a sync across stores remain later work, as in the implementation
-  plan's sections 6 and 9.
+  sharing a sync across stores are later work.
 - When the dataset outgrows memory, retention comes first, then an
   on-disk index or the approach in redb.md.

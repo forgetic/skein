@@ -23,4 +23,4 @@ The public flow requires PKCE S256 and a loopback redirect; the confidential
 flow supplies its secret only at the token endpoint.
 
 The codecs and client follow [oauth.md](../../docs/design/oauth.md). The fake
-issuer is added in the next increment.
+issuer for worlds is `skein-fake-oauth`.

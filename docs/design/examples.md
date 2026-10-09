@@ -5,8 +5,8 @@ Provisional, 2026-10-04. The design of skein's example services
 code (the wire protocol, the limits, the entities, the state machines),
 its fakes, the harness its worlds run on, and how it is tested. The
 examples exist to be tested and to be copied: a service starts from
-them. The echo server is built; the HTTP server and its client come with
-`skein-http`.
+them. The echo server is built; the HTTP server and its client are not
+(section 8).
 
 ## 1. In one page
 
@@ -115,10 +115,11 @@ request `Stop`: admit no one more. The text of a line is its bytes without
 the `\n`: framing stays in the protocol layer, which copies the text out
 when it decodes and writes the answer at its length when it encodes.
 
-`Shutdown` stands in for io's `Shutdown` event, which is not built: the
-service's `shutdown` asks the protocol layer to tell it, from its ready
-list. The domain decides what it means: it admits no one more, and asks
-for the listener to stop. The connections it has run to their end.
+`Shutdown` comes from io's `Shutdown` event, a termination signal (io.md,
+7), or, in worlds that send none, from the service's `shutdown`; either way
+the protocol layer tells it from its ready list. The domain decides what
+it means: it admits no one more, and asks for the listener to stop. The
+connections it has run to their end.
 
 ### 3.4 State machines
 
@@ -222,10 +223,12 @@ every `Open` with `Busy` and asks once for `Stop`.
 `main` reads its configuration from its arguments (the address to listen
 on, and the memory it may take), runs startup (shell.md, 6): the worst
 case against the memory, io's caps against the protocol's largest demand,
-then the seed and the kernel; and then the loop of programming-model.md,
-section 2, over the shell's `Kernel` and `Clock`. Signals to the service
-are not built, so it runs until it is killed, and says so; it stops by
-itself only when its listener fails, as when the address is in use.
+then the termination signals, the seed and the kernel; and then the loop
+of programming-model.md, section 2, over the shell's `Kernel` and
+`Clock`. SIGINT and SIGTERM arrive through io as `Shutdown` (io.md, 7):
+it admits no one more, lets its sessions end and exits successfully. A
+listener failure, as when the address is in use, exits with a
+diagnostic.
 
 ## 5. The fake echo client
 
@@ -292,11 +295,11 @@ processes, each a host of an `iterate` (a service, or a fake client):
   echo's address once it listens, as a directory would, and shuts the
   echo down once the clients are done, or at a given time, so that the
   world settles. Both reach into the service where the referee should
-  only watch from outside (testing-strategy.md, 7), and stand in for what
-  is not built: its reading of `svc.listening()` for the fact `main`
-  prints, "listening at", which the service will emit as a fact; and its
-  call of `svc.shutdown()` for the termination signal, which will come as
-  io's `Shutdown` event (io.md, 7). Each moves out once those are built.
+  only watch from outside (testing-strategy.md, 7): its reading of
+  `svc.listening()` stands in for the "listening at" line `main` prints,
+  which the service does not emit as a fact; and its call of
+  `svc.shutdown()` for the termination signal, which the end-to-end test
+  sends the binary instead.
 - **The real loop** runs the same processes and referee over one ring, in
   one thread on loopback, with deadlines on the real clock. An idle loop
   blocks on the ring until the next completion or deadline.
@@ -358,6 +361,9 @@ processes, each a host of an `iterate` (a service, or a fake client):
 - **The real loop** (`tests/echo/tests/real.rs`): the echo and its fake
   clients in one loop over the shell's ring, on loopback, quick, failing
   clearly where `io_uring` is unusable.
+- **End to end** (`tests/echo/tests/end_to_end.rs`, built with the
+  shell's package): the shipped binary against two fake clients, seen
+  only through loopback, its stderr and its exit, stopped by SIGTERM.
 
 ## 8. Not built yet
 

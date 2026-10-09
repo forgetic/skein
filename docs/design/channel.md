@@ -9,8 +9,7 @@ skein design for themselves. An application gives it two things:
 
 The channel gives it framing, an opening that agrees a version, bounds and
 flow control. Its first users are smith's channel between a host and an
-agent, and temper's between its engine and its workers. This design
-replaces the earlier one, which kept temper's first channel as it was.
+agent, and temper's between its engine and its workers.
 
 ## 1. In one page
 
@@ -364,30 +363,7 @@ The worst case per channel is the sum of:
 - **A scripted peer,** for services' worlds: it speaks the opening, then
   plays frames from a script and checks those it receives.
 
-## 12. From the first design
-
-- **Kept:**
-  - the header;
-  - an opening with a range of versions;
-  - terms;
-  - unknown kinds skipped and answered;
-  - bodies read in chunks;
-  - measured writes;
-  - an output cap.
-- **Gone:**
-  - temper's roles (an engine, a worker's link, a worker's agent) and its
-    first channel's behaviour kept for equivalence;
-  - temper's magic and channel number;
-  - a name and a secret as fields of their own, which become one opaque
-    credential;
-  - refusal codes for busy, unauthorized and replaced, now the
-    application's;
-  - a limits check inside the machine, now the owner's;
-  - per-kind gates on the first message, which are the owner's phases;
-  - the machine waiting on the owner's decoding, since the owner does not
-    read again until it has decoded.
-
-## 13. Open questions
+## 12. Open questions
 
 - **Features:** compression, or a body continued across frames, when a
   user needs either.

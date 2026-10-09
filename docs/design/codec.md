@@ -46,7 +46,8 @@ in files or stores.
   consumer depends on it in its tests only.
 - **A consumer's codec crate** holds its schemas, the generated code, its
   golden bytes and its drift test, and depends on lib and `skein-codec`.
-  smith's `smith-charter` is one, and temper's link will have one.
+  smith's `smith-charter`, `smith-channel` and `smith-transcript` are such
+  crates.
 
 ## 3. The schema
 

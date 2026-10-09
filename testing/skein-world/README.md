@@ -26,8 +26,7 @@ child's roots; a kill closes every descriptor still owned by the child.
 Parent and child may select the same directory, but never share descriptor
 ownership.
 
-The `domain` module is the domain-only world's shared machinery, extracted
-from temper's `tests/world` at `23d7caa` when smith became its second user:
+The `domain` module is the shared machinery of domain worlds:
 
 - `Schedule`, `Key` and latency `Span`: deterministic delivery times,
   FIFO ties, withdrawal and unique names from the world's injected seed.
@@ -45,13 +44,9 @@ These helpers are ordinary Rust used only by tests. The world supplies
 clock values, limits and observations, bounds the work it scripts and
 checks quiescence. No helper performs IO or reads a clock.
 
-The preserved referee regressions and utility contract tests are under
+The referee regressions and utility contract tests are under
 `tests/world/tests/domain_{referee,utilities}.rs`:
 
 ```sh
 cargo nextest run -p skein-world-tests --test domain_referee --test domain_utilities
 ```
-
-The full merge gate also runs formatting, workspace clippy and both
-nextest profiles, under the 15-second focused and 60-second fuzzy budgets
-of `testing-strategy.md`, section 8.

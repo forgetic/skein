@@ -221,8 +221,8 @@ There is one independent output demand or grant at a time. It can coexist
 with a classic read-only Demand, which it neither answers nor withdraws.
 Bytes, End and classic Room cannot settle it. Classic room demands and
 grants cannot coexist with independent output ownership, and a classic
-Send cannot spend an independent grant. Existing joined Demand semantics
-remain unchanged for classic consumers.
+Send cannot spend an independent grant. Classic consumers keep the joined
+Demand.
 
 Cancel names a pending output demand. Cancellation wins only before the
 lower has emitted its terminal. A Granted terminal already queued above
@@ -242,12 +242,12 @@ no competing classic room ownership creates an obligation; the lower
 retains only its active cell, without a history of the caller's tokens.
 Neither a grant nor Closed proves peer receipt or durable commitment.
 
-Finish keeps its classic restriction: withdraw a read only when closing
-or after End, settle any pending output demand, and finish once. This
-extension introduces no general live-read cancellation or new Finish
-terminal. End still concerns reading alone; independent output can
-progress after it. Native lower support is required: an adapter over an
-arbitrary classic combined Demand cannot manufacture independent room.
+Finish keeps its classic restriction: withdraw a read only when closing or
+after End, settle any pending output demand, and finish once. There is no
+general live-read cancellation and no Finish terminal. End concerns
+reading alone; independent output can progress after it. Native lower
+support is required: an adapter over an arbitrary classic combined Demand
+cannot manufacture independent room.
 
 ## 8. Time, deadlines and randomness
 

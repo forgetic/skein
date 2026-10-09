@@ -325,9 +325,9 @@ pub struct Limits {
   demand, so it counts it; a call and a piece of the request body are
   counted by the side above, which made them, and the step that takes one
   reads it and drops it or passes it on (testing.md, 5); what goes up is
-  handed out when it is emitted. `None` for a head shorter than a blank line, a read of
-  nothing, or room for nothing of a request body (`send` of 0), which
-  no upload could get past.
+  handed out when it is emitted. `None` for a head shorter than a blank
+  line, a read of nothing, or room for nothing of a request body (`send`
+  of 0), which no upload could get past.
 - **`largest_read`** is the larger of `head` and `read`, and at least 2;
   **`largest_room`** the larger of `request` and `send`.
 - **`UP_MAX_OUT`** is two events and two requests: a response and the
@@ -846,8 +846,8 @@ pub struct Limits {
     still answer what was on its way. Above, a user makes the calls,
     uploads each body in pieces within the room granted, reads with
     fills, line scans and scans to LF, CRLF and a quote of every size,
-    slowly, withdraws a demand and discards, discards the rest now and then,
-    sends a withdrawal or a discard that crosses its answer, the body's
+    slowly, withdraws a demand and discards, discards the rest now and
+    then, sends a withdrawal or a discard that crosses its answer, the body's
     end among them, stops for a while, and closes after the last exchange
     or at any moment. The world checks `MAX_OUT` on each call; below, one
     demand at a time, none past the caps or once the stream ended or
@@ -860,8 +860,9 @@ pub struct Limits {
     neighbours see. Each exchange is held to a reference
     reader: the call refused, or not, as a check of the test's own
     refuses it, one call in fifty getting one thing wrong; the request
-    written, against a writer of the test's own; the head; the body, a prefix of the reference's, and when `End` came,
-    nothing left that meets the demand it answered; and the outcome,
+    written, against a writer of the test's own; the head; the body, a
+    prefix of the reference's, and when `End` came, nothing left that
+    meets the demand it answered; and the outcome,
     unless the stream failed or the side above closed first, with a
     connection whose upload stopped, or whose stream ended or failed
     during the exchange, not used again.
@@ -900,8 +901,9 @@ pub struct Limits {
     withdraws the reply's demand now and then, as a machine stacked on it
     does when it closes, and closes then or a while after, stops for a
     while, and closes after the last request or at any moment. The wall
-    clock the server dates its heads by is drawn from each seed. The world checks both sides' contracts as the client's does,
-    a 100 before any read of a body its client holds back among them, and
+    clock the server dates its heads by is drawn from each seed. The
+    world checks both sides' contracts as the client's does, a 100 before
+    any read of a body its client holds back among them, and
     `waiting()` against what the neighbours see. Each call is held to a
     reference reader of requests, which shares nothing with the server:
     the call, or the rejection; the body; and the outcome, the reuse as
@@ -962,9 +964,9 @@ pub struct Limits {
   rejection, the body, and the outcome. Each is written by hand after the
   public format of its client, and says so. Thirty-six:
   - curl's: a GET, a HEAD, a JSON POST, a body that waits for a 100
-    (Continue), its `Expect` asked for, a chunked upload from standard input that waits for one
-    too, HTTP/1.0, two requests on one connection, and `Connection:
-    close` before a request never read;
+    (Continue), its `Expect` asked for, a chunked upload from standard input
+    that waits for one too, HTTP/1.0, two requests on one connection, and
+    `Connection: close` before a request never read;
   - an LLM client's POST with a JSON body, as Anthropic's and OpenAI's
     Python SDKs send them, their keys redacted;
   - hostile ones: an oversized head and an oversized request line, a
@@ -1086,8 +1088,8 @@ pub struct Limits {
   asserting that a writer and an upload were held back, an upload
   stopped, a writer heard its stream fail, a stream reset, a connection
   carried several calls, an event's id or reconnection time was checked,
-  and each outcome at each end fell. It stands in for the fuzz targets, which wait for a nightly
-  toolchain.
+  and each outcome at each end fell. It stands in for the fuzz targets,
+  which wait for a nightly toolchain.
 
 ## 7. Decisions
 
@@ -1158,8 +1160,8 @@ pub struct Limits {
   request (`Next`), so a service's entrance is where it chooses to ask.
 - **Rejections are the server's own,** small and fixed, and end the
   connection; bad framing in a body closes unanswered, as
-  programming-model.md, 8 has bad lengths do. The request line that does not fit in
-  the head is a 414, as RFC 9112, 3 requires, rather than a 431, which
+  programming-model.md, 8 has bad lengths do. The request line that does
+  not fit in the head is a 414, as RFC 9112, 3 requires, rather than a 431, which
   is for fields; a fold is rejected, not joined, as RFC 9112, 5.2 lets a
   server; an unknown method is a 501 (RFC 9110, 9.1) and a coding not
   undone too (RFC 9112, 6.1), while codings that do not end with
@@ -1235,12 +1237,7 @@ pub struct Limits {
 
 ## 9. Not built yet
 
-The client, the server, and both sides of server-sent events are built,
-with their machine worlds and transcripts, and the protocol worlds of
-testing-strategy.md, 2.5, an LLM client's stack against a server's. temper
-pulls next: both, for the engine's forge client and its webhooks.
-
-Also not built: chunked uploads; content codings (`gzip`), which the
+Chunked uploads; content codings (`gzip`), which the
 client refuses and the server answers with a 501; trailer fields, which
 are read and dropped; reconnecting an event stream, for which the reader
 keeps the reconnection time and the last event ID; a block of its own for
@@ -1248,11 +1245,10 @@ the reconnection time, `retry: N` alone ahead of the first event, which
 the writer cannot write, as every block it writes is an event or a
 comment and a reconnection time goes with an event; HTTP/2 and upgrades,
 until a peer requires them; reading a request's body while answering
-it; the heap metered in the protocol
-worlds, which join two stacks in one thread and so meet testing.md, 9's
-open question on heap handed between them, while each machine's worst
-case is checked in its memory tests; and the **fuzz targets** (`fuzz/`,
-fed `Bytes` under every demand), which wait for a nightly toolchain, the
-fuzzy suite standing in for them. Transition coverage of the handlers
-(testing-strategy.md, 6) waits for `cargo llvm-cov`, which is not
-installed.
+it; the heap metered in the protocol worlds, which join two stacks in
+one thread and so meet testing.md, 9's open question on heap handed
+between them, while each machine's worst case is checked in its memory
+tests; and the **fuzz targets** (`fuzz/`, fed `Bytes` under every
+demand), which wait for a nightly toolchain, the fuzzy suite standing in
+for them. Transition coverage of the handlers (testing-strategy.md, 6)
+waits for `cargo llvm-cov`.

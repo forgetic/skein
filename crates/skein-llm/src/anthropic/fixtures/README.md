@@ -1,14 +1,10 @@
-These are redacted subject recordings from the adjacent tongs repository,
-`crates/tongs/tests/fixtures/anthropic/*/recordings/tongs`, captured on
-2026-06-13 by recorder f4e0a2b (see each `meta.json`). The tongs online
-`subject_record.rs` harness forwarded requests through a loopback capture
-pump to the real provider; consequently the request Host is loopback.
-`response.sse` contains raw HTTP chunk framing as well as the provider's
-SSE bytes. Headers containing bearer/account/session/request identities
-were redacted by the recorder at capture time.
+Redacted recordings of successful requests to Anthropic's Messages route,
+copied from tongs (`crates/tongs/tests/fixtures/anthropic/*/recordings/tongs`);
+each `meta.json` records when and by which recorder. tongs'
+`subject_record.rs` harness forwarded through a loopback capture pump,
+hence the loopback request Host. `response.sse` keeps the HTTP chunk
+framing around the provider's SSE bytes. Bearer, account, session and
+request identities are redacted.
 
-These recordings establish actual provider response grammar and successful
-historical tongs requests. They are not captures of Claude Code or Codex
-itself, are not newly captured by temper, and do not establish current
-subscription identity requirements. Synthetic tests are separate in
-`src/tests.rs`.
+They show the provider's response grammar, not what a subscription admits
+today. Synthetic tests are in `src/tests.rs`.

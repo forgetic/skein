@@ -269,17 +269,17 @@ allocator's high water against `worst_case`.
   dispatched on a node that was refused. A few seeds run in the focused
   suite, and many in the fuzzy one.
 - **The real browser:** the kit in the real loop against Chromium,
-  opening fixed pages served by a small `skein-http` server in the same loop: a
-  button that changes a heading, a form, a dialog that covers a button,
-  a button far down a long page, a script that throws, and a resource the
-  content security policy blocks. These tests check the facts the fake
+  opening fixed pages served by a small `skein-http` server in the same
+  loop: a button that changes a heading, a form, a dialog that covers a
+  button, a button far down a long page, a script that throws, and a
+  resource the content security policy blocks. These tests check the facts the fake
   browser assumes: the framing, flattened sessions, what the
   accessibility queries match, boxes and the hit test, and the events
   each step waits for. A new Chromium version is a run of these, and a
   fact that changed is fixed in the fake first. They need Chromium and do
   not replay, so they form a suite of their own, beside the focused and
-  fuzzy suites. A missing Chromium fails that suite, naming what is
-  missing; it is never a skip.
+  fuzzy suites (`--profile browser`, within two minutes). A missing
+  Chromium fails that suite, naming what is missing; it is never a skip.
 
 The kit's tests are a crate of their own, `tests/browser`
 (`skein-browser-world`) (testing.md, 6).
@@ -287,8 +287,7 @@ The kit's tests are a crate of their own, `tests/browser`
 ## 10. What it asks of others
 
 - **io:** a spawn that makes pipes beyond the standard three, as a list of
-  the child's descriptors, each with its direction. The ring and simulator
-  process backends are built (io.md, 6).
+  the child's descriptors, each with its direction (io.md, 6).
 - **A service using it:**
   - spawning the browser with `command`, and owning the child, its pipes
     and the scratch root its profile is made in;
@@ -306,4 +305,3 @@ The kit's tests are a crate of their own, `tests/browser`
   WebDriver BiDi, a second wire, if a bug ever shows only there.
 - **Text by pattern,** should exact names prove too strict for text that
   carries numbers or times.
-- **The browser suite's budget,** set when its first tests are built.

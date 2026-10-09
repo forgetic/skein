@@ -1,19 +1,14 @@
 # Shared scripted LLM peer
 
-## 1. Role and source
+## 1. Role
 
 Skein owns reusable provider-neutral LLM calls and their independent wire
 peers. `skein-fake-llm-domain` depends only on `skein-lib`; it knows no HTTP,
 JSON, provider client, application tools, checkout paths or credential policy.
 `skein-fake-llm-protocol` depends on that domain and the shared HTTP/SSE/JSON
-and LLM codecs. Application worlds supply their own tool schemas, inputs,
-invalid calls, scripts and effect expectations.
-
-The finite-script domain and byte peer originate in Temper `25ac2ad`, copied
-into Smith in migration 05s2. This extraction removes the checkout argument
-menu and OAuth issuer from the generic machinery. The original provider
-codec ownership moves to `skein-llm`; application-specific interpretation
-stays with Smith or Temper. No branch merge from the parked runtime occurs.
+and LLM codecs; provider codecs are `skein-llm`'s (llm.md). Application
+worlds supply their own tool schemas, inputs, invalid calls, scripts and
+effect expectations, and interpret the answers themselves.
 
 ## 2. Script domain
 
@@ -90,76 +85,40 @@ unsupported wire field and the caller still bounds local output.
 caller-owned literal HTTP/SSE response bytes. The caller supplies the same
 limits used at preparation. Adoption has no stream entrance, send, read or
 terminal effect and constructs no second Client. `World::new` prepares once
-and delegates to this identical initialization. Existing demand/intake,
+and delegates to this identical initialization. Demand and intake,
 fragmentation, queue limits, terminal checks and lower settlement are shared;
 the constructor neither parses fixtures nor controls application policy.
 The original Client keeps its callback owner and prepared request bytes.
 Its price is counted once; the world's source tape, request tape, terminal
-observations, queues and intakes remain separate owned storage. Focused
-synthetic literal controls cover both native endpoints: original request and
-opaque callback (including zero), exact text and usage, unique completion and
-reuse, explicit Close followed by actual Closed, and repeated settlement
-without another terminal. These controls establish no live provider admission
-and do not use the peer's response encoder as their expected-value oracle.
+observations, queues and intakes remain separate owned storage. Its stories
+expect literal bytes, never the peer's response encoder's output, and
+establish no live provider admission.
 
 `skein-llm-world::fake::Exchange` connects the actual shared Client to the
 independent byte peer and real script domain. It records requests, queries,
 response bytes and actual terminals. Its transport uses bounded intakes and
-checks every read/room/send; it owns no provider parser. Positive controls
-carry whole schemas, literal argument bytes, exact paired feedback and
+checks every read/room/send; it owns no provider parser. Its stories carry
+whole schemas, literal argument bytes, exact paired feedback and
 continuation through both wire configurations, then corrupt provider IDs.
 Cancellation has no terminal before actual lower settlement; repeated close
 settlement produces no second terminal.
 
 `Exchange::prepared` adopts an application's already prepared actual Client.
 The caller moves the exact endpoint, credential and unchanged receiving limits
-used at admission as independent peer metadata. It creates no second Client
-and performs no second preparation; `Exchange::new` prepares once and delegates
-to the same constructor. The direct adoption control drives both configured
-dialects through the real script domain and byte peer, checking the original
-callback owner, exact configured input and actual completion/reuse terminals.
-The Client is priced once. Peer credential bytes and the retained target are
+used at admission as independent peer metadata, released after configuring
+the peer. It creates no second Client and performs no second preparation;
+`Exchange::new` prepares once and delegates to the same constructor. The
+Client is priced once. Peer credential bytes and the retained target are
 separate ownership, as are the caller's retained application declarations,
-decoded results and observation buffers. The temporary endpoint metadata is
-caller input and is released after configuring the peer.
+decoded results and observation buffers.
 
 `Exchange::at(now, wall)` installs the caller's one iteration snapshot in
 the actual Client, independent script domain and byte peer before their
 entries run. The caller supplies nondecreasing monotonic `Time`; `Wall` may
 jump independently and never arms deadlines. Installing time neither starts
 the exchange nor fires timers, delivers bytes or settles effects; the caller
-still drives the existing entrances. Focused controls adopt one actual Client
-for each configured dialect, inject a nonzero origin and fixed fake latency,
-and observe no response before due despite a wall-clock jump. At due the
-actual fake, byte peer and Client produce the exact answer and unique
-completion/reuse, followed by real Close/Closed settlement. A second control
-cancels after installing due time but before ticking, then settles lower
-effects and fires/reclaims the late fake terminal without another Client
-terminal or wire response. This entrance adds no retained state or memory
+still drives the existing entrances. It adds no retained state or memory
 allowance.
-
-The four redacted Anthropic Tongs captures retain their provenance beside the
-shared codec. Actual Client tests check known completion text, calls, stop
-reason and all usage fields under fragmentation. Synthetic cases are separate
-and these archives establish no current live subscription admission.
-
-Counted tests exercise replay transit, extended opaque heads and an actual
-maximum-size scripted response through Client and byte peer. Another driver
-fills the exact joint script/menu cap with 128 tiny entries and empty part
-wrappers, then holds every delayed-call/alarm slot at its full answer cap.
-One-over slot, script/menu and answer caps are refused. The two-connection
-story uses one actual delayed script domain: both issued HTTP calls enter
-`step`, actual `fire` terminals route through the shared service, and both
-Clients observe the exact scripted answer. A third actual terminal survives
-observed connection cancellation as an unmatched owned reply. This story
-counts each native Client, Server, Service, intake, queue and observation
-buffer separately from the inline routing slots. These drivers compare
-production `worst_case` values plus separately priced world intakes, wire
-tapes and observation copies. Application worlds must add their application
-schema/result/replay copies and outside effect ledger to this envelope.
-The integrating parent's runtime checks and serial suite measurements are
-recorded in this increment's commit. The final rebased workspace gate precedes
-its merge; Smith's real consumer has a separate review and gate.
 
 `Exchange::observe(ObservationLimits)` opts a fresh, unstarted exchange into
 fixed observation counts and whole-record byte caps. Events, decoded queries,
@@ -167,8 +126,7 @@ manual pending calls and both wire tapes reserve their exact wrapper capacity.
 Payload ownership is checked before cloning or appending, including public
 native replay token wrappers and their owning bytes. Drained records become
 caller ownership; a moved vector's replacement capacity is reserved at the next
-physical entrance. Existing worlds keep unconstrained observation behavior
-until `observe` is called.
+physical entrance. Without `observe`, observation is unconstrained.
 
 `extra_worst_case` prices the peer, script domain, routing service, queues,
 intakes, delivery scratch, credential/target and configured observations. It
@@ -178,56 +136,15 @@ arithmetic refuses impossible products without allocating the proposed cap.
 The driver reclaims retired service routes after draining their actual outputs;
 `Service::calls()` reports allocated live and retired slots without content.
 
-Focused controls meter both native Clients and peers through construction,
-Start, every progress step, Close, actual Closed and drop with an 8,192-byte
-input. Caller-held terminal replay ownership is counted independently and
-returns to zero after its final drop. The existing independent HTTP reference
-reader checks complete chunked response consumption and the whole literal
-answer; its passive validation scratch is outside runtime entrance peaks and
-drops before progress resumes. Another control opens five actual connections
-through one four-slot service, observing reclamation after each settled call.
-Exact query capacity copies one whole actual query; one byte less refuses
-before cloning and still settles cancellation and physical close. These
-controls establish shared Client/peer ownership, not an application's combined
-root, schemas, copies or simultaneously retained physical bindings.
+Memory stories compare the counting allocator's high water with production
+`worst_case` values plus the separately priced world intakes, wire tapes and
+observation copies: replay transit, extended opaque heads, a maximum-size
+scripted response, the exact joint script/menu cap with every delayed-call
+slot at its full answer cap (one over each cap is refused), and two
+connections sharing one delayed script domain. They establish shared
+Client/peer ownership only: application worlds add their schema, result and
+replay copies and their outside effect ledger to this envelope.
 
-## 6. Copied-codec disposition
-
-This increment supplies shared client/peer machinery before Smith removes
-its provider-specific copies. It does not claim that the old leaf APIs or
-automatic request policies are equivalent to the shared API. Historical
-source remains named by Smith's migration-05s2 ledger: the copied provider
-codecs originated in Temper `25ac2ad`. Smith's current application domains
-did not consume those leaf APIs; its former fake byte peer did.
-
-The audit covers `crates/smith-llm-anthropic/src/tests.rs`, the corresponding
-OpenAI test module, and the old fake-domain/protocol packages. The original
-fixture provenance READMEs remain beside the moved captures. All 28 captured
-resource files (16 Anthropic and 12 OpenAI, excluding README prose) have been
-checked byte for byte by the integrating parent. Captures prove historical
-wire preservation, separately from synthetic semantic controls and current
-deployment admission.
-
-| Old assertion or surface | Shared ownership and disposition |
-| --- | --- |
-| `opaque_thinking_and_unknown_blocks_are_replayed_with_all_fields` and `thinking_start_extensions_survive_and_server_rejects_oversize_request` | Native codec controls preserve thinking extensions and complete unknown `future_block` nested proofs. `tests/llm/tests/fake.rs` carries actual Client → byte peer → resumed request controls for signed thinking, encrypted reasoning and unknown native blocks. Tagged replay admission still rejects another configured dialect. |
-| `archived_real_provider_requests_and_answers_match_known_completions` | `tests/llm/tests/archives.rs` uses the actual Client and the four moved Anthropic captures, retaining known text/call/stop/all-counter expectations. Existing OpenAI codec fixture controls remain. This establishes no current live subscription admission. |
-| `mutation_of_order_kind_index_or_terminal_fails_exactly_once` | Native decoder ordering/delta/terminal controls and actual stacked-client worlds retain one terminal. Native peer entrances now also refuse malformed known request/event fields before any write traversal. |
-| `malformed_json_duplicates_and_every_document_limit_are_refused` | Shared JSON and native codec controls retain grammar, queried-field duplicate, depth/string/token/document/part bounds. Unknown opaque extension fields are preserved rather than assigned a new global duplicate-key policy. |
-| Malformed received tool arguments and correction history | Codex's native argument field is a string: actual Client controls preserve malformed argument bytes and durable item metadata, send the exact paired error feedback, and receive a corrected call. UTF-8, raw string and complete escaped request bounds remain enforced. Anthropic's native input is an embedded object, so unrepresentable malformed history is explicitly refused; no rewritten call is substituted. Application effect admission still validates the original arguments. |
-| `server_events_roundtrip_and_errors_classify_status_and_resets` | Shared codec/common failure classification and real Client worlds own native event encoding, status/reset handling and error-body limits. Caller retry policy is not moved into the peer or Client. |
-| `input_cap_discards_only_input_and_answer_cap_cuts_the_open_tool` | A local receiving/input limit yields actual shared `Failure::Limit`; the adapter must convey that structured failure, execute no partial call, and retain lower settlement. It does not fabricate provider `Stop::MaxTokens` or a truncated successful completion. Provider-reported `MaxTokens` remains a distinct terminal. This deliberately changes the old truncation assertion. |
-| `measured_request_roundtrips_and_marks_only_four_tail_positions` | Measured bounded encoding, known sender/tool/schema admission and current native core decoding remain. Automatic four-tail `cache_control`/ephemeral TTL placement is deliberately unsupported by the present shared Prompt; no equivalent cache optimization is claimed. |
-| Legacy request `system` block array, `thinking_budget`, `metadata`, `context_management` | The present shared Prompt has neutral instructions, configured identity and reasoning effort. It does not expose those unconsumed native request fields. The peer parses admitted historical core requests and leaves unknown deployment options uninterpreted; it does not promise to reconstruct those options from the decoded neutral Prompt. Smith must not recreate provider policy to recover the old leaf surface. |
-| Fake random checkout argument menu and `delete_repository` | Caller-owned bounded `Menu` supplies complete bodies and invalid names. Smith/Temper worlds retain application scripts and effect expectations. No checkout vocabulary or tool authority remains in either shared fake. |
-| Fake OAuth issuer and Smith OAuth copy | The peer receives an explicit borrowed caller credential. Sign-in, claims exchange, refresh and durable credential storage remain with the external credential owner; this fake does not prove or replace Temper's credential-owner stories. |
-| Fake owned-memory assertions | `fake_memory.rs` attains script/menu/wrapper and all delayed-slot caps; composed memory controls price real protocol/client ownership and raw/envelope transit. Production bounds are checked without counting transferred outputs as retained domain state. |
-| `scripts_queries_and_answers_past_their_caps_are_refused` | `exact_joint_menu_script_cap_and_all_delayed_slots_include_empty_part_wrappers` retains script/menu and answer refusal. `exact_query_cap_is_accepted_and_one_byte_less_returns_one_actual_refusal` sends the same query at its exact cap and one byte below, then observes actual delayed success or `ContextTooLong`, one terminal for the original reply right and complete reclamation. |
-| `an_unrepresentable_memory_bound_is_refused` | `extreme_call_and_answer_configuration_has_no_representable_memory_bound` checks an ordinary bound and checked refusal for maximum call and answer capacities, without allocating the extreme configuration. |
-| `random_and_truncated_tool_answers_stay_within_the_scratch_bound` | `random_and_scripted_full_and_truncated_tool_scratch_stays_within_the_bound` meters actual startup, full generation, simultaneous truncation scratch, delayed `fire` and reclamation for random caller-menu tools and scripted tools. Both slots hold real answers; outputs preserve whole caller names/bodies or their literal cut prefix, actual ToolCalls/Length and usage. Owned outputs are observed and released before the meter checks the production bound; all caller data and retired slots are released afterward. |
-
-Smith's actual adapter, root/provider wire histories, application decoding,
-canonical concrete result rendering and consumer pin are a subsequent gated
-part of this same migration. They are pending here. No copied Smith package
-has been deleted and no consumer test count is inferred from this shared-kit
-checkpoint.
+The redacted Anthropic captures beside the shared codec keep their
+provenance. They flow through the actual Client under fragmentation and
+prove wire preservation, not current live subscription admission.
