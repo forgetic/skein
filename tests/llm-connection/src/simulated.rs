@@ -263,6 +263,11 @@ impl Host for Client {
             .flatten()
             .min()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.component.as_ref().and_then(Component::next_deadline)
+    }
+
     fn is_empty(&self) -> bool {
         self.io.is_empty()
             && self.io_events.is_empty()
@@ -324,6 +329,14 @@ impl Host for Process {
             Self::Peer(peer) => peer.next_deadline(),
         }
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        match self {
+            Self::Client(client) => client.next_policy_deadline(),
+            Self::Peer(peer) => peer.next_policy_deadline(),
+        }
+    }
+
     fn is_empty(&self) -> bool {
         match self {
             Self::Client(client) => client.is_empty(),

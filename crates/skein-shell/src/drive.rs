@@ -27,6 +27,10 @@ pub trait Host {
     /// Its earliest deadline, over every layer.
     fn next_deadline(&self) -> Option<Time>;
 
+    /// Its earliest policy deadline, excluding io close, retry and file stalls
+    /// (testing-strategy.md, section 6). Every host states it explicitly.
+    fn next_policy_deadline(&self) -> Option<Time>;
+
     /// Whether it holds nothing: every slab empty, nothing in flight, every
     /// queue empty (testing-strategy.md, 6).
     fn is_empty(&self) -> bool;

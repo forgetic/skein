@@ -55,9 +55,10 @@ fn a_hung_append_is_given_up_at_the_write_deadline_and_fails_the_stream_once() {
 }
 
 #[test]
-fn a_hung_append_while_closing_is_given_up_at_the_close_deadline() {
+fn a_stall_met_by_ios_close_deadline_passes() {
     let config = Config { faults: Faults { hung: 1000, ..Faults::NONE }, ..Config::calm() };
     let mut outcome = simulated(23, config, Story::Close, Memory::Checked);
+    assert_eq!(skein_world::Host::next_policy_deadline(&outcome.procs[0]), None);
     assert_eq!(outcome.end, Time::ZERO.saturating_add(Duration::from_millis(100)));
     assert_eq!(outcome.procs[0].failures(), 0);
     assert_eq!(outcome.machine.bytes(), b"prefix:");

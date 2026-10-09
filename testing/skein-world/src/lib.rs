@@ -51,7 +51,7 @@ pub use heap::Memory;
 pub use program::{
     HostedProgram, Inherited, Machine, NoMachine, StartupAppend, StartupAppends, StartupRoot, StartupRoots,
 };
-pub use referee::{Controls, Expectation, Expectations, Referee};
+pub use referee::{Controls, Expectation, Expectations, LastWord, Referee};
 pub use skein_shell::{Host, drive};
 pub use world::{Cut, Killed, Outcome, World};
 pub use writer_pipe::{PipeCapture, PipeHost, PipeWriter};

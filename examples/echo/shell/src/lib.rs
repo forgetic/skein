@@ -38,6 +38,11 @@ impl Host for Echo {
     fn next_deadline(&self) -> Option<Time> {
         self.svc.next_deadline()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.svc.next_policy_deadline()
+    }
+
     fn is_empty(&self) -> bool {
         self.svc.is_empty()
     }

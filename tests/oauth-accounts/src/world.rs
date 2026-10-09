@@ -608,6 +608,18 @@ impl Host for Client {
         .flatten()
         .min()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        [
+            self.component.as_ref().and_then(accounts::Component::next_deadline),
+            (self.story == Story::Released && self.component.is_some() && !self.closing)
+                .then(|| self.started.saturating_add(Duration::from_secs(40))),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
     fn is_empty(&self) -> bool {
         self.closed
             && self.io.is_empty()
@@ -669,6 +681,14 @@ impl Host for Process {
             Process::Issuer(peer) => peer.next_deadline(),
         }
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        match self {
+            Process::Client(client) => client.next_policy_deadline(),
+            Process::Issuer(peer) => peer.next_policy_deadline(),
+        }
+    }
+
     fn is_empty(&self) -> bool {
         match self {
             Process::Client(client) => client.is_empty(),

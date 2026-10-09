@@ -18,6 +18,24 @@ use core::cell::RefCell;
 use skein_io::kernel::ServiceSignal;
 use skein_lib::{Queue, Time};
 
+/// Where the referee places a scenario's last word (testing-strategy.md, 6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LastWord {
+    /// When the referee's last expectation is met, the ordinary default.
+    LastExpectation,
+    /// When its last expectation is met, and no earlier than this time.
+    After(Time),
+}
+
+impl LastWord {
+    pub(crate) fn at(self, met: Time) -> Time {
+        match self {
+            LastWord::LastExpectation => met,
+            LastWord::After(after) => met.max(after),
+        }
+    }
+}
+
 /// A scenario's referee, over its processes `P`.
 pub trait Referee<P> {
     /// Injects what belongs to no process, before they run in an iteration.
@@ -38,6 +56,11 @@ pub trait Referee<P> {
 
     /// Whether every expectation is met.
     fn passed(&self) -> bool;
+
+    /// The scenario's last word, later only for a named keep, idle or delay.
+    fn last_word(&self) -> LastWord {
+        LastWord::LastExpectation
+    }
 }
 
 /// One expectation of a scenario's, about its processes `P`.

@@ -123,3 +123,43 @@ fn referee_signal_reaches_a_hosted_child_through_its_pipe() {
     assert_eq!(outcome.procs[0].received, b"terminated");
     assert_eq!(outcome.procs[1].signals, [skein_io::kernel::ServiceSignal::Interrupt]);
 }
+
+#[test]
+#[should_panic(expected = "process 0 woke for policy deadline")]
+fn a_keep_time_after_the_last_word_fails_the_world_naming_the_process() {
+    let clock = Clock::new();
+    let deadline = clock.now().now.saturating_add(Duration::from_millis(5));
+    let mut world = real::World::new(Judge);
+    world.spawn(|| Script::new(&[Act::Pause(deadline)]));
+    let _outcome = world.run(&clock, Duration::from_secs(1));
+}
+
+#[test]
+fn a_world_that_ends_by_itself_passes() {
+    let mut world = real::World::new(Judge);
+    world.spawn(|| Script::new(&[]));
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    assert!(skein_world::Host::is_empty(&outcome.procs[0]));
+}
+
+#[test]
+fn a_scenario_that_names_a_later_last_word_may_wait_for_it() {
+    let clock = Clock::new();
+    let deadline = clock.now().now.saturating_add(Duration::from_millis(5));
+    let mut world = real::World::new(skein_world_tests::Later(skein_world::LastWord::After(deadline)));
+    world.spawn(|| Script::new(&[Act::Pause(deadline)]));
+    let outcome = world.run(&clock, Duration::from_secs(1));
+    assert!(outcome.end >= deadline);
+}
+
+#[test]
+#[should_panic(expected = "process 0 woke for policy deadline")]
+fn a_named_later_last_word_still_rejects_policy_deadlines_after_it() {
+    let clock = Clock::new();
+    let start = clock.now().now;
+    let after = start.saturating_add(Duration::from_millis(5));
+    let deadline = start.saturating_add(Duration::from_millis(10));
+    let mut world = real::World::new(skein_world_tests::Later(skein_world::LastWord::After(after)));
+    world.spawn(|| Script::new(&[Act::Pause(deadline)]));
+    let _outcome = world.run(&clock, Duration::from_secs(1));
+}

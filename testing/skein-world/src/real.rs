@@ -7,7 +7,9 @@
 //! while `spawn_signalfd` and `spawn_signals` supply roots' signal sources.
 //! `run` blocks only when every process and the control queue are idle,
 //! and returns once exits, operations and descriptor closures settle. It
-//! does not replay. Checked constructors meter each process separately; their
+//! checks policy deadlines kept before each wait after the referee's last
+//! word, before hosts can clear them (testing-strategy.md, 6). It does not
+//! replay. Checked constructors meter each process separately; their
 //! outcome verifies exact release on drop (testing-strategy.md, section 6).
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -347,9 +349,12 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
         let start = clock.now().now;
         let deadline = start.saturating_add(patience);
         let mut iterations: u32 = 0;
+        let mut last_word = None;
+        let mut policy_wake: Vec<(usize, Time)> = Vec::new();
         loop {
             iterations = iterations.checked_add(1).expect("fewer than 2^32 iterations");
             let Now { now, wall } = clock.now();
+            check_policy_wake(&mut policy_wake, now);
             assert!(now < deadline, "the real loop settles within {} ms", patience.as_nanos().div_euclid(1_000_000));
             self.world.referee.act(now, &mut self.world.procs);
             self.signals();
@@ -397,6 +402,9 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                 }
                 self.world.referee.observe(now, &self.world.procs);
             }
+            if last_word.is_none() && self.world.referee.passed() {
+                last_word = Some(self.world.referee.last_word().at(now));
+            }
             self.settle_children();
             self.settle_root_signals();
             self.submit_cleanup();
@@ -433,14 +441,35 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                     now.saturating_since(start).as_nanos().div_euclid(1_000_000)
                 ));
             }
-            let mut until = deadline;
-            for at in
-                self.world.procs.iter().map(Host::next_deadline).chain([self.world.referee.next_deadline()]).flatten()
-            {
-                until = until.min(at);
-            }
+            let until = self.wait_until(deadline);
+            policy_wake = self.policy_wake(last_word);
             self.ring.enter(Wait::Until(until));
         }
+    }
+
+    fn wait_until(&self, patience: Time) -> Time {
+        self.world
+            .procs
+            .iter()
+            .map(Host::next_deadline)
+            .chain([self.world.referee.next_deadline()])
+            .flatten()
+            .fold(patience, Time::min)
+    }
+
+    fn policy_wake(&self, last_word: Option<Time>) -> Vec<(usize, Time)> {
+        let mut deadlines = Vec::new();
+        if let Some(last_word) = last_word {
+            for (at, proc) in self.world.procs.iter().enumerate() {
+                if !proc.is_empty()
+                    && let Some(deadline) = proc.next_policy_deadline()
+                    && deadline > last_word
+                {
+                    deadlines.push((*self.ids.get(at).expect("an id per process"), deadline));
+                }
+            }
+        }
+        deadlines
     }
 
     fn signals(&mut self) {
@@ -922,6 +951,18 @@ fn open_startup_append(declaration: &crate::StartupAppend) -> Result<Fd, Error> 
     let opened = skein_shell::open_append(root, &declaration.path, declaration.mode);
     skein_shell::close_keeper_fd(root);
     opened
+}
+
+/// Checks deadlines kept before the wait, before a host can fire and clear them.
+fn check_policy_wake(deadlines: &mut Vec<(usize, Time)>, now: Time) {
+    for (process, deadline) in deadlines.drain(..) {
+        if now >= deadline {
+            crate::fail(&format!(
+                "process {process} woke for policy deadline {} ns after the last word",
+                deadline.as_nanos()
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

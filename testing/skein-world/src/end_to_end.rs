@@ -465,6 +465,10 @@ impl Host for Binary {
         self.poll_at
     }
 
+    fn next_policy_deadline(&self) -> Option<Time> {
+        None
+    }
+
     fn is_empty(&self) -> bool {
         self.pidfd.is_none()
             && self.stderr.is_none()

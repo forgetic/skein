@@ -90,6 +90,13 @@ impl Host for Proc {
         }
     }
 
+    fn next_policy_deadline(&self) -> Option<Time> {
+        match self {
+            Proc::Echo { svc, .. } => svc.next_policy_deadline(),
+            Proc::Client { client, .. } => client.next_policy_deadline(),
+        }
+    }
+
     fn is_empty(&self) -> bool {
         match self {
             Proc::Echo { svc, .. } => svc.is_empty(),

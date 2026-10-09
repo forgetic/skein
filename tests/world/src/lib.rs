@@ -226,6 +226,10 @@ impl Host for Script {
         if self.done { None } else { self.pause }
     }
 
+    fn next_policy_deadline(&self) -> Option<Time> {
+        if self.done { None } else { self.pause }
+    }
+
     fn is_empty(&self) -> bool {
         self.done && self.waiting.is_none() && self.completions.is_empty() && self.submissions.is_empty()
     }
@@ -327,3 +331,29 @@ pub fn client(start: Time, send: Time) -> Script {
 pub mod hosted;
 
 pub mod roots;
+
+/// An already-met scenario whose last word names the delay under test.
+#[derive(Clone, Copy, Debug)]
+pub struct Later(pub skein_world::LastWord);
+
+impl<P> Referee<P> for Later {
+    fn act(&mut self, _now: Time, _procs: &mut [P]) {}
+
+    fn observe(&mut self, _now: Time, _procs: &[P]) {}
+
+    fn next_deadline(&self) -> Option<Time> {
+        None
+    }
+
+    fn overdue(&self, _now: Time) -> Option<String> {
+        None
+    }
+
+    fn passed(&self) -> bool {
+        true
+    }
+
+    fn last_word(&self) -> skein_world::LastWord {
+        self.0
+    }
+}

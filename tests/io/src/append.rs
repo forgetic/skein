@@ -209,6 +209,11 @@ impl Host for Writer {
     fn next_deadline(&self) -> Option<Time> {
         self.io.next_deadline()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        None
+    }
+
     fn is_empty(&self) -> bool {
         self.phase == Phase::Closed && self.io.is_empty() && self.completions.is_empty() && self.submissions.is_empty()
     }

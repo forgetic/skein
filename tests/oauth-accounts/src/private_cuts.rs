@@ -66,6 +66,11 @@ impl Host for Process {
     fn next_deadline(&self) -> Option<Time> {
         self.inner.next_deadline()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.inner.next_policy_deadline()
+    }
+
     fn is_empty(&self) -> bool {
         self.closed && self.inner.is_empty() && self.completions.is_empty() && self.submissions.is_empty()
     }

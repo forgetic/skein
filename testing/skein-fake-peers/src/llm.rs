@@ -387,6 +387,11 @@ impl Host for Peer {
     fn next_deadline(&self) -> Option<Time> {
         [self.face.io.next_deadline(), self.domain.next_deadline()].into_iter().flatten().min()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.domain.next_deadline()
+    }
+
     fn is_empty(&self) -> bool {
         self.face.is_empty()
             && self.connections.is_empty()

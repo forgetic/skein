@@ -5,6 +5,8 @@
 //! it never inspects service state. `host` registers factories, `spawn_root`
 //! supplies startup roots, and `run` answers hosted spawns and their exits
 //! through the simulator (simulator.md, section 3; examples.md, section 6).
+//! Once the referee names its last word, a clock advance that requires a
+//! policy deadline fails before the host can fire it (testing-strategy.md, 6).
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -374,6 +376,7 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
         I: FnMut(&mut Sim, &[Pid], &[P]),
     {
         let mut iterations: u32 = 0;
+        let mut last_word = None;
         loop {
             iterations = iterations.checked_add(1).expect("within STEPS");
             if iterations >= STEPS {
@@ -401,6 +404,9 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
                 }
                 self.referee.observe(now, &self.procs);
             }
+            if last_word.is_none() && self.referee.passed() {
+                last_word = Some(self.referee.last_word().at(now));
+            }
             if self.busy(now) {
                 continue;
             }
@@ -413,7 +419,11 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
                 crate::fail(&format!("seed {seed}: at {at} ns, the referee failed the world:\n{why}\n{}", self.tail()));
             }
             match self.next() {
-                Some(at) => self.sim.advance_to(at.max(now)),
+                Some(at) => {
+                    let until = at.max(now);
+                    self.check_teardown(last_word, until);
+                    self.sim.advance_to(until);
+                }
                 None => {
                     let (seed, at) = (self.seed, now.as_nanos());
                     crate::fail(&format!(
@@ -442,6 +452,24 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
             procs: self.procs,
             iterations,
             submissions: self.submissions,
+        }
+    }
+
+    fn check_teardown(&self, last_word: Option<Time>, until: Time) {
+        let Some(last_word) = last_word else { return };
+        for (process, host) in self.procs.iter().enumerate() {
+            if !host.is_empty()
+                && let Some(deadline) = host.next_policy_deadline()
+                && deadline > last_word
+                && deadline <= until
+            {
+                crate::fail(&format!(
+                    "seed {}: process {process} requires policy deadline {} ns after the last word\n{}",
+                    self.seed,
+                    deadline.as_nanos(),
+                    self.tail()
+                ));
+            }
         }
     }
 

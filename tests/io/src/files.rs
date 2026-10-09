@@ -177,6 +177,11 @@ impl Host for Owner {
     fn next_deadline(&self) -> Option<Time> {
         self.io.next_deadline()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        None
+    }
+
     fn is_empty(&self) -> bool {
         self.phase == Phase::Settled
             && self.io.takes()

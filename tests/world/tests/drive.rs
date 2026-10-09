@@ -93,6 +93,11 @@ impl Host for Closing {
     fn next_deadline(&self) -> Option<Time> {
         Some(self.deadline)
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        Some(self.deadline)
+    }
+
     fn is_empty(&self) -> bool {
         self.stage == 2 && self.pending == 0 && self.submissions.is_empty()
     }

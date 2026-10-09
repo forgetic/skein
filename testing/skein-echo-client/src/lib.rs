@@ -312,6 +312,12 @@ impl Client {
         }
     }
 
+    /// Its scripted connection delays, excluding io's settlement deadlines.
+    #[must_use]
+    pub fn next_policy_deadline(&self) -> Option<Time> {
+        self.deadlines.next()
+    }
+
     /// How many connections it plans.
     #[must_use]
     pub fn conns(&self) -> u32 {

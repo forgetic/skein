@@ -260,6 +260,12 @@ impl Service {
         }
     }
 
+    /// The protocol layer's idle and listen-backoff deadlines, excluding io.
+    #[must_use]
+    pub fn next_policy_deadline(&self) -> Option<Time> {
+        self.protocol.next_deadline()
+    }
+
     /// Shuts the service down: the domain is told `Shutdown` in the next
     /// iteration, admits no one more and stops the listener; the connections
     /// it has run to their end. Lower-tier worlds use this entry point; the

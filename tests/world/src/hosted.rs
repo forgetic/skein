@@ -243,6 +243,11 @@ impl Host for Script {
     fn next_deadline(&self) -> Option<Time> {
         self.pause
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.pause
+    }
+
     fn is_empty(&self) -> bool {
         self.done && self.completions.is_empty() && self.submissions.is_empty()
     }
@@ -334,10 +339,15 @@ pub fn story(seed: u64, story: Story) -> skein_world::Outcome<Script, RootMachin
         latency_max: skein_lib::Duration::from_millis(1),
         ..skein_sim::Faults::NONE
     };
+    // EarlyExit deliberately pauses before writing to an already-ended child.
+    let last_word = match story {
+        Story::EarlyExit => skein_world::LastWord::After(Time::from_nanos(10_000_000)),
+        Story::Exchange | Story::Kill | Story::Terminate | Story::Memory => skein_world::LastWord::LastExpectation,
+    };
     let mut world = skein_world::World::new(
         seed,
         skein_sim::Config { faults, ..skein_sim::Config::calm() },
-        Judge,
+        crate::Later(last_word),
         skein_world::Memory::Checked,
     )
     .with_machine(RootMachine);

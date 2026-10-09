@@ -401,7 +401,10 @@ pub fn worst(seed: u64, config: Config) -> EchoWorld {
     let mut limits = server();
     limits.domain.sessions = 3;
     let mut world = World::new_controlled(seed, config, Memory::Checked, |controls| {
-        EchoReferee::new(seed, Vec::new(), Shutdown::WhenDone, controls)
+        // The full-buffer story runs until its four clients' scripted aborts.
+        let expect =
+            (0..4).map(|conn| Expect::Finished { at: 1, conn, by: ms(1_000).saturating_add(MARGIN) }).collect();
+        EchoReferee::new(seed, expect, Shutdown::WhenDone, controls)
     });
     world.spawn_signals(|signal| {
         let mut proc = Proc::echo(limits, listen(), seed);
