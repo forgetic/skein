@@ -1,0 +1,24 @@
+Admitted conversations now wait in bounded arrival records when their endpoint's
+connections are busy. Limits.calls names the owner's declaration; construction
+names connections < calls and admission names outstanding calls at that bound.
+Reusable bindings take the oldest eligible waiter, and idle bindings belonging
+to another endpoint close to make room. Whole is the only waiting deadline;
+waiting timeout fails Unsent and cancellation answers at once. Close serves
+already admitted waiters, while Abort cancels them before physical settlement.
+
+Follows llm-connection.md, sections 3, 4.1, 5.1, 6 and 7. Endpoint availability
+may let another endpoint progress; record reuse after cancellation never lets a
+new arrival pass an older waiter. The checked bound includes prepared waiting
+clients until the memory pool replaces them.
+
+Final rebased committed-tip gate (heavy task 104): formatting, clippy with
+warnings as errors and standalone skein-tls check passed. Focused 1442/1442 in
+2.490 s; fuzzy 81/81 in 7.592 s; browser 6/6 in 3.732 s. Serial waiting and
+memory stories (task 101) passed 9/9 in 0.227 s. Serial close/abort fuzzy story
+including waiting calls (task 103) replayed 48 seeded draws in 0.421 s.
+Deterministic stories cover connection waiting, unsent whole timeout, immediate
+cancel, independent endpoint progress, close/abort, idle binding eviction,
+arrival order after cancellation, and checked heap settlement. The smith probe
+parallel-children follows when smith04 declares conversations.
+
+Note added after merge: the commit was merged without its body.
