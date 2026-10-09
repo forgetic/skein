@@ -1,0 +1,12 @@
+Final committed-tip gate evidence for c006edba5982d6965656bd8c5599415a9d12838a,
+parent 41a420a61b6694192037df4dd00df1b518dc4bfa:
+heavy scripts/check.sh passed formatting, clippy with warnings as errors,
+standalone TLS check, focused 1500/1500 in 2.827s (run
+8be6509f-4b47-45bd-b1a5-b009d35b71e4), fuzzy 84/84 in 8.226s
+(fed9dbb4-5d11-49aa-9d98-3ebc37796a38), browser 6/6 in 3.603s
+(2a1677bc-d9b2-421e-bbee-e32f8f6d6928).
+Log: /tmp/skein013-gate-final.log.
+Final-tip serial append selection: 12/12 in 0.117s (0206911b-f8b4-4669-8041-9f468245ca54).
+Final-tip serial fuzzy append/files: 2/2 in 0.228s (22a87f9e-8fa9-43d4-884b-9a2f29e4813d).
+The commit body explicitly labels the first passing pre-commit gate;
+this note records the exact final hash's checks, without rewriting main.
