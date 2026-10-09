@@ -141,6 +141,11 @@ pub fn poll_child(pidfd: Fd, reap: bool) -> Result<Option<Exit>, Error> {
     process::poll_child(pidfd, reap)
 }
 
+/// Tests a keeper's pidfd for exit, including descendants not yet adopted.
+pub fn pidfd_exited(pidfd: Fd) -> Result<bool, Error> {
+    process::pidfd_exited(pidfd)
+}
+
 /// Sends a keeper's signal through the owned pidfd, including its group.
 pub fn signal_kept_child(
     pidfd: Fd,

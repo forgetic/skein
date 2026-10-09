@@ -5,6 +5,8 @@
 //! An abandoned keeper performs the same settlement before releasing its paths.
 //! The last keeper restores the observer's prior subreaper setting, so later
 //! fixture descendants are not adopted on that binary's behalf.
+//! Supervised scenarios keep identities before adoption, survey live members,
+//! and choose their own TERM and KILL deadlines (benchmarks.md, section 10).
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::cell::{Cell, RefCell};
@@ -61,6 +63,58 @@ pub enum Expectation {
     EndsWithBinary,
     /// A measured command may leave children, which the keeper kills and counts.
     Measure,
+    /// A referee owns the deadlines and signals; natural settlement never kills.
+    Supervise,
+}
+
+/// The strongest cleanup signal delivered to a process observed alive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cleanup {
+    /// Every process ended without a cleanup signal.
+    None,
+    /// At least one live process received TERM, and none received KILL.
+    Terminate,
+    /// At least one live process still needed KILL.
+    Kill,
+}
+
+/// Outside evidence retained by a supervised observer, including after settlement.
+#[derive(Debug)]
+pub struct TreeStatus {
+    /// The leader and descendants alive at the most recent keeper poll.
+    pub live_pids: Vec<u32>,
+    /// Live descendants when the leader's exit was first observed; absent before it.
+    pub live_at_leader_exit: Option<Vec<u32>>,
+    /// Identities observed alive and successfully sent TERM by the keeper.
+    pub terminated_pids: Vec<u32>,
+    /// Identities observed alive and successfully sent KILL by the keeper.
+    pub killed_pids: Vec<u32>,
+    /// A live member needed KILL, including a cgroup member racing the pidfd scan.
+    pub forced_cleanup: bool,
+}
+
+impl TreeStatus {
+    pub(crate) fn new() -> Self {
+        Self {
+            live_pids: Vec::new(),
+            live_at_leader_exit: None,
+            terminated_pids: Vec::new(),
+            killed_pids: Vec::new(),
+            forced_cleanup: false,
+        }
+    }
+
+    /// The strongest successful cleanup action, rather than a requested signal.
+    #[must_use]
+    pub fn cleanup(&self) -> Cleanup {
+        if self.forced_cleanup {
+            Cleanup::Kill
+        } else if !self.terminated_pids.is_empty() {
+            Cleanup::Terminate
+        } else {
+            Cleanup::None
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -69,6 +123,8 @@ pub(crate) struct Tree {
     baseline: Resources,
     ignored: BTreeSet<u32>,
     children: BTreeMap<u32, Fd>,
+    // Descendants still parented beneath the leader cannot be waited on yet.
+    members: BTreeMap<u32, Fd>,
     leader: Option<u32>,
     finished: bool,
 }
@@ -111,6 +167,7 @@ impl Tree {
             baseline: baseline.children,
             ignored,
             children: BTreeMap::new(),
+            members: BTreeMap::new(),
             leader: None,
             finished: false,
         })
@@ -147,6 +204,10 @@ impl Tree {
                     continue;
                 }
             }
+            if let Some(descriptor) = self.members.remove(&pid) {
+                self.children.insert(pid, descriptor);
+                continue;
+            }
             match skein_shell::open_pidfd(pid) {
                 Ok(descriptor) => {
                     self.children.insert(pid, descriptor);
@@ -155,6 +216,104 @@ impl Tree {
                 Err(error) => crate::fail(&format!("opening tree member {pid}: {error:?}")),
             }
         }
+    }
+
+    /// Keeps identities below the leader before they are orphaned, including
+    /// other sessions. A cgroup additionally finds every contained generation.
+    fn discover(&mut self) {
+        self.refresh();
+        self.members.retain(|_, descriptor| {
+            if exited(*descriptor) {
+                skein_shell::close_keeper_fd(*descriptor);
+                false
+            } else {
+                true
+            }
+        });
+        let mut pending: Vec<_> =
+            self.leader.into_iter().chain(self.children.keys().copied()).chain(self.members.keys().copied()).collect();
+        if let Some(group) = &self.cgroup {
+            pending.extend(group.members());
+        }
+        let mut visited = BTreeSet::new();
+        while let Some(pid) = pending.pop() {
+            if !visited.insert(pid) || self.ignored.contains(&pid) {
+                continue;
+            }
+            if Some(pid) != self.leader && !self.children.contains_key(&pid) && !self.members.contains_key(&pid) {
+                match skein_shell::open_pidfd(pid) {
+                    Ok(descriptor) => {
+                        self.members.insert(pid, descriptor);
+                    }
+                    Err(Error::Other(3_i32)) => continue,
+                    Err(error) => crate::fail(&format!("opening supervised tree member {pid}: {error:?}")),
+                }
+            }
+            let found = process_children(pid);
+            // A non-child may be reaped by its parent during proc traversal;
+            // never attach a reused PID's descendants to the old identity.
+            if self.members.get(&pid).is_none_or(|descriptor| !exited(*descriptor)) {
+                pending.extend(found);
+            }
+        }
+        self.refresh();
+    }
+
+    pub(crate) fn survey(&mut self, leader: Fd) -> Vec<u32> {
+        self.discover();
+        let mut live = Vec::new();
+        if !exited(leader) {
+            live.extend(self.leader);
+        }
+        for (&pid, &descriptor) in &self.children {
+            if !exited(descriptor) {
+                live.push(pid);
+            }
+        }
+        for (&pid, &descriptor) in &self.members {
+            if !exited(descriptor) {
+                live.push(pid);
+            }
+        }
+        live.sort_unstable();
+        live
+    }
+
+    pub(crate) fn leader_exited(&self, live: &[u32]) -> Vec<u32> {
+        live.iter().copied().filter(|pid| Some(*pid) != self.leader).collect()
+    }
+
+    pub(crate) fn unpopulated(&mut self) -> bool {
+        !self.cgroup.as_mut().is_some_and(Cgroup::populated)
+    }
+
+    pub(crate) fn signal(&mut self, leader: Fd, signal: Signal) -> (Vec<u32>, bool) {
+        self.discover();
+        let mut delivered = Vec::new();
+        // Signal descendants first: a leader's TERM handler may exit immediately.
+        for (&pid, &descriptor) in self.children.iter().chain(&self.members) {
+            if deliver(descriptor, signal) {
+                delivered.push(pid);
+            }
+        }
+        if deliver(leader, signal) {
+            delivered.extend(self.leader);
+        }
+        let mut forced = signal == Signal::Kill && !delivered.is_empty();
+        if signal == Signal::Kill
+            && let Some(group) = &mut self.cgroup
+        {
+            forced |= group.populated();
+        }
+        if signal == Signal::Kill
+            && let Some(group) = &self.cgroup
+        {
+            // Cover forks racing the pidfd scan; cgroup.kill is recursive.
+            fs::write(group.binary.join("cgroup.kill"), b"1")
+                .unwrap_or_else(|error| crate::fail(&format!("killing supervised tree: {error}")));
+        }
+        delivered.sort_unstable();
+        (delivered, forced)
     }
 
     pub(crate) fn finish(&mut self, leader: Fd, expectation: Expectation, observed: bool) -> Result<Counts, String> {
@@ -176,9 +335,14 @@ impl Tree {
                     }
                 }
             }
-            fs::write(group.binary.join("cgroup.kill"), b"1").map_err(|error| format!("killing tree: {error}"))?;
+            if expectation != Expectation::Supervise {
+                fs::write(group.binary.join("cgroup.kill"), b"1").map_err(|error| format!("killing tree: {error}"))?;
+            }
         }
-        let _signal = call(&mut kernel, Op::Signal { pidfd: leader, signal: Signal::Kill, to: Target::Group }, until);
+        if expectation != Expectation::Supervise {
+            let _signal =
+                call(&mut kernel, Op::Signal { pidfd: leader, signal: Signal::Kill, to: Target::Group }, until);
+        }
         // Reaping adopted children may expose another generation. Scan after every
         // batch, including an empty batch while cgroup.events remains populated.
         loop {
@@ -188,8 +352,13 @@ impl Tree {
                 if skein_shell::poll_child(descriptor, false).is_ok_and(|status| status.is_none()) {
                     lingering.push(pid);
                 }
-                let _signal =
-                    call(&mut kernel, Op::Signal { pidfd: descriptor, signal: Signal::Kill, to: Target::Child }, until);
+                if expectation != Expectation::Supervise {
+                    let _signal = call(
+                        &mut kernel,
+                        Op::Signal { pidfd: descriptor, signal: Signal::Kill, to: Target::Child },
+                        until,
+                    );
+                }
                 call(&mut kernel, Op::Wait { pidfd: descriptor, reap: false }, until)?;
                 call(&mut kernel, Op::Wait { pidfd: descriptor, reap: true }, until)?;
                 call(&mut kernel, Op::Close { fd: descriptor }, until)?;
@@ -212,6 +381,9 @@ impl Tree {
             }
         }
         call(&mut kernel, Op::Wait { pidfd: leader, reap: true }, until)?;
+        for descriptor in core::mem::take(&mut self.members).into_values() {
+            call(&mut kernel, Op::Close { fd: descriptor }, until)?;
+        }
         let counts = match &self.cgroup {
             Some(group) => group.counts()?,
             None => {
@@ -275,6 +447,34 @@ fn difference(after: Duration, before: Duration) -> Duration {
     Duration::from_nanos(after.as_nanos().checked_sub(before.as_nanos()).expect("resource CPU never falls"))
 }
 
+fn exited(descriptor: Fd) -> bool {
+    skein_shell::pidfd_exited(descriptor)
+        .unwrap_or_else(|error| crate::fail(&format!("polling tree identity: {error:?}")))
+}
+
+fn deliver(descriptor: Fd, signal: Signal) -> bool {
+    if exited(descriptor) {
+        return false;
+    }
+    match skein_shell::signal_kept_child(descriptor, signal, Target::Child) {
+        Ok(()) => true,
+        Err(Error::NotFound | Error::Other(3_i32)) => false,
+        Err(error) => crate::fail(&format!("signalling tree identity: {error:?}")),
+    }
+}
+
+fn process_children(pid: u32) -> BTreeSet<u32> {
+    let mut result = BTreeSet::new();
+    if let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) {
+        for task in tasks.flatten() {
+            if let Ok(list) = fs::read_to_string(task.path().join("children")) {
+                result.extend(list.split_whitespace().filter_map(|pid| pid.parse::<u32>().ok()));
+            }
+        }
+    }
+    result
+}
+
 fn children() -> BTreeSet<u32> {
     let mut result = BTreeSet::new();
     for task in fs::read_dir("/proc/self/task").expect("the observer has a proc task directory").flatten() {
@@ -303,6 +503,24 @@ pub(crate) fn call(kernel: &mut Kernel, operation: Op, until: Time) -> Result<Do
 }
 
 impl Cgroup {
+    fn members(&self) -> BTreeSet<u32> {
+        let mut result = BTreeSet::new();
+        let mut pending = vec![self.binary.clone()];
+        while let Some(directory) = pending.pop() {
+            if let Ok(list) = fs::read_to_string(directory.join("cgroup.procs")) {
+                result.extend(list.split_whitespace().filter_map(|pid| pid.parse::<u32>().ok()));
+            }
+            if let Ok(entries) = fs::read_dir(directory) {
+                for entry in entries.flatten() {
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        pending.push(entry.path());
+                    }
+                }
+            }
+        }
+        result
+    }
+
     fn prepare() -> Option<Self> {
         if CGROUP_BASE.with(|base| base.borrow().is_some()) {
             return CGROUP_BASE.with(|base| {

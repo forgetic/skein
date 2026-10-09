@@ -568,6 +568,20 @@ pub(super) fn poll_child(pidfd: Fd, reap: bool) -> Result<Option<skein_io::kerne
     }))
 }
 
+/// Tests exit readiness without requiring the process to be this observer's child.
+pub(super) fn pidfd_exited(pidfd: Fd) -> Result<bool, Error> {
+    let mut watched = libc::pollfd { fd: pidfd.raw(), events: libc::POLLIN, revents: 0 };
+    // SAFETY: watched names one owned pidfd and remains writable throughout poll.
+    let result = unsafe { libc::poll(ptr::from_mut(&mut watched), 1, 0) };
+    if result < 0 {
+        return Err(Error::Other(super::last_errno()));
+    }
+    if watched.revents & libc::POLLNVAL != 0 {
+        return Err(Error::InvalidArgument);
+    }
+    Ok(watched.revents & (libc::POLLIN | libc::POLLHUP) != 0)
+}
+
 /// Closes a test keeper's descriptor on startup or abandonment, outside normal ring settlement.
 pub(super) fn close_keeper_fd(descriptor: Fd) {
     // SAFETY: the keeper relinquishes its exclusively owned descriptor here.

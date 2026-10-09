@@ -5,6 +5,8 @@
 //! controlling terminal, `take_streams` transfers the scripted ends for
 //! adoption, and the `Host` entry points wait, signal, read and close on
 //! the world's shared ring. The referee observes stderr and `exit_status`.
+//! A supervised tree retains its keeper after leader exit; `signal_tree` queues
+//! member-pidfd delivery by the keeper, while the referee owns the grace.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
@@ -16,7 +18,7 @@ use skein_shell::{Config, Kernel, OpenError, Wait};
 
 use crate::Host;
 use crate::tree::{self, Tree};
-pub use crate::tree::{Counts, Expectation, Method, PeakScope};
+pub use crate::tree::{Cleanup, Counts, Expectation, Method, PeakScope, TreeStatus};
 
 /// A scenario's binary command, with an exact environment and working directory.
 #[derive(Debug)]
@@ -81,7 +83,10 @@ pub struct Binary {
     wait_started: bool,
     reading: bool,
     signal: Option<(Signal, Target)>,
+    tree_signal: Option<Signal>,
+    tree_sweep: Option<Signal>,
     tree: Option<Box<Tree>>,
+    tree_status: Box<TreeStatus>,
     counts: Option<Counts>,
     expectation: Expectation,
     poll_at: Option<Time>,
@@ -176,7 +181,10 @@ impl Binary {
             wait_started: false,
             reading: false,
             signal: None,
+            tree_signal: None,
+            tree_sweep: None,
             tree: Some(Box::new(tree)),
+            tree_status: Box::new(TreeStatus::new()),
             counts: None,
             expectation,
             poll_at: Some(Time::ZERO),
@@ -214,9 +222,29 @@ impl Binary {
         self.signal = Some((signal, Target::Group));
     }
 
+    /// Queues a keeper signal to every discovered live tree member, including
+    /// detached descendants after leader exit. `Supervise` leaves its grace and
+    /// escalation deadlines to the referee. Membership is refreshed at delivery.
+    pub fn signal_tree(&mut self, signal: Signal) {
+        assert_eq!(self.expectation, Expectation::Supervise, "whole-tree policy belongs to a supervised observer");
+        assert!(self.tree.is_some(), "a signal needs a retained tree keeper");
+        assert!(self.tree_signal.is_none(), "one pending tree signal at a time");
+        self.tree_signal = Some(signal);
+    }
+
+    /// The supervised tree's last poll and delivered cleanup signals. Its
+    /// history remains available after `counts` reports genuine settlement.
+    #[must_use]
+    pub fn tree_status(&self) -> &TreeStatus {
+        &self.tree_status
+    }
+
     /// Ends a measured command; final counts arrive after its tree settles.
     pub fn end(&mut self) {
-        self.signal_group(Signal::Kill);
+        match self.expectation {
+            Expectation::Supervise => self.signal_tree(Signal::Kill),
+            Expectation::EndsWithBinary | Expectation::Measure => self.signal_group(Signal::Kill),
+        }
     }
 
     /// The terminal counts, present only once the binary and every descendant settled.
@@ -305,7 +333,8 @@ impl Drop for Binary {
 
 impl Host for Binary {
     fn iterate(&mut self, now: Time, _wall: Wall) {
-        if self.poll_at.is_some_and(|at| at <= now) {
+        let poll_tree = self.poll_at.is_some_and(|at| at <= now);
+        if poll_tree {
             if let Some(tree) = &mut self.tree {
                 tree.refresh();
             }
@@ -313,6 +342,31 @@ impl Host for Binary {
         }
         while let Some(complete) = self.completions.pop() {
             self.completed(complete);
+        }
+        if self.expectation == Expectation::Supervise
+            && (poll_tree || self.status.is_some() && self.tree_status.live_at_leader_exit.is_none())
+            && let Some(tree) = &mut self.tree
+        {
+            self.tree_status.live_pids = tree.survey(self.pidfd.expect("a retained tree has its leader pidfd"));
+            if self.status.is_some() && self.tree_status.live_at_leader_exit.is_none() {
+                self.tree_status.live_at_leader_exit = Some(tree.leader_exited(&self.tree_status.live_pids));
+            }
+        }
+        if let Some(signal) = self.tree_signal.take().or(if poll_tree { self.tree_sweep } else { None }) {
+            if signal == Signal::Kill {
+                self.tree_sweep = Some(Signal::Kill);
+            }
+            let tree = self.tree.as_mut().expect("a pending signal has a tree");
+            let (delivered, forced) = tree.signal(self.pidfd.expect("a retained tree has its leader pidfd"), signal);
+            self.tree_status.forced_cleanup |= forced;
+            let history = match signal {
+                Signal::Terminate => &mut self.tree_status.terminated_pids,
+                Signal::Kill => &mut self.tree_status.killed_pids,
+            };
+            history.extend(delivered);
+            history.sort_unstable();
+            history.dedup();
+            self.tree_status.live_pids = tree.survey(self.pidfd.expect("a retained tree has its leader pidfd"));
         }
         if let Some(streams) = self.streams.take() {
             for fd in streams.descriptors() {
@@ -339,6 +393,12 @@ impl Host for Binary {
             && !self.signalling
             && let Some(pidfd) = self.pidfd
         {
+            if self.expectation == Expectation::Supervise {
+                let tree = self.tree.as_mut().expect("a retained leader has a tree");
+                if !self.tree_status.live_pids.is_empty() || !tree.unpopulated() {
+                    return;
+                }
+            }
             if let Some(tree) = &mut self.tree {
                 self.counts = Some(tree.finish(pidfd, self.expectation, true).unwrap_or_else(|why| crate::fail(&why)));
             }
@@ -363,8 +423,12 @@ impl Host for Binary {
             || !self.wait_started
             || self.streams.is_some()
             || (self.signal.is_some() && !self.signalling)
+            || self.tree_signal.is_some()
             || (self.stderr.is_some() && !self.reading)
-            || (self.status.is_some() && self.pidfd.is_some() && !self.signalling)
+            || (self.expectation != Expectation::Supervise
+                && self.status.is_some()
+                && self.pidfd.is_some()
+                && !self.signalling)
     }
 
     fn next_deadline(&self) -> Option<Time> {
@@ -378,6 +442,7 @@ impl Host for Binary {
             && self.closing == 0
             && !self.signalling
             && self.signal.is_none()
+            && self.tree_signal.is_none()
             && self.completions.is_empty()
             && self.submissions.is_empty()
     }

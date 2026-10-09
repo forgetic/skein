@@ -502,3 +502,258 @@ fn a_failed_binary_start_restores_the_original_subreaper_setting() {
     assert!(matches!(Binary::start(missing, Mode::Pipes, 1024), Err(StartError::Child(_))));
     assert_eq!(skein_shell::subreaper().expect("the setting after failed startup"), original);
 }
+
+#[derive(Clone, Copy)]
+enum SupervisedTrigger {
+    Ready,
+    LeaderExit,
+    Bound,
+    Never,
+}
+
+struct SupervisedJudge {
+    trigger: SupervisedTrigger,
+    term_at: Option<Time>,
+    kill_at: Option<Time>,
+    next: Option<Time>,
+    saw_retained_exit: bool,
+    saw_grace: bool,
+}
+
+impl Referee<Process> for SupervisedJudge {
+    fn act(&mut self, now: Time, procs: &mut [Process]) {
+        let Process::Child(child) = &mut procs[0] else { panic!("binary observer") };
+        if self.term_at.is_none() {
+            let ready = match self.trigger {
+                SupervisedTrigger::Ready => ready_descendant(child.stderr()).is_some(),
+                SupervisedTrigger::LeaderExit => child.exit_status().is_some(),
+                SupervisedTrigger::Bound => now >= Time::ZERO.saturating_add(Duration::from_millis(10)),
+                SupervisedTrigger::Never => false,
+            };
+            if ready {
+                if child.exit_status().is_some() && !child.tree_status().live_pids.is_empty() {
+                    assert!(child.counts().is_none(), "a living tree retains its keeper after leader exit");
+                    self.saw_retained_exit = true;
+                }
+                child.signal_tree(Signal::Terminate);
+                self.term_at = Some(now);
+            }
+        } else if let Some(term_at) = self.term_at
+            && child.counts().is_none()
+        {
+            let grace = term_at.saturating_add(Duration::from_millis(20));
+            if child.exit_status().is_some() && !child.tree_status().live_pids.is_empty() && now < grace {
+                self.saw_grace = true;
+                self.saw_retained_exit = true;
+                assert!(child.tree_status().killed_pids.is_empty(), "the keeper leaves escalation to its referee");
+            }
+            if now >= grace && self.kill_at.is_none() {
+                child.signal_tree(Signal::Kill);
+                self.kill_at = Some(now);
+            }
+        }
+    }
+
+    fn observe(&mut self, now: Time, procs: &[Process]) {
+        let Process::Child(child) = &procs[0] else { panic!("binary observer") };
+        self.next = if child.counts().is_some() {
+            None
+        } else if let Some(term_at) = self.term_at {
+            self.kill_at.is_none().then_some(term_at.saturating_add(Duration::from_millis(20)))
+        } else {
+            match self.trigger {
+                SupervisedTrigger::Ready => ready_descendant(child.stderr()).is_some().then_some(now),
+                SupervisedTrigger::LeaderExit => child.exit_status().is_some().then_some(now),
+                SupervisedTrigger::Bound => Some(Time::ZERO.saturating_add(Duration::from_millis(10))),
+                SupervisedTrigger::Never => None,
+            }
+        };
+    }
+
+    fn next_deadline(&self) -> Option<Time> {
+        self.next
+    }
+    fn overdue(&self, _now: Time) -> Option<String> {
+        None
+    }
+    fn passed(&self) -> bool {
+        if self.kill_at.is_some() {
+            self.saw_grace && self.saw_retained_exit
+        } else {
+            match self.trigger {
+                SupervisedTrigger::LeaderExit => self.saw_retained_exit,
+                SupervisedTrigger::Ready | SupervisedTrigger::Bound | SupervisedTrigger::Never => true,
+            }
+        }
+    }
+}
+
+fn supervised_run(mode: &str, force_walk: bool, trigger: SupervisedTrigger) -> real::Outcome<Process> {
+    use skein_world::end_to_end::Expectation;
+    let binary = Binary::start_with_tree(fixture(mode), Mode::Pipes, 4096, Expectation::Supervise, force_walk)
+        .expect("a supervised fixture starts");
+    let judge = SupervisedJudge {
+        trigger,
+        term_at: None,
+        kill_at: None,
+        next: None,
+        saw_retained_exit: false,
+        saw_grace: false,
+    };
+    let mut world = real::World::new(judge);
+    world.spawn_with_fds(binary.descriptors(), || Process::Child(binary));
+    world.run(&Clock::new(), Duration::from_secs(1))
+}
+
+#[test]
+fn a_supervised_natural_tree_settles_without_cleanup() {
+    use skein_world::end_to_end::Cleanup;
+    for force_walk in [true, false] {
+        for mode in ["exit", "escape-zombie-exit"] {
+            let outcome = supervised_run(mode, force_walk, SupervisedTrigger::Never);
+            let child = tree_child(&outcome);
+            assert_tree_counted(child, force_walk);
+            assert_eq!(child.tree_status().cleanup(), Cleanup::None);
+            assert!(child.tree_status().live_pids.is_empty());
+            assert_eq!(child.tree_status().live_at_leader_exit, Some(Vec::new()));
+        }
+    }
+}
+
+#[test]
+fn a_supervised_tree_retains_detached_descendants_after_natural_leader_exit() {
+    use skein_world::end_to_end::Cleanup;
+    for force_walk in [true, false] {
+        let outcome = supervised_run("escape-exit", force_walk, SupervisedTrigger::LeaderExit);
+        let child = tree_child(&outcome);
+        let pid = descendant(child.stderr());
+        assert_eq!(child.tree_status().live_at_leader_exit, Some(vec![pid]));
+        assert_eq!(child.tree_status().cleanup(), Cleanup::Terminate);
+        assert!(child.tree_status().terminated_pids.contains(&pid));
+        assert!(child.tree_status().killed_pids.is_empty());
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        assert_tree_counted(child, force_walk);
+    }
+}
+
+#[test]
+fn whole_tree_term_reaches_detached_descendants_before_the_leader_exits() {
+    use skein_world::end_to_end::Cleanup;
+    for force_walk in [true, false] {
+        for mode in ["supervise-term", "supervise-grandchild"] {
+            let outcome = supervised_run(mode, force_walk, SupervisedTrigger::Ready);
+            let child = tree_child(&outcome);
+            assert_eq!(child.tree_status().cleanup(), Cleanup::Terminate);
+            assert!(child.tree_status().terminated_pids.contains(&descendant(child.stderr())));
+            assert!(child.stderr().windows(b"tree-term".len()).any(|bytes| bytes == b"tree-term"));
+            assert!(child.tree_status().killed_pids.is_empty());
+            if mode == "supervise-grandchild" {
+                let grandchild: u32 = std::str::from_utf8(child.stderr())
+                    .expect("fixture text")
+                    .lines()
+                    .find_map(|line| line.strip_prefix("grandchild:")?.parse().ok())
+                    .expect("the fixture reports a detached grandchild");
+                assert!(child.tree_status().terminated_pids.contains(&grandchild));
+                assert!(!std::path::Path::new(&format!("/proc/{grandchild}")).exists());
+            }
+            assert_tree_counted(child, force_walk);
+        }
+    }
+}
+
+#[test]
+fn a_supervised_tree_honors_grace_after_leader_exit_then_reports_forced_kill() {
+    use skein_world::end_to_end::Cleanup;
+    for force_walk in [true, false] {
+        let outcome = supervised_run("supervise-ignore", force_walk, SupervisedTrigger::Ready);
+        let child = tree_child(&outcome);
+        let pid = descendant(child.stderr());
+        assert_eq!(child.tree_status().live_at_leader_exit, Some(vec![pid]));
+        assert_eq!(child.tree_status().cleanup(), Cleanup::Kill);
+        assert!(child.tree_status().terminated_pids.contains(&pid));
+        assert_eq!(child.tree_status().killed_pids, vec![pid]);
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        assert_tree_counted(child, force_walk);
+    }
+}
+
+#[test]
+fn a_supervised_never_ending_leader_receives_the_referees_term_bound() {
+    use skein_world::end_to_end::Cleanup;
+    for force_walk in [true, false] {
+        let outcome = supervised_run("never", force_walk, SupervisedTrigger::Bound);
+        let child = tree_child(&outcome);
+        assert_eq!(child.exit_status(), Some(Exit::Signal(15)));
+        assert_eq!(child.tree_status().cleanup(), Cleanup::Terminate);
+        assert_tree_counted(child, force_walk);
+    }
+}
+
+#[test]
+fn supervised_tree_signals_leave_an_existing_unrelated_child_running() {
+    for force_walk in [true, false] {
+        let mut unrelated = std::process::Command::new("sleep").arg("60").spawn().expect("an unrelated child starts");
+        let outcome = supervised_run("supervise-ignore", force_walk, SupervisedTrigger::Ready);
+        assert!(unrelated.try_wait().expect("inspect the unrelated child").is_none());
+        assert!(!tree_child(&outcome).tree_status().terminated_pids.contains(&unrelated.id()));
+        assert!(!tree_child(&outcome).tree_status().killed_pids.contains(&unrelated.id()));
+        unrelated.kill().expect("the unrelated owner ends its child");
+        unrelated.wait().expect("the unrelated owner reaps its child");
+    }
+}
+
+#[test]
+fn supervised_tree_signals_stay_inside_their_own_delegated_cgroup() {
+    use skein_world::end_to_end::{Expectation, Method};
+    let first = Binary::start_with_tree(fixture("supervise-ignore"), Mode::Pipes, 4096, Expectation::Supervise, false)
+        .expect("the first supervised observer starts");
+    let second = Binary::start_with_tree(fixture("never"), Mode::Pipes, 4096, Expectation::Supervise, false);
+    let Ok(mut second) = second else {
+        drop(first); // A walk deliberately refuses a concurrent observer.
+        return;
+    };
+    let pidfd = second.descriptors()[0];
+    let mut world = real::World::new(SupervisedJudge {
+        trigger: SupervisedTrigger::Ready,
+        term_at: None,
+        kill_at: None,
+        next: None,
+        saw_retained_exit: false,
+        saw_grace: false,
+    });
+    world.spawn_with_fds(first.descriptors(), || Process::Child(first));
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    assert_eq!(tree_child(&outcome).counts().expect("the first tree settled").method, Method::Cgroup);
+    assert_eq!(skein_shell::poll_child(pidfd, false).expect("the second leader remains owned"), None);
+    second.signal_tree(Signal::Terminate);
+    let mut world = real::World::new(TreeJudge { end: false, sent: false });
+    world.spawn_with_fds(second.descriptors(), || Process::Child(second));
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    assert_eq!(tree_child(&outcome).exit_status(), Some(Exit::Signal(15)));
+    assert_eq!(tree_child(&outcome).counts().expect("the second tree settled").method, Method::Cgroup);
+}
+
+#[test]
+fn a_supervised_natural_stream_drains_before_terminal_counts() {
+    use skein_world::end_to_end::{Cleanup, Expectation};
+    let mut binary = Binary::start_with_tree(
+        command("printf answer; printf diagnostic >&2"),
+        Mode::Pipes,
+        4096,
+        Expectation::Supervise,
+        false,
+    )
+    .expect("a supervised stream fixture starts");
+    let streams = binary.take_streams().expect("the person's streams");
+    let mut world = real::World::new(Judge { signal: false, sent: false, act_at: None });
+    world.spawn_with_fds(binary.descriptors(), || Process::Child(binary));
+    world.spawn_with_fds(streams.descriptors(), || {
+        Process::Person(Script::pipes(streams.descriptors(), &[Act::Close(0), Act::Read(0), Act::Read(0)]))
+    });
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    let (child, person) = observations(&outcome);
+    assert_eq!(person.received, b"answer");
+    assert_eq!(child.stderr(), b"diagnostic");
+    assert_eq!(child.tree_status().cleanup(), Cleanup::None);
+    assert_tree_counted(child, false);
+}

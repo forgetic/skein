@@ -71,6 +71,34 @@ fn main() -> ExitCode {
         Some("never") => loop {
             std::thread::park();
         },
+        Some(mode @ ("supervise-term" | "supervise-ignore" | "supervise-grandchild")) => {
+            let mut command = Command::new("/usr/bin/setsid");
+            command.arg("/bin/sh");
+            let script = match mode {
+                "supervise-term" => {
+                    "trap 'printf tree-term\\n >&2; exit 0' TERM; printf 'ready\\n'; while :; do :; done"
+                }
+                "supervise-ignore" => "trap '' TERM; printf 'ready\\n'; exec sleep 60",
+                "supervise-grandchild" => {
+                    "/usr/bin/setsid /bin/sh -c \"trap 'printf tree-term\\\\n >&2; exit 0' TERM; printf 'ready\\\\n'; while :; do :; done\" & printf 'grandchild:%s\\n' \"$!\" >&2; wait"
+                }
+                _ => unreachable!("the fixture selected its supervised mode"),
+            };
+            let mut child = command
+                .args(["-c", script])
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("the fixture starts its detached descendant");
+            let mut ready = String::new();
+            BufReader::new(child.stdout.take().expect("readiness pipe"))
+                .read_line(&mut ready)
+                .expect("descendant readiness");
+            assert_eq!(ready, "ready\n");
+            eprintln!("descendant:{}", child.id());
+            loop {
+                std::thread::park();
+            }
+        }
         other => panic!("unknown fixture program {other:?}"),
     }
 }

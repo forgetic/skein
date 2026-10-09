@@ -28,8 +28,8 @@ pub use clock::{Clock, Now};
 pub use drive::{Host, drive};
 pub use ring::{
     Config, HostedPipes, Kernel, OpenError, Wait, abandon_binary, close_keeper_fd, hosted_pipes, make_subreaper,
-    open_append, open_cgroup, open_pidfd, open_root, open_signal_pipe, open_termination_signals, poll_child,
-    set_subreaper, signal_current_thread, signal_kept_child, start_binary, start_binary_in_cgroup, subreaper,
-    wait_cgroup_change, write_service_signal,
+    open_append, open_cgroup, open_pidfd, open_root, open_signal_pipe, open_termination_signals, pidfd_exited,
+    poll_child, set_subreaper, signal_current_thread, signal_kept_child, start_binary, start_binary_in_cgroup,
+    subreaper, wait_cgroup_change, write_service_signal,
 };
 pub use seed::seed;
