@@ -609,7 +609,10 @@ are the owner's (oauth.md, 6).
   and `Debug` (oauth.md, 4).
 
 The checks of owner and links need the kernel's `Stat` to answer both
-(kernel.md, 6.1).
+(kernel.md, 6.1). The owner they expect is the process's own effective
+user: the shell reads it once at startup (shell.md, 6) and gives it to
+io's file configuration, never inferred from a path or its parents. A
+private root or file owned by anyone else is refused, saying so.
 
 ## 6. Processes
 
