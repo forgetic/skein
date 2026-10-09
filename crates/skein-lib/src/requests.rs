@@ -6,17 +6,34 @@
 //! `take` lends a bounded cursor: apply every `Save` before handling a
 //! `Send`. Dropping a cursor leaves untaken work in the table.
 //!
-//! | State | Event | Next | Emits through take |
+//! | State | Event | Next | Emits |
 //! |---|---|---|---|
 //! | absent | ask | parked or ready | save, then eligible send |
-//! | absent | restore | parked | nothing until eligible |
-//! | parked | link up and matching confirmation | ready | first-send save if needed, send |
-//! | ready | take send | in flight | one attempt under the held key |
-//! | in flight | take | in flight | nothing |
+//! | absent | restore | parked | initial parked progress |
+//! | parked | link up, matching confirmation, retention known if restored | ready | send after first-send save if needed |
+//! | ready | take send | in flight | fresh attempt, in-flight progress |
+//! | in flight | final envelope | retired | owner token, erase |
+//! | in flight | again or lost, eligible | retrying | retry deadline, retrying progress |
+//! | in flight | again or lost, ineligible | parked | parked progress |
+//! | in flight | signed out | parked | clear confirmation, parked progress |
+//! | retrying | retry deadline fires | ready | eligible send |
+//! | ready, in flight, retrying | link down or scope changes away | parked | invalidate attempt, parked progress |
+//! | any live state | retention cutoff passes | retired | erase, unknown progress |
+//! | any state | stale envelope | unchanged | nothing |
+//! | retired | erase and terminal progress taken, reclaim | absent | release count and bytes |
 //!
 //! The link starts down and no scope is confirmed. Restoration also waits
-//! for known retention. First sending is recorded on the supplied wall
-//! clock; monotonic time is supplied separately for lifecycle deadlines.
+//! for known retention. A first-send save records wall time; restored ages
+//! are converted once to monotonic time. Later wall-clock jumps do not move
+//! deadlines. The cutoff is strict: exactly retention minus margin is still
+//! eligible, and one nanosecond beyond is unknown. Retry jitter is uniform
+//! over half to all of each exponentially growing span, capped at `most`.
+//!
+//! `fire` expires retention and retries; `take` also calls it before lending
+//! outputs. Input answers may be processed before `fire`, so a final answer
+//! in that iteration wins. `progress` lends the latest display change per
+//! owner, coalescing untaken changes; unknown is held until taken. After
+//! outputs and progress, call `reclaim` at the iteration's reclaim point.
 
 use crate::{Duration, Id, Map, Rng, Slab, Time, Token, Wall};
 
@@ -55,8 +72,63 @@ pub struct RequestRecord<R> {
 pub enum RequestOut<'a, R> {
     /// Persist this record before any send taken afterwards.
     Save(&'a RequestRecord<R>),
+    /// Erase the retired request from the store.
+    Erase(RequestKey),
     /// Send the held request under a fresh attempt token.
     Send { attempt: Token, key: RequestKey, request: &'a R },
+}
+
+/// The protocol layer's classification of an attempt's answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestEnvelope {
+    /// Durable answer; its payload goes directly to the owner.
+    Final,
+    /// Busy or not ready; retry under the same key.
+    Again,
+    /// No answer arrived; retry if reachable, otherwise park.
+    Lost,
+    /// Sign-in ended; await renewed scope confirmation.
+    SignedOut,
+}
+
+/// Whether an envelope ends the request, changes its lifecycle or is stale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum RequestAnswered {
+    /// Route the final answer directly to this owner.
+    Final(Token),
+    /// The request will retry or remain parked.
+    Pending,
+    /// This attempt has been superseded or retired.
+    Stale,
+}
+
+/// The latest request state its owner may display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestProgress {
+    /// An attempt is in flight.
+    InFlight,
+    /// A retry is waiting for its deadline or its send output.
+    Retrying,
+    /// Link, scope or restored retention prevents sending.
+    Parked,
+    /// Retention passed; whether the request was made is unknown.
+    Unknown,
+}
+
+#[derive(Debug)]
+enum State {
+    Parked,
+    Ready,
+    InFlight(Token),
+    Retrying(Time),
+    Retired { erase: bool },
+}
+
+#[derive(Debug)]
+struct Anchor {
+    now: Time,
+    age: Duration,
 }
 
 #[derive(Debug)]
@@ -66,7 +138,33 @@ struct Entry<R> {
     size: u64,
     restored: bool,
     save: bool,
-    attempt: Option<Token>,
+    state: State,
+    progress: Option<RequestProgress>,
+    changed: bool,
+    backoff: Duration,
+    anchor: Option<Anchor>,
+}
+
+impl<R> Entry<R> {
+    fn progress(&mut self, progress: RequestProgress) {
+        if self.progress != Some(progress) {
+            self.progress = Some(progress);
+            self.changed = true;
+        }
+    }
+
+    fn erase_pending(&self) -> bool {
+        match self.state {
+            State::Retired { erase } => erase,
+            State::Parked | State::Ready | State::InFlight(_) | State::Retrying(_) => false,
+        }
+    }
+
+    fn unknown(&mut self) {
+        self.state = State::Retired { erase: true };
+        self.save = false;
+        self.progress(RequestProgress::Unknown);
+    }
 }
 
 /// Keyed requests whose opaque payloads are kept before sending.
@@ -84,6 +182,7 @@ pub struct RequestTable<R> {
     up: bool,
     scope: Option<u64>,
     retention: Option<Duration>,
+    retries: Rng,
 }
 
 /// A transient bounded visit, borrowing the table only while outputs are taken.
@@ -91,6 +190,8 @@ pub struct RequestTable<R> {
 pub struct RequestTake<'a, R> {
     table: &'a mut RequestTable<R>,
     remaining: u32,
+    now: Time,
+    wall: Wall,
 }
 
 impl<R> RequestTable<R> {
@@ -110,6 +211,7 @@ impl<R> RequestTable<R> {
             up: false,
             scope: None,
             retention: None,
+            retries: Rng::new(seed ^ 0x5245_5452_4945_5321),
         }
     }
 
@@ -140,33 +242,183 @@ impl<R> RequestTable<R> {
     /// Tell the table whether its peer is reachable.
     pub fn link(&mut self, up: bool) {
         self.up = up;
+        self.synchronize();
     }
 
     /// Permit only requests belonging to this opaque scope.
     pub fn confirmed(&mut self, scope: Option<u64>) {
         self.scope = scope;
+        self.synchronize();
     }
 
     /// Supply the answer retention before restored requests can leave.
     pub fn retention(&mut self, span: Duration) {
         self.retention = Some(span);
+        self.synchronize();
     }
 
     /// Visit at most `out` records and sends, with every record before sends.
-    pub fn take(&mut self, _now: Time, wall: Wall) -> RequestTake<'_, R> {
+    pub fn take(&mut self, now: Time, wall: Wall) -> RequestTake<'_, R> {
+        self.fire(now, wall);
+        RequestTake { remaining: self.limits.out, table: self, now, wall }
+    }
+
+    /// Apply an envelope for the one current attempt; stale tokens change nothing.
+    pub fn answered(&mut self, now: Time, attempt: Token, envelope: RequestEnvelope) -> RequestAnswered {
+        let mut found = None;
         for (_, id) in &self.order {
-            let entry = self.entries.get_mut(*id).expect("order names a held entry");
-            if self.up
-                && self.scope == Some(entry.record.scope)
-                && (!entry.restored || self.retention.is_some())
-                && entry.attempt.is_none()
-                && entry.record.first_sent.is_none()
-            {
-                entry.record.first_sent = Some(wall);
-                entry.save = true;
+            let entry = self.entries.get(*id).expect("order names a held entry");
+            match entry.state {
+                State::InFlight(current) => {
+                    if current == attempt {
+                        found = Some(*id);
+                        break;
+                    }
+                }
+                State::Parked | State::Ready | State::Retrying(_) | State::Retired { .. } => {}
             }
         }
-        RequestTake { remaining: self.limits.out, table: self }
+        let Some(id) = found else {
+            return RequestAnswered::Stale;
+        };
+        let entry = self.entries.get_mut(id).expect("attempt names a held entry");
+        match envelope {
+            RequestEnvelope::Final => {
+                entry.state = State::Retired { erase: true };
+                entry.save = false;
+                entry.changed = false;
+                return RequestAnswered::Final(entry.owner);
+            }
+            RequestEnvelope::Again | RequestEnvelope::Lost => {
+                let span = entry.backoff.as_nanos();
+                let jitter = self.retries.between(span.div_euclid(2), span);
+                entry.state = State::Retrying(now.saturating_add(Duration::from_nanos(jitter)));
+                entry.backoff = entry.backoff.saturating_mul(2).min(self.limits.most);
+                entry.progress(RequestProgress::Retrying);
+            }
+            RequestEnvelope::SignedOut => {
+                self.confirmed(None);
+            }
+        }
+        RequestAnswered::Pending
+    }
+
+    /// Expire retry and retention deadlines using the supplied clocks.
+    pub fn fire(&mut self, now: Time, wall: Wall) {
+        for (_, id) in &self.order {
+            let entry = self.entries.get_mut(*id).expect("order names a held entry");
+            match entry.state {
+                State::Retired { .. } => continue,
+                State::Parked | State::Ready | State::InFlight(_) | State::Retrying(_) => {}
+            }
+            if entry.anchor.is_none()
+                && let Some(first) = entry.record.first_sent
+            {
+                let age = Duration::from_nanos(wall.as_nanos().saturating_sub(first.as_nanos()));
+                entry.anchor = Some(Anchor { now, age });
+            }
+            if let Some(retention) = self.retention
+                && let Some(anchor) = &entry.anchor
+            {
+                let age = anchor.age.saturating_add(now.saturating_since(anchor.now));
+                let allowance = retention.as_nanos().saturating_sub(self.limits.margin.as_nanos());
+                if age.as_nanos() > allowance {
+                    entry.unknown();
+                    continue;
+                }
+            }
+            match entry.state {
+                State::Retrying(deadline) => {
+                    if deadline <= now {
+                        entry.state = State::Ready;
+                    }
+                }
+                State::Parked | State::Ready | State::InFlight(_) | State::Retired { .. } => {}
+            }
+        }
+    }
+
+    /// The earliest retry or strict retention cutoff, including parked requests.
+    #[must_use]
+    pub fn next_deadline(&self) -> Option<Time> {
+        let mut next = None;
+        for (_, id) in &self.order {
+            let entry = self.entries.get(*id).expect("order names a held entry");
+            match entry.state {
+                State::Retrying(deadline) => earliest(&mut next, deadline),
+                State::Retired { .. } => continue,
+                State::Parked | State::Ready | State::InFlight(_) => {}
+            }
+            if let Some(retention) = self.retention
+                && let Some(anchor) = &entry.anchor
+            {
+                let allowance = retention.as_nanos().saturating_sub(self.limits.margin.as_nanos());
+                if anchor.age.as_nanos() > allowance {
+                    earliest(&mut next, anchor.now);
+                } else {
+                    let remaining = allowance.checked_sub(anchor.age.as_nanos()).expect("age is within allowance");
+                    if let Some(remaining) = remaining.checked_add(1)
+                        && let Some(deadline) = anchor.now.checked_add(Duration::from_nanos(remaining))
+                    {
+                        earliest(&mut next, deadline);
+                    }
+                }
+            }
+        }
+        next
+    }
+
+    /// Take the next owner's latest display change, in admission order.
+    pub fn progress(&mut self) -> Option<(Token, RequestProgress)> {
+        for (_, id) in &self.order {
+            let entry = self.entries.get_mut(*id).expect("order names a held entry");
+            if entry.changed {
+                entry.changed = false;
+                return Some((entry.owner, entry.progress.expect("a change has a progress value")));
+            }
+        }
+        None
+    }
+
+    /// Whether a display change remains, including a terminal unknown outcome.
+    #[must_use]
+    pub fn progress_pending(&self) -> bool {
+        for (_, id) in &self.order {
+            if self.entries.get(*id).expect("order names a held entry").changed {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Release retired requests whose erase and terminal progress have been taken.
+    pub fn reclaim(&mut self) {
+        for _ in 0..self.limits.requests {
+            let mut found = None;
+            for (number, id) in &self.order {
+                let entry = self.entries.get(*id).expect("order names a held entry");
+                match entry.state {
+                    State::Retired { .. } => {
+                        if !entry.erase_pending() && !entry.changed {
+                            found = Some((*number, *id));
+                            break;
+                        }
+                    }
+                    State::Parked | State::Ready | State::InFlight(_) | State::Retrying(_) => {}
+                }
+            }
+            let Some((number, id)) = found else {
+                break;
+            };
+            let entry = self.entries.get(id).expect("retired entry is held");
+            self.bytes = self.bytes.checked_sub(entry.size).expect("held entry's size was counted");
+            let removed = self.index.remove(&entry.record.key);
+            assert!(removed == Some(id), "one index entry per request");
+            let removed = self.order.remove(&number);
+            assert!(removed == Some(id), "one order entry per request");
+            self.entries.retire(id);
+        }
+        self.entries.reclaim();
     }
 
     /// Whether store records or eligible sends remain to take.
@@ -174,7 +426,7 @@ impl<R> RequestTable<R> {
     pub fn pending(&self) -> bool {
         for (_, id) in &self.order {
             let entry = self.entries.get(*id).expect("order names a held entry");
-            if entry.save || self.eligible(entry) {
+            if entry.save || entry.erase_pending() || self.eligible(entry) {
                 return true;
             }
         }
@@ -260,7 +512,19 @@ impl<R> RequestTable<R> {
 
     fn insert(&mut self, owner: Token, size: u64, record: RequestRecord<R>, restored: bool) {
         let key = record.key;
-        let entry = Entry { record, owner, size, restored, save: !restored, attempt: None };
+        let eligible = self.up && self.scope == Some(record.scope) && (!restored || self.retention.is_some());
+        let entry = Entry {
+            record,
+            owner,
+            size,
+            restored,
+            save: !restored,
+            state: if eligible { State::Ready } else { State::Parked },
+            progress: if eligible { None } else { Some(RequestProgress::Parked) },
+            changed: !eligible,
+            backoff: self.limits.first.min(self.limits.most),
+            anchor: None,
+        };
         let Ok(id) = self.entries.insert(entry) else {
             unreachable!("admission reserved an entry");
         };
@@ -272,12 +536,38 @@ impl<R> RequestTable<R> {
         self.bytes = self.bytes.checked_add(size).expect("admission checked declared bytes");
     }
 
+    fn synchronize(&mut self) {
+        for (_, id) in &self.order {
+            let entry = self.entries.get_mut(*id).expect("order names a held entry");
+            let eligible =
+                self.up && self.scope == Some(entry.record.scope) && (!entry.restored || self.retention.is_some());
+            match entry.state {
+                State::Retired { .. } => {}
+                State::Parked => {
+                    if eligible {
+                        entry.state = State::Ready;
+                    }
+                }
+                State::Ready | State::InFlight(_) | State::Retrying(_) => {
+                    if !eligible {
+                        entry.state = State::Parked;
+                        entry.progress(RequestProgress::Parked);
+                    }
+                }
+            }
+        }
+    }
+
     fn eligible(&self, entry: &Entry<R>) -> bool {
-        self.up
-            && self.scope == Some(entry.record.scope)
-            && entry.attempt.is_none()
-            && (!entry.restored || self.retention.is_some())
-            && self.attempt < u64::MAX
+        match entry.state {
+            State::Ready => {
+                self.up
+                    && self.scope == Some(entry.record.scope)
+                    && (!entry.restored || self.retention.is_some())
+                    && self.attempt < u64::MAX
+            }
+            State::Parked | State::InFlight(_) | State::Retrying(_) | State::Retired { .. } => false,
+        }
     }
 }
 
@@ -287,30 +577,52 @@ impl<R> RequestTake<'_, R> {
         if self.remaining == 0 {
             return None;
         }
-        let mut save = None;
+        let mut record = None;
         let mut send = None;
         for (_, id) in &self.table.order {
             let entry = self.table.entries.get(*id).expect("order names a held entry");
-            if entry.save {
-                save = Some(*id);
+            let eligible = self.table.eligible(entry);
+            if entry.save || entry.erase_pending() || (eligible && entry.record.first_sent.is_none()) {
+                record = Some(*id);
                 break;
             }
-            if send.is_none() && self.table.eligible(entry) {
+            if send.is_none() && eligible {
                 send = Some(*id);
             }
         }
-        if let Some(id) = save {
+        if let Some(id) = record {
+            let eligible = self.table.eligible(self.table.entries.get(id).expect("held entry"));
             let entry = self.table.entries.get_mut(id).expect("held entry");
-            entry.save = false;
             self.remaining = self.remaining.checked_sub(1).expect("visit has room");
+            if entry.erase_pending() {
+                entry.state = State::Retired { erase: false };
+                return Some(RequestOut::Erase(entry.record.key));
+            }
+            if eligible && entry.record.first_sent.is_none() {
+                entry.record.first_sent = Some(self.wall);
+                entry.anchor = Some(Anchor { now: self.now, age: Duration::ZERO });
+            }
+            entry.save = false;
             return Some(RequestOut::Save(&entry.record));
         }
         let id = send?;
         self.table.attempt = self.table.attempt.checked_add(1).expect("eligibility checked numbering");
         let attempt = Token::new(self.table.attempt);
         let entry = self.table.entries.get_mut(id).expect("held entry");
-        entry.attempt = Some(attempt);
+        entry.state = State::InFlight(attempt);
+        entry.progress(RequestProgress::InFlight);
         self.remaining = self.remaining.checked_sub(1).expect("visit has room");
         Some(RequestOut::Send { attempt, key: entry.record.key, request: &entry.record.request })
+    }
+}
+
+fn earliest(next: &mut Option<Time>, deadline: Time) {
+    match *next {
+        Some(current) => {
+            if deadline < current {
+                *next = Some(deadline);
+            }
+        }
+        None => *next = Some(deadline),
     }
 }
