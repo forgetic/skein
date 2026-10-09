@@ -19,6 +19,7 @@
 
 pub mod append;
 pub mod census;
+pub mod files;
 pub mod ledger;
 pub mod output;
 pub mod owner;

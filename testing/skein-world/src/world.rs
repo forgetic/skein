@@ -265,7 +265,19 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
     /// checks that every process holds nothing, and that the simulator has
     /// nothing in flight and no descriptor open.
     #[must_use]
-    pub fn run(mut self) -> Outcome<P, M> {
+    pub fn run(self) -> Outcome<P, M> {
+        self.run_with_faults(|_, _, _| None)
+    }
+
+    /// Runs with a scenario's fault schedule at each kernel submission batch.
+    /// The hook observes records outside the host's memory span; returning
+    /// faults changes the simulator from that batch onward, while `None`
+    /// keeps its current configuration. Records and their order are untouched.
+    #[must_use]
+    pub fn run_with_faults<F>(mut self, mut faults: F) -> Outcome<P, M>
+    where
+        F: FnMut(usize, Time, &Queue<skein_io::kernel::Submit>) -> Option<skein_sim::Faults>,
+    {
         let mut iterations: u32 = 0;
         loop {
             iterations = iterations.checked_add(1).expect("within STEPS");
@@ -288,7 +300,7 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
                 {
                     self.drop_killed(at);
                 } else {
-                    self.turn(at, now, wall);
+                    self.turn(at, now, wall, &mut faults);
                     at = at.checked_add(1).expect("a bounded process count");
                 }
                 self.referee.observe(now, &self.procs);
@@ -348,7 +360,10 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
     }
 
     /// One turn of process `at`'s loop: reap, iterate, submit.
-    fn turn(&mut self, at: usize, now: Time, wall: skein_lib::Wall) {
+    fn turn<F>(&mut self, at: usize, now: Time, wall: skein_lib::Wall, faults: &mut F)
+    where
+        F: FnMut(usize, Time, &Queue<skein_io::kernel::Submit>) -> Option<skein_sim::Faults>,
+    {
         let pid = *self.pids.get(at).expect("a pid for each process");
         if *self.finished.get(at).expect("a status per process") {
             return;
@@ -404,6 +419,9 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
                 proc.iterate(now, wall);
                 proc.drain();
             }
+        }
+        if let Some(faults) = faults(at, now, proc.submissions()) {
+            self.sim.set_faults(faults);
         }
         self.sim.submit(pid, proc.submissions());
         if self.hosted.get(at).expect("a status per process").is_some()

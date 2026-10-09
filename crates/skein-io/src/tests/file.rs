@@ -158,7 +158,10 @@ fn read_and_create_no_follow_use_the_safe_kernel_modes() {
         &mut events,
         &mut subs,
     );
-    assert_eq!(events.pop(), Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::NotFound }));
+    assert_eq!(
+        events.pop(),
+        Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::NotFound, committed: false, residue: None })
+    );
 
     file_layer::down(
         &mut io,
@@ -368,7 +371,10 @@ fn a_deadline_waits_for_uncancellable_stat_then_closes_the_file() {
     );
     assert!(events.is_empty());
     complete(&mut io, subs.pop().expect("cleanup close"), Ok(Done::Nothing), &mut events, &mut subs);
-    assert_eq!(events.pop(), Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::TimedOut }));
+    assert_eq!(
+        events.pop(),
+        Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::TimedOut, committed: false, residue: None })
+    );
 }
 
 #[test]
@@ -393,7 +399,10 @@ fn each_file_request_uses_its_own_absolute_deadline() {
     assert_eq!(cancel.kind, Op::Cancel { target: open.op });
     complete(&mut io, cancel, Ok(Done::Nothing), &mut events, &mut subs);
     complete(&mut io, open, Err(crate::kernel::Error::Cancelled), &mut events, &mut subs);
-    assert_eq!(events.pop(), Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::TimedOut }));
+    assert_eq!(
+        events.pop(),
+        Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::TimedOut, committed: false, residue: None })
+    );
     assert!(io.takes());
 }
 

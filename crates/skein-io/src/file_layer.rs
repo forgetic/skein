@@ -205,6 +205,7 @@ pub struct FileIo {
     timeout: Duration,
     deadline: Option<Time>,
     cancel_op: Option<Token>,
+    cancel_target: Option<Token>,
     stop: Option<Stop>,
     random: Option<u64>,
 }
@@ -290,6 +291,7 @@ impl FileIo {
             timeout,
             deadline: None,
             cancel_op: None,
+            cancel_target: None,
             stop: None,
             random: None,
         }
@@ -402,11 +404,11 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
         }
         Request::OpenDirectory { owner, root, name, no_follow } => {
             if name.contains(&0) {
-                events.push(Event::Failed { owner, error: Error::InvalidArgument });
+                events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
                 return;
             }
             if io.files.len() == io.files.capacity() {
-                events.push(Event::Failed { owner, error: Error::TooManyOpenFiles });
+                events.push(Event::Failed { owner, error: Error::TooManyOpenFiles, committed: false, residue: None });
                 return;
             }
             io.pending = Some(Pending::OpenDirectory { owner });
@@ -415,11 +417,11 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
         }
         Request::Load { owner, root, path, max, no_follow } => {
             let Some(fd) = io.file(root) else {
-                events.push(Event::Failed { owner, error: Error::NotFound });
+                events.push(Event::Failed { owner, error: Error::NotFound, committed: false, residue: None });
                 return;
             };
             if max > io.max_file || path.contains(&0) || path.len() >= 4096 {
-                events.push(Event::Failed { owner, error: Error::InvalidArgument });
+                events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
                 return;
             }
             io.pending = Some(Pending::LoadOpening { owner, max });
@@ -428,11 +430,11 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
         }
         Request::Scan { owner, root, path, max, max_bytes, no_follow } => {
             let Some(fd) = io.file(root) else {
-                events.push(Event::Failed { owner, error: Error::NotFound });
+                events.push(Event::Failed { owner, error: Error::NotFound, committed: false, residue: None });
                 return;
             };
             if max > io.max_entries || path.contains(&0) || path.len() >= 4096 {
-                events.push(Event::Failed { owner, error: Error::InvalidArgument });
+                events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
                 return;
             }
             io.pending = Some(Pending::ScanOpening { owner, max, max_bytes });
@@ -444,7 +446,7 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
         }
         Request::Stat { owner, file } => {
             let Some(fd) = io.file(file) else {
-                events.push(Event::Failed { owner, error: Error::NotFound });
+                events.push(Event::Failed { owner, error: Error::NotFound, committed: false, residue: None });
                 return;
             };
             io.pending = Some(Pending::Stating { owner });
@@ -452,7 +454,7 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
         }
         Request::WriteAt { owner, file, offset, bytes } => {
             let Some(fd) = io.file(file) else {
-                events.push(Event::Failed { owner, error: Error::NotFound });
+                events.push(Event::Failed { owner, error: Error::NotFound, committed: false, residue: None });
                 return;
             };
             if bytes.is_empty() {
@@ -460,7 +462,7 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
                 return;
             }
             let Ok(op) = Op::write(fd, bytes, 0, offset) else {
-                events.push(Event::Failed { owner, error: Error::InvalidArgument });
+                events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
                 return;
             };
             io.pending = Some(Pending::Write { owner });
@@ -468,16 +470,16 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
         }
         Request::ReadAt { owner, file, offset, max } => {
             let Some(fd) = io.file(file) else {
-                events.push(Event::Failed { owner, error: Error::NotFound });
+                events.push(Event::Failed { owner, error: Error::NotFound, committed: false, residue: None });
                 return;
             };
             if max == 0 || max > io.max_read {
-                events.push(Event::Failed { owner, error: Error::InvalidArgument });
+                events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
                 return;
             }
             let buffer = vec![0_u8; usize::try_from(max).expect("u32 fits usize")].into_boxed_slice();
             let Ok(op) = Op::read(fd, buffer, offset) else {
-                events.push(Event::Failed { owner, error: Error::InvalidArgument });
+                events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
                 return;
             };
             io.pending = Some(Pending::Read { owner, fd, offset, max, bytes: Vec::new() });
@@ -485,7 +487,7 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
         }
         Request::Sync { owner, file } => {
             let Some(fd) = io.file(file) else {
-                events.push(Event::Failed { owner, error: Error::NotFound });
+                events.push(Event::Failed { owner, error: Error::NotFound, committed: false, residue: None });
                 return;
             };
             io.pending = Some(Pending::Sync { owner });
@@ -493,7 +495,7 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
         }
         Request::Close { owner, file } => {
             let Some(fd) = io.files.remove(&file) else {
-                events.push(Event::Failed { owner, error: Error::NotFound });
+                events.push(Event::Failed { owner, error: Error::NotFound, committed: false, residue: None });
                 return;
             };
             io.pending = Some(Pending::Close { owner });
@@ -505,7 +507,7 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
         }
         Request::Rename { owner, root, from, to } => {
             if !crate::kernel::is_name(&from) || !crate::kernel::is_name(&to) {
-                events.push(Event::Failed { owner, error: Error::InvalidArgument });
+                events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
                 return;
             }
             io.pending = Some(Pending::Rename { owner });
@@ -513,7 +515,7 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
         }
         Request::Remove { owner, root, name } => {
             if !crate::kernel::is_name(&name) {
-                events.push(Event::Failed { owner, error: Error::InvalidArgument });
+                events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
                 return;
             }
             io.pending = Some(Pending::Remove { owner });
@@ -538,11 +540,11 @@ fn create(
     subs: &mut Queue<Submit>,
 ) {
     if name.contains(&0) || mode & !crate::kernel::PERMISSIONS != 0 {
-        events.push(Event::Failed { owner, error: Error::InvalidArgument });
+        events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
         return;
     }
     if io.files.len() == io.files.capacity() {
-        events.push(Event::Failed { owner, error: Error::TooManyOpenFiles });
+        events.push(Event::Failed { owner, error: Error::TooManyOpenFiles, committed: false, residue: None });
         return;
     }
     io.pending = Some(Pending::Create { owner });
@@ -561,11 +563,11 @@ fn open_read(
     subs: &mut Queue<Submit>,
 ) {
     if name.contains(&0) {
-        events.push(Event::Failed { owner, error: Error::InvalidArgument });
+        events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
         return;
     }
     if io.files.len() == io.files.capacity() {
-        events.push(Event::Failed { owner, error: Error::TooManyOpenFiles });
+        events.push(Event::Failed { owner, error: Error::TooManyOpenFiles, committed: false, residue: None });
         return;
     }
     io.pending = Some(Pending::OpenRead { owner });
@@ -648,6 +650,7 @@ fn submit_cancel(io: &mut FileIo, subs: &mut Queue<Submit>) {
     let op = Token::new(io.next_op);
     io.next_op = io.next_op.checked_add(1).expect("operation tokens do not wrap");
     io.cancel_op = Some(op);
+    io.cancel_target = Some(target);
     subs.push(Submit { op, kind: Op::Cancel { target } });
 }
 
@@ -655,6 +658,12 @@ fn submit_cancel(io: &mut FileIo, subs: &mut Queue<Submit>) {
 pub fn up(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
     if io.cancel_op == Some(complete.op) {
         io.cancel_op = None;
+        let target = io.cancel_target.take().expect("a cancel retains its original target");
+        if crate::layer::unsubmitted(complete.result) && io.outstanding == Some(target) {
+            // The stalled operation still owns its record. Retry a cancel the
+            // backend did not submit, without targeting a later cleanup step.
+            submit_cancel(io, subs);
+        }
         return;
     }
     assert!(io.outstanding == Some(complete.op), "completion names the outstanding file operation");
@@ -870,7 +879,7 @@ fn terminal_failure(events: &mut Queue<Event>, owner: Token, reason: Error) {
     if reason == Error::Cancelled {
         events.push(Event::Cancelled { owner });
     } else {
-        events.push(Event::Failed { owner, error: reason });
+        events.push(Event::Failed { owner, error: reason, committed: false, residue: None });
     }
 }
 
@@ -982,7 +991,7 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             | Pending::ScanClosing { owner, .. } => owner,
             Pending::Store(_) => unreachable!("store completion is handled separately"),
         };
-        events.push(Event::Failed { owner, error });
+        events.push(Event::Failed { owner, error, committed: false, residue: None });
         return;
     }
     match (pending, complete.kind, complete.result.expect("checked success")) {
@@ -990,7 +999,7 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             if let Some(file) = io.insert(fd) {
                 events.push(Event::Opened { owner, file, len: 0 });
             } else {
-                events.push(Event::Failed { owner, error: Error::TooManyOpenFiles });
+                events.push(Event::Failed { owner, error: Error::TooManyOpenFiles, committed: false, residue: None });
             }
         }
         (Pending::OpenRead { owner }, Op::Open { .. }, Done::Fd(fd)) => {
@@ -1010,7 +1019,7 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             if let Some(file) = io.insert(fd) {
                 events.push(Event::Opened { owner, file, len: stat.size });
             } else {
-                events.push(Event::Failed { owner, error: Error::TooManyOpenFiles });
+                events.push(Event::Failed { owner, error: Error::TooManyOpenFiles, committed: false, residue: None });
             }
         }
         (Pending::Cleanup { owner, error }, Op::Close { .. }, Done::Nothing) => {
@@ -1102,7 +1111,7 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
         (Pending::Write { owner }, Op::Write { fd, bytes, from, at }, Done::Count(count)) => {
             let next = from.checked_add(count).expect("write count fits");
             if count == 0 {
-                events.push(Event::Failed { owner, error: Error::Other(5) });
+                events.push(Event::Failed { owner, error: Error::Other(5), committed: false, residue: None });
             } else if usize::try_from(next).expect("u32 fits usize") == bytes.len() {
                 events.push(Event::Written { owner });
             } else {
@@ -1110,7 +1119,12 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
                 io.pending = Some(Pending::Write { owner });
                 let Ok(op) = Op::write(fd, bytes, next, at) else {
                     io.pending = None;
-                    events.push(Event::Failed { owner, error: Error::InvalidArgument });
+                    events.push(Event::Failed {
+                        owner,
+                        error: Error::InvalidArgument,
+                        committed: false,
+                        residue: None,
+                    });
                     return;
                 };
                 io.issue(op, subs);
@@ -1129,7 +1143,12 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
                 let buffer = vec![0_u8; usize::try_from(left).expect("u32 fits usize")].into_boxed_slice();
                 let Ok(op) = Op::read(fd, buffer, at) else {
                     io.pending = None;
-                    events.push(Event::Failed { owner, error: Error::InvalidArgument });
+                    events.push(Event::Failed {
+                        owner,
+                        error: Error::InvalidArgument,
+                        committed: false,
+                        residue: None,
+                    });
                     return;
                 };
                 io.issue(op, subs);

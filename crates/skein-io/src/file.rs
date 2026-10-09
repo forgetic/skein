@@ -8,6 +8,25 @@ use crate::kernel::Fd;
 use alloc::boxed::Box;
 use skein_lib::Token;
 
+/// The target version a store's owner permits replacing (io.md, section 5.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expect {
+    /// The owner permits replacing any target, without reading its content.
+    Any,
+    /// The owner permits creating a target only when its name is absent.
+    Absent,
+    /// The owner permits replacing only the target with this content digest.
+    Digest(Digest),
+}
+
+/// A temporary whose cleanup failed, reported by io at the store's terminal.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Residue {
+    /// A bounded leaf name beside the request's target, in the same directory.
+    pub name: Box<[u8]>,
+    pub error: crate::kernel::Error,
+}
+
 #[derive(PartialEq, Eq, Debug)]
 pub enum Request {
     Create {
@@ -59,13 +78,13 @@ pub enum Request {
         max_bytes: u64,
         no_follow: bool,
     },
-    /// Replaces one file after rechecking its content version, through a synced temporary.
+    /// Replaces one file under its stated expectation, through a synced temporary.
     Store {
         owner: Token,
         root: Token,
         path: Box<[u8]>,
         bytes: Box<[u8]>,
-        expected: Option<Digest>,
+        expected: Expect,
         no_follow: bool,
     },
     /// States an open file or directory.
@@ -184,6 +203,12 @@ pub enum Event {
     Failed {
         owner: Token,
         error: crate::kernel::Error,
+        /// A Store's rename succeeded before this failure. The new file is
+        /// present; its durability may be unknown (io.md, section 5.2).
+        /// False for failures of other file requests.
+        committed: bool,
+        /// A temporary still beside the target after its removal failed.
+        residue: Option<Residue>,
     },
     /// The owner stopped a file request before it completed.
     Cancelled {
