@@ -80,7 +80,7 @@ pub enum Op {
     Stat          { fd: Fd },
     Rename        { from_dir: Fd, from: Box<[u8]>, to_dir: Fd, to: Box<[u8]> },
     Remove        { dir: Fd, name: Box<[u8]>, directory: bool },
-    MakeDirectory { dir: Fd, name: Box<[u8]> },
+    MakeDirectory { dir: Fd, name: Box<[u8]>, mode: u32 },     // less the umask (io.md, 5.3)
     List          { fd: Fd, entries: Box<[Entry]>, names: Box<[u8]> },  // synchronous
     // processes (section 6.2)
     Spawn     { spawn: Box<Spawn> },                         // synchronous
@@ -268,7 +268,8 @@ documentation, with each operation's errors; the decisions behind it:
   `Sync` the new one survives a crash. Its pieces are io's decisions
   (io.md, 5): the temporary's name drawn from the seed, drawn again on
   `Exists`; the old file's bits kept, which is why `Create` takes a mode
-  and `Stat` answers one; a symbolic link at the target replaced by the
+  and `Stat` answers one (and why `MakeDirectory` takes one too: a private
+  directory is made `0o700`, io.md, 5.3); a symbolic link at the target replaced by the
   file, as `Rename` replaces a link and does not follow it, since writing
   through links is not offered.
 - **`List` hands back entries as plain values,** `getdents64`'s structures

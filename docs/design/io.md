@@ -565,7 +565,8 @@ lives in a private directory, readable by the service's user alone. io's
 part is the modes and the checks; what the files hold, and their names,
 are the owner's (oauth.md, 6).
 
-- **A private root.** The directory is made `0o700` if it is absent, and
+- **A private root.** The directory is made `0o700` if it is absent
+  (`MakeDirectory` takes a mode, as `Create` does; kernel.md, 6.1), and
   opened beneath its root as a root of its own, without following a link
   at its name. io states what it opened and refuses it (`Permission`)
   unless it is a directory with no group or other permission bits.
