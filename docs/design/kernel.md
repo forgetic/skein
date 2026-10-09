@@ -234,8 +234,19 @@ documentation, with each operation's errors; the decisions behind it:
   existing file or directory), `Directory` (an existing directory: a
   root, or one to list) or `Create` (a new file, exclusively, to write).
   Each is one well-defined case for the simulator and the suite to hold,
-  and more come when a user pulls them: opening a path only to stat it
-  (`O_PATH`), say, which `Read` cannot when the file is unreadable.
+  and more come when a user pulls them.
+- **A path-only open, to stat what cannot be read.** `PathNoFollow` is
+  `O_PATH | O_NOFOLLOW`, beneath the root with links refused in every
+  parent, as the other no-follow cases. It answers a descriptor for the
+  entry itself, a symbolic link included, and needs search permission on
+  the directories above it and none on the entry, so it opens another
+  user's `0o700` directory or `0o600` file that `Read` cannot (io.md,
+  5.3). Only `Stat` and `Close` take it; any other operation on it is an
+  invalid record. Its `Stat` may answer `Symlink` and `Other`, which
+  otherwise only `List` shows. It does no I/O, so the ring keeps whatever
+  it opened, without the `NotAFile` check, and leaves it as it is (a
+  path-only descriptor takes no `fcntl` flags). The simulator holds the
+  same permission rule: search on the parents, nothing on the entry.
 - **Reads and writes are at an offset,** never at the descriptor's
   position, so concurrent ones need no order. Both may be short: a `Read`
   at the end of the file, and whenever the backend says (POSIX allows it;
@@ -427,7 +438,10 @@ for its backend.
   with a directory beside it for a link to lead out to, and removed with
   the backend; in the simulator, the minimal fake machine (testing.md, 4).
   The scenarios: a file made, written at offsets over itself and past its
-  end, synced, read back and stated; renames over a file, across
+  end, synced, read back and stated; a `0o000` file and directory of the
+  scenario's own user that `Read` is denied and `PathNoFollow` opens and
+  stats (on the ring, the denial is checked only without
+  `CAP_DAC_OVERRIDE`, which skips it), and a link it opens as a link; renames over a file, across
   directories, of a file over a directory and the other way, over a full
   and an empty directory, beneath itself, over itself, and the idiom that
   replaces a file whole; removals of files, directories, a link and a file
@@ -487,7 +501,7 @@ for its backend.
   a process's limit on the real kernel takes `unsafe` outside the ring
   adapter, or a child process, and neither is allowed.
 - **The records io's next parts pull** (io.md, 9): `Append`; `Stat`'s
-  owner and links; a `Wait` that does not reap, and `Signal`'s target,
+  owner and links; the path-only open (`PathNoFollow`); a `Wait` that does not reap, and `Signal`'s target,
   the group; `Usage` and `Window`. Today a `Wait` reaps, and a `Signal`
   reaches the child alone. Each comes with its conformance scenario
   (section 8) on both backends.

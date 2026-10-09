@@ -451,7 +451,8 @@ caller budgets the command buffers it supplies to `Spawn`.
   path beneath a root, so io opens the directory a name lies in, beneath
   the root, before it renames or removes that name or makes a directory
   there, and it stats what it has opened: a stat needs the file readable,
-  until an open for a path only is pulled. Reads and writes may be short,
+  but for the path-only open that names why a private open was denied
+  (5.3). Reads and writes may be short,
   and io continues them; a listing comes an entry count at a time, and
   io's stated count is a limit it checks as the entries come.
 - **Replacing a file, in order:** `Stat` the old file, opened to read, for
@@ -592,10 +593,11 @@ are the owner's (oauth.md, 6).
 - **A private root.** The directory is made `0o700` if it is absent
   (`MakeDirectory` takes a mode, as `Create` does; kernel.md, 6.1), and
   opened beneath its root as a root of its own, without following a link
-  at its name. io states what it opened and refuses it, saying what it
-  found unsafe (a link, a non-directory, group or other bits, another
-  owner), so an owner tells a planted file from a failed read
-  unless it is a directory with no group or other permission bits.
+  at its name. io stats what it opened and refuses it unless it is a
+  directory with no group or other permission bits and the expected
+  owner, saying what it found unsafe (a link, a non-directory, group or
+  other bits, another owner), so an owner tells a planted file from a
+  failed read.
 - **Private files are made `0o600`,** less the umask, which only takes
   bits away, and are replaced whole with that mode (5.2), never with the
   old file's: a file found with group or other bits is not copied
@@ -613,6 +615,24 @@ The checks of owner and links need the kernel's `Stat` to answer both
 user: the shell reads it once at startup (shell.md, 6) and gives it to
 io's file configuration, never inferred from a path or its parents. A
 private root or file owned by anyone else is refused, saying so.
+
+- **A denied open is still named.** A private root or file of another
+  user is usually unreadable to this one (`0o700`, `0o600`), so its open
+  fails with `Permission` before there is anything to stat. io then opens
+  the same path again, beneath the same root, for its path only
+  (`OpenHow::PathNoFollow`, kernel.md, 6.1), which needs no permission on
+  the entry itself, stats that, closes it, and answers the refusal it
+  found: another owner, a link, a non-directory, group or other bits, in
+  the order the checks above take. Only when that stat finds nothing
+  unsafe (a `0o000` directory of this user, say), or the path-only open
+  fails too, is the answer the first open's `Failed`, unchanged.
+- **The path-only descriptor decides nothing.** It is never read and
+  never makes a file acceptable: every check that admits a root or a
+  file is made on the descriptor that will be read. It only names a
+  refusal, so a swap between the two opens can change which refusal is
+  told, never let an unsafe file be read. This is why a user who once ran
+  the service as root hears that the directory is root's, not that
+  permission was denied.
 
 ## 6. Processes
 
