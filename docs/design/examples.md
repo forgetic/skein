@@ -365,6 +365,13 @@ processes, each a host of an `iterate` (a service, or a fake client):
     when that file changes. Its counts are the cgroup's: user and
     system CPU from `cpu.stat`, and the tree's peak memory, all its
     processes at once, from `memory.peak`.
+
+    This is the first use of the kernel's cgroup facilities that
+    contained trees build on (draft/process.md). It is written as a tree
+    in that draft's terms (spawned into a cgroup, empty, killed, counted)
+    so that it can move into io whole. When io gains trees, the kit
+    starts its binary as an io tree and drops its own cgroup code; the
+    walk below stays only for machines with no delegated subtree.
   - **A walk of pidfds, otherwise.** The test process is made a
     subreaper (`PR_SET_CHILD_SUBREAPER`), so a descendant whose parent
     exits is reparented to it rather than to init. The kit holds a pidfd
