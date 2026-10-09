@@ -29,7 +29,7 @@ pub type EchoWorld = World<Proc, EchoReferee>;
 /// A scenario: a world from a seed and a configuration.
 pub type Scenario = fn(u64, Config) -> EchoWorld;
 
-/// The echo's idle deadline, and how far it is spread.
+/// The short deadline and spread used only by scenarios about idleness.
 pub const IDLE: Duration = Duration::from_secs(2);
 pub const SPREAD: Duration = Duration::from_millis(100);
 
@@ -45,9 +45,11 @@ pub const ECHO: usize = 0;
 /// The echo's limits: tiny, so that each layer refuses at its own entrance
 /// in some scenario. Six io slots (one for signals), so that io still accepts past the
 /// protocol layer's three connections, which still bind past the domain's
-/// two sessions.
+/// two sessions. Idle and spread remain the shell’s shipped values
+/// (testing-strategy.md, section 6).
 #[must_use]
-pub const fn server(spread: Duration) -> service::Limits {
+pub const fn server() -> service::Limits {
+    let shipped = skein_echo_shell::limits().protocol;
     service::Limits {
         io: skein_io::Limits {
             sockets: 6,
@@ -61,7 +63,13 @@ pub const fn server(spread: Duration) -> service::Limits {
             close_timeout: Duration::from_secs(1),
             retry: Duration::from_millis(10),
         },
-        protocol: protocol::Limits { conns: 3, line: LINE, idle: IDLE, spread, retry: Duration::from_millis(10) },
+        protocol: protocol::Limits {
+            conns: 3,
+            line: LINE,
+            idle: shipped.idle,
+            spread: shipped.spread,
+            retry: Duration::from_millis(10),
+        },
         domain: domain::Limits { sessions: 2 },
         queue: 4,
     }
@@ -130,11 +138,29 @@ pub const fn plan(at: Time, seed: u64) -> Plan {
 
 /// A world with the echo in it, and these expectations.
 fn world(seed: u64, config: Config, expect: Vec<Expect>, shutdown: Shutdown) -> EchoWorld {
+    world_with(seed, config, expect, shutdown, server())
+}
+
+/// These scenarios explicitly expect an idle deadline to fire.
+fn idling_world(seed: u64, config: Config, expect: Vec<Expect>, shutdown: Shutdown) -> EchoWorld {
+    let mut limits = server();
+    limits.protocol.idle = IDLE;
+    limits.protocol.spread = SPREAD;
+    world_with(seed, config, expect, shutdown, limits)
+}
+
+fn world_with(
+    seed: u64,
+    config: Config,
+    expect: Vec<Expect>,
+    shutdown: Shutdown,
+    limits: service::Limits,
+) -> EchoWorld {
     let mut world = World::new_controlled(seed, config, Memory::Checked, |controls| {
         EchoReferee::new(seed, expect, shutdown, controls)
     });
     world.spawn_signals(|signal| {
-        let mut proc = Proc::echo(server(SPREAD), listen(), seed);
+        let mut proc = Proc::echo(limits, listen(), seed);
         match &mut proc {
             Proc::Echo { svc, .. } => svc.svc.adopt_signals(signal).expect("signal slot"),
             Proc::Client { .. } => unreachable!("echo"),
@@ -243,7 +269,7 @@ pub fn busy(seed: u64, config: Config) -> EchoWorld {
         expect.push(Expect::TurnedAway { at: 1, conn: 3, by: ms(1_000) });
         expect.push(Expect::Served { at: 1, conn: 4, by: END });
     }
-    let mut world = world(seed, config, expect, Shutdown::WhenDone);
+    let mut world = idling_world(seed, config, expect, Shutdown::WhenDone);
     spawn(&mut world, &plans);
     world
 }
@@ -271,7 +297,7 @@ pub fn idle(seed: u64, config: Config) -> EchoWorld {
             expect.push(Expect::Finished { at: 1, conn, by: END });
         }
     }
-    let mut world = world(seed, config, expect, Shutdown::WhenDone);
+    let mut world = idling_world(seed, config, expect, Shutdown::WhenDone);
     spawn(&mut world, &plans);
     world
 }
@@ -301,7 +327,7 @@ pub fn backpressure(seed: u64, config: Config) -> EchoWorld {
         ..plan(ms(1), rng.next_u64())
     };
     let late = Plan { lines: 10, shortest: LINE, ahead: 10, read_from: Some(ms(1_000)), ..plan(ms(1), rng.next_u64()) };
-    let (echo, client) = (server(SPREAD).io, client_limits(2).io);
+    let (echo, client) = (server().io, client_limits(2).io);
     // Every buffer between what the client handed io and what the echo's
     // protocol layer reads, then every one back, and a line in flight in it.
     let most = u64::from(client.output + BUFFER + echo.receive + echo.intake)
@@ -316,11 +342,11 @@ pub fn backpressure(seed: u64, config: Config) -> EchoWorld {
         expect.push(Expect::Served { at: 1, conn: 1, by: ms(1_500) });
         // Once the echo idles the stopped client out, its close discards
         // what the client sends, which then hands io the rest of its lines.
-        let close = server(SPREAD).io.close_timeout;
+        let close = server().io.close_timeout;
         let by = ms(1).saturating_add(IDLE).saturating_add(SPREAD).saturating_add(close).saturating_add(MARGIN);
         expect.push(Expect::Handed { at: 1, conn: 0, bytes: 40 * u64::from(LINE), by });
     }
-    let mut world = world(seed, config, expect, Shutdown::WhenDone);
+    let mut world = idling_world(seed, config, expect, Shutdown::WhenDone);
     spawn(&mut world, &[full, late]);
     world
 }
@@ -372,7 +398,7 @@ pub fn half_close(seed: u64, config: Config) -> EchoWorld {
 pub fn worst(seed: u64, config: Config) -> EchoWorld {
     let config = Config { buffer: BUFFER, ..config };
     let mut rng = Rng::new(seed ^ 0x3057);
-    let mut limits = server(SPREAD);
+    let mut limits = server();
     limits.domain.sessions = 3;
     let mut world = World::new_controlled(seed, config, Memory::Checked, |controls| {
         EchoReferee::new(seed, Vec::new(), Shutdown::WhenDone, controls)

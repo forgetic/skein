@@ -2,7 +2,10 @@
 //! section 5). Each peer keeps its independent machine, bounded connections,
 //! observations and io queues; it never knows a client's internal state or
 //! application policy. Constructors start listening; `Host::iterate` drives
-//! the passes, and `shutdown` closes admission and every connection.
+//! the passes, and `shutdown` closes admission and every connection once
+//! the clients have settled. A scenario about peer hang-up names it at its
+//! shutdown call; no peer closes merely to help its client settle
+//! (testing-strategy.md, section 6).
 //!
 //! These testing step machines use ordinary Rust (programming-model.md,
 //! section 10.2). Plaintext replays; TLS uses the fixed Skein test chain and

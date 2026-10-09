@@ -651,10 +651,20 @@ impl Host for Process {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shutdown {
+    ClientReady,
+    ClientClosing,
+    IssuerReady,
+    IssuerClosing,
+}
+
 struct Judge {
     delivered: bool,
     passed: bool,
     size: usize,
+    shutdown: Shutdown,
+    now: Time,
 }
 impl Referee<Process> for Judge {
     fn act(&mut self, _now: Time, processes: &mut [Process]) {
@@ -684,16 +694,27 @@ impl Referee<Process> for Judge {
             }
         }
         if self.passed {
+            // The issuer remains live until every client's io has settled.
+            let shutdown = self.shutdown;
             for process in processes {
                 match process {
                     Process::Client(actor) => actor.close = true,
-                    Process::Issuer(peer) => peer.shutdown(),
+                    Process::Issuer(peer) => {
+                        if shutdown == Shutdown::IssuerReady {
+                            peer.shutdown();
+                        }
+                    }
                     Process::Browser(_) => {}
                 }
             }
+            self.shutdown = match shutdown {
+                Shutdown::ClientReady => Shutdown::ClientClosing,
+                Shutdown::IssuerReady => Shutdown::IssuerClosing,
+                Shutdown::ClientClosing | Shutdown::IssuerClosing => shutdown,
+            };
         }
     }
-    fn observe(&mut self, _now: Time, processes: &[Process]) {
+    fn observe(&mut self, now: Time, processes: &[Process]) {
         let mut tokens = false;
         let mut browser = false;
         let mut posts = 0;
@@ -738,12 +759,25 @@ impl Referee<Process> for Judge {
         }
         assert!(posts <= 2, "exactly sign-in and refresh POSTs");
         self.passed = tokens && browser && posts == 2 && redirected;
+        self.now = now;
+        if self.passed
+            && self.shutdown == Shutdown::ClientClosing
+            && processes.iter().all(|process| match process {
+                Process::Client(actor) | Process::Browser(actor) => actor.is_empty(),
+                Process::Issuer(_) => true,
+            })
+        {
+            self.shutdown = Shutdown::IssuerReady;
+        }
     }
     fn next_deadline(&self) -> Option<Time> {
         if !self.delivered {
             Some(Time::ZERO)
         } else if self.passed {
-            None
+            match self.shutdown {
+                Shutdown::ClientReady | Shutdown::IssuerReady => Some(self.now),
+                Shutdown::ClientClosing | Shutdown::IssuerClosing => None,
+            }
         } else {
             Some(Time::from_nanos(20_000_000_000))
         }
@@ -767,7 +801,12 @@ pub fn run(seed: u64, faulted: bool, large: bool, memory: Memory) -> Outcome<Pro
         config.faults.short_recv = 300;
         config.faults.short_send = 300;
     }
-    let mut world = World::new(seed, config, Judge { delivered: false, passed: false, size }, memory);
+    let mut world = World::new(
+        seed,
+        config,
+        Judge { delivered: false, passed: false, size, shutdown: Shutdown::ClientReady, now: Time::ZERO },
+        memory,
+    );
     world.spawn(|| {
         let limits = skein_fake_peers::Limits {
             io: io::Limits { sockets: 2, ..io_limits() },

@@ -131,7 +131,8 @@ impl Peer {
         &self.observations
     }
 
-    /// Stops admission and closes connections without forgetting accepted issuer work.
+    /// Ends a peer whose clients have settled, retaining accepted work’s terminals.
+    /// A caller ending it earlier names its scenario about peer hang-up.
     pub fn shutdown(&mut self) {
         self.face.shutdown();
     }
