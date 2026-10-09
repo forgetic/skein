@@ -458,10 +458,11 @@ pub(crate) const fn stop(value: openai::Stop) -> Stop {
 }
 pub(crate) const fn usage(value: openai::Usage) -> Usage {
     Usage {
-        input_tokens: value.input_tokens,
-        output_tokens: value.output_tokens,
-        cache_read_tokens: value.cache_read_tokens,
-        cache_write_tokens: value.cache_write_tokens,
+        input: value.input,
+        output: value.output,
+        cache_read: value.cache_read,
+        cache_write: value.cache_write,
+        reasoning: value.reasoning,
     }
 }
 pub(crate) const fn failure(value: openai::Failure) -> Failure {
@@ -685,10 +686,16 @@ mod tests {
         assert_eq!(stop(openai::Stop::MaxTokens), Stop::MaxTokens);
         assert_eq!(stop(openai::Stop::ToolUse), Stop::ToolUse);
         assert_eq!(stop(openai::Stop::EndTurn), Stop::EndTurn);
-        let counts = openai::Usage { input_tokens: 10, output_tokens: 3, cache_read_tokens: 5, cache_write_tokens: 2 };
+        let counts = openai::Usage {
+            input: Some(10),
+            output: Some(3),
+            cache_read: Some(5),
+            cache_write: Some(2),
+            reasoning: None,
+        };
         assert_eq!(
             usage(counts),
-            Usage { input_tokens: 10, output_tokens: 3, cache_read_tokens: 5, cache_write_tokens: 2 }
+            Usage { input: Some(10), output: Some(3), cache_read: Some(5), cache_write: Some(2), reasoning: None }
         );
         assert_eq!(
             failure(openai::Failure::RateLimited { retry_after: Duration::from_secs(7) }),

@@ -322,13 +322,29 @@ impl Exchange {
         scripts: Box<[api::Script]>,
         echo: skein_llm::openai::Echo,
     ) -> Self {
+        Self::new_configured(
+            input,
+            bounds,
+            scripts,
+            documents::Options { echo, usage_fields: documents::UsageFields::ALL },
+        )
+    }
+
+    /// Construct an exchange with the independent peer's echo and usage reporting.
+    #[must_use]
+    pub fn new_configured(
+        input: Call,
+        bounds: client::Limits,
+        scripts: Box<[api::Script]>,
+        options: documents::Options,
+    ) -> Self {
         let endpoint = input.endpoint.clone();
         let credential = Credential {
             access_token: input.credential.access_token.clone(),
             account_id: input.credential.account_id.clone(),
         };
         let machine = client::Client::prepare(input, &bounds).expect("actual shared Client admission");
-        Self::prepared_with_codex_echo(machine, endpoint, credential, bounds, scripts, echo)
+        Self::prepared_with_options(machine, endpoint, credential, bounds, scripts, options)
     }
 
     /// Adopts the caller's one prepared Client without preparing another call.
@@ -360,13 +376,39 @@ impl Exchange {
         scripts: Box<[api::Script]>,
         echo: skein_llm::openai::Echo,
     ) -> Self {
+        Self::prepared_with_options(
+            machine,
+            endpoint,
+            credential,
+            bounds,
+            scripts,
+            documents::Options { echo, usage_fields: documents::UsageFields::ALL },
+        )
+    }
+
+    /// Adopt the prepared Client under the peer's explicit reporting configuration.
+    #[must_use]
+    pub fn prepared_with_options(
+        machine: client::Client,
+        endpoint: Endpoint,
+        credential: Credential,
+        bounds: client::Limits,
+        scripts: Box<[api::Script]>,
+        options: documents::Options,
+    ) -> Self {
         let provider = match endpoint.provider {
             Provider::OpenAiCodex => documents::Provider::OpenAi,
             Provider::Anthropic => documents::Provider::Anthropic,
         };
         let peer_limits = limits(&bounds);
         let service = provider::Service::new(
-            provider::Config { echo, provider, path: endpoint.target, headers: Box::new([]) },
+            provider::Config {
+                usage_fields: options.usage_fields,
+                echo: options.echo,
+                provider,
+                path: endpoint.target,
+                headers: Box::new([]),
+            },
             &peer_limits,
         )
         .expect("bounded independent peer");

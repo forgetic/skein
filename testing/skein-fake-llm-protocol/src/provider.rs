@@ -59,6 +59,8 @@ pub struct Limits {
 pub struct Config {
     /// Codex metadata echoes; off unless the world explicitly selects them.
     pub echo: openai::Echo,
+    /// Usage fields this dialect reports; absent selections are omitted.
+    pub usage_fields: documents::UsageFields,
     /// Provider dialect selected by this scripted service.
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -738,13 +740,13 @@ fn next_event(
     let Some(answer) = &server.answer else {
         return;
     };
-    match documents::event_with_echo(
+    match documents::event_with_options(
         service.config.provider,
         answer,
         server.sequence,
         server.response_id,
         server.body.as_slice(),
-        service.config.echo,
+        documents::Options { echo: service.config.echo, usage_fields: service.config.usage_fields },
         &env.limits.documents,
     ) {
         Ok(Some(event)) => {

@@ -88,16 +88,22 @@ pub enum Stop {
     MaxTokens,
     Refusal,
 }
+/// Optional native token reports; absent accounting never becomes a report of zero.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Usage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
+    pub input: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    /// Completion tokens, including reasoning.
+    pub output: Option<u64>,
+    /// The part of output spent on reasoning, never added to output.
+    pub reasoning: Option<u64>,
 }
 impl Usage {
-    pub const ZERO: Usage = Usage { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
+    /// All counts are unreported until the provider supplies them.
+    pub const NONE: Usage = Usage { input: None, cache_read: None, cache_write: None, output: None, reasoning: None };
 }
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Failure {
     /// Provider bytes violate the dialect or end before its terminal event.

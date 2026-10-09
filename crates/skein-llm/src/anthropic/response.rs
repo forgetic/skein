@@ -47,10 +47,10 @@ pub enum Delta {
 /// Fields omitted from cumulative usage updates retain their previous values.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct UsagePatch {
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
-    pub cache_read_tokens: Option<u64>,
-    pub cache_write_tokens: Option<u64>,
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Event {
@@ -117,7 +117,7 @@ impl StreamDecoder {
             ending: false,
             over: false,
             stop: None,
-            usage: Usage::ZERO,
+            usage: Usage { input: None, output: None, cache_read: None, cache_write: None, reasoning: None },
             received_bytes: 0,
             part_bytes: 0,
             detail_bytes: limits.detail_bytes,
@@ -178,6 +178,7 @@ impl StreamDecoder {
                 }
                 self.started = true;
                 self.usage = usage;
+                self.usage.reasoning = None;
             }
             Event::Added { index, block } => {
                 if let Some(part) = self.pending.take() {
@@ -516,17 +517,17 @@ pub(super) fn write_thinking(out: &mut skein_json::writer::Encoder, head: &Json,
 }
 
 fn merge_usage(usage: &mut Usage, patch: UsagePatch) {
-    if let Some(value) = patch.input_tokens {
-        usage.input_tokens = value;
+    if let Some(value) = patch.input {
+        usage.input = Some(value);
     }
-    if let Some(value) = patch.output_tokens {
-        usage.output_tokens = value;
+    if let Some(value) = patch.output {
+        usage.output = Some(value);
     }
-    if let Some(value) = patch.cache_read_tokens {
-        usage.cache_read_tokens = value;
+    if let Some(value) = patch.cache_read {
+        usage.cache_read = Some(value);
     }
-    if let Some(value) = patch.cache_write_tokens {
-        usage.cache_write_tokens = value;
+    if let Some(value) = patch.cache_write {
+        usage.cache_write = Some(value);
     }
 }
 
@@ -541,8 +542,8 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
             if !json::array(field(message, b"content")?, 0)?.is_empty() {
                 return Err(DecodeError::Malformed);
             }
-            let patch = read_usage(field(message, b"usage")?)?;
-            let mut usage = Usage::ZERO;
+            let patch = read_usage(json::reported_field(message, b"usage"));
+            let mut usage = Usage::NONE;
             merge_usage(&mut usage, patch);
             Ok(Event::Started { usage })
         }
@@ -601,7 +602,7 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
                 },
                 _ => return Err(DecodeError::WrongType),
             };
-            Ok(Event::MessageDelta { stop, usage: read_usage(field(tokens, b"usage")?)? })
+            Ok(Event::MessageDelta { stop, usage: read_usage(json::reported_field(tokens, b"usage")) })
         }
         b"message_stop" => Ok(Event::Completed),
         b"error" => Ok(Event::Failed { error: decode_error(value, limits)? }),
@@ -626,18 +627,15 @@ pub(super) fn validate_opaque(tokens: &[Token]) -> Result<(), DecodeError> {
 pub fn decode_error(value: &Json, limits: &Limits) -> Result<ProviderError, DecodeError> {
     crate::openai::decode_error(value, limits)
 }
-fn read_usage(tokens: &[Token]) -> Result<UsagePatch, DecodeError> {
-    Ok(UsagePatch {
-        input_tokens: optional_unsigned(tokens, b"input_tokens")?,
-        output_tokens: optional_unsigned(tokens, b"output_tokens")?,
-        cache_read_tokens: optional_unsigned(tokens, b"cache_read_input_tokens")?,
-        cache_write_tokens: optional_unsigned(tokens, b"cache_creation_input_tokens")?,
-    })
-}
-fn optional_unsigned(tokens: &[Token], name: &[u8]) -> Result<Option<u64>, DecodeError> {
-    match json::optional_at(tokens, json::field(tokens, name)?)? {
-        Some(value) => Ok(Some(json::unsigned(value)?)),
-        None => Ok(None),
+fn read_usage(tokens: Option<&[Token]>) -> UsagePatch {
+    let Some(tokens) = tokens else {
+        return UsagePatch { input: None, output: None, cache_read: None, cache_write: None };
+    };
+    UsagePatch {
+        input: json::reported_unsigned(tokens, b"input_tokens"),
+        output: json::reported_unsigned(tokens, b"output_tokens"),
+        cache_read: json::reported_unsigned(tokens, b"cache_read_input_tokens"),
+        cache_write: json::reported_unsigned(tokens, b"cache_creation_input_tokens"),
     }
 }
 fn optional_text(tokens: &[Token], name: &[u8]) -> Result<Box<[u8]>, DecodeError> {

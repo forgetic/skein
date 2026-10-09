@@ -240,11 +240,11 @@ fn random_and_scripted_full_and_truncated_tool_scratch_stays_within_the_bound() 
                 if scripted {
                     assert_eq!(answer.parts.len(), 2, "both complete scripted calls were generated");
                 }
-                assert!(answer.usage.completion_tokens > 0);
+                assert!(answer.usage.output.is_some_and(|count| count > 0));
             } else {
                 assert_eq!(answer.finish, Finish::Length);
                 assert_eq!(answer.parts.len(), 1, "the cut answer retains just its first call");
-                assert_eq!(answer.usage.completion_tokens, 0);
+                assert_eq!(answer.usage.output, Some(0));
             }
             for part in &answer.parts {
                 let Part::ToolCall { id, name, arguments } = part else {

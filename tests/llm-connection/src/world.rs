@@ -134,6 +134,7 @@ impl Peer {
             owner,
             service: provider::Service::new(
                 provider::Config {
+                    usage_fields: skein_fake_llm_protocol::documents::UsageFields::ALL,
                     echo: skein_llm::openai::Echo::NONE,
                     provider: documents::Provider::OpenAi,
                     path: call.endpoint.target,

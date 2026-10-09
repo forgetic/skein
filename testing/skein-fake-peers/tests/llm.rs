@@ -45,6 +45,7 @@ fn make(address: SocketAddr, transport: Transport) -> Result<llm::Peer, skein_fa
         transport,
         limits(),
         provider::Config {
+            usage_fields: skein_fake_llm_protocol::documents::UsageFields::ALL,
             echo: skein_llm::openai::Echo::NONE,
             provider: documents::Provider::OpenAi,
             path: call.endpoint.target,

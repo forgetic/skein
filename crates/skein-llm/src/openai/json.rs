@@ -406,3 +406,12 @@ fn tokenizer_error(error: tokenizer::Error, limits: &Limits) -> DecodeError {
         | tokenizer::Error::Stream(_) => DecodeError::Malformed,
     }
 }
+
+/// Usage is accounting: an absent or unusable report never changes a terminal.
+pub(crate) fn reported_field<'a>(tokens: &'a [Token], name: &[u8]) -> Option<&'a [Token]> {
+    let at = field(tokens, name).ok().flatten()?;
+    value_at(tokens, at).ok()
+}
+pub(crate) fn reported_unsigned(tokens: &[Token], name: &[u8]) -> Option<u64> {
+    unsigned(reported_field(tokens, name)?).ok()
+}

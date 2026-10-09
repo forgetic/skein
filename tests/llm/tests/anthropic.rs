@@ -104,10 +104,10 @@ fn oauth_request_text_usage_and_http_fragmentation() {
             assert!(world.seen.iter().any(|event| matches!(event, client::Event::Delta { owner, delta: Delta::Text { index: 0, text, .. } } if *owner == Token::new(7) && text.as_ref() == "Hello 🌍".as_bytes())));
             let answer = completion(&world);
             assert_eq!(answer.stop, Stop::EndTurn);
-            assert_eq!(answer.usage.input_tokens, 7);
-            assert_eq!(answer.usage.cache_read_tokens, 11);
-            assert_eq!(answer.usage.cache_write_tokens, 13);
-            assert_eq!(answer.usage.output_tokens, 9);
+            assert_eq!(answer.usage.input, Some(7));
+            assert_eq!(answer.usage.cache_read, Some(11));
+            assert_eq!(answer.usage.cache_write, Some(13));
+            assert_eq!(answer.usage.output, Some(9));
             assert!(matches!(&answer.content[0], Block::Text { text, .. } if text.as_ref() == "Hello 🌍".as_bytes()));
         }
     }
@@ -245,10 +245,10 @@ fn usage_updates_are_snapshots_and_token_limit_is_successful() {
     world.assert_once();
     let answer = completion(&world);
     assert_eq!(answer.stop, Stop::MaxTokens);
-    assert_eq!(answer.usage.output_tokens, 9);
-    assert_eq!(answer.usage.input_tokens, 7);
-    assert_eq!(answer.usage.cache_read_tokens, 11);
-    assert_eq!(answer.usage.cache_write_tokens, 13);
+    assert_eq!(answer.usage.output, Some(9));
+    assert_eq!(answer.usage.input, Some(7));
+    assert_eq!(answer.usage.cache_read, Some(11));
+    assert_eq!(answer.usage.cache_write, Some(13));
 }
 
 #[test]

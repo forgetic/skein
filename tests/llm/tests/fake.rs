@@ -431,15 +431,12 @@ fn actual_byte_peer_preserves_opaque_extensions_refusal_stop_and_continuation_re
             panic!("one outside request");
         };
         let fresh = u64::try_from(query.system.len() + 5).expect("Hello and actual system bytes") / 4;
-        assert_eq!(answer.usage.input_tokens, fresh);
-        assert_eq!(answer.usage.output_tokens, 17);
-        assert_eq!(answer.usage.cache_read_tokens, 0);
+        assert_eq!(answer.usage.input, Some(0));
+        assert_eq!(answer.usage.output, Some(17));
+        assert_eq!(answer.usage.cache_read, Some(0));
         assert_eq!(
-            answer.usage.cache_write_tokens,
-            match provider {
-                skein_llm::Provider::Anthropic => fresh,
-                skein_llm::Provider::OpenAiCodex => 0,
-            }
+            answer.usage.cache_write,
+Some(fresh)
         );
         let mut next = input(provider, 2);
         next.prompt.messages = Box::new([
@@ -474,20 +471,17 @@ fn actual_byte_peer_preserves_opaque_extensions_refusal_stop_and_continuation_re
             panic!("actual ordinary continuation");
         };
         assert_eq!(text.as_ref(), b"resumed exact");
-        assert_eq!(terminal.usage.input_tokens, 2, "eight continuation text bytes read fresh");
-        assert_eq!(terminal.usage.output_tokens, 3);
+        assert_eq!(terminal.usage.input, Some(0), "continuation text is written to the cache");
+        assert_eq!(terminal.usage.output, Some(3));
         assert_eq!(
-            terminal.usage.cache_read_tokens,
-            u64::try_from(query.system.len() + bytes.len() + b"actual refusal".len())
+            terminal.usage.cache_read,
+Some(            u64::try_from(query.system.len() + bytes.len() + b"actual refusal".len())
                 .expect("exact prior content bytes")
-                / 4
+                / 4)
         );
         assert_eq!(
-            terminal.usage.cache_write_tokens,
-            match provider {
-                skein_llm::Provider::Anthropic => 2,
-                skein_llm::Provider::OpenAiCodex => 0,
-            }
+            terminal.usage.cache_write,
+Some(2)
         );
     }
 }
@@ -750,6 +744,42 @@ fn configured_codex_echoes_preserve_the_completion_and_retain_the_token_cliff() 
             assert_eq!(completion(&world), &expected);
         } else {
             assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Tokens, bound }, .. } if *bound == u64::from(cap))));
+        }
+    }
+}
+
+#[test]
+fn byte_peers_can_omit_each_usage_report_without_changing_completion() {
+    use skein_fake_llm_protocol::documents::{Options, UsageField, UsageFields};
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        for selected in [
+            None,
+            Some(UsageField::Input),
+            Some(UsageField::CacheRead),
+            Some(UsageField::CacheWrite),
+            Some(UsageField::Output),
+            Some(UsageField::Reasoning),
+        ] {
+            let fields = selected.map_or(UsageFields::NONE, |field| UsageFields::NONE.with(field));
+            let mut world = Exchange::new_configured(
+                input(provider, 99),
+                limits(),
+                scripts(),
+                Options { echo: skein_llm::openai::Echo::NONE, usage_fields: fields },
+            );
+            world.start();
+            world.run();
+            let answer = completion(&world);
+            assert_eq!(answer.stop, skein_llm::Stop::ToolUse);
+            assert!(matches!(&*answer.content, [Block::ToolCall { name, .. }] if name.as_ref() == b"caller_tool"));
+            assert_eq!(answer.usage.input, (selected == Some(UsageField::Input)).then_some(0));
+            assert_eq!(answer.usage.cache_read, (selected == Some(UsageField::CacheRead)).then_some(0));
+            assert_eq!(answer.usage.cache_write.is_some(), selected == Some(UsageField::CacheWrite));
+            assert_eq!(answer.usage.output, (selected == Some(UsageField::Output)).then_some(8));
+            assert_eq!(
+                answer.usage.reasoning,
+                (provider == skein_llm::Provider::OpenAiCodex && selected == Some(UsageField::Reasoning)).then_some(0)
+            );
         }
     }
 }

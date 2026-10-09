@@ -4,12 +4,15 @@
 #![expect(clippy::disallowed_types, reason = "ordinary test code collects provider outputs in Vec")]
 #![expect(clippy::disallowed_methods, reason = "tests inspect fixture text and collect outputs")]
 #![expect(clippy::arithmetic_side_effects, reason = "the test's trusted archive cursor uses ordinary arithmetic")]
+#![expect(clippy::disallowed_macros, reason = "ordinary tests format synthetic provider documents")]
 use crate::openai::{
     DecodeError, Event, Failure, Input, Item, Json, Limits, Output, Part, ProviderError, RateLimit, Request, Role,
     Stop, StreamDecoder, Tool, Usage, classify, decode_error, decode_event, decode_request, encode_error, encode_event,
     encode_request, json, worst_case,
 };
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use skein_json::Token;
 use skein_lib::{Duration, Queue, Wall, bytes};
@@ -209,7 +212,7 @@ fn synthetic_parallel_tools_reasoning_and_message_heads_keep_order() {
                 arguments: owned(br#"{"path":"b"}"#),
             },
         },
-        Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO },
+        Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
     ];
     let trace = stream(&events, &LIMITS);
     let parts: Vec<&Part> = trace
@@ -257,7 +260,7 @@ fn input_cap_discards_input_and_answer_limit_emits_one_failed_terminal() {
                 arguments: owned(br#"{"path":"a"}"#),
             },
         },
-        Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO },
+        Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
     ];
     let trace = stream(&events, &Limits { input_bytes: 3, ..LIMITS });
     assert!(trace.iter().any(|out| match out {
@@ -274,7 +277,7 @@ fn input_cap_discards_input_and_answer_limit_emits_one_failed_terminal() {
             index: 0,
             item: Item::Message { id: owned(b"m"), phase: None, text: owned(b"hello"), refusal: false },
         },
-        Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO },
+        Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
     ];
     let trace = stream(&events, &Limits { answer_bytes: 4, ..LIMITS });
     assert!(match trace.last() {
@@ -321,7 +324,7 @@ fn mismatched_indices_ids_kinds_and_early_end_fail_once() {
                 },
             },
         ]),
-        Vec::from([added, Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO }]),
+        Vec::from([added, Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE }]),
         Vec::from([Event::Progress]),
     ];
     for events in scenarios {
@@ -366,7 +369,13 @@ fn server_events_roundtrip_echoes_skipped_and_errors_keep_reset_priority() {
         },
         Event::Completed {
             stop: Stop::MaxTokens,
-            usage: Usage { input_tokens: 12, output_tokens: 3, cache_read_tokens: 4, cache_write_tokens: 0 },
+            usage: Usage {
+                input: Some(12),
+                output: Some(3),
+                cache_read: Some(4),
+                cache_write: Some(0),
+                reasoning: None,
+            },
         },
         Event::Progress,
         Event::Unknown,
@@ -398,17 +407,23 @@ fn server_events_roundtrip_echoes_skipped_and_errors_keep_reset_priority() {
 }
 
 #[test]
-fn completed_usage_rejects_cached_over_total_and_done_honors_incomplete_status() {
+fn completed_usage_keeps_cached_over_total_and_done_honors_incomplete_status() {
     let valid = value(br#"{"type":"response.done","response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"},"usage":{"input_tokens":8,"input_tokens_details":{"cached_tokens":3},"output_tokens":2},"output":[{"ignored":true}]}}"#);
     assert_eq!(
         decode_event(&valid, &LIMITS),
         Ok(Event::Completed {
             stop: Stop::Refusal,
-            usage: Usage { input_tokens: 5, output_tokens: 2, cache_read_tokens: 3, cache_write_tokens: 0 }
+            usage: Usage { input: Some(5), output: Some(2), cache_read: Some(3), cache_write: None, reasoning: None }
         })
     );
     let invalid = value(br#"{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":2,"input_tokens_details":{"cached_tokens":3},"output_tokens":2}}}"#);
-    assert_eq!(decode_event(&invalid, &LIMITS), Err(DecodeError::Malformed));
+    assert_eq!(
+        decode_event(&invalid, &LIMITS),
+        Ok(Event::Completed {
+            stop: Stop::EndTurn,
+            usage: Usage { input: None, cache_read: Some(3), cache_write: None, output: Some(2), reasoning: None },
+        })
+    );
     assert_eq!(
         decode_event(
             &value(br#"{"type":"response.completed","response":{"status":"in_progress","usage":null}}"#),
@@ -526,10 +541,11 @@ fn archived_real_provider_requests_and_answers_match_known_completions() {
             Some(&Output::Completed {
                 stop: if tool_count == 0 { Stop::EndTurn } else { Stop::ToolUse },
                 usage: Usage {
-                    input_tokens: input,
-                    output_tokens: output,
-                    cache_read_tokens: 0,
-                    cache_write_tokens: 0
+                    input: Some(input),
+                    output: Some(output),
+                    cache_read: Some(0),
+                    cache_write: None,
+                    reasoning: Some(if scenario == "single-text" { 10 } else { 0 })
                 }
             })
         );
@@ -601,7 +617,7 @@ fn out_of_order_done_waits_for_order_and_terminal_waits_for_ready_parts() {
         drain(&mut out, &mut trace);
     }
     assert!(decoder.has_ready());
-    decoder.event(Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO }, &LIMITS, Wall::EPOCH, &mut out);
+    decoder.event(Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE }, &LIMITS, Wall::EPOCH, &mut out);
     drain(&mut out, &mut trace);
     assert!(decoder.has_ready());
     assert!(!decoder.is_complete());
@@ -617,7 +633,7 @@ fn out_of_order_done_waits_for_order_and_terminal_waits_for_ready_parts() {
         })
         .collect();
     assert_eq!(ids, Vec::from([(owned(b"x"), owned(b"a")), (owned(b"y"), owned(b"b")), (owned(b"z"), owned(b"c"))]));
-    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO }));
+    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::NONE }));
 }
 
 #[test]
@@ -634,9 +650,9 @@ fn incomplete_and_refused_terminals_override_tools_and_absolute_reset_uses_wall(
                     arguments: owned(b"{}"),
                 },
             },
-            Event::Completed { stop, usage: Usage::ZERO },
+            Event::Completed { stop, usage: Usage::NONE },
         ];
-        assert_eq!(stream(&events, &LIMITS).last(), Some(&Output::Completed { stop, usage: Usage::ZERO }));
+        assert_eq!(stream(&events, &LIMITS).last(), Some(&Output::Completed { stop, usage: Usage::NONE }));
     }
     let mut decoder = StreamDecoder::new(&LIMITS);
     let mut out = Queue::with_capacity(crate::openai::MAX_OUT);
@@ -661,8 +677,8 @@ fn incomplete_and_refused_terminals_override_tools_and_absolute_reset_uses_wall(
         })
     );
     assert_eq!(
-        stream(&[Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO }], &LIMITS),
-        Vec::from([Output::Completed { stop: Stop::EndTurn, usage: Usage::ZERO }])
+        stream(&[Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE }], &LIMITS),
+        Vec::from([Output::Completed { stop: Stop::EndTurn, usage: Usage::NONE }])
     );
 }
 
@@ -687,12 +703,12 @@ fn server_refuses_request_limit_even_when_document_limit_is_larger() {
 
 #[test]
 fn fake_completion_echo_exercises_large_event_without_keeping_request() {
-    let bytes = crate::openai::encode_completion(Stop::EndTurn, Usage::ZERO, &request(), &LIMITS).unwrap();
+    let bytes = crate::openai::encode_completion(Stop::EndTurn, Usage::NONE, &request(), &LIMITS).unwrap();
     assert!(bytes::find(&bytes, b"instructions").is_some());
     assert!(bytes::find(&bytes, b"parameters").is_some());
     assert_eq!(
         decode_event(&value(&bytes), &LIMITS).unwrap(),
-        Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO }
+        Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE }
     );
 }
 
@@ -709,7 +725,7 @@ fn deltas_decode_roundtrip_and_forward_before_completed_blocks() {
         Event::Done { index: 2, item: Item::Opaque { value: value(br#"{"id":"r","type":"reasoning","summary":[{"type":"summary_text","text":"checking"}],"encrypted_content":"secret"}"#) } },
         Event::Done { index: 1, item: Item::FunctionCall { id: owned(b"f"), call_id: owned(b"c"), name: owned(b"read"), arguments: owned(br#"{"path":"a"}"#) } },
         Event::Done { index: 0, item: Item::Message { id: owned(b"m"), phase: Some(owned(b"final_answer")), text: owned(b"hello"), refusal: false } },
-        Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO },
+        Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
     ];
     for event in &events {
         assert_eq!(decode_event(&value(&encode_event(event, &LIMITS).unwrap()), &LIMITS).unwrap(), *event);
@@ -738,7 +754,7 @@ fn deltas_decode_roundtrip_and_forward_before_completed_blocks() {
         Part::Opaque { .. } => true,
         _ => false,
     });
-    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO }));
+    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::NONE }));
 }
 
 #[test]
@@ -760,7 +776,7 @@ fn delta_references_and_cumulative_size_are_checked_and_failure_is_terminal() {
             Event::TextDelta { index: 0, content_index: 0, text: owned(b"ab") },
             Event::TextDelta { index: 0, content_index: 0, text: owned(b"cd") },
             Event::TextDelta { index: 0, content_index: 0, text: owned(b"ignored") },
-            Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO },
+            Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
         ],
         &Limits { answer_bytes: 3, ..LIMITS },
     );
@@ -868,7 +884,7 @@ fn separate_opaque_tool_ids_each_obey_string_and_joint_answer_caps() {
                 arguments: owned(b"{}"),
             },
         },
-        Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO },
+        Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
     ];
     let exact = Limits { string_bytes: 13, answer_bytes: 20, ..LIMITS };
     let trace = stream(&events, &exact);
@@ -884,7 +900,7 @@ fn separate_opaque_tool_ids_each_obey_string_and_joint_answer_caps() {
             cut: false,
         })
     );
-    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO }));
+    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::NONE }));
     let trace = stream(&events, &Limits { answer_bytes: 19, ..exact });
     assert!(match trace.last() {
         Some(Output::Failed { failure: Failure::Limit { .. }, .. }) => true,
@@ -906,11 +922,11 @@ fn separate_opaque_tool_ids_each_obey_string_and_joint_answer_caps() {
                     arguments: owned(b"{}"),
                 },
             },
-            Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO },
+            Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
         ];
         assert_eq!(
             stream(&events, &Limits { string_bytes: 14, answer_bytes: 27, ..exact }).last(),
-            Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO })
+            Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::NONE })
         );
         let trace = stream(&events, &Limits { string_bytes: 13, answer_bytes: 27, ..exact });
         assert!(match trace.last() {
@@ -965,7 +981,7 @@ fn unfinished_native_call_keeps_its_identity_and_arguments_at_the_output_cap() {
             arguments: Box::new([]),
         },
         Event::ArgumentsDelta { index: 0, delta: owned(br#"{"x":"#) },
-        Event::Completed { stop: Stop::MaxTokens, usage: Usage::ZERO },
+        Event::Completed { stop: Stop::MaxTokens, usage: Usage::NONE },
     ];
     for event in &events {
         let wire = encode_event(event, &LIMITS).expect("native event");
@@ -977,7 +993,7 @@ fn unfinished_native_call_keeps_its_identity_and_arguments_at_the_output_cap() {
             call_id.as_ref() == b"c" && name.as_ref() == b"read" && input.as_ref() == br#"{"x":"#,
         _ => false,
     }));
-    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::MaxTokens, usage: Usage::ZERO }));
+    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::MaxTokens, usage: Usage::NONE }));
 }
 
 #[test]
@@ -1000,7 +1016,7 @@ fn escaped_argument_text_is_counted_at_the_input_edge_and_one_over() {
                 arguments: owned(arguments),
             },
         },
-        Event::Completed { stop: Stop::ToolUse, usage: Usage::ZERO },
+        Event::Completed { stop: Stop::ToolUse, usage: Usage::NONE },
     ];
     for below in [false, true] {
         let input = u32::try_from(arguments.len()).unwrap() - u32::from(below);
@@ -1021,7 +1037,7 @@ fn escaped_argument_text_is_counted_at_the_input_edge_and_one_over() {
             }
             Part::Text { .. } | Part::Opaque { .. } | Part::Dropped { .. } => unreachable!("one function call outcome"),
         }
-        assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO }));
+        assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::NONE }));
     }
 }
 
@@ -1044,7 +1060,7 @@ fn a_native_done_item_marked_incomplete_is_a_cut_and_requires_the_output_cap() {
                 arguments: owned(b"{broken"),
             },
         },
-        Event::Completed { stop: Stop::MaxTokens, usage: Usage::ZERO },
+        Event::Completed { stop: Stop::MaxTokens, usage: Usage::NONE },
     ];
     let wire = encode_event(&events[1], &LIMITS).expect("incomplete provider item");
     assert_eq!(decode_event(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap(), events[1]);
@@ -1053,9 +1069,9 @@ fn a_native_done_item_marked_incomplete_is_a_cut_and_requires_the_output_cap() {
         Output::Part(Part::ToolCall { input, cut: true, .. }) => input.as_ref() == b"{broken",
         _ => false,
     }));
-    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::MaxTokens, usage: Usage::ZERO }));
+    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::MaxTokens, usage: Usage::NONE }));
     let mut events = events;
-    events[2] = Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO };
+    events[2] = Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE };
     let trace = stream(&events, &LIMITS);
     assert!(match trace.last() {
         Some(Output::Failed { failure: Failure::Protocol, .. }) => true,
@@ -1080,7 +1096,7 @@ fn reasoning_drop_is_opt_in_at_one_over_and_never_drops_unknown_items() {
             for event in [
                 Event::Added { index: 0, id: owned(b"r"), kind: owned(kind) },
                 Event::Done { index: 0, item: Item::Opaque { value: opaque.clone() } },
-                Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO },
+                Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
             ] {
                 decoder.event(event, &bounds, Wall::EPOCH, &mut out);
                 drain(&mut out, &mut trace);
@@ -1107,5 +1123,92 @@ fn reasoning_drop_is_opt_in_at_one_over_and_never_drops_unknown_items() {
                 }));
             }
         }
+    }
+}
+
+#[test]
+fn codex_usage_distinguishes_each_absent_present_and_zero_field() {
+    for amount in [0, 7] {
+        for (wire, expected) in [
+            (format!(r#"{{"input_tokens":{amount}}}"#), Usage { input: Some(amount), ..Usage::NONE }),
+            (
+                format!(r#"{{"input_tokens_details":{{"cached_tokens":{amount}}}}}"#),
+                Usage { cache_read: Some(amount), ..Usage::NONE },
+            ),
+            (
+                format!(r#"{{"input_tokens_details":{{"cache_write_tokens":{amount}}}}}"#),
+                Usage { cache_write: Some(amount), ..Usage::NONE },
+            ),
+            (format!(r#"{{"output_tokens":{amount}}}"#), Usage { output: Some(amount), ..Usage::NONE }),
+            (
+                format!(r#"{{"output_tokens_details":{{"reasoning_tokens":{amount}}}}}"#),
+                Usage { reasoning: Some(amount), ..Usage::NONE },
+            ),
+        ] {
+            let document =
+                format!(r#"{{"type":"response.completed","response":{{"status":"completed","usage":{wire}}}}}"#);
+            assert_eq!(
+                decode_event(&value(document.as_bytes()), &LIMITS),
+                Ok(Event::Completed { stop: Stop::EndTurn, usage: expected })
+            );
+        }
+    }
+    for usage in [
+        "{}",
+        "null",
+        r#"{"input_tokens":"bad","output_tokens":-1,"input_tokens_details":{"cached_tokens":true},"output_tokens_details":{"reasoning_tokens":"bad"}}"#,
+    ] {
+        let document =
+            format!(r#"{{"type":"response.completed","response":{{"status":"completed","usage":{usage}}}}}"#);
+        assert_eq!(
+            decode_event(&value(document.as_bytes()), &LIMITS),
+            Ok(Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE })
+        );
+    }
+    assert_eq!(
+        decode_event(&value(br#"{"type":"response.completed","response":{"status":"completed"}}"#), &LIMITS),
+        Ok(Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE })
+    );
+}
+
+#[test]
+fn inconsistent_codex_usage_keeps_reports_and_the_model_completion() {
+    for (total, read, written, expected) in [
+        (2, 3, None, None),
+        (5, 3, Some(3), None),
+        (u64::MAX, u64::MAX, Some(u64::MAX), None),
+        (8, 3, None, Some(5)),
+        (8, 3, Some(2), Some(3)),
+        (0, 0, Some(0), Some(0)),
+    ] {
+        let write = written.map_or(String::new(), |written| format!(r#", "cache_write_tokens":{written}"#));
+        let document = format!(
+            r#"{{"type":"response.completed","response":{{"status":"completed","usage":{{"input_tokens":{total},"input_tokens_details":{{"cached_tokens":{read}{write}}},"output_tokens":7,"output_tokens_details":{{"reasoning_tokens":2}}}}}}}}"#
+        );
+        let event = decode_event(&value(document.as_bytes()), &LIMITS).unwrap();
+        let usage = Usage {
+            input: expected,
+            cache_read: Some(read),
+            cache_write: written,
+            output: Some(7),
+            reasoning: Some(2),
+        };
+        assert_eq!(event, Event::Completed { stop: Stop::EndTurn, usage });
+        let trace = stream(
+            &[
+                Event::Added { index: 0, id: owned(b"m"), kind: owned(b"message") },
+                Event::Done {
+                    index: 0,
+                    item: Item::Message { id: owned(b"m"), phase: None, text: owned(b"kept"), refusal: false },
+                },
+                event,
+            ],
+            &LIMITS,
+        );
+        assert!(trace.iter().any(|output| match output {
+            Output::Part(Part::Text { text, .. }) => text.as_ref() == b"kept",
+            _ => false,
+        }));
+        assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::EndTurn, usage }));
     }
 }

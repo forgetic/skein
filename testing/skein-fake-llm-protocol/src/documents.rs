@@ -26,6 +26,56 @@ pub enum Provider {
     OpenAi,
 }
 
+/// One usage field whose reporting the configured byte peer may enable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UsageField {
+    /// Disjoint prompt input, sent by the peer when configured.
+    Input,
+    /// Cache reads, sent by the peer when configured.
+    CacheRead,
+    /// Cache writes, sent by the peer when configured.
+    CacheWrite,
+    /// Completion output, sent by the peer when configured.
+    Output,
+    /// Reasoning within output, sent only on Codex when configured.
+    Reasoning,
+}
+/// The configured subset of usage fields the peer writes; omission preserves None.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct UsageFields {
+    bits: u8,
+}
+impl UsageFields {
+    pub const ALL: UsageFields = UsageFields { bits: 31 };
+    pub const NONE: UsageFields = UsageFields { bits: 0 };
+    #[must_use]
+    pub const fn with(self, field: UsageField) -> UsageFields {
+        UsageFields { bits: self.bits | usage_bit(field) }
+    }
+    #[must_use]
+    pub const fn contains(self, field: UsageField) -> bool {
+        self.bits & usage_bit(field) != 0
+    }
+}
+const fn usage_bit(field: UsageField) -> u8 {
+    match field {
+        UsageField::Input => 1,
+        UsageField::CacheRead => 2,
+        UsageField::CacheWrite => 4,
+        UsageField::Output => 8,
+        UsageField::Reasoning => 16,
+    }
+}
+/// Optional native echoes and the usage fields configured for this byte peer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Options {
+    pub echo: openai::Echo,
+    pub usage_fields: UsageFields,
+}
+impl Options {
+    pub const DEFAULT: Options = Options { echo: openai::Echo::NONE, usage_fields: UsageFields::ALL };
+}
+
 /// Immutable ownership and document caps supplied by the caller to every entry point.
 ///
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -201,22 +251,24 @@ pub fn event(
     call: u64,
     limits: &Limits,
 ) -> Result<Option<Outgoing>, Error> {
-    event_with_echo(provider, answer, sequence, call, &[], openai::Echo::NONE, limits)
+    event_with_options(provider, answer, sequence, call, &[], Options::DEFAULT, limits)
 }
 
 /// Encode one event with the optional Codex request echo from its bounded body.
-pub fn event_with_echo(
+pub fn event_with_options(
     provider: Provider,
     answer: &api::Answer,
     sequence: u32,
     call: u64,
     body: &[u8],
-    echo: openai::Echo,
+    options: Options,
     limits: &Limits,
 ) -> Result<Option<Outgoing>, Error> {
+    let echo = options.echo;
     let (name, data) = match provider {
         Provider::Anthropic => {
-            let Some((name, event)) = anthropic_event(answer, sequence, &limits.anthropic)? else {
+            let Some((name, event)) = anthropic_event(answer, sequence, options.usage_fields, &limits.anthropic)?
+            else {
                 return Ok(None);
             };
             let Ok(data) = anthropic::encode_event(&event, &limits.anthropic) else {
@@ -225,7 +277,8 @@ pub fn event_with_echo(
             (name, data)
         }
         Provider::OpenAi => {
-            let Some((name, event)) = openai_event(answer, sequence, call, &limits.openai)? else {
+            let Some((name, event)) = openai_event(answer, sequence, call, options.usage_fields, &limits.openai)?
+            else {
                 return Ok(None);
             };
             let echo_event = match &event {
@@ -262,14 +315,11 @@ type OpenAiEvent = (Box<[u8]>, openai::Event);
 fn anthropic_event(
     answer: &api::Answer,
     sequence: u32,
+    fields: UsageFields,
     limits: &anthropic::Limits,
 ) -> Result<Option<AnthropicEvent>, Error> {
-    let usage = anthropic::Usage {
-        input_tokens: answer.usage.prompt_tokens,
-        output_tokens: answer.usage.completion_tokens,
-        cache_read_tokens: answer.usage.cached_tokens,
-        cache_write_tokens: answer.usage.cache_creation_tokens,
-    };
+    let mut usage = reported_usage(answer.usage, fields);
+    usage.reasoning = None;
     if sequence == 0 {
         return Ok(Some((bytes::copy_of(b"message_start"), anthropic::Event::Started { usage })));
     }
@@ -345,10 +395,10 @@ fn anthropic_event(
             anthropic::Event::MessageDelta {
                 stop: Some(anthropic_stop(answer.finish)),
                 usage: anthropic::UsagePatch {
-                    input_tokens: Some(usage.input_tokens),
-                    output_tokens: Some(usage.output_tokens),
-                    cache_read_tokens: Some(usage.cache_read_tokens),
-                    cache_write_tokens: Some(usage.cache_write_tokens),
+                    input: usage.input,
+                    output: usage.output,
+                    cache_read: usage.cache_read,
+                    cache_write: usage.cache_write,
                 },
             },
         )));
@@ -363,6 +413,7 @@ fn openai_event(
     answer: &api::Answer,
     sequence: u32,
     call: u64,
+    fields: UsageFields,
     limits: &openai::Limits,
 ) -> Result<Option<OpenAiEvent>, Error> {
     if sequence == 0 {
@@ -439,15 +490,7 @@ fn openai_event(
                 api::Finish::Length | api::Finish::ContentFilter => b"response.incomplete",
                 api::Finish::Stop | api::Finish::ToolCalls => b"response.completed",
             }),
-            openai::Event::Completed {
-                stop: openai_stop(answer.finish),
-                usage: openai::Usage {
-                    input_tokens: answer.usage.prompt_tokens,
-                    output_tokens: answer.usage.completion_tokens,
-                    cache_read_tokens: answer.usage.cached_tokens,
-                    cache_write_tokens: 0,
-                },
-            },
+            openai::Event::Completed { stop: openai_stop(answer.finish), usage: reported_usage(answer.usage, fields) },
         )));
     }
     Ok(None)
@@ -512,5 +555,15 @@ fn openai_stop(stop: api::Finish) -> openai::Stop {
         api::Finish::ToolCalls => openai::Stop::ToolUse,
         api::Finish::Length => openai::Stop::MaxTokens,
         api::Finish::ContentFilter => openai::Stop::Refusal,
+    }
+}
+
+fn reported_usage(usage: api::Usage, fields: UsageFields) -> openai::Usage {
+    openai::Usage {
+        input: if fields.contains(UsageField::Input) { usage.input } else { None },
+        cache_read: if fields.contains(UsageField::CacheRead) { usage.cache_read } else { None },
+        cache_write: if fields.contains(UsageField::CacheWrite) { usage.cache_write } else { None },
+        output: if fields.contains(UsageField::Output) { usage.output } else { None },
+        reasoning: if fields.contains(UsageField::Reasoning) { usage.reasoning } else { None },
     }
 }

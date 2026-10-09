@@ -560,6 +560,7 @@ pub fn run_with_shutdown(
             transport,
             limits,
             provider::Config {
+                usage_fields: skein_fake_llm_protocol::documents::UsageFields::ALL,
                 echo: skein_llm::openai::Echo::NONE,
                 provider: documents::Provider::OpenAi,
                 path: skein_llm::Endpoint::codex().target,

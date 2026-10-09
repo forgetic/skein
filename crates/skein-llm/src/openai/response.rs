@@ -656,10 +656,7 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
                 }
                 _ => return Err(DecodeError::Malformed),
             };
-            Ok(Event::Completed {
-                stop,
-                usage: read_usage(json::value_at(response, json::required(response, b"usage")?)?)?,
-            })
+            Ok(Event::Completed { stop, usage: read_usage(json::reported_field(response, b"usage")) })
         }
         b"response.failed" => {
             let response = json::value_at(tokens, json::required(tokens, b"response")?)?;
@@ -757,21 +754,31 @@ fn read_item(tokens: &[Token], limits: &Limits) -> Result<Item, DecodeError> {
         _ => Ok(Item::Opaque { value: Json::from_tokens(tokens, limits)? }),
     }
 }
-fn read_usage(tokens: &[Token]) -> Result<Usage, DecodeError> {
-    let input = json::unsigned(json::value_at(tokens, json::required(tokens, b"input_tokens")?)?)?;
-    let cached = match json::optional_at(tokens, json::field(tokens, b"input_tokens_details")?)? {
-        Some(value) => match json::optional_at(value, json::field(value, b"cached_tokens")?)? {
-            Some(value) => json::unsigned(value)?,
-            None => 0,
-        },
-        None => 0,
+fn read_usage(tokens: Option<&[Token]>) -> Usage {
+    let Some(tokens) = tokens else {
+        return Usage::NONE;
     };
-    Ok(Usage {
-        input_tokens: input.checked_sub(cached).ok_or(DecodeError::Malformed)?,
-        cache_read_tokens: cached,
-        output_tokens: json::unsigned(json::value_at(tokens, json::required(tokens, b"output_tokens")?)?)?,
-        cache_write_tokens: 0,
-    })
+    let details = json::reported_field(tokens, b"input_tokens_details");
+    let cache_read = match details {
+        Some(details) => json::reported_unsigned(details, b"cached_tokens"),
+        None => None,
+    };
+    let cache_write = match details {
+        Some(details) => json::reported_unsigned(details, b"cache_write_tokens"),
+        None => None,
+    };
+    let reasoning = match json::reported_field(tokens, b"output_tokens_details") {
+        Some(details) => json::reported_unsigned(details, b"reasoning_tokens"),
+        None => None,
+    };
+    let mut input = json::reported_unsigned(tokens, b"input_tokens");
+    for part in [cache_read, cache_write].into_iter().flatten() {
+        input = match input {
+            Some(input) => input.checked_sub(part),
+            None => None,
+        };
+    }
+    Usage { input, cache_read, cache_write, output: json::reported_unsigned(tokens, b"output_tokens"), reasoning }
 }
 pub fn decode_error(value: &Json, limits: &Limits) -> Result<ProviderError, DecodeError> {
     let tokens = value.as_tokens();
@@ -989,15 +996,7 @@ fn write_terminal(out: &mut Encoder, stop: Stop, usage: Usage, completion_echo: 
     if let Some(request) = completion_echo {
         write_attribution(out, request.input.len(), selection.attribution_bytes);
     }
-    out.key(b"input_tokens");
-    out.unsigned(usage.input_tokens.saturating_add(usage.cache_read_tokens));
-    out.key(b"output_tokens");
-    out.unsigned(usage.output_tokens);
-    out.key(b"input_tokens_details");
-    out.object_start();
-    out.key(b"cached_tokens");
-    out.unsigned(usage.cache_read_tokens);
-    out.object_end();
+    write_usage(out, usage);
     out.object_end();
     out.object_end();
 }
@@ -1113,4 +1112,40 @@ fn write_attribution(out: &mut Encoder, items: usize, entry_bytes: u32) {
     }
     out.array_end();
     out.object_end();
+}
+
+fn write_usage(out: &mut Encoder, usage: Usage) {
+    let mut input = usage.input;
+    for part in [usage.cache_read, usage.cache_write].into_iter().flatten() {
+        input = match input {
+            Some(input) => input.checked_add(part),
+            None => None,
+        };
+    }
+    for (name, value) in [(b"input_tokens".as_slice(), input), (b"output_tokens".as_slice(), usage.output)] {
+        if let Some(value) = value {
+            out.key(name);
+            out.unsigned(value);
+        }
+    }
+    if usage.cache_read.is_some() || usage.cache_write.is_some() {
+        out.key(b"input_tokens_details");
+        out.object_start();
+        for (name, value) in
+            [(b"cached_tokens".as_slice(), usage.cache_read), (b"cache_write_tokens".as_slice(), usage.cache_write)]
+        {
+            if let Some(value) = value {
+                out.key(name);
+                out.unsigned(value);
+            }
+        }
+        out.object_end();
+    }
+    if let Some(reasoning) = usage.reasoning {
+        out.key(b"output_tokens_details");
+        out.object_start();
+        out.key(b"reasoning_tokens");
+        out.unsigned(reasoning);
+        out.object_end();
+    }
 }

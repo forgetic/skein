@@ -107,8 +107,8 @@ fn anthropic_seeded_fragmentation_and_grants_preserve_completion() {
             )
             .unwrap();
         assert_eq!(answer.stop, skein_llm::Stop::EndTurn, "seed {seed}");
-        assert_eq!(answer.usage.input_tokens, 7);
-        assert_eq!(answer.usage.output_tokens, 9);
+        assert_eq!(answer.usage.input, Some(7));
+        assert_eq!(answer.usage.output, Some(9));
         assert_eq!(answer.content.len(), 2);
         assert!(matches!(&answer.content[0], skein_llm::Block::Reasoning { .. }));
         assert!(

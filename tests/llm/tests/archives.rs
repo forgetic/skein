@@ -37,7 +37,7 @@ fn completion(world: &World) -> &Completion {
 
 #[test]
 fn historical_messages_captures_flow_through_the_actual_shared_client() {
-    for (scenario, input_tokens, output_tokens, calls) in [
+    for (scenario, expected_input, expected_output, calls) in [
         ("single-text", 39_u64, 4_u64, 0_usize),
         ("tool-call", 603, 53, 1),
         ("parallel-tool-calls", 617, 89, 2),
@@ -86,10 +86,10 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
         world.run();
         world.assert_once();
         let completion = completion(&world);
-        assert_eq!(completion.usage.input_tokens, input_tokens, "known captured input accounting");
-        assert_eq!(completion.usage.output_tokens, output_tokens, "known captured output accounting");
-        assert_eq!(completion.usage.cache_read_tokens, 0);
-        assert_eq!(completion.usage.cache_write_tokens, 0);
+        assert_eq!(completion.usage.input, Some(expected_input), "known captured input accounting");
+        assert_eq!(completion.usage.output, Some(expected_output), "known captured output accounting");
+        assert_eq!(completion.usage.cache_read, Some(0));
+        assert_eq!(completion.usage.cache_write, Some(0));
         assert_eq!(completion.stop, if calls == 0 { Stop::EndTurn } else { Stop::ToolUse });
         let actual_calls: Vec<_> = completion
             .content

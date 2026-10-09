@@ -65,7 +65,7 @@ through `Endpoint::headers`. Credential and framing headers cannot be overridden
 
 Anthropic uses native ordered message blocks, tool schemas and tool-result
 error flags. `Prompt::max_output_tokens` sets its required `max_tokens`, defaulting
-to 4096; zero is invalid. Codex requires this setting to be `None`.
+to `Limits::declared_output_tokens`; zero is invalid. Codex requires this setting to be `None`.
 `reasoning_effort` accepts `off` or adaptive-thinking effort `low`, `medium`,
 `high`, `max`; model compatibility is the caller's choice. Anthropic rejects
 `cache_key`, which has no equivalent in this dialect. Completed thinking and
@@ -139,3 +139,8 @@ Anthropic thinking and other opaque Codex items retain typed limit failures.
 Anthropic output uses `client::Limits.declared_output_tokens` when the prompt
 has no cap. A prompt cap above that declaration is refused as `Cap::Output`.
 Native Anthropic request encoding and measurement take the declaration explicitly.
+
+`Usage` exposes optional `input`, `cache_read`, `cache_write`, `output` and
+`reasoning` counts. `None` is unreported; `Some(0)` is a reported zero.
+Inconsistent accounting preserves the completion and leaves derived input absent.
+The fake protocol's `Config.usage_fields` selects the fields it writes.

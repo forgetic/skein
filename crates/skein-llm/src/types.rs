@@ -132,21 +132,22 @@ pub enum Stop {
     MaxTokens,
     Refusal,
 }
-/// Provider-reported token accounting. Absent usage and optional cache counts are zero.
+/// Provider-reported token accounting; None is unreported and Some(0) is a report of zero.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Usage {
-    /// Uncached input tokens; excludes both cache fields below.
-    pub input_tokens: u64,
-    /// Output tokens, including provider-counted reasoning tokens.
-    pub output_tokens: u64,
-    /// Input tokens read from an existing prompt cache.
-    pub cache_read_tokens: u64,
-    /// Input tokens written to a prompt cache, when the provider reports them.
-    pub cache_write_tokens: u64,
+    pub input: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    /// Completion tokens, including reasoning.
+    pub output: Option<u64>,
+    /// The part of output spent on reasoning, never added to output.
+    pub reasoning: Option<u64>,
 }
 impl Usage {
-    pub const ZERO: Usage = Usage { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
+    /// All counts are unreported until the provider supplies them.
+    pub const NONE: Usage = Usage { input: None, cache_read: None, cache_write: None, output: None, reasoning: None };
 }
+
 /// A terminal successful response. Its blocks can be appended to history.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Completion {

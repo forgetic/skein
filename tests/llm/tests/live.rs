@@ -284,7 +284,10 @@ fn completion(events: &[client::Event]) -> Completion {
         })
         .collect();
     assert_eq!(blocks.as_slice(), completion.content.as_ref(), "completed blocks preserve stream order");
-    assert!(completion.usage.input_tokens > 0 && completion.usage.output_tokens > 0, "real token usage");
+    assert!(
+        completion.usage.input.is_some_and(|count| count > 0) && completion.usage.output.is_some_and(|count| count > 0),
+        "real token usage"
+    );
     assert_eq!(events.iter().filter(|event| matches!(event, client::Event::Reusable)).count(), 1);
     completion.clone()
 }

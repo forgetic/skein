@@ -299,7 +299,7 @@ fn said(messages: &[Message]) -> usize {
 /// last message afresh, which this call writes for the next.
 ///
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
-fn usage(query: &Query, completion_tokens: u64) -> Usage {
+fn usage(query: &Query, output: u64) -> Usage {
     let mut cached = 0;
     let mut fresh = len(&query.system);
     if let Some((last, earlier)) = query.messages.split_last() {
@@ -313,7 +313,13 @@ fn usage(query: &Query, completion_tokens: u64) -> Usage {
         }
         fresh = fresh.saturating_add(text_of(last));
     }
-    Usage { prompt_tokens: fresh / 4, cached_tokens: cached / 4, cache_creation_tokens: fresh / 4, completion_tokens }
+    Usage {
+        input: Some(0),
+        cache_read: Some(cached / 4),
+        cache_write: Some(fresh / 4),
+        output: Some(output),
+        reasoning: Some(0),
+    }
 }
 
 /// Whether the conversation ends with a user message, and every user message's
@@ -682,14 +688,14 @@ mod tests {
         let mut first = query(Box::new([user(Box::new([text()]))]));
         first.max_tokens = 3;
         let answer = respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &first).expect("a valid query");
-        assert_eq!((answer.finish, answer.usage.completion_tokens), (Finish::Length, 3));
+        assert_eq!((answer.finish, answer.usage.output), (Finish::Length, Some(3)));
         // It was to call a tool, and stops partway into the call.
         assert_eq!(answer.parts.len(), 1);
         assert_eq!(called(answer.parts.first()), (&b"call_0000000000000001"[..], &b"ls"[..], &br#"{"a"#[..]));
         let config = Config { tool_rounds: 0, answer_tokens: 2, ..CONFIG };
         let answer = respond(&mut rng, &mut minted, &config, &[], &menu(), &first).expect("a valid query");
         assert_eq!(answer.finish, Finish::Stop);
-        assert!(answer.usage.completion_tokens <= 2, "within the configured answer");
+        assert!(answer.usage.output.expect("fake reports output") <= 2, "within the configured answer");
     }
 
     #[test]
@@ -700,7 +706,7 @@ mod tests {
         let answer =
             respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &query(Box::new([asked()]))).expect("a valid query");
         let usage = answer.usage;
-        assert_eq!((usage.prompt_tokens, usage.cached_tokens, usage.cache_creation_tokens), (2, 0, 2));
+        assert_eq!((usage.input, usage.cache_read, usage.cache_write), (Some(0), Some(0), Some(2)));
         let id = b"call_0000000000000001";
         drop(answer);
         let messages = Box::new([asked(), assistant(Box::new([call(id)])), user(Box::new([output(id)]))]);
@@ -708,7 +714,7 @@ mod tests {
             respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &query(messages)).expect("a valid query").usage;
         // The prompt and the call ("ls", "{}") from the cache; the output "ok"
         // afresh.
-        assert_eq!((usage.prompt_tokens, usage.cached_tokens, usage.cache_creation_tokens), (0, 3, 0));
+        assert_eq!((usage.input, usage.cache_read, usage.cache_write), (Some(0), Some(3), Some(0)));
     }
 
     #[test]
@@ -759,7 +765,7 @@ mod tests {
         let mut first = query(Box::new([user(Box::new([text()]))]));
         first.system = copy_of(b"Do it. @main");
         let answer = respond(&mut rng, &mut minted, &CONFIG, &scripts, &menu(), &first).expect("a valid query");
-        assert_eq!((answer.finish, answer.usage.completion_tokens), (Finish::ToolCalls, 5));
+        assert_eq!((answer.finish, answer.usage.output), (Finish::ToolCalls, Some(5)));
         let [Part::Text { .. }, Part::ToolCall { id, name, .. }, Part::ToolCall { arguments, .. }] = &*answer.parts
         else {
             panic!("expected the scripted calls, got {:?}", answer.parts);
@@ -798,7 +804,7 @@ mod tests {
         let mut first = query(Box::new([user(Box::new([text()]))]));
         first.system = copy_of(b"@main");
         let answer = respond(&mut rng, &mut minted, &CONFIG, &scripts, &menu(), &first).expect("a valid query");
-        assert_eq!((answer.finish, answer.usage.completion_tokens), (Finish::Length, 100));
+        assert_eq!((answer.finish, answer.usage.output), (Finish::Length, Some(100)));
         assert_eq!(called(answer.parts.first()), (&b"call_0000000000000001"[..], &b"ls"[..], &b"{}"[..]));
     }
 

@@ -259,10 +259,10 @@ fn write_event(out: &mut Encoder, event: &Event, limits: &Limits) {
             usage_fields(
                 out,
                 UsagePatch {
-                    input_tokens: Some(usage.input_tokens),
-                    output_tokens: Some(usage.output_tokens),
-                    cache_read_tokens: Some(usage.cache_read_tokens),
-                    cache_write_tokens: Some(usage.cache_write_tokens),
+                    input: usage.input,
+                    output: usage.output,
+                    cache_read: usage.cache_read,
+                    cache_write: usage.cache_write,
                 },
             );
             out.object_end();
@@ -362,10 +362,10 @@ fn write_block(out: &mut Encoder, block: &BlockStart, limits: &Limits) {
 fn usage_fields(out: &mut Encoder, usage: UsagePatch) {
     out.object_start();
     for (name, amount) in [
-        (b"input_tokens".as_slice(), usage.input_tokens),
-        (b"output_tokens".as_slice(), usage.output_tokens),
-        (b"cache_read_input_tokens".as_slice(), usage.cache_read_tokens),
-        (b"cache_creation_input_tokens".as_slice(), usage.cache_write_tokens),
+        (b"input_tokens".as_slice(), usage.input),
+        (b"output_tokens".as_slice(), usage.output),
+        (b"cache_read_input_tokens".as_slice(), usage.cache_read),
+        (b"cache_creation_input_tokens".as_slice(), usage.cache_write),
     ] {
         if let Some(amount) = amount {
             out.key(name);

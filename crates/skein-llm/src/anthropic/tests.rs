@@ -1,4 +1,6 @@
+#![expect(clippy::disallowed_macros, reason = "ordinary tests format synthetic provider documents")]
 use super::{DecodeError, Event, Failure, Json, Limits, MAX_OUT, Output, Part, Stop, StreamDecoder, Usage};
+use alloc::format;
 use skein_lib::{Queue, Wall, bytes};
 
 const LIMITS: Limits = Limits {
@@ -82,7 +84,13 @@ fn text_stream_preserves_initial_text_deltas_and_cumulative_usage() {
         out.pop(),
         Some(Output::Completed {
             stop: Stop::EndTurn,
-            usage: Usage { input_tokens: 10, output_tokens: 11, cache_read_tokens: 8, cache_write_tokens: 7 },
+            usage: Usage {
+                input: Some(10),
+                output: Some(11),
+                cache_read: Some(8),
+                cache_write: Some(7),
+                reasoning: None
+            },
         })
     );
     assert!(decoder.is_complete(), "message_stop terminates");
@@ -564,5 +572,43 @@ fn output_cap_cuts_the_last_tool_block_with_or_without_block_stop() {
             )
             | None => unreachable!("output-cap terminal"),
         }
+    }
+}
+
+#[test]
+fn anthropic_usage_preserves_omission_zero_and_cumulative_reports() {
+    for amount in [0, 7] {
+        for (field, expected) in [
+            ("input_tokens", Usage { input: Some(amount), ..Usage::NONE }),
+            ("cache_read_input_tokens", Usage { cache_read: Some(amount), ..Usage::NONE }),
+            ("cache_creation_input_tokens", Usage { cache_write: Some(amount), ..Usage::NONE }),
+            ("output_tokens", Usage { output: Some(amount), ..Usage::NONE }),
+        ] {
+            let mut decoder = StreamDecoder::new(&LIMITS);
+            let mut out = Queue::with_capacity(MAX_OUT);
+            progress(
+                &mut decoder,
+                br#"{"type":"message_start","message":{"type":"message","role":"assistant","content":[]}}"#,
+                &LIMITS,
+                &mut out,
+            );
+            let document =
+                format!(r#"{{"type":"message_delta","delta":{{"stop_reason":null}},"usage":{{"{field}":{amount}}}}}"#);
+            progress(&mut decoder, document.as_bytes(), &LIMITS, &mut out);
+            progress(&mut decoder, br#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":"bad","output_tokens":null,"cache_read_input_tokens":-1,"reasoning_tokens":88}}"#, &LIMITS, &mut out);
+            feed(&mut decoder, STOP, &LIMITS, &mut out);
+            assert_eq!(out.pop(), Some(Output::Completed { stop: Stop::EndTurn, usage: expected }));
+        }
+    }
+    for usage in ["", r#", "usage":null"#, r#", "usage":{}"#] {
+        let mut decoder = StreamDecoder::new(&LIMITS);
+        let mut out = Queue::with_capacity(MAX_OUT);
+        let document = format!(
+            r#"{{"type":"message_start","message":{{"type":"message","role":"assistant","content":[]{usage}}}}}"#
+        );
+        progress(&mut decoder, document.as_bytes(), &LIMITS, &mut out);
+        progress(&mut decoder, br#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#, &LIMITS, &mut out);
+        feed(&mut decoder, STOP, &LIMITS, &mut out);
+        assert_eq!(out.pop(), Some(Output::Completed { stop: Stop::EndTurn, usage: Usage::NONE }));
     }
 }

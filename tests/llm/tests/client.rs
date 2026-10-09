@@ -47,8 +47,8 @@ fn wire_request_and_streamed_answer() {
             })
             .unwrap();
         assert_eq!(completion.stop, Stop::EndTurn);
-        assert_eq!(completion.usage.input_tokens, 8);
-        assert_eq!(completion.usage.cache_read_tokens, 4);
+        assert_eq!(completion.usage.input, Some(8));
+        assert_eq!(completion.usage.cache_read, Some(4));
         assert!(
             completion
                 .content
@@ -802,4 +802,47 @@ fn an_error_documents_retained_token_limit_keeps_the_http_status() {
             ..
         }
     )));
+}
+
+#[test]
+fn inconsistent_usage_on_the_wire_preserves_text_and_completed_terminal() {
+    for cache_parts in [r#"{"cached_tokens":3}"#, r#"{"cached_tokens":2,"cache_write_tokens":2}"#] {
+        let terminal = format!(
+            r#"{{"type":"response.completed","response":{{"status":"completed","usage":{{"input_tokens":1,"input_tokens_details":{cache_parts},"output_tokens":7,"output_tokens_details":{{"reasoning_tokens":2}}}}}}}}"#
+        );
+        let documents = [
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"m","type":"message"}}"#,
+            r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"m","type":"message","content":[{"type":"output_text","text":"kept"}]}}"#,
+            terminal.as_str(),
+        ];
+        let mut world = World::new(
+            call(1),
+            limits(),
+            response(200, "Content-Type: text/event-stream\r\n", &events(&documents), false),
+            9,
+        );
+        world.fragmentation(1, 3);
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        let completion = world
+            .seen
+            .iter()
+            .find_map(|event| match event {
+                client::Event::Completed { completion, .. } => Some(completion),
+                client::Event::Delta { .. }
+                | client::Event::Block { .. }
+                | client::Event::Failed { .. }
+                | client::Event::Cancelled { .. }
+                | client::Event::Reusable
+                | client::Event::Close
+                | client::Event::Closed => None,
+            })
+            .expect("usage cannot fail a completion");
+        assert_eq!(completion.usage.input, None);
+        assert!(completion.usage.cache_read.is_some());
+        assert_eq!(completion.usage.output, Some(7));
+        assert_eq!(completion.usage.reasoning, Some(2));
+        assert!(matches!(&*completion.content, [Block::Text { text, .. }] if text.as_ref() == b"kept"));
+    }
 }

@@ -567,7 +567,7 @@ fn an_oversized_call_completes_within_the_declared_bound() {
                 arguments: vec![b'x'; 128].into(),
             },
         },
-        openai::Event::Completed { stop: openai::Stop::ToolUse, usage: openai::Usage::ZERO },
+        openai::Event::Completed { stop: openai::Stop::ToolUse, usage: openai::Usage::NONE },
     ];
     let meter = Meter::new();
     let mut body = Vec::new();

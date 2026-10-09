@@ -62,6 +62,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
     };
     let mut service = provider::Service::new(
         provider::Config {
+            usage_fields: skein_fake_llm_protocol::documents::UsageFields::ALL,
             echo: skein_llm::openai::Echo::NONE,
             provider: provider_kind,
             path: call.endpoint.target.clone(),
