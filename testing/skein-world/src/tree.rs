@@ -3,6 +3,8 @@
 //! state. `prepare` chooses containment, `refresh` finds adopted children,
 //! and `finish` kills leftovers, settles every owned pidfd and returns counts.
 //! An abandoned keeper performs the same settlement before releasing its paths.
+//! The last keeper restores the observer's prior subreaper setting, so later
+//! fixture descendants are not adopted on that binary's behalf.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::cell::{Cell, RefCell};
@@ -20,6 +22,7 @@ use skein_shell::{Clock, Config, Kernel, Wait};
 std::thread_local! {
     static ACTIVE: Cell<u32> = const { Cell::new(0) };
     static WALK_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static SUBREAPER_BEFORE: Cell<bool> = const { Cell::new(false) };
     static CGROUP_BASE: RefCell<Option<CgroupBase>> = const { RefCell::new(None) };
 }
 
@@ -91,7 +94,11 @@ impl Tree {
         if WALK_ACTIVE.get() {
             return Err(Error::Other(16));
         }
-        skein_shell::make_subreaper()?;
+        if ACTIVE.get() == 0 {
+            let previous = skein_shell::subreaper()?;
+            skein_shell::make_subreaper()?;
+            SUBREAPER_BEFORE.set(previous);
+        }
         let ignored = children();
         let cgroup = if walk { None } else { Cgroup::prepare() };
         if cgroup.is_none() && ACTIVE.get() != 0 {
@@ -420,6 +427,9 @@ impl Drop for Tree {
         }
         if let Some(group) = self.cgroup.take() {
             group.remove();
+        }
+        if ACTIVE.get() == 0 {
+            skein_shell::set_subreaper(SUBREAPER_BEFORE.get()).expect("the observer restores its subreaper setting");
         }
     }
 }

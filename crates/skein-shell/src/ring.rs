@@ -116,6 +116,16 @@ pub fn make_subreaper() -> Result<(), Error> {
     process::make_subreaper()
 }
 
+/// Reads whether this test process adopts orphaned descendants.
+pub fn subreaper() -> Result<bool, Error> {
+    process::subreaper()
+}
+
+/// Restores or enables this test process's orphan adoption setting.
+pub fn set_subreaper(enabled: bool) -> Result<(), Error> {
+    process::set_subreaper(enabled)
+}
+
 /// Opens a discovered process's pidfd for the test keeper.
 pub fn open_pidfd(pid: u32) -> Result<Fd, Error> {
     process::open_pidfd(pid)

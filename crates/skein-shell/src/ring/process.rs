@@ -492,8 +492,24 @@ fn cpu(value: libc::timeval) -> Result<skein_lib::Duration, Error> {
 
 /// Makes orphaned descendants children of the end-to-end observer (examples.md, section 6).
 pub(super) fn make_subreaper() -> Result<(), Error> {
+    set_subreaper(true)
+}
+
+/// Reads the observer's process-wide orphan adoption setting.
+pub(super) fn subreaper() -> Result<bool, Error> {
+    let mut enabled = 0_i32;
+    // SAFETY: prctl writes one integer to the live output pointer.
+    if unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, ptr::from_mut(&mut enabled), 0, 0, 0) } == 0 {
+        Ok(enabled != 0)
+    } else {
+        Err(Error::Other(super::last_errno()))
+    }
+}
+
+/// Changes only the observer's process-wide orphan adoption setting.
+pub(super) fn set_subreaper(enabled: bool) -> Result<(), Error> {
     // SAFETY: prctl changes this process's subreaper setting, with no borrowed pointer.
-    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0 {
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, i32::from(enabled), 0, 0, 0) } == 0 {
         Ok(())
     } else {
         Err(Error::Other(super::last_errno()))

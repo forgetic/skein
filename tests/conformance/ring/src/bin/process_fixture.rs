@@ -32,24 +32,34 @@ fn main() -> ExitCode {
             let code = args.next().expect("exit code").parse::<u8>().expect("numeric exit code");
             ExitCode::from(code)
         }
-        Some(mode @ ("fork-exit" | "fork-live" | "escape-exit")) => {
-            let mut command = if mode == "escape-exit" {
+        Some(mode @ ("fork-exit" | "fork-live" | "escape-exit" | "escape-zombie-exit")) => {
+            let mut command = if matches!(mode, "escape-exit" | "escape-zombie-exit") {
                 let mut command = Command::new("/usr/bin/setsid");
                 command.arg("/bin/sh");
                 command
             } else {
                 Command::new("/bin/sh")
             };
-            let mut child = command
-                .args(["-c", "printf 'ready\n' >&2; exec sleep 60"])
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("the fixture starts its descendant");
+            let script = if mode == "escape-zombie-exit" {
+                "printf 'ready\n' >&2; exit 0"
+            } else {
+                "printf 'ready\n' >&2; exec sleep 60"
+            };
+            let mut child =
+                command.args(["-c", script]).stderr(Stdio::piped()).spawn().expect("the fixture starts its descendant");
             let mut ready = String::new();
             BufReader::new(child.stderr.take().expect("readiness pipe"))
                 .read_line(&mut ready)
                 .expect("descendant readiness");
             assert_eq!(ready, "ready\n");
+            if mode == "escape-zombie-exit" {
+                // Leave the exited descendant unreaped, after it has left its
+                // original group/session and the cgroup's live population.
+                let status = format!("/proc/{}/status", child.id());
+                while !std::fs::read_to_string(&status).expect("unreaped descendant status").contains("State:\tZ") {
+                    std::hint::spin_loop();
+                }
+            }
             eprintln!("descendant:{}", child.id());
             if mode == "fork-live" {
                 loop {
