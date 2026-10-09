@@ -211,26 +211,34 @@ fn public_sign_in_refresh_rotation_and_old_refresh_replay() {
     let answer = response(fake_step(&mut issuer, fake::Event::Post { request, now: time(2), wall: wall(100) }));
     let first = record(client_step(&mut client, oauth::Event::Http(answer)));
     assert_eq!(first.generation, 1);
-    assert_eq!(first.refresh_token.as_ref(), b"refresh-1");
+    assert_eq!(first.refresh_token.as_deref().expect("refresh token"), b"refresh-1");
     assert_eq!(issuer.generation(), 1);
 
     issuer.queue(success(b"access-2", Some(b"refresh-2"), 0)).expect("plan");
     assert!(client_step(&mut client, oauth::Event::Reset).is_none());
     let request = http(client_step(
         &mut client,
-        oauth::Event::Refresh { registration: registration(true), prior: first.refresh_state(), now: time(3) },
+        oauth::Event::Refresh {
+            registration: registration(true),
+            prior: first.refresh_state().expect("record has refresh state"),
+            now: time(3),
+        },
     ));
     let answer = response(fake_step(&mut issuer, fake::Event::Post { request, now: time(3), wall: wall(101) }));
     let second = record(client_step(&mut client, oauth::Event::Http(answer)));
     assert_eq!(second.generation, 2);
-    assert_eq!(second.refresh_token.as_ref(), b"refresh-2");
+    assert_eq!(second.refresh_token.as_deref().expect("refresh token"), b"refresh-2");
     assert_eq!(issuer.generation(), 2);
     assert_eq!(second.remaining(wall(126)), Duration::from_secs(5));
 
     assert!(client_step(&mut client, oauth::Event::Reset).is_none());
     let replay = http(client_step(
         &mut client,
-        oauth::Event::Refresh { registration: registration(true), prior: first.refresh_state(), now: time(4) },
+        oauth::Event::Refresh {
+            registration: registration(true),
+            prior: first.refresh_state().expect("record has refresh state"),
+            now: time(4),
+        },
     ));
     let refusal =
         response(fake_step(&mut issuer, fake::Event::Post { request: replay, now: time(4), wall: wall(102) }));
@@ -250,7 +258,11 @@ fn confidential_sign_in_and_stable_refresh_use_the_same_machine() {
     assert!(client_step(&mut client, oauth::Event::Reset).is_none());
     let request = http(client_step(
         &mut client,
-        oauth::Event::Refresh { registration: registration(false), prior: first.refresh_state(), now: time(3) },
+        oauth::Event::Refresh {
+            registration: registration(false),
+            prior: first.refresh_state().expect("record has refresh state"),
+            now: time(3),
+        },
     ));
     let answer = response(fake_step(&mut issuer, fake::Event::Post { request, now: time(3), wall: wall(101) }));
     let second = record(client_step(&mut client, oauth::Event::Http(answer)));
@@ -348,7 +360,7 @@ fn issuer_rate_limit_then_client_backoff_reaches_success() {
     let retry = http(client_step(&mut client, oauth::Event::Tick { now: time(4) }));
     let answer = response(fake_step(&mut issuer, fake::Event::Post { request: retry, now: time(4), wall: wall(102) }));
     let record = record(client_step(&mut client, oauth::Event::Http(answer)));
-    assert_eq!(record.refresh_token.as_ref(), b"next");
+    assert_eq!(record.refresh_token.as_deref().expect("refresh token"), b"next");
 }
 
 #[test]

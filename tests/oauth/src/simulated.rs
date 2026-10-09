@@ -423,7 +423,7 @@ impl Actor {
                         client.step(
                             oauth::Event::Refresh {
                                 registration: registration(),
-                                prior: self.records[0].refresh_state(),
+                                prior: self.records[0].refresh_state().expect("record has refresh state"),
                                 now,
                             },
                             &mut self.oauth_requests,
@@ -729,7 +729,7 @@ impl Referee<Process> for Judge {
                         assert_eq!(actor.records[0].access_token, vec![b'a'; self.size].into_boxed_slice());
                         assert_eq!(actor.records[1].access_token, vec![b'b'; self.size].into_boxed_slice());
                         assert_eq!(
-                            actor.records[1].refresh_token.as_ref(),
+                            actor.records[1].refresh_token.as_deref().expect("refresh token"),
                             if self.size == 256 { vec![b't'; 256] } else { b"r2".to_vec() }
                         );
                         tokens = true;

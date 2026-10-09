@@ -125,7 +125,7 @@ fn public_sign_in_uses_s256_state_and_one_code_exchange() {
     };
     assert_eq!(record.key, 7);
     assert_eq!(record.generation, 1);
-    assert_eq!(record.refresh_token.as_ref(), b"refresh-new");
+    assert_eq!(record.refresh_token.as_deref().expect("refresh token"), b"refresh-new");
     assert!(client.is_done());
     assert!(step(&mut client, answered(http.id, 200, &token_body(), 4)).is_none(), "late answer ignored");
 }
@@ -384,7 +384,7 @@ fn refresh_rotation_preserves_old_token_when_answer_omits_one() {
     let Some(Request::Tokens { record }) = step(&mut client, answered(http.id, 200, &body, 2)) else {
         panic!("tokens expected")
     };
-    assert_eq!(record.refresh_token.as_ref(), b"old");
+    assert_eq!(record.refresh_token.as_deref().expect("refresh token"), b"old");
     assert_eq!(record.generation, 5);
 }
 
