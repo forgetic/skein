@@ -16,6 +16,7 @@ fn full_pool_stays_within_its_checked_bound() {
     let limits = Limits {
         endpoints: 1,
         connections: 2,
+        calls: 2,
         per_endpoint: 2,
         idle_keep: Duration::from_secs(10),
         io: skein_io::Limits {
@@ -94,7 +95,7 @@ fn full_pool_stays_within_its_checked_bound() {
     match up.pop() {
         Some(Event::Refused { call, why }) => {
             assert_eq!(call, Token::new(9));
-            assert_eq!(why, skein_llm_connection::Refusal::Pool);
+            assert_eq!(why, skein_llm_connection::Refusal::Calls { bound: 2 });
         }
         other => panic!("expected pool refusal, got {other:?}"),
     }
@@ -146,11 +147,14 @@ fn bounded_request_batches_preserve_exact_upload_latency_replay_and_separate_hea
 #[test]
 fn an_owner_close_in_each_phase_fits_the_checked_pool_bound() {
     use skein_llm_connection_world::world::{Point, World};
-    for point in [Point::Connecting, Point::Head, Point::Streaming, Point::Draining, Point::Idle, Point::Closing] {
-        let bound = worst_case(&skein_llm_connection_world::world::limits(1)).expect("pool bound");
+    for point in
+        [Point::Waiting, Point::Connecting, Point::Head, Point::Streaming, Point::Draining, Point::Idle, Point::Closing]
+    {
+        let calls = if point == Point::Waiting { 2 } else { 1 };
+        let bound = worst_case(&skein_llm_connection_world::world::limits(calls)).expect("pool bound");
         let meter = Meter::new();
         meter.start();
-        let mut world = World::new(53, 1);
+        let mut world = World::configured(53, calls, 1, 1);
         if point == Point::Closing {
             world.until(Point::Idle);
             world.delay_close = true;
@@ -166,4 +170,21 @@ fn an_owner_close_in_each_phase_fits_the_checked_pool_bound() {
         drop(world);
         assert_eq!(meter.held(), 0);
     }
+}
+
+#[test]
+fn every_declared_waiting_record_and_its_prepared_client_fit_the_checked_bound() {
+    use skein_llm_connection_world::world::{Point, World};
+    let bound = worst_case(&skein_llm_connection_world::world::limits(8)).expect("pool bound");
+    let meter = Meter::new();
+    meter.start();
+    let mut world = World::configured(59, 8, 1, 1);
+    world.until(Point::Head);
+    world.request(Request::Close);
+    world.finish();
+    assert_eq!(world.judge.completed, 8);
+    let sample = meter.end();
+    assert!(sample.peak() <= bound, "waiting peak {} exceeds {bound}", sample.peak());
+    drop(world);
+    assert_eq!(meter.held(), 0);
 }

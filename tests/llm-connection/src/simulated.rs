@@ -22,6 +22,7 @@ fn limits(calls: u32) -> Limits {
     Limits {
         endpoints: 1,
         connections: calls,
+        calls,
         per_endpoint: calls,
         idle_keep: Duration::from_secs(300),
         io: io::Limits {

@@ -48,8 +48,8 @@ pub enum Refusal {
     Closed,
     /// The endpoint index does not name configured endpoint.
     Endpoint,
-    /// Neither a free nor reusable connection is available.
-    Pool,
+    /// The owner already has its declared number of conversations outstanding.
+    Calls { bound: u32 },
     /// The LLM client rejected the call before touching the stream.
     Client(llm::Error),
 }

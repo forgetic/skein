@@ -1,15 +1,13 @@
 //! Endpoint configuration and admission (llm-connection.md, sections 3, 4
 //! and 7). The component keeps configured endpoints, physical bindings and
-//! an owner lifecycle. It knows no retry or termination policy. `down` admits
+//! an owner lifecycle and admitted calls in arrival order. It knows no retry
+//! or termination policy. `down` admits
 //! calls and the owner close; `up` routes io settlement; `fire` advances one
 //! binding. Closed is last, after every physical binding has settled.
 
-#![expect(
-    clippy::single_match,
-    clippy::collapsible_match,
-    clippy::manual_let_else,
-    reason = "explicit routing cases and checked slab insertion"
-)]
+#![expect(clippy::single_match, clippy::manual_let_else, reason = "explicit routing cases and checked slab insertion")]
+
+use alloc::boxed::Box;
 
 use skein_io::{Event as IoEvent, Request as IoRequest};
 use skein_lib::{Env, Id, List, Queue, Slab, Token};
@@ -30,6 +28,16 @@ enum Lifecycle {
     Closed,
 }
 
+/// An admitted conversation waiting for an endpoint binding; terminal releases it.
+pub(crate) struct Waiting {
+    call: Token,
+    endpoint: u32,
+    order: u64,
+    prepared: llm::client::Client,
+    deadlines: crate::deadlines::Table,
+    asked: bool,
+}
+
 /// The owner's bounded call pool; Close or Abort ends it with one Closed.
 #[expect(missing_debug_implementations, reason = "live calls retain bearer credentials")]
 pub struct Component {
@@ -39,6 +47,8 @@ pub struct Component {
     slots: List<Option<Id<Connection>>>,
     cursor: u32,
     lifecycle: Lifecycle,
+    waiting: List<Option<Waiting>>,
+    arrival: u64,
 }
 
 /// The most owner events and io requests from one component entrance.
@@ -61,6 +71,16 @@ impl Component {
         }
         if worst_case(limits).is_none() || limits.per_endpoint > limits.connections {
             return Err(EndpointError::Limits);
+        }
+        if limits.connections < limits.calls {
+            return Err(EndpointError::ConnectionsCalls { connections: limits.connections, calls: limits.calls });
+        }
+        let mut waiting = List::with_capacity(limits.calls);
+        for _ in 0..limits.calls {
+            match waiting.push(None) {
+                Ok(()) => {}
+                Err(_) => unreachable!("one record per conversation"),
+            }
         }
         for destination in &endpoints {
             match &destination.transport {
@@ -92,15 +112,14 @@ impl Component {
             slots: List::with_capacity(limits.connections),
             cursor: 0,
             lifecycle: Lifecycle::Live,
+            waiting,
+            arrival: 0,
         })
     }
 
-    /// Admit one call before touching the stream. `occupied` is the pool's
-    /// current connection count, including connections still settling.
-    /// The connection machine takes the returned prepared client.
+    /// Check a call before touching the stream; down retains the prepared client.
     pub fn admit(
         &self,
-        occupied: u32,
         call: Token,
         endpoint: u32,
         prompt: Prompt,
@@ -115,8 +134,8 @@ impl Component {
         let Some(destination) = self.endpoints.get(endpoint) else {
             return Err(Refusal::Endpoint);
         };
-        if occupied >= self.limits.connections {
-            return Err(Refusal::Pool);
+        if self.outstanding() >= self.limits.calls {
+            return Err(Refusal::Calls { bound: self.limits.calls });
         }
         let input = Call { owner: call, prompt, credential, endpoint: destination.llm.clone() };
         match llm::client::Client::prepare(input, &self.limits.llm) {
@@ -152,6 +171,15 @@ impl Component {
                 self.start(env, call, endpoint, prompt, credential, deadlines, up, io);
             }
             Request::Next { call } => {
+                for index in 0..self.waiting.len() {
+                    match self.waiting.get_mut(index).expect("waiting index") {
+                        Some(waiting) if waiting.call == call => {
+                            waiting.asked = true;
+                            return;
+                        }
+                        Some(_) | None => {}
+                    }
+                }
                 for slot in &self.slots {
                     match slot {
                         Some(id) => match self.connections.get_mut(*id) {
@@ -166,6 +194,17 @@ impl Component {
                 }
             }
             Request::Cancel { call } => {
+                for index in 0..self.waiting.len() {
+                    match self.waiting.get(index).expect("waiting index") {
+                        Some(waiting) if waiting.call == call => {
+                            self.waiting.get_mut(index).expect("waiting index").take();
+                            up.push(Event::Cancelled { call });
+                            self.refresh_waiting();
+                            return;
+                        }
+                        Some(_) | None => {}
+                    }
+                }
                 for slot in &self.slots {
                     match slot {
                         Some(id) => match self.connections.get_mut(*id) {
@@ -253,6 +292,30 @@ impl Component {
 
     /// Runs buffered child work and closes idle bindings after their keep time.
     pub fn fire(&mut self, env: &Env<Limits>, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
+        for index in 0..self.waiting.len() {
+            match self.waiting.get(index).expect("waiting index") {
+                Some(waiting) if self.lifecycle == Lifecycle::Aborting || waiting.deadlines.due(env.now).is_some() => {
+                    let waiting = self.waiting.get_mut(index).expect("waiting index").take().expect("waiting call");
+                    if self.lifecycle == Lifecycle::Aborting {
+                        up.push(Event::Cancelled { call: waiting.call });
+                    } else {
+                        up.push(Event::Failed {
+                            call: waiting.call,
+                            failure: llm::Failure::TimedOut,
+                            evidence: llm::client::Evidence::Unsent,
+                            detail: Box::new([]),
+                        });
+                    }
+                    self.refresh_waiting();
+                    self.settled(up);
+                    return;
+                }
+                Some(_) | None => {}
+            }
+        }
+        if self.serve_waiting(env, up, io) {
+            return;
+        }
         for _ in 0..self.slots.len() {
             let index = self.cursor;
             self.cursor = match self.cursor.checked_add(1) {
@@ -285,6 +348,9 @@ impl Component {
     /// Buffered routing work that the owner should schedule before sleeping.
     #[must_use]
     pub fn has_work(&self) -> bool {
+        if self.runnable_waiting().is_some() || (self.lifecycle == Lifecycle::Aborting && self.waiting_count() > 0) {
+            return true;
+        }
         for slot in &self.slots {
             match slot {
                 Some(id) => match self.connections.get(*id) {
@@ -301,6 +367,20 @@ impl Component {
     #[must_use]
     pub fn next_deadline(&self) -> Option<skein_lib::Time> {
         let mut earliest: Option<skein_lib::Time> = None;
+        for waiting in &self.waiting {
+            match waiting {
+                Some(waiting) => match waiting.deadlines.next() {
+                    Some(next) => {
+                        earliest = Some(match earliest {
+                            Some(prior) => prior.min(next),
+                            None => next,
+                        });
+                    }
+                    None => {}
+                },
+                None => {}
+            }
+        }
         for slot in &self.slots {
             match slot {
                 Some(id) => match self.connections.get(*id) {
@@ -341,6 +421,9 @@ impl Component {
             Lifecycle::Live | Lifecycle::Closed => return,
             Lifecycle::Closing | Lifecycle::Aborting => {}
         }
+        if self.waiting_count() > 0 {
+            return;
+        }
         for slot in &self.slots {
             if slot.is_some() {
                 return;
@@ -367,37 +450,64 @@ impl Component {
         up: &mut Queue<Event>,
         io: &mut Queue<IoRequest>,
     ) {
-        let prepared = match self.admit(0, call, endpoint, prompt, credential) {
+        let prepared = match self.admit(call, endpoint, prompt, credential) {
             Ok(client) => client,
             Err(why) => {
                 up.push(Event::Refused { call, why });
                 return;
             }
         };
-        let mut same_endpoint: u32 = 0;
+        let mut table = crate::deadlines::Table::new(deadlines, env.now);
+        table.arm(crate::deadlines::Phase::Waiting, env.now, self.limits.idle_keep);
+        let waiting = Waiting { call, endpoint, order: self.arrival, prepared, deadlines: table, asked: false };
+        self.arrival = self.arrival.checked_add(1).expect("arrival counter fits the process lifetime");
+        for index in 0..self.waiting.len() {
+            if self.waiting.get(index).expect("waiting index").is_none() {
+                *self.waiting.get_mut(index).expect("waiting index") = Some(waiting);
+                self.refresh_waiting();
+                self.serve_waiting(env, up, io);
+                return;
+            }
+        }
+        unreachable!("admission reserves a waiting record");
+    }
+
+    fn waiting_count(&self) -> u32 {
+        let mut count = 0_u32;
+        for waiting in &self.waiting {
+            if waiting.is_some() {
+                count = count.checked_add(1).expect("bounded conversations");
+            }
+        }
+        count
+    }
+
+    fn outstanding(&self) -> u32 {
+        let mut count = self.waiting_count();
+        for slot in &self.slots {
+            match slot {
+                Some(id) => match self.connections.get(*id) {
+                    Some(connection) if connection.call.is_some() => {
+                        count = count.checked_add(1).expect("bounded conversations");
+                    }
+                    Some(_) | None => {}
+                },
+                None => {}
+            }
+        }
+        count
+    }
+
+    fn refresh_waiting(&mut self) {
         for slot in &self.slots {
             match slot {
                 Some(id) => match self.connections.get_mut(*id) {
                     Some(connection) => {
-                        if connection.endpoint == endpoint {
-                            same_endpoint = same_endpoint.saturating_add(1);
-                            if connection.phase == Phase::Idle {
-                                match connection.llm.next_call(prepared) {
-                                    Ok(()) => {
-                                        connection.call = Some(call);
-                                        connection.phase = Phase::Head;
-                                        connection.idle_at = None;
-                                        connection.deadlines = crate::deadlines::Table::new(deadlines, env.now);
-                                        connection.sync_deadlines(env);
-                                        connection.start_call(env, id.token(), up, io);
-                                        return;
-                                    }
-                                    Err(client) => {
-                                        up.push(Event::Refused { call, why: Refusal::Client(llm::Error::Invalid) });
-                                        drop(client);
-                                        return;
-                                    }
-                                }
+                        connection.waiting = false;
+                        for waiting in &self.waiting {
+                            match waiting {
+                                Some(waiting) if waiting.endpoint == connection.endpoint => connection.waiting = true,
+                                Some(_) | None => {}
                             }
                         }
                     }
@@ -406,25 +516,126 @@ impl Component {
                 None => {}
             }
         }
-        if self.connections.is_full() || same_endpoint >= self.limits.per_endpoint {
-            up.push(Event::Refused { call, why: Refusal::Pool });
-            return;
+    }
+
+    // Arrival order is independent of which record was vacated by cancellation.
+    fn runnable_waiting(&self) -> Option<u32> {
+        if self.lifecycle == Lifecycle::Aborting || self.lifecycle == Lifecycle::Closed {
+            return None;
         }
-        let destination = self.endpoints.get(endpoint).expect("the endpoint was checked by admission");
+        let mut selected: Option<u32> = None;
+        let mut oldest = u64::MAX;
+        for index in 0..self.waiting.len() {
+            match self.waiting.get(index).expect("waiting index") {
+                Some(waiting) => {
+                    let mut count = 0_u32;
+                    let mut reusable = false;
+                    let mut evictable = false;
+                    for slot in &self.slots {
+                        match slot {
+                            Some(id) => match self.connections.get(*id) {
+                                Some(connection) => {
+                                    if connection.endpoint == waiting.endpoint {
+                                        count = count.checked_add(1).expect("bounded connections");
+                                        if connection.phase == Phase::Idle || connection.phase == Phase::Ready {
+                                            reusable = true;
+                                        }
+                                    } else if connection.phase == Phase::Idle {
+                                        evictable = true;
+                                    }
+                                }
+                                None => {}
+                            },
+                            None => {}
+                        }
+                    }
+                    if waiting.order < oldest
+                        && (reusable
+                            || (count < self.limits.per_endpoint && (!self.connections.is_full() || evictable)))
+                    {
+                        selected = Some(index);
+                        oldest = waiting.order;
+                    }
+                }
+                None => {}
+            }
+        }
+        selected
+    }
+
+    fn serve_waiting(&mut self, env: &Env<Limits>, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) -> bool {
+        let index = match self.runnable_waiting() {
+            Some(index) => index,
+            None => return false,
+        };
+        let endpoint = self.waiting.get(index).expect("waiting index").as_ref().expect("waiting call").endpoint;
+        for slot in &self.slots {
+            match slot {
+                Some(id) => match self.connections.get_mut(*id) {
+                    Some(connection)
+                        if connection.endpoint == endpoint
+                            && (connection.phase == Phase::Idle || connection.phase == Phase::Ready) =>
+                    {
+                        let waiting = self.waiting.get_mut(index).expect("waiting index").take().expect("waiting call");
+                        match connection.llm.next_call(waiting.prepared) {
+                            Ok(()) => {}
+                            Err(_) => unreachable!("a reusable client accepts the prepared call"),
+                        }
+                        connection.call = Some(waiting.call);
+                        connection.phase = Phase::Head;
+                        connection.idle_at = None;
+                        connection.deadlines = waiting.deadlines;
+                        connection.sync_deadlines(env);
+                        if waiting.asked {
+                            connection.next(env, id.token(), up, io);
+                        }
+                        connection.start_call(env, id.token(), up, io);
+                        self.refresh_waiting();
+                        return true;
+                    }
+                    Some(_) | None => {}
+                },
+                None => {}
+            }
+        }
+        if self.connections.is_full() {
+            for slot in &self.slots {
+                match slot {
+                    Some(id) => match self.connections.get_mut(*id) {
+                        Some(connection) if connection.endpoint != endpoint && connection.phase == Phase::Idle => {
+                            connection.request_close(false);
+                            connection.route(env, id.token(), up, io);
+                            return true;
+                        }
+                        Some(_) | None => {}
+                    },
+                    None => {}
+                }
+            }
+            return false;
+        }
+        let waiting = self.waiting.get_mut(index).expect("waiting index").take().expect("waiting call");
+        let destination = self.endpoints.get(endpoint).expect("admitted endpoint");
         let tls = match &destination.transport {
             Transport::Tls { server_name, trust } => {
                 Some(tls::Client::new(trust, server_name.clone(), &self.limits.tls))
             }
             Transport::Plaintext => None,
         };
-        let connection = Connection::new(endpoint, call, tls, prepared, deadlines, env.now);
+        let mut connection =
+            Connection::new(endpoint, waiting.call, tls, waiting.prepared, crate::Deadlines::none(), env.now);
+        connection.deadlines = waiting.deadlines;
+        connection.sync_deadlines(env);
+        if self.lifecycle == Lifecycle::Closing {
+            connection.request_close(false);
+        }
         let id = match self.connections.insert(connection) {
             Ok(id) => id,
-            Err(_) => unreachable!("the pool was checked"),
+            Err(_) => unreachable!("checked connection capacity"),
         };
         let mut stored = false;
         for index in 0..self.slots.len() {
-            let slot = self.slots.get_mut(index).expect("the index is within the slot table");
+            let slot = self.slots.get_mut(index).expect("connection index");
             if slot.is_none() {
                 *slot = Some(id);
                 stored = true;
@@ -432,8 +643,13 @@ impl Component {
             }
         }
         if !stored {
-            self.slots.push(Some(id)).expect("a slot exists for every connection");
+            self.slots.push(Some(id)).expect("one slot per connection");
         }
         io.push(IoRequest::Connect { owner: id.token(), addr: destination.address });
+        if waiting.asked {
+            self.connections.get_mut(id).expect("new connection").next(env, id.token(), up, io);
+        }
+        self.refresh_waiting();
+        true
     }
 }

@@ -14,6 +14,7 @@ fn limits() -> Limits {
     Limits {
         endpoints: 1,
         connections: 1,
+        calls: 1,
         per_endpoint: 1,
         idle_keep: Duration::from_secs(10),
         io: skein_io::Limits {

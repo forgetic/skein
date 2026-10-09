@@ -10,7 +10,6 @@ use crate::boundary::Deadlines;
 /// The call or connection phase, selecting all armed deadlines in one place.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Phase {
-    #[cfg_attr(not(test), expect(dead_code, reason = "the waiting phase is implemented in reliability increment 3.3"))]
     Waiting,
     Connecting,
     Handshaking,
@@ -70,9 +69,7 @@ impl Table {
             Phase::Idle => (false, false, false, false, false, true),
             Phase::Closing | Phase::Closed => (false, false, false, false, false, false),
         };
-        if !connect {
-            self.connect = None;
-        }
+        self.connect = selected(self.connect, connect, now, self.config.connect);
         self.handshake = selected(self.handshake, handshake, now, self.config.handshake);
         if !head {
             self.head = None;
@@ -208,5 +205,21 @@ mod tests {
         table.arm(Phase::Closing, later, Duration::from_secs(10));
         assert_eq!(table.next(), None);
         assert_eq!(table.due(later), None);
+    }
+    #[test]
+    fn connecting_after_waiting_arms_connect_now_and_retains_the_original_whole() {
+        let mut table = Table::new(
+            Deadlines {
+                connect: Some(Duration::from_secs(1)),
+                whole: Some(Duration::from_secs(5)),
+                ..Deadlines::none()
+            },
+            Time::ZERO,
+        );
+        table.arm(Phase::Waiting, Time::ZERO, Duration::from_secs(10));
+        assert_eq!(table.next(), Some(Time::from_nanos(5_000_000_000)));
+        table.arm(Phase::Connecting, Time::from_nanos(3_000_000_000), Duration::from_secs(10));
+        assert_eq!(table.connect, Some(Time::from_nanos(4_000_000_000)));
+        assert_eq!(table.whole, Some(Time::from_nanos(5_000_000_000)));
     }
 }

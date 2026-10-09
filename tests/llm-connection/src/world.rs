@@ -18,6 +18,7 @@ use crate::plaintext::Wire;
 /// An independently selected point for an owner close or abort.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Point {
+    Waiting,
     Connecting,
     Head,
     Streaming,
@@ -34,6 +35,7 @@ pub struct Judge {
     pub cancelled: u32,
     pub deltas: u32,
     pub refused: u32,
+    pub failed: u32,
     pending: BTreeSet<Token>,
 }
 
@@ -59,7 +61,10 @@ impl Judge {
                 assert!(self.pending.remove(call), "one terminal per call");
                 self.cancelled += 1;
             }
-            Event::Failed { call, .. } => assert!(self.pending.remove(call), "one terminal per call"),
+            Event::Failed { call, .. } => {
+                assert!(self.pending.remove(call), "one terminal per call");
+                self.failed += 1;
+            }
             Event::Delta { call, .. } | Event::Block { call, .. } => {
                 assert!(self.pending.contains(call), "output belongs to an active call");
                 self.deltas += 1;
@@ -81,6 +86,7 @@ pub fn limits(calls: u32) -> Limits {
     Limits {
         endpoints: 1,
         connections: calls,
+        calls,
         per_endpoint: calls,
         idle_keep: Duration::from_secs(300),
         io: skein_io::Limits {
@@ -287,15 +293,25 @@ impl World {
     /// Admit several calls to the same endpoint; each has an independent byte peer.
     #[must_use]
     pub fn new(seed: u64, calls: u32) -> Self {
-        let limits = limits(calls);
-        let mut endpoints = List::with_capacity(1);
-        endpoints
-            .push(Endpoint {
-                address: (Ipv4Addr::LOCALHOST, 80).into(),
-                transport: skein_llm_connection::Transport::Plaintext,
-                llm: skein_llm::Endpoint::codex(),
-            })
-            .expect("endpoint");
+        Self::configured(seed, calls, calls, 1)
+    }
+
+    /// Configure endpoint concurrency independently of the declared conversations.
+    #[must_use]
+    pub fn configured(seed: u64, calls: u32, per_endpoint: u32, endpoint_count: u32) -> Self {
+        let mut limits = limits(calls);
+        limits.per_endpoint = per_endpoint;
+        limits.endpoints = endpoint_count;
+        let mut endpoints = List::with_capacity(endpoint_count);
+        for endpoint in 0..endpoint_count {
+            endpoints
+                .push(Endpoint {
+                    address: (Ipv4Addr::LOCALHOST, 80 + u16::try_from(endpoint).expect("test endpoint")).into(),
+                    transport: skein_llm_connection::Transport::Plaintext,
+                    llm: skein_llm::Endpoint::codex(),
+                })
+                .expect("endpoint");
+        }
         let mut world = Self {
             component: Component::new(endpoints, &limits).expect("component"),
             judge: Judge::default(),
@@ -320,16 +336,21 @@ impl World {
 
     /// Submit a start; closing refusals are independent of an existing call token.
     pub fn start(&mut self, token: u64) {
+        self.start_at(token, 0, Deadlines::none());
+    }
+
+    /// Admit a call to a selected endpoint with its own whole-call bound.
+    pub fn start_at(&mut self, token: u64, endpoint: u32, deadlines: Deadlines) {
         let mut call = skein_llm_world::call(token);
         call.prompt.instructions = b"close-world".as_slice().into();
         self.component.down(
             &self.env,
             Request::Start {
                 call: Token::new(token),
-                endpoint: 0,
+                endpoint,
                 prompt: call.prompt,
                 credential: call.credential,
-                deadlines: Deadlines::none(),
+                deadlines,
             },
             &mut self.above,
             &mut self.below,
@@ -338,6 +359,18 @@ impl World {
             self.judge.start(Token::new(token));
             self.component.down(&self.env, Request::Next { call: Token::new(token) }, &mut self.above, &mut self.below);
         }
+    }
+
+    /// Set virtual time and deliver any due component deadlines.
+    pub fn advance(&mut self, now: Time) {
+        self.env.now = now;
+        self.component.fire(&self.env, &mut self.above, &mut self.below);
+    }
+
+    /// Count physical connections, independently of the component's waiting records.
+    #[must_use]
+    pub fn connections(&self) -> usize {
+        self.peers.len()
     }
 
     /// Apply an owner request with its promised output reservation.
@@ -403,7 +436,8 @@ impl World {
                 );
             }
         }
-        if self.component.has_work() {
+        if self.component.has_work() || self.component.next_deadline().is_some_and(|deadline| deadline <= self.env.now)
+        {
             self.component.fire(&self.env, &mut self.above, &mut self.below);
         }
         for peer in self.peers.values_mut() {
@@ -417,7 +451,7 @@ impl World {
 
     /// Run to an observable phase; hold the final chunk to make draining distinct.
     pub fn until(&mut self, point: Point) {
-        if point == Point::Connecting {
+        if point == Point::Connecting || point == Point::Waiting {
             return;
         }
         if point == Point::Draining {
@@ -426,7 +460,7 @@ impl World {
         for _ in 0..40_000 {
             self.tick();
             let ready = match point {
-                Point::Connecting => true,
+                Point::Waiting | Point::Connecting => true,
                 Point::Head => self.peers.values().any(|peer| !peer.wire.received.is_empty()),
                 Point::Streaming => self.judge.deltas > 0 && self.judge.completed == 0,
                 Point::Draining => self.judge.completed == self.calls,
@@ -467,7 +501,7 @@ impl World {
 /// Cross an owner close with one call's progress, then replay the exact result.
 #[must_use]
 pub fn run(seed: u64, point: Point, abort: bool) -> (Vec<String>, Vec<String>) {
-    let mut world = World::new(seed, 1);
+    let mut world = if point == Point::Waiting { World::configured(seed, 2, 1, 1) } else { World::new(seed, 1) };
     if point == Point::Closing {
         world.until(Point::Idle);
         world.delay_close = true;
@@ -487,7 +521,7 @@ pub fn run(seed: u64, point: Point, abort: bool) -> (Vec<String>, Vec<String>) {
     if abort {
         assert!(world.aborts > 0, "abort reaches every physical closing binding");
     } else {
-        assert_eq!(world.judge.completed, 1);
+        assert_eq!(world.judge.completed, if point == Point::Waiting { 2 } else { 1 });
     }
     (world.trace, world.events)
 }

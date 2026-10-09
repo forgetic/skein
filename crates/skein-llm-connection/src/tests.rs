@@ -9,6 +9,7 @@ fn limits() -> Limits {
     Limits {
         endpoints: 1,
         connections: 1,
+        calls: 1,
         per_endpoint: 1,
         idle_keep: Duration::from_secs(10),
         io: skein_io::Limits {
@@ -84,17 +85,7 @@ fn credential() -> Credential {
 fn unknown_endpoint_is_refused() {
     let limits = limits();
     let component = Component::new(List::with_capacity(1), &limits).expect("empty configuration fits");
-    assert_eq!(component.admit(0, Token::new(7), 0, prompt(), credential()).err(), Some(Refusal::Endpoint));
-}
-
-#[test]
-fn full_pool_is_refused() {
-    let limits = limits();
-    let mut endpoints = List::with_capacity(1);
-    endpoints.push(endpoint()).expect("one endpoint fits");
-    let component = Component::new(endpoints, &limits).expect("valid endpoints");
-    drop(component.admit(0, Token::new(7), 0, prompt(), credential()).expect("valid call admitted"));
-    assert_eq!(component.admit(1, Token::new(8), 0, prompt(), credential()).err(), Some(Refusal::Pool));
+    assert_eq!(component.admit(Token::new(7), 0, prompt(), credential()).err(), Some(Refusal::Endpoint));
 }
 
 #[test]
@@ -106,13 +97,13 @@ fn invalid_and_oversized_requests_are_refused() {
     let mut invalid = prompt();
     invalid.model = Box::new([]);
     assert_eq!(
-        component.admit(0, Token::new(7), 0, invalid, credential()).err(),
+        component.admit(Token::new(7), 0, invalid, credential()).err(),
         Some(Refusal::Client(skein_llm::Error::Invalid))
     );
     let mut oversized = prompt();
     oversized.instructions = Box::new([b'x'; 9000]);
     assert_eq!(
-        component.admit(0, Token::new(7), 0, oversized, credential()).err(),
+        component.admit(Token::new(7), 0, oversized, credential()).err(),
         Some(Refusal::Client(skein_llm::Error::Limit))
     );
 }
@@ -293,7 +284,7 @@ fn a_handshake_failure_has_one_unsent_terminal() {
 }
 
 #[test]
-fn a_full_pool_refuses_the_second_call() {
+fn a_start_past_calls_is_refused_by_name() {
     let mut component = component();
     let mut up = Queue::with_capacity(MAX_OUT.above);
     let mut io = Queue::with_capacity(MAX_OUT.below);
@@ -314,7 +305,7 @@ fn a_full_pool_refuses_the_second_call() {
     match up.pop() {
         Some(Event::Refused { call, why }) => {
             assert_eq!(call, Token::new(8));
-            assert_eq!(why, Refusal::Pool);
+            assert_eq!(why, Refusal::Calls { bound: 1 });
         }
         other => panic!("expected pool refusal, got {other:?}"),
     }
@@ -451,6 +442,7 @@ fn a_start_after_closed_is_an_asserted_owner_bug() {
 fn abort_starts_one_binding_per_entrance_and_waits_for_physical_settlement() {
     let mut config = limits();
     config.connections = 2;
+    config.calls = 2;
     config.per_endpoint = 2;
     config.io.sockets = 2;
     let mut endpoints = List::with_capacity(1);
@@ -554,4 +546,14 @@ fn is_abort(request: Option<Lower>) -> bool {
         )
         | None => false,
     }
+}
+
+#[test]
+fn fewer_connections_than_conversations_is_rejected_by_name() {
+    let mut config = limits();
+    config.calls = 2;
+    assert_eq!(
+        Component::new(List::with_capacity(0), &config).err(),
+        Some(EndpointError::ConnectionsCalls { connections: 1, calls: 2 })
+    );
 }

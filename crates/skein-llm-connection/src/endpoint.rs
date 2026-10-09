@@ -30,6 +30,8 @@ pub enum EndpointError {
     TooMany,
     /// A limit is zero, inconsistent or cannot be measured.
     Limits,
+    /// The physical connection bound is smaller than the declared conversations.
+    ConnectionsCalls { connections: u32, calls: u32 },
     /// A child machine's demand cannot fit the stream below it.
     Stream,
     /// Plaintext was configured for an address outside loopback.

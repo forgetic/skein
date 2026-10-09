@@ -9,6 +9,7 @@ use crate::call::Connection;
 pub struct Limits {
     pub endpoints: u32,
     pub connections: u32,
+    pub calls: u32,
     pub per_endpoint: u32,
     pub idle_keep: Duration,
     pub io: skein_io::Limits,
@@ -19,7 +20,7 @@ pub struct Limits {
 /// Conservative bytes for the complete pool and component tables.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
-    if limits.endpoints == 0 || limits.connections == 0 || limits.per_endpoint == 0 {
+    if limits.endpoints == 0 || limits.connections == 0 || limits.calls == 0 || limits.per_endpoint == 0 {
         return None;
     }
     let routes = Queue::<skein_llm::client::Event>::worst_case(64)?
@@ -37,6 +38,8 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     let pool = each.checked_mul(u64::from(limits.connections))?;
     pool.checked_add(Slab::<Connection>::worst_case(limits.connections)?)?
         .checked_add(List::<Option<Id<Connection>>>::worst_case(limits.connections)?)?
+        .checked_add(List::<Option<crate::component::Waiting>>::worst_case(limits.calls)?)?
+        .checked_add(skein_llm::client::worst_case(&limits.llm)?.checked_mul(u64::from(limits.calls))?)?
         .checked_add(List::<crate::Endpoint>::worst_case(limits.endpoints)?)?
         .checked_add(skein_io::worst_case(&limits.io)?)
 }

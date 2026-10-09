@@ -7,7 +7,8 @@
 //! | --- | --- | --- | --- |
 //! | Connecting | connected | Handshaking | TLS handshake |
 //! | Handshaking | ready | Calling | LLM request |
-//! | Calling | drained | Idle | answer, reusable binding |
+//! | Draining | drained, live | Idle | reusable binding |
+//! | Draining | drained, owner closing | Ready | take a waiting call or close |
 //! | any live | failure or close | Closing | one call terminal, socket close |
 //! | Closing | socket closed | Closed | settlement |
 
@@ -32,6 +33,7 @@ pub(crate) enum Phase {
     Streaming,
     Draining,
     Idle,
+    Ready,
     Closing,
 }
 
@@ -56,6 +58,7 @@ pub(crate) struct Connection {
     pub(crate) tls_closed: bool,
     pub(crate) socket_close_sent: bool,
     pub(crate) deadlines: Table,
+    pub(crate) waiting: bool,
     activity: u64,
     control: Control,
     llm_events: Queue<llm::Event>,
@@ -72,7 +75,7 @@ impl Connection {
             || !self.cipher_down.is_empty()
             || (self.calling() && self.llm.has_work())
             || (self.abort_pending())
-            || (self.closing() && self.call.is_none() && self.phase != Phase::Closing)
+            || (self.closing() && !self.waiting && self.call.is_none() && self.phase != Phase::Closing)
     }
 
     pub(crate) fn new(
@@ -94,6 +97,7 @@ impl Connection {
             tls_closed: false,
             socket_close_sent: false,
             deadlines: Table::new(deadlines, now),
+            waiting: false,
             activity: 0,
             control: Control::Live,
             llm_events: Queue::with_capacity(64),
@@ -141,14 +145,14 @@ impl Connection {
     fn calling(&self) -> bool {
         match self.phase {
             Phase::Head | Phase::Streaming | Phase::Draining => true,
-            Phase::Connecting | Phase::Handshaking | Phase::Idle | Phase::Closing => false,
+            Phase::Connecting | Phase::Handshaking | Phase::Idle | Phase::Ready | Phase::Closing => false,
         }
     }
 
     fn terminal(&mut self) {
         match self.phase {
             Phase::Head | Phase::Streaming => self.phase = Phase::Draining,
-            Phase::Connecting | Phase::Handshaking | Phase::Draining | Phase::Idle | Phase::Closing => {}
+            Phase::Connecting | Phase::Handshaking | Phase::Draining | Phase::Idle | Phase::Ready | Phase::Closing => {}
         }
     }
 
@@ -160,7 +164,7 @@ impl Connection {
             Phase::Streaming => DeadlinePhase::Streaming,
             Phase::Draining => DeadlinePhase::Draining,
             Phase::Idle => DeadlinePhase::Idle,
-            Phase::Closing => DeadlinePhase::Closing,
+            Phase::Ready | Phase::Closing => DeadlinePhase::Closing,
         };
         self.deadlines.arm(phase, env.now, env.limits.idle_keep);
     }
@@ -312,11 +316,11 @@ impl Connection {
                 self.sync_deadlines(env);
                 return;
             }
-            Phase::Closing => return,
+            Phase::Ready | Phase::Closing => return,
             Phase::Connecting | Phase::Handshaking | Phase::Head | Phase::Streaming => {}
         }
         // Keep the expired phase at the abort boundary; skein-llm's vocabulary
-        // adds its typed timed-out phase in reliability increment 4.8.
+        // adds its typed timed-out phase in reliability increment 4.12.
         match due {
             Due::Connect | Due::Handshake | Due::Head | Due::Idle | Due::Whole => {}
             Due::Keep => unreachable!("keep runs only on an idle connection"),
@@ -335,7 +339,7 @@ impl Connection {
             self.phase = Phase::Closing;
             self.socket_close_sent = false;
             self.close_socket(io);
-        } else if self.closing() && self.call.is_none() && self.phase != Phase::Closing {
+        } else if self.closing() && !self.waiting && self.call.is_none() && self.phase != Phase::Closing {
             llm::down(&mut self.llm, &llm_env, llm::Request::Close, &mut self.llm_events, &mut self.plain_down);
         }
         for _ in 0_u32..64_u32 {
@@ -347,7 +351,7 @@ impl Connection {
                         up.push(Event::Completed { call, completion });
                         self.call = None;
                         self.terminal();
-                        if self.closing() {
+                        if self.closing() && !self.waiting {
                             llm::down(
                                 &mut self.llm,
                                 &llm_env,
@@ -361,7 +365,7 @@ impl Connection {
                         up.push(Event::Failed { call, failure, evidence, detail });
                         self.call = None;
                         self.terminal();
-                        if self.closing() {
+                        if self.closing() && !self.waiting {
                             llm::down(
                                 &mut self.llm,
                                 &llm_env,
@@ -375,7 +379,7 @@ impl Connection {
                         up.push(Event::Cancelled { call });
                         self.call = None;
                         self.terminal();
-                        if self.closing() {
+                        if self.closing() && !self.waiting {
                             llm::down(
                                 &mut self.llm,
                                 &llm_env,
@@ -386,11 +390,16 @@ impl Connection {
                         }
                     }
                     llm::Event::Reusable => {
-                        self.phase = Phase::Idle;
+                        self.phase = if self.closing() { Phase::Ready } else { Phase::Idle };
                         self.idle_at = Some(env.now);
                     }
                     llm::Event::Close => match self.phase {
-                        Phase::Handshaking | Phase::Head | Phase::Streaming | Phase::Draining | Phase::Idle => {
+                        Phase::Handshaking
+                        | Phase::Head
+                        | Phase::Streaming
+                        | Phase::Draining
+                        | Phase::Idle
+                        | Phase::Ready => {
                             self.close_transport(env, io);
                         }
                         Phase::Connecting => self.close_socket(io),
@@ -399,7 +408,7 @@ impl Connection {
                     llm::Event::Closed => {}
                 }
             } else if let Some(down) = self.plain_down.pop() {
-                if self.calling() || self.phase == Phase::Idle {
+                if self.calling() || (self.phase == Phase::Idle || self.phase == Phase::Ready) {
                     match &down {
                         Down::Send(bytes) if !bytes.is_empty() && self.phase == Phase::Head => {
                             self.deadlines.sent(env.now);
