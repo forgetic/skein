@@ -12,9 +12,9 @@ use alloc::vec::Vec;
 use skein_lib::stream::{Down, Fault, Read, Up};
 use skein_lib::{Env, Queue};
 
-use super::{boxed, env, stream};
+use super::{Gathered, Message, boxed, env, stream};
+use crate::sse;
 use crate::sse::writer::{self, Event, Limits, Outgoing, Refusal, Request, Waiting, Writer};
-use crate::sse::{self, Message};
 
 const LIMITS: Limits = Limits { event: 128, chunk: 16 };
 
@@ -293,16 +293,16 @@ fn every_event_written_is_read_back_as_it_was_written() {
     bytes.extend_from_slice(&machine.framed(Request::Comment(boxed(b""))));
     let read = stream(&bytes, reader);
     let expected = [
-        sse::Event::Message(Message {
+        Gathered::Message(Message {
             name: boxed(b"message_start"),
             data: boxed(b"{\"type\":\"message_start\"}"),
             id: boxed(b"1"),
         }),
-        sse::Event::Message(Message { name: boxed(b"message"), data: boxed(b"line one\nline two"), id: boxed(b"1") }),
-        sse::Event::Message(Message { name: boxed(b"delta"), data: boxed(b""), id: boxed(b"1") }),
-        sse::Event::Message(Message { name: boxed(b"x"), data: boxed(b"a\nb\nc\n"), id: boxed(b"") }),
-        sse::Event::Message(Message { name: boxed(b"message"), data: boxed(b"[DONE]"), id: boxed(b"") }),
-        sse::Event::Ended,
+        Gathered::Message(Message { name: boxed(b"message"), data: boxed(b"line one\nline two"), id: boxed(b"1") }),
+        Gathered::Message(Message { name: boxed(b"delta"), data: boxed(b""), id: boxed(b"1") }),
+        Gathered::Message(Message { name: boxed(b"x"), data: boxed(b"a\nb\nc\n"), id: boxed(b"") }),
+        Gathered::Message(Message { name: boxed(b"message"), data: boxed(b"[DONE]"), id: boxed(b"") }),
+        Gathered::Ended,
     ];
     assert_eq!(read, expected);
 }

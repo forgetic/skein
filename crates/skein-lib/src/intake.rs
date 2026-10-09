@@ -97,6 +97,12 @@ impl Intake {
         self.capacity.checked_sub(self.len()).expect("no longer than its capacity")
     }
 
+    /// Drops buffered bytes while keeping the fixed capacity; resets scan progress.
+    pub fn clear(&mut self) {
+        self.bytes.clear();
+        self.searched.clear = 0;
+    }
+
     /// Appends received bytes, or refuses them whole when they do not fit,
     /// appending nothing.
     pub fn append(&mut self, bytes: &[u8]) -> Result<(), Overflow> {

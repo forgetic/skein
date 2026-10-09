@@ -202,6 +202,7 @@ pub struct Client {
     outputs: Queue<dialect::Output>,
     requests: Queue<http::Request>,
     sse_below: Queue<Down>,
+    event_data: List<u8>,
     error: List<u8>,
     status: u16,
     rate: openai::RateLimit,
@@ -281,6 +282,7 @@ impl Client {
             outputs: Queue::with_capacity(dialect::MAX_OUT),
             requests: Queue::with_capacity(REQUESTS),
             sse_below: Queue::with_capacity(1),
+            event_data: List::with_capacity(limits.sse.event),
             error: List::with_capacity(limits.error_bytes),
             status: 0,
             rate: openai::RateLimit { retry_after: None, reset: None, exhausted: false },
@@ -332,7 +334,7 @@ impl Client {
             {
                 return true;
             }
-            return self.sse.waiting() == sse::Waiting::Next;
+            return self.sse.waiting() == sse::Waiting::Next || self.sse.waiting() == sse::Waiting::Above;
         }
         false
     }
@@ -469,6 +471,8 @@ pub fn resume(client: &mut Client, env: &Env<Limits>, above: &mut Queue<Event>, 
                 decoder.ready(&env.limits.dialect, &mut client.outputs);
             } else if client.sse.waiting() == sse::Waiting::Next {
                 sse_down(client, env, sse::Request::Next);
+            } else if client.sse.waiting() == sse::Waiting::Above {
+                sse_down(client, env, sse::Request::Data(Down::Demand { read: Read::Fill(1), room: 0 }));
             } else {
                 break;
             }
@@ -720,11 +724,29 @@ fn sse_event(
         return;
     }
     match event {
-        sse::Event::Message(message) => {
+        sse::Event::Opened => client.event_data.clear(),
+        sse::Event::Data(event) => match event {
+            Up::Bytes(bytes) => {
+                for byte in &bytes {
+                    client.event_data.push(*byte).expect("event data fits its wire event cap");
+                }
+            }
+            Up::End => {}
+            Up::Failed(_) => client.event_data.clear(),
+            Up::Room => unreachable!("SSE data is read only"),
+        },
+        sse::Event::Dispatched(dispatch) => {
             client.activity = client.activity.checked_add(1).expect("an SSE message count fits u64");
             let decoder = client.decoder.as_mut().expect("the streaming state has its decoder");
-            let parsed =
-                decoder.event(&message, &env.limits.dialect, env.wall, client.status, client.rate, &mut client.outputs);
+            let parsed = decoder.event(
+                &dispatch.name,
+                client.event_data.as_slice(),
+                &env.limits.dialect,
+                env.wall,
+                client.status,
+                client.rate,
+                &mut client.outputs,
+            );
             if let Err(error) = parsed {
                 let failure = match error {
                     openai::DecodeError::TooLarge { which, bound } => Failure::Limit { which, bound },
@@ -998,6 +1020,7 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     {
         return None;
     }
+    // The event term covers the gathering buffer and decoding copies.
     // Every opaque item was charged by its serialized length in the
     // dialect's answer budget. A JSON token occupies at least one wire byte.
     // Metadata envelopes are also charged in the held completion. Include

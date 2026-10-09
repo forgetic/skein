@@ -46,16 +46,21 @@ impl Decoder {
             }
         }
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "event bytes and dispatch metadata accompany the existing decoding context"
+    )]
     pub(crate) fn event(
         &mut self,
-        message: &skein_http::sse::Message,
+        name: &[u8],
+        data: &[u8],
         limits: &openai::Limits,
         wall: Wall,
         status: u16,
         rate: openai::RateLimit,
         out: &mut Queue<Output>,
     ) -> Result<(), openai::DecodeError> {
-        let json = openai::Json::from_bytes(&message.data, limits)?;
+        let json = openai::Json::from_bytes(data, limits)?;
         match self {
             Decoder::Codex(decoder) => {
                 let event = openai::decode_event(&json, limits)?;
@@ -82,7 +87,7 @@ impl Decoder {
                 let tokens = json.as_tokens();
                 let kind = openai::json::required(tokens, b"type")?;
                 let kind = openai::json::text_ref(openai::json::value_at(tokens, kind)?)?;
-                if message.name.as_ref() != b"message" && message.name.as_ref() != kind {
+                if name != b"message" && name != kind {
                     return Err(openai::DecodeError::Malformed);
                 }
                 let event = anthropic::decode_event(&json, limits)?;
