@@ -294,10 +294,10 @@ fn collect_memory(
         (u32::try_from(document.len()).expect("bounded document")).max(json::largest_demand(&limits.tokenizer)),
     );
     intake.append(document).expect("all bytes fit");
-    let bound = collector::worst_case(&limits).expect("priced limits");
+    let bound = collector::worst_case(&limits, &[], &filter).expect("priced limits");
     let meter = Meter::new();
     meter.start();
-    let mut collector = Collector::new(filter, &limits);
+    let mut collector = Collector::new(filter, &limits, &[]);
     let mut most = meter.end().peak();
     let mut demand = None;
     for step in 0..8 * document.len() + 64 {

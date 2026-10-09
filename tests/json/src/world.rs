@@ -650,7 +650,7 @@ pub fn collect(
         withdrawn: None,
     };
     let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
-    let mut collector = Collector::new(filter, &limits);
+    let mut collector = Collector::new(filter, &limits, crate::COLLECTOR_CAPS);
     let mut events = Queue::with_capacity(8);
     let mut requests = Queue::with_capacity(8);
     let mut outcome = None;

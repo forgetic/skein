@@ -11,6 +11,8 @@
 //! | Over | owner bug; restart first | absorb end/fault | Closed |
 //! | Closed | owner bug | absorb withdrawn delivery | owner bug |
 
+use alloc::boxed::Box;
+
 use crate::document::{self, Builder};
 use crate::tokenizer::{self as json, Tokenizer};
 use crate::{Document, Kind, Token};
@@ -23,13 +25,31 @@ pub struct Filter {
     pub root: Keep,
 }
 
+/// A named runtime cap's index, supplied by the filter's owner.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Cap(u8);
+
+impl Cap {
+    /// Names an entry in the cap table used to construct the collector.
+    #[must_use]
+    pub const fn new(index: u8) -> Cap {
+        Cap(index)
+    }
+
+    /// The owner's cap-table index, for translating a named failure.
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        self.0
+    }
+}
+
 /// How the owner asks to retain a value; unknown children are scanned.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Keep {
     /// Keep the complete bounded value for the decoder.
     Value,
     /// Keep a string only through this decoded byte count, or its length alone.
-    Text(u32),
+    Text(Cap),
     /// Keep a container and only the named children for the decoder.
     Into(&'static [Node]),
 }
@@ -87,7 +107,10 @@ pub enum Error {
     /// The document exceeded its retained record count.
     TooManyTokens,
     /// The document exceeded its decoded retained byte count.
-    TooMuchText,
+    TooMuchText {
+        /// A named cap when one applies, or the global retained text count.
+        cap: Option<Cap>,
+    },
     /// The skipped values exceeded their delivered byte count.
     SkippedTooLong,
     /// An object repeated a field named by the filter.
@@ -131,6 +154,7 @@ pub struct Collector {
     state: State,
     position: Position,
     skipped: u64,
+    caps: Box<[u32]>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -160,7 +184,8 @@ impl Collector {
     /// Makes one collector under stable limits, initially waiting for Collect.
     /// Named fields must fit the tokenizer's retained string cap.
     #[must_use]
-    pub fn new(filter: Filter, limits: &Limits) -> Collector {
+    pub fn new(filter: Filter, limits: &Limits, caps: &[u32]) -> Collector {
+        assert!(caps.len() <= 256, "cap indexes fit u8");
         Collector {
             tokenizer: Tokenizer::new(&limits.tokenizer),
             events: Queue::with_capacity(1),
@@ -169,6 +194,7 @@ impl Collector {
             state: State::Idle,
             position: Position::Value(filter.root),
             skipped: 0,
+            caps: Box::from(caps),
         }
     }
 
@@ -214,7 +240,11 @@ impl Collector {
 
 /// The collector's retained buffers, bounded walk and transient ownership.
 #[must_use]
-pub fn worst_case(limits: &Limits) -> Option<u64> {
+pub fn worst_case(limits: &Limits, caps: &[u32], _filter: &Filter) -> Option<u64> {
+    if caps.len() > 256 {
+        return None;
+    }
+    let caps = u64::try_from(caps.len()).ok()?.checked_mul(u64::try_from(size_of::<u32>()).ok()?)?;
     let delivery = u64::from(json::largest_demand(&limits.tokenizer));
     let tokenizer = json::worst_case(&limits.tokenizer)?.checked_sub(delivery)?;
     let walk = Stack::<Frame>::worst_case(limits.tokenizer.depth)?;
@@ -224,7 +254,7 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     // A token's delivery and owned text coexist while the tokenizer emits it.
     // The output document is copied only after that delivery and token are gone.
     let transient = delivery.checked_add(token)?.max(retained);
-    tokenizer.checked_add(walk)?.checked_add(queue)?.checked_add(retained)?.checked_add(transient)
+    tokenizer.checked_add(walk)?.checked_add(queue)?.checked_add(retained)?.checked_add(transient)?.checked_add(caps)
 }
 
 /// Receives a stream event, emitting at most `UP_MAX_OUT`.
@@ -382,7 +412,9 @@ fn failed(
 
 fn demand(collector: &mut Collector, env: &Env<Limits>, below: &mut Queue<Down>) {
     let request = match collector.position {
-        Position::Value(Keep::Text(cap)) => json::Request::Text(cap),
+        Position::Value(Keep::Text(cap)) => {
+            json::Request::Text(*collector.caps.get(usize::from(cap.index())).expect("the filter names a supplied cap"))
+        }
         Position::Value(Keep::Value | Keep::Into(_)) | Position::End => json::Request::Next,
         Position::Skip => json::Request::Skip,
         Position::Key => {
@@ -496,7 +528,7 @@ fn push(collector: &mut Collector, token: &Token) -> Result<(), Error> {
 fn document_error(error: document::Error) -> Error {
     match error {
         document::Error::TooManyTokens => Error::TooManyTokens,
-        document::Error::TooMuchText => Error::TooMuchText,
+        document::Error::TooMuchText => Error::TooMuchText { cap: None },
         document::Error::Range => unreachable!("the builder computes every record offset"),
     }
 }

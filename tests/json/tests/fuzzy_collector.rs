@@ -1,6 +1,6 @@
 //! Selective collection over generated paths and corrupt peer extensions.
 use skein_json::Token;
-use skein_json::collector::{Event, Filter, Keep, Key, Limits, Node};
+use skein_json::collector::{Cap, Event, Filter, Keep, Key, Limits, Node};
 use skein_json_world::{
     generate::{self, Shape},
     reference,
@@ -10,13 +10,17 @@ use skein_lib::Rng;
 use std::collections::BTreeSet;
 const CHILDREN: &[Node] = &[
     Node { key: Key::Field(b"keep"), keep: Keep::Value },
-    Node { key: Key::Field(b"text"), keep: Keep::Text(4) },
-    Node { key: Key::Field(b"array"), keep: Keep::Into(&[Node { key: Key::Each, keep: Keep::Text(8) }]) },
-    Node { key: Key::Field(b"nested"), keep: Keep::Into(&[Node { key: Key::Field(b"text"), keep: Keep::Text(0) }]) },
+    Node { key: Key::Field(b"text"), keep: Keep::Text(Cap::new(0)) },
+    Node { key: Key::Field(b"array"), keep: Keep::Into(&[Node { key: Key::Each, keep: Keep::Text(Cap::new(1)) }]) },
+    Node {
+        key: Key::Field(b"nested"),
+        keep: Keep::Into(&[Node { key: Key::Field(b"text"), keep: Keep::Text(Cap::new(2)) }]),
+    },
     Node { key: Key::Field(b"absent"), keep: Keep::Value },
-    Node { key: Key::Each, keep: Keep::Text(4) },
+    Node { key: Key::Each, keep: Keep::Text(Cap::new(0)) },
 ];
-const FILTERS: &[Keep] = &[Keep::Value, Keep::Text(0), Keep::Text(8), Keep::Into(&[]), Keep::Into(CHILDREN)];
+const FILTERS: &[Keep] =
+    &[Keep::Value, Keep::Text(Cap::new(2)), Keep::Text(Cap::new(1)), Keep::Into(&[]), Keep::Into(CHILDREN)];
 const NAMES: &[&[u8]] = &[b"keep", b"text", b"array", b"nested", b"omit"];
 #[test]
 fn ten_thousand_generated_mutated_and_extended_documents_obey_drawn_filters() {
@@ -88,7 +92,7 @@ fn ten_thousand_generated_mutated_and_extended_documents_obey_drawn_filters() {
             unchanged_extension(&mut rng, seed, limits, &settings);
         }
     }
-    for what in ["collected", "long", "TooManyTokens", "TooMuchText", "SkippedTooLong", "Duplicate"] {
+    for what in ["collected", "long", "TooManyTokens", "TooMuchText { cap: None }", "SkippedTooLong", "Duplicate"] {
         assert!(seen.contains(what), "{what} fell: {seen:?}");
     }
     for value in [

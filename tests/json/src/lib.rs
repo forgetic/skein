@@ -63,3 +63,6 @@ pub struct Decoded {
     pub tokens: Vec<Token>,
     pub outcome: Outcome,
 }
+
+/// Runtime caps for the fixed selective filters used by the worlds.
+pub const COLLECTOR_CAPS: &[u32] = &[4, 8, 0, 2];

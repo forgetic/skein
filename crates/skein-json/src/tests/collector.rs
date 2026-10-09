@@ -1,6 +1,6 @@
 //! Selective collection: dispositions, counts, duplicate admission and lifetime.
 use super::{boxed, env, key, number, string};
-use crate::collector::{self, Collector, Counts, Error, Event, Filter, Keep, Key, Limits, Node, Request, Waiting};
+use crate::collector::{self, Cap, Collector, Counts, Error, Event, Filter, Keep, Key, Limits, Node, Request, Waiting};
 use crate::document;
 use crate::tokenizer;
 use crate::{Document, Kind, Token};
@@ -15,8 +15,8 @@ const LIMITS: Limits = Limits {
 };
 const FIELDS: &[Node] = &[
     Node { key: Key::Field(b"keep"), keep: Keep::Value },
-    Node { key: Key::Field(b"text"), keep: Keep::Text(3) },
-    Node { key: Key::Field(b"array"), keep: Keep::Into(&[Node { key: Key::Each, keep: Keep::Text(2) }]) },
+    Node { key: Key::Field(b"text"), keep: Keep::Text(Cap::new(0)) },
+    Node { key: Key::Field(b"array"), keep: Keep::Into(&[Node { key: Key::Each, keep: Keep::Text(Cap::new(1)) }]) },
 ];
 const FILTER: Filter = Filter { root: Keep::Into(FIELDS) };
 
@@ -28,9 +28,12 @@ struct Machine {
 }
 impl Machine {
     fn new(filter: Filter, limits: Limits) -> Machine {
+        Machine::with_caps(filter, limits, &[3, 2])
+    }
+    fn with_caps(filter: Filter, limits: Limits, caps: &[u32]) -> Machine {
         let basic = env(limits.tokenizer);
         Machine {
-            collector: Collector::new(filter, &limits),
+            collector: Collector::new(filter, &limits, caps),
             env: Env { now: basic.now, wall: basic.wall, limits },
             above: Queue::with_capacity(4),
             below: Queue::with_capacity(4),
@@ -149,7 +152,7 @@ fn each_retained_count_and_skip_count_accepts_its_edge_then_fails() {
         expected(&[Token::ObjectStart, key(b"keep"), number(b"1"), Token::ObjectEnd])
     );
     assert_eq!(collect(bytes, FILTER, Limits { tokens: 3, ..limits }).0, Event::Failed(Error::TooManyTokens));
-    assert_eq!(collect(bytes, FILTER, Limits { text: 4, ..limits }).0, Event::Failed(Error::TooMuchText));
+    assert_eq!(collect(bytes, FILTER, Limits { text: 4, ..limits }).0, Event::Failed(Error::TooMuchText { cap: None }));
     assert_eq!(collect(bytes, FILTER, Limits { skip: 2, ..limits }).0, Event::Failed(Error::SkippedTooLong));
 }
 #[test]
@@ -208,4 +211,32 @@ fn a_second_close_is_an_owner_bug() {
     machine.down(Request::Close);
     drop(machine.above.pop());
     machine.down(Request::Close);
+}
+
+#[test]
+fn one_static_filter_uses_the_named_cap_supplied_at_construction() {
+    const FILTER: Filter = Filter { root: Keep::Text(Cap::new(0)) };
+    for cap in 0..=4 {
+        let mut machine = Machine::with_caps(FILTER, LIMITS, &[cap]);
+        let event = machine.read(br#""a\nb""#);
+        let Event::Collected(document) = event else { panic!("a valid string") };
+        let record = document.token(0).unwrap();
+        assert_eq!(record.len, 3);
+        assert_eq!(record.kind, if cap < 3 { Kind::Long } else { Kind::String });
+        assert_eq!(document.text_len(), if cap < 3 { 0 } else { 3 });
+    }
+    assert_eq!(Cap::new(0).index(), 0);
+}
+
+#[test]
+fn cap_values_are_owned_and_restarts_reuse_the_same_table() {
+    const FILTER: Filter = Filter { root: Keep::Text(Cap::new(0)) };
+    let mut caps = [2];
+    let mut machine = Machine::with_caps(FILTER, LIMITS, &caps);
+    caps[0] = 0;
+    assert_eq!(caps, [0]);
+    assert_eq!(machine.read(br#""ab""#), expected(&[string(b"ab")]));
+    machine.collector.restart(FILTER);
+    assert_eq!(machine.read(br#""ab""#), expected(&[string(b"ab")]));
+    assert_eq!(collector::worst_case(&LIMITS, &[0; 257], &FILTER), None);
 }

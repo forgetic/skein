@@ -180,13 +180,14 @@ fn drawn_text_and_skip_demands_are_judged_by_the_reference() {
 
 #[test]
 fn collector_paths_counts_and_neighbor_interruptions() {
-    use skein_json::collector::{Event, Filter, Keep, Key, Limits as CollectorLimits, Node};
-    let filter = Filter {
+    use skein_json::collector::{Cap, Event, Filter, Keep, Key, Limits as CollectorLimits, Node};
+    const FILTER: Filter = Filter {
         root: Keep::Into(&[
-            Node { key: Key::Field(b"a"), keep: Keep::Into(&[Node { key: Key::Each, keep: Keep::Text(2) }]) },
+            Node { key: Key::Field(b"a"), keep: Keep::Into(&[Node { key: Key::Each, keep: Keep::Text(Cap::new(3)) }]) },
             Node { key: Key::Field(b"missing"), keep: Keep::Value },
         ]),
     };
+    let filter = FILTER;
     let limits = CollectorLimits { tokenizer: LIMITS, tokens: 128, text: 256, skip: 1 << 16 };
     for seed in 0..200 {
         let mut rng = Rng::new(seed);

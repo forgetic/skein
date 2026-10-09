@@ -533,7 +533,7 @@ impl Pruned<'_> {
         let mut start = 0;
         if matches!(kind, Kind::Key | Kind::String | Kind::Number) {
             if self.text.len() + bytes.len() > self.limits.text as usize {
-                return Err(Error::TooMuchText);
+                return Err(Error::TooMuchText { cap: None });
             }
             start = u32::try_from(self.text.len()).expect("retained under u32 text");
             self.text.extend_from_slice(bytes);
@@ -556,7 +556,7 @@ impl Pruned<'_> {
             Token::String(bytes) => {
                 self.push(
                     token,
-                    matches!(keep,Keep::Text(cap) if bytes.len() > cap.min(self.limits.tokenizer.string) as usize),
+                    matches!(keep,Keep::Text(cap) if bytes.len() > crate::COLLECTOR_CAPS[usize::from(cap.index())].min(self.limits.tokenizer.string) as usize),
                 )?;
             }
             Token::ObjectStart | Token::ArrayStart => {
