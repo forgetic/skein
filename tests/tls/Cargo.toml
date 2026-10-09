@@ -20,6 +20,8 @@ rustls = { workspace = true, features = ["std"] }
 skein-heap.workspace = true
 # The HTTP client, stacked on the TLS client in tests/stack.rs.
 skein-http.workspace = true
+skein-shell.workspace = true
+skein-scratch.workspace = true
 
 # Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.
 # tests/clippy.toml bans what would make a run unrepeatable; what rustls draws

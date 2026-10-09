@@ -7,6 +7,7 @@
 //! - [`open_append`]: a regular file opened beneath a root for output at startup.
 //! - [`open_root`]: a directory opened at startup as a root for io's files.
 //! - [`effective_user`]: the startup user ID for io's private-file configuration.
+//! - [`read_file`] and [`read_trust_roots`]: startup reads within configured bounds.
 //! - [`open_termination_signals`]: the blocked SIGINT/SIGTERM source io adopts.
 //! - [`Clock`]: monotonic and wall time, read together once per iteration.
 //! - [`seed`]: the random seed, from `getrandom`, once at startup.
@@ -22,6 +23,7 @@ mod clock;
 mod drive;
 mod ring;
 mod seed;
+mod startup;
 #[cfg(test)]
 mod tests;
 
@@ -34,3 +36,4 @@ pub use ring::{
     signal_kept_child, start_binary, start_binary_in_cgroup, subreaper, wait_cgroup_change, write_service_signal,
 };
 pub use seed::seed;
+pub use startup::{RootBounds, Roots, RootsRefusal, Trust, Unread, read_file, read_trust_roots};

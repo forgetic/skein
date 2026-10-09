@@ -67,6 +67,9 @@
 )]
 
 mod process;
+mod startup;
+
+pub(crate) use startup::read_file;
 
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

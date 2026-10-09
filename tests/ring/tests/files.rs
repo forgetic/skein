@@ -7,6 +7,9 @@
 //!
 //! A machine without `io_uring` fails every test here, saying so.
 
+#[path = "files/startup.rs"]
+mod startup;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;

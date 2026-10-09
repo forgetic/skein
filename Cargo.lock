@@ -614,6 +614,8 @@ dependencies = [
  "skein-http",
  "skein-io",
  "skein-lib",
+ "skein-scratch",
+ "skein-shell",
  "skein-sim",
  "skein-tls",
 ]
