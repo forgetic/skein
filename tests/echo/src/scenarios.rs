@@ -456,9 +456,7 @@ pub fn closes(seed: u64, config: Config) -> EchoWorld {
     world
 }
 
-/// A shutdown while connections live: one lingers, served, through the
-/// shutdown, and the echo still idles it out; one connects after it and is
-/// refused, as nothing listens any more.
+/// A shutdown drains a served connection at once; a later connect is refused.
 #[must_use]
 pub fn shutdown(seed: u64, config: Config) -> EchoWorld {
     let mut rng = Rng::new(seed ^ 0x5407);
@@ -466,9 +464,8 @@ pub fn shutdown(seed: u64, config: Config) -> EchoWorld {
     let after = plan(ms(100), rng.next_u64());
     let mut expect = vec![Expect::Finished { at: 1, conn: 0, by: END }, Expect::Finished { at: 1, conn: 1, by: END }];
     if calm(&config) {
-        let by = ms(1).saturating_add(IDLE).saturating_add(SPREAD).saturating_add(Duration::from_secs(1));
         expect.push(Expect::Served { at: 1, conn: 0, by: ms(10) });
-        expect.push(Expect::Idled { at: 1, conn: 0, idle: IDLE, by });
+        expect.push(Expect::Ends { at: 1, conn: 0, by: ms(60) });
         expect.push(Expect::Refused { at: 1, conn: 1, by: ms(200) });
     }
     let mut world = world(seed, config, expect, Shutdown::At(ms(50)));
@@ -476,8 +473,40 @@ pub fn shutdown(seed: u64, config: Config) -> EchoWorld {
     world
 }
 
+/// A line is answered before its connection closes at shutdown.
+#[must_use]
+pub fn shutdown_line(seed: u64, config: Config) -> EchoWorld {
+    let peer = Plan { lines: 1, then: Then::Linger, ..plan(ms(1), seed) };
+    let mut expect = vec![Expect::Finished { at: 1, conn: 0, by: END }];
+    if calm(&config) {
+        expect.push(Expect::Ends { at: 1, conn: 0, by: ms(60) });
+    }
+    let mut world = world(seed, config, expect, Shutdown::At(ms(50)));
+    spawn(&mut world, &[peer]);
+    world
+}
+
+/// A peer that stopped reading holds a graceful close until the second signal.
+#[must_use]
+pub fn shutdown_abort(seed: u64, config: Config) -> EchoWorld {
+    let config = Config { buffer: BUFFER, ..config };
+    let peer = Plan {
+        lines: 40,
+        shortest: LINE,
+        ahead: 40,
+        read_from: None,
+        then: Then::Linger,
+        abort_at: Some(ms(500)),
+        ..plan(ms(1), seed)
+    };
+    let expect = vec![Expect::Finished { at: 1, conn: 0, by: END }];
+    let mut world = world(seed, config, expect, Shutdown::Twice { first: ms(100), second: ms(200) });
+    spawn(&mut world, &[peer]);
+    world
+}
+
 /// Every scenario, by name, for the sweeps.
-pub const SCENARIOS: [(&str, Scenario); 9] = [
+pub const SCENARIOS: [(&str, Scenario); 11] = [
     ("clients", clients),
     ("too_long", too_long),
     ("busy", busy),
@@ -485,6 +514,8 @@ pub const SCENARIOS: [(&str, Scenario); 9] = [
     ("backpressure", backpressure),
     ("closes", closes),
     ("shutdown", shutdown),
+    ("shutdown_line", shutdown_line),
+    ("shutdown_abort", shutdown_abort),
     ("half_close", half_close),
     ("worst", worst),
 ];

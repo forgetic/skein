@@ -258,7 +258,7 @@ fn an_idle_connection_is_closed_at_its_deadline() {
 }
 
 #[test]
-fn shutdown_stops_the_listener_and_the_service_empties_once_its_peers_leave() {
+fn shutdown_closes_idle_connections_without_waiting_for_their_idle_deadline() {
     let mut rig = Rig::new();
     rig.settle();
     let peer = rig.connect();
@@ -267,10 +267,8 @@ fn shutdown_stops_the_listener_and_the_service_empties_once_its_peers_leave() {
     assert!(rig.svc.work_pending(rig.now), "the shutdown waits on the ready list");
     rig.settle();
     assert_eq!(rig.svc.listening(), None, "the listener stopped");
-    assert!(!rig.svc.is_empty(), "a peer is still served");
-    rig.deliver(peer, b"bye\n");
-    rig.settle();
-    assert_eq!(rig.sent_on(peer), b"bye\n", "served after the shutdown");
+    assert!(!rig.svc.is_empty(), "io awaits the peer’s end during graceful close");
+    assert!(rig.sent_on(peer).is_empty(), "the idle connection is no longer served");
     // The peer ends: the server closes, and io's drain has nothing more to
     // read.
     rig.deliver(peer, b"");

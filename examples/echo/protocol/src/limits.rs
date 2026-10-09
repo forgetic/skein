@@ -62,8 +62,8 @@ impl Limits {
 
 /// The most heap the protocol layer holds under `limits`, or `None` past a
 /// `u64` (programming-model.md, 6.3): its slab of connections, their idle
-/// deadlines and its ready list; a line in flight per connection (the bytes
-/// read, the domain's text, or the answer before io takes it, as one
+/// deadlines, their live names and its ready list; a line in flight per
+/// connection (the bytes read, the domain's text, or the answer before io takes it, as one
 /// request is in flight per connection); and one line more, for the copy a
 /// step makes while it decodes a line or encodes its answer.
 #[must_use]
@@ -71,7 +71,7 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     let conns = limits.conns;
     let tables = Slab::<Conn>::worst_case(conns)?
         .checked_add(Deadlines::<Id<Conn>>::worst_case(conns)?)?
-        .checked_add(Set::<Id<Conn>>::worst_case(conns)?)?;
+        .checked_add(Set::<Id<Conn>>::worst_case(conns)?.checked_mul(2)?)?;
     let lines = u64::from(conns).checked_add(1)?.checked_mul(u64::from(limits.line))?;
     tables.checked_add(lines)
 }
@@ -85,7 +85,7 @@ pub struct MaxOut {
 }
 
 /// `resume`: the listener's `Listen`; or `Shutdown` told; or a connection's
-/// `Gone`.
+/// `Gone`, drain or abort.
 pub const MAX_OUT_RESUME: MaxOut = MaxOut { events: 1, requests: 1 };
 
 /// `up`: a socket bound and its first demand, or rejected; a call up; or a

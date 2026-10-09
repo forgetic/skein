@@ -6,7 +6,8 @@
 //! The sweeps over many seeds are in `fuzzy_scenarios.rs`.
 
 use skein_echo_world::scenarios::{
-    EchoWorld, backpressure, busy, clients, closes, half_close, idle, shutdown, too_long, worst,
+    EchoWorld, backpressure, busy, clients, closes, half_close, idle, shutdown, shutdown_abort, shutdown_line,
+    too_long, worst,
 };
 use skein_heap::Counting;
 use skein_sim::Config;
@@ -94,7 +95,7 @@ fn closes_and_resets_in_every_state_settle() {
 }
 
 #[test]
-fn a_shutdown_stops_the_listener_and_lets_its_connections_run_on() {
+fn a_shutdown_closes_idle_connections_at_once() {
     calm(shutdown);
     chaos(shutdown);
 }
@@ -154,4 +155,43 @@ fn the_echo_driven_to_its_limits_comes_near_its_worst_case() {
         assert!(most * 2 >= bound, "seed {}: the echo held {most} bytes at its limits, of {bound}", outcome.seed);
     }
     chaos(worst);
+}
+
+#[test]
+fn a_shutdown_answers_a_line_out_then_closes_its_connection() {
+    calm(shutdown_line);
+    chaos(shutdown_line);
+}
+
+#[test]
+fn a_second_signal_aborts_a_connection_whose_peer_stopped_reading() {
+    for outcome in calm(shutdown_abort) {
+        let settled = outcome
+            .trace
+            .iter()
+            .filter_map(|entry| {
+                if entry.pid.raw() == 0
+                    && matches!(
+                        entry.event,
+                        skein_sim::Event::Complete { kind: skein_sim::Summary::Close { .. }, result: Ok(_), .. }
+                    )
+                {
+                    Some(entry.at)
+                } else {
+                    None
+                }
+            })
+            .max()
+            .expect("the echo closed its descriptors");
+        assert!(
+            settled >= skein_echo_world::scenarios::ms(200),
+            "a graceful close was still held until the second signal"
+        );
+        assert!(
+            settled < skein_echo_world::scenarios::ms(250),
+            "the echo settled before the client abort at 500 ms and io's close timeout"
+        );
+        assert!(outcome.end < skein_echo_world::scenarios::ms(1_000), "the abort settles before io's close timeout");
+    }
+    chaos(shutdown_abort);
 }

@@ -325,3 +325,162 @@ fn limits_must_hold_a_connection_the_refusals_and_a_deadline() {
     assert_eq!(LIMITS.largest_read(), 16);
     assert_eq!(LIMITS.largest_room(), 16);
 }
+
+#[test]
+fn shutdown_closes_greeting_reading_and_draining_without_an_idle_deadline() {
+    let mut rig = Rig::with(Limits { conns: 3, ..LIMITS });
+    rig.listen();
+    let greeting = rig.bound(1);
+    let reading = rig.reading(2, session(2));
+    let draining = rig.reading(3, session(3));
+    rig.line(draining, session(3), b"last\n");
+    let _answer = rig.down(reply(draining, Reply::Echo(Box::from(&b"last"[..]))));
+    let _listener = rig.down(skein_echo_domain::Request::Stop);
+    let out = rig.drain();
+    assert_eq!(out.io, [close(1), close(2), close(3)]);
+    assert_eq!(out.calls, [Call::Gone { session: session(2) }, Call::Gone { session: session(3) }]);
+    assert_eq!(rig.proto.next_deadline(), None);
+    for conn in [greeting, reading, draining] {
+        rig.closed(conn).nothing();
+    }
+    rig.proto.reclaim();
+    assert_eq!(rig.proto.conns(), 0);
+}
+
+#[test]
+fn shutdown_while_admitting_closes_after_either_domain_reply() {
+    for admitted_peer in [false, true] {
+        let mut rig = Rig::new();
+        rig.listen();
+        let conn = rig.bound(1);
+        let _open = rig.up(stream(conn, Up::Room));
+        let _listener = rig.down(skein_echo_domain::Request::Stop);
+        rig.drain().nothing();
+        let out = if admitted_peer { rig.down(admitted(conn, session(1))) } else { rig.down(reply(conn, Reply::Busy)) };
+        if admitted_peer {
+            assert_eq!(out.io, [close(1)]);
+            assert_eq!(rig.drain().calls, [Call::Gone { session: session(1) }]);
+        } else {
+            assert_eq!(out.io, [send(1, BUSY), close(1)]);
+        }
+        rig.closed(conn).nothing();
+        rig.proto.reclaim();
+        assert_eq!(rig.proto.conns(), 0);
+    }
+}
+
+#[test]
+fn shutdown_answers_a_line_out_then_closes_and_settles_both_bindings() {
+    let mut rig = Rig::new();
+    rig.listen();
+    let conn = rig.reading(1, session(1));
+    rig.line(conn, session(1), b"last\n");
+    let _listener = rig.down(skein_echo_domain::Request::Stop);
+    rig.drain().nothing();
+    let out = rig.down(reply(conn, Reply::Echo(Box::from(&b"last"[..]))));
+    assert_eq!(out.io, [send(1, b"last\n"), close(1)]);
+    assert_eq!(rig.proto.next_deadline(), None);
+    assert_eq!(rig.drain().calls, [Call::Gone { session: session(1) }]);
+    rig.closed(conn).nothing();
+    rig.proto.reclaim();
+    assert_eq!(rig.proto.conns(), 0);
+}
+
+#[test]
+fn a_second_signal_aborts_a_remaining_close_once() {
+    let mut rig = Rig::new();
+    rig.listen();
+    let conn = rig.reading(1, session(1));
+    rig.proto.shutdown();
+    assert_eq!(rig.drain().calls, [Call::Shutdown]);
+    let _listener = rig.down(skein_echo_domain::Request::Stop);
+    assert_eq!(rig.drain().io, [close(1)]);
+    rig.proto.shutdown();
+    assert_eq!(rig.drain().io, [skein_io::Request::Abort { entity: socket(1) }]);
+    rig.proto.shutdown();
+    rig.drain().nothing();
+    rig.closed(conn).nothing();
+    rig.proto.reclaim();
+    assert_eq!(rig.proto.conns(), 0);
+}
+
+#[test]
+fn two_signals_before_shutdown_is_told_still_stop_and_settle_a_call_out() {
+    let mut rig = Rig::new();
+    rig.listen();
+    let conn = rig.reading(1, session(1));
+    rig.line(conn, session(1), b"last\n");
+    rig.proto.shutdown();
+    rig.proto.shutdown();
+    let out = rig.drain();
+    assert_eq!(out.io, [skein_io::Request::Abort { entity: socket(1) }]);
+    assert_eq!(out.calls, [Call::Shutdown, Call::Gone { session: session(1) }]);
+    let _listener = rig.down(skein_echo_domain::Request::Stop);
+    rig.closed(conn).nothing();
+    rig.drain().nothing();
+    rig.proto.reclaim();
+    assert_eq!(rig.proto.conns(), 1, "the line's terminal is still owed");
+    rig.down(reply(conn, Reply::Echo(Box::from(&b"last"[..])))).nothing();
+    rig.proto.reclaim();
+    assert_eq!(rig.proto.conns(), 0);
+}
+
+#[test]
+fn an_abort_in_each_open_state_keeps_only_the_call_terminal_it_still_owes() {
+    for stage in 0..5_u32 {
+        let mut rig = Rig::new();
+        rig.listen();
+        let conn = rig.bound(1);
+        if stage >= 1 {
+            let _open = rig.up(stream(conn, Up::Room));
+        }
+        if stage >= 2 {
+            let _read = rig.down(admitted(conn, session(1)));
+        }
+        if stage >= 3 {
+            rig.line(conn, session(1), b"last\n");
+        }
+        if stage == 4 {
+            let _answer = rig.down(reply(conn, Reply::Echo(Box::from(&b"last"[..]))));
+        }
+        rig.proto.shutdown();
+        assert_eq!(rig.drain().calls, [Call::Shutdown]);
+        rig.proto.shutdown();
+        let out = rig.drain();
+        assert_eq!(out.io, [skein_io::Request::Abort { entity: socket(1) }]);
+        if stage >= 2 {
+            assert_eq!(out.calls, [Call::Gone { session: session(1) }]);
+        } else {
+            assert!(out.calls.is_empty());
+        }
+        rig.closed(conn).nothing();
+        if stage == 1 {
+            rig.down(admitted(conn, session(1))).nothing();
+            assert_eq!(rig.drain().calls, [Call::Gone { session: session(1) }]);
+        }
+        if stage == 3 {
+            rig.down(reply(conn, Reply::Echo(Box::from(&b"last"[..])))).nothing();
+        }
+        rig.proto.reclaim();
+        assert_eq!(rig.proto.conns(), 0);
+    }
+}
+
+#[test]
+fn a_signal_after_the_owner_stopped_aborts_and_a_closed_socket_needs_no_abort() {
+    let mut rig = Rig::new();
+    rig.listen();
+    let conn = rig.reading(1, session(1));
+    rig.line(conn, session(1), b"last\n");
+    let _listener = rig.down(skein_echo_domain::Request::Stop);
+    rig.drain().nothing();
+    let _answer = rig.down(reply(conn, Reply::Echo(Box::from(&b"last"[..]))));
+    // Closed may arrive while its Gone is still on the ready list.
+    rig.closed(conn).nothing();
+    rig.proto.shutdown();
+    let out = rig.drain();
+    assert!(out.io.is_empty(), "Closed already arrived: no request names the dead socket");
+    assert_eq!(out.calls, [Call::Gone { session: session(1) }]);
+    rig.proto.reclaim();
+    assert_eq!(rig.proto.conns(), 0);
+}
