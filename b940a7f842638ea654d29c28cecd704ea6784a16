@@ -1,0 +1,5 @@
+Final rebased-tip validation for 04.9 affinity, 2026-10-09.
+
+Tip b940a7f842638ea654d29c28cecd704ea6784a16 rebased on efa7c315c7b8c6aaf7eb9cf652255e3751034e70. Full scripts/check.sh through serial heavy passed formatting, all-target workspace clippy with -D warnings, standalone skein-tls check; focused 1673/1673 in 3.459s, fuzzy 90/90 in 9.286s, browser 6/6 in 3.864s. Evidence /tmp/skein04-9-relogin-gate.log. Prior selected 253 family tests and four actual-byte affinity worlds retain their checkpoint evidence. No live probe; Smith08 cache-reuse evidence pending consumption.
+
+Direct memory verification used project home-free-src-rust-skein, generation 2026-10-09T14:46:27Z, complete 17/17 positive symbol page, provider_headers both-direction trace and request_head snippet. Seven cited paths showed no recorded issue and metadata_match; graph describes main, so the unmerged source diff was independently read before validation. Best-effort graph signal only. Interface shapes preserved; parse_uuid remains crate-private as only the independent byte peer needs it.
