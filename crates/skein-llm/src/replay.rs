@@ -14,15 +14,15 @@ pub const REPLAY_HEADER_BYTES: u32 = 7;
 /// Checked overflow refuses configuration rather than reducing replay storage.
 #[must_use]
 pub const fn replay_bytes(limits: &DocumentLimits) -> Option<u32> {
-    limits.opaque_bytes.checked_add(REPLAY_HEADER_BYTES)
+    limits.bytes.checked_add(REPLAY_HEADER_BYTES)
 }
 
 /// Transit heap for encoding/decoding, including simultaneous raw/output bytes
 /// and bounded JSON machines/token storage. Caller-owned input storage is separate.
 #[must_use]
 pub fn replay_worst_case(limits: &DocumentLimits) -> Option<u64> {
-    crate::openai::worst_case(limits)?
-        .checked_add(u64::from(limits.opaque_bytes).checked_mul(2)?)?
+    crate::document::worst_case(limits)?
+        .checked_add(u64::from(limits.bytes).checked_mul(2)?)?
         .checked_add(u64::from(REPLAY_HEADER_BYTES))
 }
 
@@ -39,11 +39,10 @@ impl Replay {
             Ok(data) => data,
             Err(error) => return Err(crate::translate::decode(error)),
         };
-        let length = u32::try_from(data.len()).or(Err(Error::limit(crate::Cap::Opaque, limits.opaque_bytes)))?;
-        let total =
-            length.checked_add(REPLAY_HEADER_BYTES).ok_or(Error::limit(crate::Cap::Opaque, limits.opaque_bytes))?;
-        if length > limits.opaque_bytes {
-            return Err(Error::limit(crate::Cap::Opaque, limits.opaque_bytes));
+        let length = u32::try_from(data.len()).or(Err(Error::limit(crate::Cap::Retained, limits.bytes)))?;
+        let total = length.checked_add(REPLAY_HEADER_BYTES).ok_or(Error::limit(crate::Cap::Retained, limits.bytes))?;
+        if length > limits.bytes {
+            return Err(Error::limit(crate::Cap::Retained, limits.bytes));
         }
         let mut out = Writer::new(usize::try_from(total).expect("u32 fits usize"));
         out.put(&VERSION.to_be_bytes()).expect("measured replay header");
@@ -61,9 +60,9 @@ impl Replay {
     /// version/tag or malformed JSON is accepted; Client checks block/dialect
     /// compatibility when the replay is used in a prompt.
     pub fn from_bytes(data: &[u8], limits: &DocumentLimits) -> Result<Replay, Error> {
-        let maximum = replay_bytes(limits).ok_or(Error::limit(crate::Cap::Opaque, limits.opaque_bytes))?;
+        let maximum = replay_bytes(limits).ok_or(Error::limit(crate::Cap::Retained, limits.bytes))?;
         if data.len() > usize::try_from(maximum).expect("u32 fits usize") {
-            return Err(Error::limit(crate::Cap::Opaque, limits.opaque_bytes));
+            return Err(Error::limit(crate::Cap::Retained, limits.bytes));
         }
         let mut input = Reader::new(data);
         if input.u16() != Some(VERSION) {
@@ -75,8 +74,8 @@ impl Replay {
             Some(_) | None => return Err(Error::Unsupported),
         };
         let length = input.u32().ok_or(Error::Invalid)?;
-        if length > limits.opaque_bytes {
-            return Err(Error::limit(crate::Cap::Opaque, limits.opaque_bytes));
+        if length > limits.bytes {
+            return Err(Error::limit(crate::Cap::Retained, limits.bytes));
         }
         let data = input.bytes(length).ok_or(Error::Invalid)?;
         if input.remaining() != 0 {

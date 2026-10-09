@@ -43,7 +43,7 @@ pub fn worst_case(limits: &Limits, endpoints: &List<crate::Endpoint>) -> Option<
         let each = skein_tls::client::worst_case(&limits.tls)?
             .checked_add(skein_llm::client::worst_case(&client)?)?
             .checked_add(routes)?
-            .checked_add(u64::from(client.dialect.answer_bytes).checked_mul(64)?)?
+            .checked_add(u64::from(client.answer).checked_mul(64)?)?
             .checked_add(u64::from(client.http.request.max(client.http.send)).checked_mul(256)?)?
             .checked_add(
                 u64::from(skein_tls::client::largest_room(&limits.tls).max(skein_llm::client::largest_room(&client)))

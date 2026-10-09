@@ -97,7 +97,7 @@ fn measured_http_head_accepts_exact_cap_and_rejects_one_byte_less() {
 fn fixed_header_count_is_validated_before_encoding() {
     let mut bounds = limits();
     bounds.http.headers = 6;
-    assert_eq!(rejection(anthropic_call(), &bounds), Error::Limit { which: skein_llm::Cap::Headers, bound: 6 });
+    assert_eq!(rejection(anthropic_call(), &bounds), Error::Limit { which: skein_llm::Cap::ResponseFields, bound: 6 });
     bounds.http.headers = 7;
     assert!(client::Client::prepare(anthropic_call(), &bounds).is_ok());
 }

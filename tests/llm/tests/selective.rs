@@ -3,13 +3,12 @@ use skein_llm_world::{TERMINAL, World, call, events, limits, response};
 
 fn tiny() -> client::Limits {
     let mut bounds = limits();
-    bounds.dialect.tokens = 64;
-    bounds.dialect.document_bytes = 512;
-    bounds.dialect.string_bytes = 64;
-    bounds.dialect.input_bytes = 3;
-    bounds.dialect.opaque_bytes = 128;
-    bounds.sse.line = 2_000_000;
-    bounds.sse.event = 2_000_000;
+    bounds.tokens = 64;
+    bounds.retained = 512;
+    bounds.strings = 64;
+    bounds.input = 3;
+    bounds.reasoning = 128;
+    bounds.skip = 2_000_000;
     bounds
 }
 
@@ -73,7 +72,10 @@ fn reasoning_one_byte_over_is_dropped_only_by_the_explicit_policy() {
             assert!(
                 world.seen.iter().any(|event| matches!(
                     event,
-                    client::Event::Failed { failure: Failure::Limit { which: skein_llm::Cap::Opaque, bound: 128 }, .. }
+                    client::Event::Failed {
+                        failure: Failure::Limit { which: skein_llm::Cap::Reasoning, bound: 128 },
+                        ..
+                    }
                 )),
                 "{:?}",
                 world.seen

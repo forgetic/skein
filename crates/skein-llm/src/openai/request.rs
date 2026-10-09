@@ -33,7 +33,7 @@ pub struct Request {
 }
 pub fn encode_request(request: &Request, limits: &Limits) -> Result<Box<[u8]>, DecodeError> {
     let len = measure_request(request, limits)?;
-    let bounded = skein_json::writer::Limits { depth: limits.depth, length: limits.request_bytes };
+    let bounded = skein_json::writer::Limits { depth: limits.depth, length: limits.request };
     let mut write = Encoder::write(len, &bounded);
     write_request(&mut write, request);
     Ok(write.finish())
@@ -41,15 +41,17 @@ pub fn encode_request(request: &Request, limits: &Limits) -> Result<Box<[u8]>, D
 /// Validates and measures without allocating the request's body.
 pub fn measure_request(request: &Request, limits: &Limits) -> Result<u32, DecodeError> {
     validate(request, limits)?;
-    let bounded = skein_json::writer::Limits { depth: limits.depth, length: limits.request_bytes };
+    let bounded = skein_json::writer::Limits { depth: limits.depth, length: limits.request };
     let mut measure = Encoder::measure(&bounded);
     write_request(&mut measure, request);
     crate::openai::common::measured(measure, bounded, crate::Cap::Request)
 }
 fn validate(request: &Request, limits: &Limits) -> Result<(), DecodeError> {
-    let count = usize::try_from(limits.parts).expect("u32 fits usize");
-    if request.input.len() > count || request.tools.len() > count {
-        return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
+    if request.tools.len() > usize::try_from(limits.tools).expect("bounded tools") {
+        return Err(DecodeError::limit(crate::Cap::Tools, limits.tools));
+    }
+    if request.input.len() > usize::try_from(limits.history_items).expect("bounded history") {
+        return Err(DecodeError::limit(crate::Cap::HistoryItems, limits.history_items));
     }
     for tool in &request.tools {
         if json::kind(tool.schema.view(), 0) != Some(Kind::ObjectStart) {
@@ -58,13 +60,6 @@ fn validate(request: &Request, limits: &Limits) -> Result<(), DecodeError> {
     }
     for input in &request.input {
         match input {
-            Input::FunctionCall { arguments, .. } => {
-                // Native history carries arguments as text, not an embedded
-                // document. The measured encoder validates UTF-8 and escaping.
-                if arguments.len() > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
-                    return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
-                }
-            }
             Input::Opaque { value } => {
                 if json::kind(value.view(), 0) != Some(Kind::ObjectStart) {
                     return Err(DecodeError::WrongType);
@@ -74,7 +69,7 @@ fn validate(request: &Request, limits: &Limits) -> Result<(), DecodeError> {
                 Role::User if *refusal => return Err(DecodeError::WrongType),
                 Role::User | Role::Assistant => {}
             },
-            Input::FunctionOutput { .. } => {}
+            Input::FunctionCall { .. } | Input::FunctionOutput { .. } => {}
         }
     }
     Ok(())
@@ -213,12 +208,11 @@ fn write_input(out: &mut Encoder, input: &Input) {
     }
 }
 pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeError> {
-    let mut admission =
-        Encoder::measure(&skein_json::writer::Limits { depth: limits.depth, length: limits.request_bytes });
+    let mut admission = Encoder::measure(&skein_json::writer::Limits { depth: limits.depth, length: limits.request });
     value.write(&mut admission);
     let _length = crate::openai::common::measured(
         admission,
-        skein_json::writer::Limits { depth: limits.depth, length: limits.request_bytes },
+        skein_json::writer::Limits { depth: limits.depth, length: limits.request },
         crate::Cap::Request,
     )?;
     let tokens = value.view();
@@ -229,9 +223,9 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
     }
     let instructions = json::text(json::value_at(tokens, json::required(tokens, b"instructions")?)?)?;
     let model = json::text(json::value_at(tokens, json::required(tokens, b"model")?)?)?;
-    let mut tools = List::with_capacity(limits.parts);
+    let mut tools = List::with_capacity(limits.tools);
     if let Some(values) = json::optional_at(tokens, json::field(tokens, b"tools")?)? {
-        for &offset in &json::array(values, limits.parts)? {
+        for &offset in &json::array_limit(values, limits.tools, crate::Cap::Tools)? {
             let tool = json::value_at(values, offset)?;
             if json::text_ref(json::value_at(tool, json::required(tool, b"type")?)?)? != b"function" {
                 return Err(DecodeError::WrongType);
@@ -243,19 +237,22 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
             let tool = Tool {
                 name: json::text(json::value_at(tool, json::required(tool, b"name")?)?)?,
                 description,
-                schema: Json::from_view(json::value_at(tool, json::required(tool, b"parameters")?)?, limits)?,
+                schema: Json::from_view(
+                    json::value_at(tool, json::required(tool, b"parameters")?)?,
+                    &limits.request_document(),
+                )?,
             };
             if tools.push(tool).is_err() {
-                return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
+                return Err(DecodeError::limit(crate::Cap::Tools, limits.tools));
             }
         }
     }
     let values = json::value_at(tokens, json::required(tokens, b"input")?)?;
-    let mut input = List::with_capacity(limits.parts);
-    for &offset in &json::array(values, limits.parts)? {
+    let mut input = List::with_capacity(limits.history_items);
+    for &offset in &json::array_limit(values, limits.history_items, crate::Cap::HistoryItems)? {
         let item = read_input(json::value_at(values, offset)?, limits)?;
         if input.push(item).is_err() {
-            return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
+            return Err(DecodeError::limit(crate::Cap::HistoryItems, limits.history_items));
         }
     }
     let effort = match json::optional_at(tokens, json::field(tokens, b"reasoning")?)? {
@@ -308,10 +305,10 @@ fn read_input(tokens: (&Document, json::Span), limits: &Limits) -> Result<Input,
                 _ => return Err(DecodeError::WrongType),
             };
             let values = json::value_at(tokens, json::required(tokens, b"content")?)?;
-            let mut text = List::with_capacity(limits.request_bytes);
+            let mut text = List::with_capacity(limits.request);
             let mut refusal = false;
             let mut content_kind: Option<bool> = None;
-            for &offset in &json::array(values, limits.parts)? {
+            for &offset in &json::array_limit(values, limits.history_items, crate::Cap::HistoryItems)? {
                 let part = json::value_at(values, offset)?;
                 let kind = json::text_ref(json::value_at(part, json::required(part, b"type")?)?)?;
                 let key = match kind {
@@ -353,6 +350,6 @@ fn read_input(tokens: (&Document, json::Span), limits: &Limits) -> Result<Input,
             call_id: json::text(json::value_at(tokens, json::required(tokens, b"call_id")?)?)?,
             output: json::text(json::value_at(tokens, json::required(tokens, b"output")?)?)?,
         }),
-        _ => Ok(Input::Opaque { value: Json::from_view(tokens, limits)? }),
+        _ => Ok(Input::Opaque { value: Json::from_view(tokens, &limits.request_document())? }),
     }
 }

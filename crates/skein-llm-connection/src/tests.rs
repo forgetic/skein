@@ -91,8 +91,8 @@ fn invalid_and_oversized_requests_are_refused() {
     assert_eq!(
         component.admit(Token::new(7), 0, oversized, credential()).err(),
         Some(Refusal::Client(skein_llm::Error::Limit {
-            which: skein_llm::Cap::String,
-            bound: u64::from(client_limits().dialect.string_bytes)
+            which: skein_llm::Cap::Request,
+            bound: u64::from(client_limits().request)
         }))
     );
 }
@@ -567,18 +567,24 @@ fn client_limits() -> skein_llm::client::Limits {
     skein_llm::client::Limits {
         http: skein_http::client::Limits { request: 4096, head: 4096, headers: 32, read: 256, send: 31 },
         sse: skein_http::sse::Limits { line: 4096, event: 8192, field: 128, chunk: 128 },
-        dialect: skein_llm::DocumentLimits {
-            request_bytes: 8192,
-            document_bytes: 8192,
-            string_bytes: 4096,
-            depth: 32,
-            tokens: 1024,
-            parts: 16,
-            input_bytes: 2048,
-            opaque_bytes: 2048,
-            answer_bytes: 8192,
-            detail_bytes: 256,
-        },
+
+        request: 8192,
+        retained: 8192,
+        strings: 4096,
+        depth: 32,
+        tokens: 1024,
+        output_items: 16,
+        input: 2048,
+        reasoning: 2048,
+        answer: 8192,
+        detail_bytes: 256,
+
+        tools: 16,
+        history_items: 16,
+        metadata: 2048,
+        receiving: 1_048_576,
+        skip: 8192,
+
         error_bytes: 4096,
         drop_reasoning: false,
         declared_output_tokens: 4096,

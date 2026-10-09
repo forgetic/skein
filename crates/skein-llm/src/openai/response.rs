@@ -100,13 +100,13 @@ pub enum Part {
     /// admitted JSON strings, never packed into a delimiter-separated string.
     /// See `docs/design/llm.md`, Vocabulary and ownership.
     ToolCall {
-        /// Exact identity paired with the application's result, under `Limits::string_bytes`.
+        /// Exact identity paired with the application's result, under `Limits::strings`.
         call_id: Box<[u8]>,
-        /// Exact provider item identity retained for replay, under `Limits::string_bytes`.
+        /// Exact provider item identity retained for replay, under `Limits::strings`.
         item_id: Box<[u8]>,
-        /// Provider-written name under `Limits::string_bytes`; the caller checks its declaration.
+        /// Provider-written name under `Limits::strings`; the caller checks its declaration.
         name: Box<[u8]>,
-        /// Complete raw argument text under `Limits::input_bytes`, or empty when `too_large` is true.
+        /// Complete raw argument text under `Limits::input`, or empty when `too_large` is true.
         input: Box<[u8]>,
         /// Whether the raw argument text exceeded the receiving input cap.
         too_large: bool,
@@ -175,7 +175,7 @@ impl StreamDecoder {
     pub fn with_reasoning_drop(limits: &Limits, enabled: bool) -> StreamDecoder {
         StreamDecoder {
             reasoning: if enabled { ReasoningPolicy::Drop } else { ReasoningPolicy::Keep },
-            opened: List::with_capacity(limits.parts),
+            opened: List::with_capacity(limits.output_items),
             next: 0,
             parts: 0,
             bytes: 0,
@@ -318,15 +318,15 @@ impl StreamDecoder {
                 out.push(Output::Progress);
             }
             Event::Added { index, id, kind } => {
-                let limit = usize::try_from(limits.string_bytes).expect("u32 fits usize");
+                let limit = usize::try_from(limits.strings).expect("u32 fits usize");
                 if id.len() > limit || kind.len() > limit {
-                    return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
+                    return Err(DecodeError::limit(crate::Cap::Strings, limits.strings));
                 }
                 if index != self.opened.len() {
                     return Err(DecodeError::Malformed);
                 }
                 if self.opened.push(Opened::Active { id, kind }).is_err() {
-                    return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
+                    return Err(DecodeError::limit(crate::Cap::OutputItems, limits.output_items));
                 }
                 out.push(Output::Progress);
             }
@@ -335,13 +335,13 @@ impl StreamDecoder {
                     return Err(DecodeError::Malformed);
                 }
                 for text in [&id, &call_id, &name] {
-                    if text.len() > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
-                        return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
+                    if text.len() > usize::try_from(limits.strings).expect("u32 fits usize") {
+                        return Err(DecodeError::limit(crate::Cap::Strings, limits.strings));
                     }
                 }
                 let bytes = received_length(long, arguments.len());
-                let mut input = List::with_capacity(limits.input_bytes);
-                let too_large = bytes > u64::from(limits.input_bytes);
+                let mut input = List::with_capacity(limits.input);
+                let too_large = bytes > u64::from(limits.input);
                 if !too_large {
                     for &byte in &arguments {
                         input.push(byte).expect("admitted initial arguments");
@@ -349,7 +349,7 @@ impl StreamDecoder {
                 }
                 self.opened
                     .push(Opened::Tool { id, call_id, name, input, bytes, too_large })
-                    .or(Err(DecodeError::limit(crate::Cap::Parts, limits.parts)))?;
+                    .or(Err(DecodeError::limit(crate::Cap::OutputItems, limits.output_items)))?;
                 out.push(Output::Progress);
             }
             Event::TextDelta { index, content_index, text } => {
@@ -471,9 +471,9 @@ impl StreamDecoder {
             }
         }
         if let Some(sub_index) = sub_index
-            && sub_index >= limits.parts
+            && sub_index >= limits.output_items
         {
-            return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
+            return Err(DecodeError::limit(crate::Cap::OutputItems, limits.output_items));
         }
         if expected_kind == b"function_call" {
             return Ok(());
@@ -481,24 +481,25 @@ impl StreamDecoder {
         let bytes = self
             .delta_bytes
             .checked_add(u64::try_from(size).expect("usize fits u64"))
-            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes))?;
-        if bytes > u64::from(limits.answer_bytes) {
-            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes));
+            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer))?;
+        if bytes > u64::from(limits.answer) {
+            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer));
         }
         self.delta_bytes = bytes;
         Ok(())
     }
     fn reserve(&mut self, parts: u32, bytes: usize, limits: &Limits) -> Result<(), DecodeError> {
-        let parts = self.parts.checked_add(parts).ok_or(DecodeError::limit(crate::Cap::Parts, limits.parts))?;
+        let parts =
+            self.parts.checked_add(parts).ok_or(DecodeError::limit(crate::Cap::OutputItems, limits.output_items))?;
         let bytes = self
             .bytes
             .checked_add(u64::try_from(bytes).expect("usize fits u64"))
-            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes))?;
-        if parts > limits.parts {
-            return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
+            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer))?;
+        if parts > limits.output_items {
+            return Err(DecodeError::limit(crate::Cap::OutputItems, limits.output_items));
         }
-        if bytes > u64::from(limits.answer_bytes) {
-            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes));
+        if bytes > u64::from(limits.answer) {
+            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer));
         }
         self.parts = parts;
         self.bytes = bytes;
@@ -568,15 +569,15 @@ fn prepare(
                 Item::CutCall { id, call_id, name, arguments } => (id, call_id, name, arguments, true),
                 Item::Message { .. } | Item::Opaque { .. } => unreachable!("a function-call item"),
             };
-            let cap = usize::try_from(limits.string_bytes).expect("u32 fits usize");
+            let cap = usize::try_from(limits.strings).expect("u32 fits usize");
             if id.len() > cap || call_id.len() > cap || name.len() > cap {
-                return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
+                return Err(DecodeError::limit(crate::Cap::Strings, limits.strings));
             }
             if expected_id != id.as_ref() || expected_kind != b"function_call" {
                 return Err(DecodeError::Malformed);
             }
             let bytes = received_length(long, arguments.len());
-            let too_large = bytes > u64::from(limits.input_bytes);
+            let too_large = bytes > u64::from(limits.input);
             let input = if too_large { bytes::copy_of(b"") } else { arguments };
             Ok(Prepared {
                 part: Part::ToolCall { call_id, item_id: id, name, input, too_large, bytes, cut },
@@ -601,21 +602,25 @@ fn prepare(
                     ReasoningPolicy::Drop => {
                         return Ok(Prepared { part: Part::Dropped { bytes: length }, tool: false, refusal: false });
                     }
-                    ReasoningPolicy::Keep => return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes)),
+                    ReasoningPolicy::Keep => return Err(DecodeError::limit(crate::Cap::Reasoning, limits.reasoning)),
                 }
             }
-            let bytes = value.to_bytes(limits)?;
-            if bytes.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
+            let bytes = value.to_bytes(&limits.document())?;
+            let counted = if expected_kind == b"reasoning" {
+                match json::optional_at(tokens, json::field(tokens, b"encrypted_content")?)? {
+                    Some(text) => u64::try_from(json::text_ref(text)?.len()).expect("bounded reasoning"),
+                    None => 0,
+                }
+            } else {
+                u64::try_from(bytes.len()).expect("bounded opaque item")
+            };
+            if counted > u64::from(limits.reasoning) {
                 match reasoning {
                     ReasoningPolicy::Drop if expected_kind == b"reasoning" => {
-                        return Ok(Prepared {
-                            part: Part::Dropped { bytes: u64::try_from(bytes.len()).expect("slice length fits u64") },
-                            tool: false,
-                            refusal: false,
-                        });
+                        return Ok(Prepared { part: Part::Dropped { bytes: counted }, tool: false, refusal: false });
                     }
                     ReasoningPolicy::Keep | ReasoningPolicy::Drop => {
-                        return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
+                        return Err(DecodeError::limit(crate::Cap::Reasoning, limits.reasoning));
                     }
                 }
             }
@@ -739,10 +744,10 @@ fn read_item(tokens: (&Document, json::Span), limits: &Limits) -> Result<Item, D
         }
         b"message" => {
             let values = json::value_at(tokens, json::required(tokens, b"content")?)?;
-            let mut text = List::with_capacity(limits.answer_bytes);
+            let mut text = List::with_capacity(limits.answer);
             let mut refusal = false;
             let mut content_kind: Option<bool> = None;
-            for &offset in &json::array(values, limits.parts)? {
+            for &offset in &json::array(values, limits.output_items)? {
                 let part = json::value_at(values, offset)?;
                 let kind = json::text_ref(json::value_at(part, json::required(part, b"type")?)?)?;
                 let is_refusal = kind == b"refusal";
@@ -776,8 +781,8 @@ fn read_item(tokens: (&Document, json::Span), limits: &Limits) -> Result<Item, D
                 refusal,
             })
         }
-        b"reasoning" => Ok(Item::Opaque { value: Json::collected_view(tokens, limits)? }),
-        _ => Ok(Item::Opaque { value: Json::from_view(tokens, limits)? }),
+        b"reasoning" => Ok(Item::Opaque { value: Json::collected_view(tokens, &limits.document())? }),
+        _ => Ok(Item::Opaque { value: Json::from_view(tokens, &limits.document())? }),
     }
 }
 fn read_usage(tokens: Option<(&Document, json::Span)>) -> Usage {
@@ -868,13 +873,13 @@ pub fn encode_peer_event(
     echo: Echo,
     limits: &Limits,
 ) -> Result<Box<[u8]>, DecodeError> {
-    if echo.attribution_bytes > limits.document_bytes {
-        return Err(DecodeError::limit(crate::Cap::Document, limits.document_bytes));
+    if echo.attribution_bytes > limits.retained {
+        return Err(DecodeError::limit(crate::Cap::Retained, limits.retained));
     }
     let bounded = limits.writer_limits();
     let mut measure = Encoder::measure(&bounded);
     write_event(&mut measure, event, request, echo);
-    let len = common::measured(measure, bounded, crate::Cap::Document)?;
+    let len = common::measured(measure, bounded, crate::Cap::Retained)?;
     let mut write = Encoder::write(len, &bounded);
     write_event(&mut write, event, request, echo);
     Ok(write.finish())
@@ -1082,12 +1087,11 @@ fn write_item(out: &mut Encoder, item: &Item) {
 }
 
 pub(crate) fn decoder_worst_case(limits: &Limits) -> Option<u64> {
-    let slots = List::<Opened>::worst_case(limits.parts)?;
-    let identifiers = u64::from(limits.parts)
-        .checked_mul(u64::from(limits.string_bytes.min(limits.document_bytes)))?
-        .checked_mul(3)?;
-    let inputs = u64::from(limits.parts).checked_mul(u64::from(limits.input_bytes))?;
-    slots.checked_add(identifiers)?.checked_add(inputs)?.checked_add(u64::from(limits.answer_bytes))
+    let slots = List::<Opened>::worst_case(limits.output_items)?;
+    let identifiers =
+        u64::from(limits.output_items).checked_mul(u64::from(limits.strings.min(limits.retained)))?.checked_mul(3)?;
+    let inputs = u64::from(limits.output_items).checked_mul(u64::from(limits.input))?;
+    slots.checked_add(identifiers)?.checked_add(inputs)?.checked_add(u64::from(limits.answer))
 }
 
 /// Fake-server completion with the instructions/tools echo that the real Codex

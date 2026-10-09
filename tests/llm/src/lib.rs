@@ -3,25 +3,31 @@
 use skein_http::{Header, client as http, sse};
 use skein_lib::stream::{Down, Read, Up};
 use skein_lib::{Env, Intake, Queue, Rng, Time, Token, Wall};
-use skein_llm::{Block, Call, Credential, Endpoint, Message, Prompt, Role, client, openai};
+use skein_llm::{Block, Call, Credential, Endpoint, Message, Prompt, Role, client};
 
 #[must_use]
 pub fn limits() -> client::Limits {
     client::Limits {
         http: http::Limits { request: 4096, head: 4096, headers: 32, read: 256, send: 31 },
         sse: sse::Limits { line: 4096, event: 8192, field: 128, chunk: 128 },
-        dialect: openai::Limits {
-            request_bytes: 8192,
-            document_bytes: 8192,
-            string_bytes: 4096,
-            depth: 32,
-            tokens: 1024,
-            parts: 16,
-            input_bytes: 2048,
-            opaque_bytes: 2048,
-            answer_bytes: 8192,
-            detail_bytes: 256,
-        },
+
+        request: 8192,
+        retained: 8192,
+        strings: 4096,
+        depth: 32,
+        tokens: 1024,
+        output_items: 16,
+        input: 2048,
+        reasoning: 2048,
+        answer: 8192,
+        detail_bytes: 256,
+
+        tools: 16,
+        history_items: 16,
+        metadata: 2048,
+        receiving: 1_048_576,
+        skip: 8192,
+
         error_bytes: 4096,
         drop_reasoning: false,
         declared_output_tokens: 4096,

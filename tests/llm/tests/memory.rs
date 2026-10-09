@@ -100,8 +100,8 @@ fn bounded_error_body_and_protocol_failure_release_all_storage() {
 #[test]
 fn large_schema_request_reasoning_and_answer_fit_the_same_bound() {
     let mut bounds = limits();
-    bounds.dialect.parts = 4;
-    bounds.dialect.opaque_bytes = 4096;
+    bounds.output_items = 4;
+    bounds.reasoning = 4096;
     let bound = client::worst_case(&bounds).unwrap();
     let meter = Meter::new();
     let mut request = call(1);
@@ -113,7 +113,7 @@ fn large_schema_request_reasoning_and_answer_fit_the_same_bound() {
     request.prompt.tools = Box::new([skein_llm::Tool {
         name: b"large_tool".to_vec().into(),
         description: vec![b'd'; 128].into(),
-        schema: skein_llm::openai::Json::from_bytes(schema_wire.as_bytes(), &bounds.dialect).unwrap(),
+        schema: skein_llm::openai::Json::from_bytes(schema_wire.as_bytes(), &bounds.native().document()).unwrap(),
     }]);
     let reasoning = format!(
         r#"{{"type":"response.output_item.done","output_index":0,"item":{{"id":"rs_1","type":"reasoning","encrypted_content":"{}","summary":[]}}}}"#,
@@ -197,8 +197,8 @@ fn almost_full_error_buffer_and_partial_request_are_bounded() {
 #[test]
 fn multiple_unknown_items_with_many_empty_tokens_fit_the_bound() {
     let mut bounds = limits();
-    bounds.dialect.parts = 4;
-    bounds.dialect.opaque_bytes = 4096;
+    bounds.output_items = 4;
+    bounds.reasoning = 4096;
     let bound = client::worst_case(&bounds).unwrap();
     let meter = Meter::new();
     // Near 1024 tokens per event and near 8192 bytes across the answer, while
@@ -249,13 +249,13 @@ fn multiple_unknown_items_with_many_empty_tokens_fit_the_bound() {
 #[test]
 fn thirty_two_unknown_arrays_exercise_the_compact_record_bound() {
     let mut bounds = limits();
-    bounds.dialect.parts = 32;
-    bounds.dialect.tokens = 2048;
-    bounds.dialect.document_bytes = 4096;
-    bounds.dialect.opaque_bytes = 4096;
-    bounds.dialect.string_bytes = 64;
-    bounds.dialect.answer_bytes = 140_000;
-    bounds.dialect.request_bytes = 1024;
+    bounds.output_items = 32;
+    bounds.tokens = 2048;
+    bounds.retained = 4096;
+    bounds.reasoning = 4096;
+    bounds.strings = 64;
+    bounds.answer = 140_000;
+    bounds.request = 1024;
     let bound = client::worst_case(&bounds).unwrap();
     let meter = Meter::new();
     let tiny_values = vec!["0"; 1900].join(",");
@@ -310,8 +310,8 @@ fn anthropic_signed_thinking_tool_input_and_replay_fit_the_declared_bound() {
     for chunked in [false, true] {
         for fragment in [1, 251] {
             let mut bounds = limits();
-            bounds.dialect.parts = 4;
-            bounds.dialect.opaque_bytes = 4096;
+            bounds.output_items = 4;
+            bounds.reasoning = 4096;
             let bound = client::worst_case(&bounds).unwrap();
             let input = memory_anthropic_call(1);
             let span = Span::start();
@@ -431,25 +431,25 @@ fn memory_anthropic_call(owner: u64) -> skein_llm::Call {
 fn opaque_envelope_and_extended_thinking_transit_fit_counted_bounds() {
     for bytes in [32_u32, 2048] {
         let mut bounds = limits();
-        bounds.dialect.opaque_bytes = bytes;
-        bounds.dialect.string_bytes = bytes.max(4096);
-        bounds.dialect.document_bytes = 8192;
+        bounds.reasoning = bytes;
+        bounds.strings = bytes.max(4096);
+        bounds.retained = 8192;
         let metadata = format!(
             r#"{{"type":"thinking","thinking":"{}","signature":"s","extension":{{"signed":true}}}}"#,
             "x".repeat(usize::try_from(bytes.saturating_sub(96)).expect("bounded payload"))
         );
         let replay = skein_llm::Replay {
             provider: skein_llm::Provider::Anthropic,
-            value: skein_llm::Json::from_bytes(metadata.as_bytes(), &bounds.dialect)
+            value: skein_llm::Json::from_bytes(metadata.as_bytes(), &bounds.native().document())
                 .expect("bounded extended opaque value"),
         };
-        let bound = skein_llm::replay_worst_case(&bounds.dialect).expect("checked replay transit bound");
+        let bound = skein_llm::replay_worst_case(&bounds.native().document()).expect("checked replay transit bound");
         let span = Span::start();
-        let encoded = replay.to_bytes(&bounds.dialect);
+        let encoded = replay.to_bytes(&bounds.native().document());
         match encoded {
             Ok(encoded) => {
-                let decoded =
-                    skein_llm::Replay::from_bytes(&encoded, &bounds.dialect).expect("complete envelope restores");
+                let decoded = skein_llm::Replay::from_bytes(&encoded, &bounds.native().document())
+                    .expect("complete envelope restores");
                 assert_eq!(decoded, replay, "counted transit preserves every extension");
                 let grown = span.end();
                 assert!(
@@ -479,7 +479,7 @@ fn actual_scripted_byte_peer_and_client_fit_the_composed_heap_envelope() {
     let mut bounds = limits();
     // A string at its 4096-byte cap is emitted inside a larger JSON event and
     // a `data: ` line. Admit the entire document plus its six framing bytes.
-    bounds.sse.line = bounds.dialect.document_bytes.checked_add(6).expect("bounded data-line framing");
+    bounds.skip = bounds.retained.checked_add(6).expect("bounded data-line framing");
     let peer = skein_llm_world::fake::limits(&bounds);
     let config = skein_llm_world::fake::config();
     let core = client::worst_case(&bounds)
@@ -490,14 +490,14 @@ fn actual_scripted_byte_peer_and_client_fit_the_composed_heap_envelope() {
         .expect("composed domain bound");
     // The independent world owns two 32-KiB intakes, exact wire tapes and
     // observation copies. They are separate from protocol-owned allocations.
-    let external = 4_u64 * 32768 + 8 * u64::from(bounds.dialect.document_bytes) + 64 * 1024;
+    let external = 4_u64 * 32768 + 8 * u64::from(bounds.retained) + 64 * 1024;
     let mut input = call(1);
     input.prompt.instructions = b"maximum-script".as_slice().into();
     let scripts = Box::new([Script {
         cue: b"maximum-script".as_slice().into(),
         turns: Box::new([Turn {
             lines: Box::new([Line::Text {
-                text: vec![b'x'; usize::try_from(bounds.dialect.string_bytes).expect("bounded maximum answer")].into(),
+                text: vec![b'x'; usize::try_from(bounds.strings).expect("bounded maximum answer")].into(),
             }]),
             finish: Finish::Stop,
             tokens: 1000,
@@ -540,7 +540,7 @@ fn actual_scripted_byte_peer_and_client_fit_the_composed_heap_envelope() {
     let [skein_llm::Block::Text { text, .. }] = &*completion.content else {
         panic!("whole maximum scripted text");
     };
-    assert_eq!(text.len(), usize::try_from(bounds.dialect.string_bytes).expect("same maximum text cap"));
+    assert_eq!(text.len(), usize::try_from(bounds.strings).expect("same maximum text cap"));
     assert!(text.iter().all(|byte| *byte == b'x'), "whole maximum payload was conveyed");
 }
 
@@ -548,7 +548,7 @@ fn actual_scripted_byte_peer_and_client_fit_the_composed_heap_envelope() {
 fn an_oversized_call_completes_within_the_declared_bound() {
     use skein_llm::{Block, openai};
     let mut bounds = limits();
-    bounds.dialect.input_bytes = 3;
+    bounds.input = 3;
     let events = [
         openai::Event::ToolAdded {
             index: 0,
@@ -573,7 +573,7 @@ fn an_oversized_call_completes_within_the_declared_bound() {
     let mut body = Vec::new();
     for event in &events {
         body.extend_from_slice(b"data: ");
-        body.extend_from_slice(&openai::encode_event(event, &bounds.dialect).expect("bounded provider event"));
+        body.extend_from_slice(&openai::encode_event(event, &bounds.native()).expect("bounded provider event"));
         body.extend_from_slice(b"\n\n");
     }
     let wire = skein_llm_world::response(200, "Content-Type: text/event-stream\r\n", &body, false);
@@ -606,19 +606,19 @@ fn an_oversized_call_completes_within_the_declared_bound() {
 fn replay_at_its_cap_owns_only_shared_text_and_fixed_records() {
     let raw =
         format!("{{\"type\":\"reasoning\",\"summary\":[{}],\"encrypted_content\":\"x\"}}", vec!["\"\""; 512].join(","));
-    let mut bounded = limits().dialect;
-    bounded.document_bytes = u32::try_from(raw.len()).unwrap();
-    bounded.opaque_bytes = bounded.document_bytes;
+    let mut bounded = limits().native();
+    bounded.retained = u32::try_from(raw.len()).unwrap();
+    bounded.reasoning = bounded.retained;
     bounded.tokens = 1024;
     let admitted = skein_llm::Replay {
         provider: skein_llm::Provider::OpenAiCodex,
-        value: skein_llm::Json::from_bytes(raw.as_bytes(), &bounded).unwrap(),
+        value: skein_llm::Json::from_bytes(raw.as_bytes(), &bounded.document()).unwrap(),
     };
-    let wire = admitted.to_bytes(&bounded).unwrap();
+    let wire = admitted.to_bytes(&bounded.document()).unwrap();
     assert_eq!(wire.len(), raw.len() + usize::try_from(skein_llm::REPLAY_HEADER_BYTES).unwrap());
     drop(admitted);
     let meter = Meter::new();
-    let replay = skein_llm::Replay::from_bytes(&wire, &bounded).unwrap();
+    let replay = skein_llm::Replay::from_bytes(&wire, &bounded.document()).unwrap();
     let document = replay.value.document();
     let owned = u64::from(document.text_len())
         + u64::from(document.len()) * u64::try_from(size_of::<skein_json::Compact>()).unwrap();
@@ -652,13 +652,12 @@ fn selective_peak(size: usize, call_arguments: bool) -> u64 {
     drop(documents);
     drop(text);
     let mut bounds = limits();
-    bounds.dialect.tokens = 64;
-    bounds.dialect.document_bytes = 512;
-    bounds.dialect.string_bytes = 64;
-    bounds.dialect.input_bytes = 3;
-    bounds.dialect.opaque_bytes = 128;
-    bounds.sse.line = 8_000_000;
-    bounds.sse.event = 8_000_000;
+    bounds.tokens = 64;
+    bounds.retained = 512;
+    bounds.strings = 64;
+    bounds.input = 3;
+    bounds.reasoning = 128;
+    bounds.skip = 8_000_000;
     let bound = client::worst_case(&bounds).expect("checked selective receiving bound");
     // The wire tape is world-owned and allocated before the meter's base.
     // Its unchanged allocation stays alive throughout every measured step.

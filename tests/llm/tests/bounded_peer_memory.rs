@@ -36,7 +36,7 @@ fn observations(bounds: &client::Limits) -> ObservationLimits {
         queries: 1,
         query_bytes: 32768,
         pending: 0,
-        request_bytes: bounds.http.request.checked_add(bounds.dialect.request_bytes).expect("whole HTTP request"),
+        request: bounds.http.request.checked_add(bounds.request).expect("whole HTTP request"),
         response_bytes: 4096,
     }
 }
@@ -44,12 +44,12 @@ fn observations(bounds: &client::Limits) -> ObservationLimits {
 fn limits() -> client::Limits {
     let mut bounds = skein_llm_world::limits();
     bounds.http.request = 32768;
-    bounds.dialect.request_bytes = 32768;
-    bounds.dialect.document_bytes = 32768;
-    bounds.dialect.string_bytes = 16384;
-    bounds.dialect.parts = 32;
-    bounds.dialect.tokens = 4096;
-    bounds.dialect.answer_bytes = 1024;
+    bounds.request = 32768;
+    bounds.retained = 32768;
+    bounds.strings = 16384;
+    bounds.output_items = 32;
+    bounds.tokens = 4096;
+    bounds.answer = 1024;
     bounds
 }
 
@@ -184,7 +184,7 @@ fn assert_native_payloads(world: &Exchange, seen: &Seen, caps: &ObservationLimit
     assert!(text.iter().all(|byte| *byte == b'x'));
     assert!(world.requests.windows(LARGE).any(|text| text.iter().all(|byte| *byte == b'x')));
     assert_reference_response(&world.responses, bounds);
-    assert!(world.requests.len() <= usize::try_from(caps.request_bytes).expect("declared trace cap"));
+    assert!(world.requests.len() <= usize::try_from(caps.request).expect("declared trace cap"));
     assert!(world.responses.len() <= 4096);
     let completion = seen.terminal.as_ref().expect("actual native terminal");
     assert_eq!(completion.stop, Stop::EndTurn);
@@ -217,7 +217,7 @@ fn actual_native_peer_and_client_fit_checked_prices_until_every_owner_drops() {
         world.observe(caps);
         assert_eq!(world.seen.capacity(), usize::try_from(caps.events).expect("event reservation"));
         assert_eq!(world.queries.capacity(), 1);
-        assert_eq!(world.requests.capacity(), usize::try_from(caps.request_bytes).expect("request reservation"));
+        assert_eq!(world.requests.capacity(), usize::try_from(caps.request).expect("request reservation"));
         assert_eq!(world.responses.capacity(), 4096);
         assert_eq!(world.service.calls(), 0);
         let constructed = meter.end();

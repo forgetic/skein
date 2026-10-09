@@ -130,7 +130,7 @@ fn choice(choice: skein_llm::ToolChoice) -> api::ToolChoice {
 }
 
 fn anthropic_request(data: &[u8], limits: &anthropic::Limits) -> Result<api::Query, Error> {
-    let json = anthropic::Json::from_bytes(data, limits).or(Err(Error::Malformed))?;
+    let json = anthropic::Json::from_bytes(data, &limits.request_document()).or(Err(Error::Malformed))?;
     let request = anthropic::decode_request(&json, limits).or(Err(Error::Malformed))?;
     let mut marks = List::with_capacity(4);
     for mark in request.marks {
@@ -142,20 +142,20 @@ fn anthropic_request(data: &[u8], limits: &anthropic::Limits) -> Result<api::Que
             .expect("native marks already bounded");
     }
     let request = request.prompt;
-    let mut tools = List::with_capacity(limits.parts);
+    let mut tools = List::with_capacity(limits.tools);
     for tool in request.tools {
-        let parameters = tool.schema.to_bytes(limits).or(Err(Error::Malformed))?;
+        let parameters = tool.schema.to_bytes(&limits.request_document()).or(Err(Error::Malformed))?;
         tools
             .push(api::ToolSpec { name: tool.name, description: tool.description, parameters })
             .or(Err(Error::TooLarge))?;
     }
-    let mut messages = List::with_capacity(limits.parts);
+    let mut messages = List::with_capacity(limits.history_items);
     for message in request.messages {
         let role = match message.role {
             skein_llm::Role::User => api::Role::User,
             skein_llm::Role::Assistant => api::Role::Assistant,
         };
-        let mut parts = List::with_capacity(limits.parts);
+        let mut parts = List::with_capacity(limits.history_items);
         for block in message.content {
             let part = match block {
                 skein_llm::Block::Text { text, .. } | skein_llm::Block::Refusal { text, .. } => {
@@ -168,9 +168,9 @@ fn anthropic_request(data: &[u8], limits: &anthropic::Limits) -> Result<api::Que
                 skein_llm::Block::Oversize { .. } | skein_llm::Block::Cut { .. } | skein_llm::Block::Dropped { .. } => {
                     return Err(Error::Malformed);
                 }
-                skein_llm::Block::Reasoning { replay } => {
-                    api::Part::Opaque { bytes: replay.value.to_bytes(limits).or(Err(Error::Malformed))? }
-                }
+                skein_llm::Block::Reasoning { replay } => api::Part::Opaque {
+                    bytes: replay.value.to_bytes(&limits.request_document()).or(Err(Error::Malformed))?,
+                },
             };
             parts.push(part).or(Err(Error::TooLarge))?;
         }
@@ -191,7 +191,7 @@ fn openai_request(data: &[u8], limits: &Limits) -> Result<api::Query, Error> {
     if limits.model_ceiling == 0 {
         return Err(Error::Malformed);
     }
-    let Ok(json) = openai::Json::from_bytes(data, &limits.openai) else {
+    let Ok(json) = openai::Json::from_bytes(data, &limits.openai.request_document()) else {
         return Err(Error::Malformed);
     };
     let Ok(request) = openai::decode_request(&json, &limits.openai) else {
@@ -203,13 +203,13 @@ fn openai_request(data: &[u8], limits: &Limits) -> Result<api::Query, Error> {
     };
     let mut tools = List::with_capacity(u32::try_from(request.tools.len()).or(Err(Error::TooLarge))?);
     for tool in request.tools {
-        let Ok(parameters) = tool.schema.to_bytes(&limits.openai) else {
+        let Ok(parameters) = tool.schema.to_bytes(&limits.openai.request_document()) else {
             return Err(Error::Malformed);
         };
         tools.push(api::ToolSpec { name: tool.name, description: tool.description, parameters }).expect("one per tool");
     }
-    let mut messages = List::with_capacity(limits.openai.parts);
-    let mut parts = List::with_capacity(limits.openai.parts);
+    let mut messages = List::with_capacity(limits.openai.history_items);
+    let mut parts = List::with_capacity(limits.openai.history_items);
     let mut previous = None;
     for item in request.input {
         let (role, part) = match item {
@@ -227,7 +227,7 @@ fn openai_request(data: &[u8], limits: &Limits) -> Result<api::Query, Error> {
                 (api::Role::User, api::Part::ToolOutput { id: call_id, output, is_error: false })
             }
             openai::Input::Opaque { value } => {
-                let Ok(bytes) = value.to_bytes(&limits.openai) else {
+                let Ok(bytes) = value.to_bytes(&limits.openai.request_document()) else {
                     return Err(Error::Malformed);
                 };
                 (api::Role::Assistant, api::Part::Opaque { bytes })
@@ -236,7 +236,7 @@ fn openai_request(data: &[u8], limits: &Limits) -> Result<api::Query, Error> {
         if previous != Some(role) {
             if let Some(role) = previous {
                 messages.push(api::Message { role, parts: parts.into_boxed() }).or(Err(Error::TooLarge))?;
-                parts = List::with_capacity(limits.openai.parts);
+                parts = List::with_capacity(limits.openai.history_items);
             }
             previous = Some(role);
         }
@@ -314,7 +314,8 @@ pub fn event_with_options(
                 | openai::Event::Unknown => false,
             };
             let request = if echo_event {
-                let value = openai::Json::from_bytes(body, &limits.openai).or(Err(Error::Malformed))?;
+                let value =
+                    openai::Json::from_bytes(body, &limits.openai.request_document()).or(Err(Error::Malformed))?;
                 Some(openai::decode_request(&value, &limits.openai).or(Err(Error::Malformed))?)
             } else {
                 None
@@ -350,17 +351,17 @@ fn anthropic_event(
                 let block = match part {
                     api::Part::Text { .. } => anthropic::BlockStart::Text { text: Box::new([]) },
                     api::Part::ToolCall { id, name, .. } => {
-                        let Ok(input) = anthropic::Json::from_bytes(b"{}", limits) else {
+                        let Ok(input) = anthropic::Json::from_bytes(b"{}", &limits.request_document()) else {
                             return Err(Error::Malformed);
                         };
                         anthropic::BlockStart::ToolCall {
                             id: id.clone(),
                             name: name.clone(),
-                            input: input.to_bytes(limits).or(Err(Error::Malformed))?,
+                            input: input.to_bytes(&limits.request_document()).or(Err(Error::Malformed))?,
                         }
                     }
                     api::Part::Opaque { bytes } => {
-                        let Ok(value) = anthropic::Json::from_bytes(bytes, limits) else {
+                        let Ok(value) = anthropic::Json::from_bytes(bytes, &limits.request_document()) else {
                             return Err(Error::Malformed);
                         };
                         match string_field(value.document(), b"type")?.as_ref() {
@@ -464,7 +465,7 @@ fn openai_event(
                 },
             ),
             api::Part::Opaque { bytes } => {
-                let Ok(value) = openai::Json::from_bytes(bytes, limits) else {
+                let Ok(value) = openai::Json::from_bytes(bytes, &limits.request_document()) else {
                     return Err(Error::Malformed);
                 };
                 let id = string_field(value.document(), b"id")?;

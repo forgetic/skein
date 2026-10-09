@@ -127,35 +127,31 @@ fn randomized_receiving_limits_name_the_cap_and_the_bound_that_was_passed() {
         let bound = u32::try_from(seed % 7 + 1).unwrap();
         let which = match seed % 6 {
             0 => {
-                bounds.dialect.tokens = bound;
+                bounds.tokens = bound;
                 Cap::Tokens
             }
             1 => {
-                bounds.dialect.document_bytes = bound;
-                Cap::Document
+                bounds.retained = bound;
+                Cap::Retained
             }
             2 => {
-                bounds.dialect.answer_bytes = bound;
+                bounds.answer = bound;
                 Cap::Answer
             }
-            3 => {
-                bounds.sse.line = bound;
-                Cap::Line
-            }
-            4 => {
-                bounds.sse.event = bound;
-                Cap::Event
+            3 | 4 => {
+                bounds.skip = bound;
+                Cap::Skip
             }
             5 => {
-                bounds.dialect.parts = 1;
-                Cap::Parts
+                bounds.output_items = 1;
+                Cap::OutputItems
             }
             _ => unreachable!(),
         };
-        let expected_bound = if which == Cap::Parts { 1 } else { u64::from(bound) };
+        let expected_bound = if which == Cap::OutputItems { 1 } else { u64::from(bound) };
         let mut input = call(seed);
         input.prompt.messages = Box::new([]);
-        let wire = if which == Cap::Parts {
+        let wire = if which == Cap::OutputItems {
             let documents = [
                 skein_llm_world::TEXT_ADDED,
                 skein_llm_world::TEXT_DONE,
@@ -193,7 +189,7 @@ fn randomized_receiving_limits_name_the_cap_and_the_bound_that_was_passed() {
         );
         // The independently written tape exceeds each tiny cap: its answer is
         // Hello plus native identity, its first document has more than seven
-        // tokens/bytes, and its SSE framing has more than seven bytes. A parts
+        // tokens/bytes, and its SSE framing has more than seven bytes. An item
         // cap of one cannot accept its second output block.
         assert!(expected_bound < 8);
     }
@@ -250,13 +246,12 @@ fn selective_known_events_ignore_seeded_extensions_and_field_order() {
                 seed % 2 == 0,
             );
             let mut bounds = limits();
-            bounds.dialect.tokens = 64;
-            bounds.dialect.document_bytes = 512;
-            bounds.dialect.string_bytes = 64;
-            bounds.dialect.input_bytes = 64;
-            bounds.dialect.opaque_bytes = 128;
-            bounds.sse.line = 16_384;
-            bounds.sse.event = 16_384;
+            bounds.tokens = 64;
+            bounds.retained = 512;
+            bounds.strings = 64;
+            bounds.input = 64;
+            bounds.reasoning = 128;
+            bounds.skip = 16_384;
             let mut input = call(seed);
             if provider == skein_llm::Provider::Anthropic {
                 input.endpoint = skein_llm::Endpoint::anthropic();

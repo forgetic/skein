@@ -150,7 +150,7 @@ impl Service {
     pub fn new(config: Config, limits: &Limits) -> Result<Service, Error> {
         if worst_case(limits).is_none()
             || config.path.first() != Some(&b'/')
-            || config.echo.attribution_bytes > limits.documents.openai.document_bytes
+            || config.echo.attribution_bytes > limits.documents.openai.retained
         {
             return Err(Error::Limits);
         }
@@ -273,7 +273,7 @@ impl Server {
         if worst_case(limits).is_none() {
             return Err(Error::Limits);
         }
-        let request = limits.documents.anthropic.request_bytes.max(limits.documents.openai.request_bytes);
+        let request = limits.documents.anthropic.request.max(limits.documents.openai.request);
         Ok(Server {
             owner,
             state: State::New,
@@ -915,7 +915,9 @@ fn send_error(server: &mut Server, env: &Env<Limits>) {
 }
 
 fn answer_fits(answer: &api::Answer, limits: &documents::Limits) -> bool {
-    if answer.parts.len() > usize::try_from(limits.openai.parts.min(limits.anthropic.parts)).expect("u32 fits usize") {
+    if answer.parts.len()
+        > usize::try_from(limits.openai.output_items.min(limits.anthropic.output_items)).expect("u32 fits usize")
+    {
         return false;
     }
     let mut length = Some(0_usize);
@@ -938,9 +940,7 @@ fn answer_fits(answer: &api::Answer, limits: &documents::Limits) -> bool {
     }
     match length {
         Some(length) => {
-            length
-                <= usize::try_from(limits.openai.answer_bytes.max(limits.anthropic.answer_bytes))
-                    .expect("u32 fits usize")
+            length <= usize::try_from(limits.openai.answer.max(limits.anthropic.answer)).expect("u32 fits usize")
         }
         None => false,
     }
@@ -971,7 +971,7 @@ pub fn head_worst_case(limits: &Limits) -> Option<u64> {
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
-    let request = limits.documents.openai.request_bytes.max(limits.documents.anthropic.request_bytes);
+    let request = limits.documents.openai.request.max(limits.documents.anthropic.request);
     if limits.http.body < u64::from(request)
         || limits.sse.chunk > limits.http.send
         || limits.documents.model_ceiling == 0
@@ -990,10 +990,7 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         // Configured echoes retain this raw request in the existing body List;
         // native codec worst_case above prices transient decoded metadata and entry scratch.
         .checked_add(List::<u8>::worst_case(request)?)?
-        .checked_add(
-            u64::from(limits.documents.openai.answer_bytes.max(limits.documents.anthropic.answer_bytes))
-                .checked_mul(8)?,
-        )?
+        .checked_add(u64::from(limits.documents.openai.answer.max(limits.documents.anthropic.answer)).checked_mul(8)?)?
         .checked_add(Queue::<http::Event>::worst_case(EVENTS)?)?
         .checked_add(Queue::<http::Request>::worst_case(REQUESTS)?)?
         .checked_add(Queue::<sse::Event>::worst_case(1)?)?

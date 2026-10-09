@@ -51,7 +51,7 @@ pub struct ObservationLimits {
 
     /// Maximum retained actual client-to-peer HTTP bytes, checked before append.
     /// Contract: docs/design/fake-llm.md, sections 2–5.
-    pub request_bytes: u32,
+    pub request: u32,
 
     /// Maximum retained actual peer-to-client HTTP bytes, checked before append.
     /// Contract: docs/design/fake-llm.md, sections 2–5.
@@ -111,7 +111,7 @@ fn observation_worst_case(observations: &ObservationLimits) -> Option<u64> {
         .checked_add(u64::from(observations.queries).checked_mul(observations.query_bytes)?)?
         .checked_add(cells::<fake::Event>(observations.pending)?)?
         .checked_add(u64::from(observations.pending).checked_mul(observations.query_bytes)?)?
-        .checked_add(u64::from(observations.request_bytes))?
+        .checked_add(u64::from(observations.request))?
         .checked_add(u64::from(observations.response_bytes))
 }
 
@@ -269,8 +269,7 @@ pub fn limits(bounds: &client::Limits) -> provider::Limits {
     // The peer may write past a client's receiving answer ceiling. Price that
     // independent bounded storage through provider::worst_case, including in
     // extra_worst_case; never make the test peer pre-filter an oversized call.
-    let documents =
-        skein_llm::DocumentLimits { answer_bytes: bounds.dialect.answer_bytes.max(32768), ..bounds.dialect };
+    let documents = skein_llm::openai::Limits { answer: bounds.answer.max(32768), ..bounds.native() };
     provider::Limits {
         calls: 4,
         http: http::Limits { head: 4096, headers: 32, body: 32768, read: 256, response: 4096, send: 128 },
@@ -478,7 +477,7 @@ impl Exchange {
             reserve(&mut self.queries, observations.queries);
             reserve(&mut self.heads, observations.heads);
             reserve(&mut self.pending, observations.pending);
-            reserve(&mut self.requests, observations.request_bytes);
+            reserve(&mut self.requests, observations.request);
             reserve(&mut self.responses, observations.response_bytes);
         }
     }
@@ -626,7 +625,7 @@ impl Exchange {
                             self.requests
                                 .len()
                                 .checked_add(data.len())
-                                .is_some_and(|length| length <= index(observations.request_bytes)),
+                                .is_some_and(|length| length <= index(observations.request)),
                             "request tape ceiling before append"
                         );
                     }

@@ -29,10 +29,10 @@ pub enum Mark {
 /// tool schema and ordered conversation block. Unknown top-level deployment
 /// options are not interpreted. Counts, structure and wire bytes remain bounded.
 pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeError> {
-    let value = Json::from_view(value.view(), limits)?;
-    let encoded = value.to_bytes(limits)?;
-    if encoded.len() > usize::try_from(limits.request_bytes).expect("u32 fits usize") {
-        return Err(DecodeError::limit(crate::Cap::Request, limits.request_bytes));
+    let value = Json::from_view(value.view(), &limits.request_document())?;
+    let encoded = value.to_bytes(&limits.request_document())?;
+    if encoded.len() > usize::try_from(limits.request).expect("u32 fits usize") {
+        return Err(DecodeError::limit(crate::Cap::Request, limits.request));
     }
     let tokens = value.view();
     let marks = markers(tokens, limits)?;
@@ -42,9 +42,9 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
     let model = text(tokens, b"model")?;
     let max = output_cap(tokens)?;
     let instructions = system(tokens, limits)?;
-    let mut tools = List::with_capacity(limits.parts);
+    let mut tools = List::with_capacity(limits.tools);
     if let Some(items) = optional(tokens, b"tools")? {
-        for tool in &elements(items, limits)? {
+        for tool in &elements(items, limits, limits.tools, crate::Cap::Tools)? {
             let tool = tool.view();
             tools
                 .push(Tool {
@@ -53,41 +53,41 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
                         Some(value) => bytes::copy_of(json::text_ref(value)?),
                         None => Box::new([]),
                     },
-                    schema: Json::from_view(required(tool, b"input_schema")?, limits)?,
+                    schema: Json::from_view(required(tool, b"input_schema")?, &limits.request_document())?,
                 })
-                .or(Err(DecodeError::limit(crate::Cap::Parts, limits.parts)))?;
+                .or(Err(DecodeError::limit(crate::Cap::Tools, limits.tools)))?;
         }
     }
-    let mut messages = List::with_capacity(limits.parts);
-    for message in &elements(required(tokens, b"messages")?, limits)? {
+    let mut messages = List::with_capacity(limits.history_items);
+    for message in &elements(required(tokens, b"messages")?, limits, limits.history_items, crate::Cap::HistoryItems)? {
         let message = message.view();
         let role = match json::text_ref(required(message, b"role")?)? {
             b"user" => Role::User,
             b"assistant" => Role::Assistant,
             _ => return Err(DecodeError::WrongType),
         };
-        let mut blocks = List::with_capacity(limits.parts);
+        let mut blocks = List::with_capacity(limits.history_items);
         let content = required(message, b"content")?;
         if json::kind(content, 0) == Some(Kind::String) {
             let text = json::text(content)?;
             blocks
                 .push(Block::Text { text, replay: None })
-                .or(Err(DecodeError::limit(crate::Cap::Parts, limits.parts)))?;
+                .or(Err(DecodeError::limit(crate::Cap::HistoryItems, limits.history_items)))?;
         } else {
-            for block in &elements(content, limits)? {
+            for block in &elements(content, limits, limits.history_items, crate::Cap::HistoryItems)? {
                 let block = block.view();
                 let kind = json::text_ref(required(block, b"type")?)?;
                 let block = match kind {
                     b"text" => Block::Text { text: text(block, b"text")?, replay: None },
                     b"tool_use" => {
-                        let input = Json::from_view(required(block, b"input")?, limits)?;
+                        let input = Json::from_view(required(block, b"input")?, &limits.request_document())?;
                         if json::kind(input.view(), 0) != Some(Kind::ObjectStart) {
                             return Err(DecodeError::WrongType);
                         }
                         Block::ToolCall {
                             id: text(block, b"id")?,
                             name: text(block, b"name")?,
-                            arguments: input.to_bytes(limits)?,
+                            arguments: input.to_bytes(&limits.request_document())?,
                             replay: None,
                         }
                     }
@@ -100,15 +100,18 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
                         },
                     },
                     _ => Block::Reasoning {
-                        replay: Replay { provider: Provider::Anthropic, value: Json::from_view(block, limits)? },
+                        replay: Replay {
+                            provider: Provider::Anthropic,
+                            value: Json::from_view(block, &limits.request_document())?,
+                        },
                     },
                 };
-                blocks.push(block).or(Err(DecodeError::limit(crate::Cap::Parts, limits.parts)))?;
+                blocks.push(block).or(Err(DecodeError::limit(crate::Cap::HistoryItems, limits.history_items)))?;
             }
         }
         messages
             .push(Message { role, content: blocks.into_boxed() })
-            .or(Err(DecodeError::limit(crate::Cap::Parts, limits.parts)))?;
+            .or(Err(DecodeError::limit(crate::Cap::HistoryItems, limits.history_items)))?;
     }
     let choice = tool_choice(tokens)?;
     let prompt = Prompt {
@@ -139,7 +142,9 @@ fn markers(tokens: (&Document, json::Span), limits: &Limits) -> Result<Box<[Mark
     if let Some(system) = optional(tokens, b"system")?
         && json::kind(system, 0) == Some(Kind::ArrayStart)
     {
-        for (index, offset) in json::array(system, limits.parts)?.iter().enumerate() {
+        for (index, offset) in
+            json::array_limit(system, limits.history_items, crate::Cap::HistoryItems)?.iter().enumerate()
+        {
             if marker(json::value_at(system, *offset)?)? {
                 marks
                     .push(Mark::System { block: u32::try_from(index).expect("bounded system blocks") })
@@ -148,10 +153,14 @@ fn markers(tokens: (&Document, json::Span), limits: &Limits) -> Result<Box<[Mark
         }
     }
     let messages = required(tokens, b"messages")?;
-    for (message_index, offset) in json::array(messages, limits.parts)?.iter().enumerate() {
+    for (message_index, offset) in
+        json::array_limit(messages, limits.history_items, crate::Cap::HistoryItems)?.iter().enumerate()
+    {
         let content = required(json::value_at(messages, *offset)?, b"content")?;
         if json::kind(content, 0) == Some(Kind::ArrayStart) {
-            for (block_index, offset) in json::array(content, limits.parts)?.iter().enumerate() {
+            for (block_index, offset) in
+                json::array_limit(content, limits.history_items, crate::Cap::HistoryItems)?.iter().enumerate()
+            {
                 let block = json::value_at(content, *offset)?;
                 if marker(block)? {
                     match json::text_ref(required(block, b"type")?)? {
@@ -209,9 +218,9 @@ fn content_text(tokens: (&Document, json::Span), limits: &Limits) -> Result<Box<
 }
 
 fn text_blocks(tokens: (&Document, json::Span), limits: &Limits) -> Result<Box<[u8]>, DecodeError> {
-    let offsets = json::array(tokens, limits.parts)?;
+    let offsets = json::array_limit(tokens, limits.history_items, crate::Cap::HistoryItems)?;
     let mut length = 0_usize;
-    let maximum = usize::try_from(limits.string_bytes).expect("u32 fits usize");
+    let maximum = usize::try_from(limits.request).expect("u32 fits usize");
     for (index, offset) in offsets.iter().enumerate() {
         let block = json::value_at(tokens, *offset)?;
         if json::text_ref(required(block, b"type")?)? != b"text" {
@@ -219,10 +228,10 @@ fn text_blocks(tokens: (&Document, json::Span), limits: &Limits) -> Result<Box<[
         }
         let text = json::text_ref(required(block, b"text")?)?;
         let separator = usize::from(index > 0);
-        length = length.checked_add(separator).ok_or(DecodeError::limit(crate::Cap::String, limits.string_bytes))?;
-        length = length.checked_add(text.len()).ok_or(DecodeError::limit(crate::Cap::String, limits.string_bytes))?;
+        length = length.checked_add(separator).ok_or(DecodeError::limit(crate::Cap::Request, limits.request))?;
+        length = length.checked_add(text.len()).ok_or(DecodeError::limit(crate::Cap::Request, limits.request))?;
         if length > maximum {
-            return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
+            return Err(DecodeError::limit(crate::Cap::Request, limits.request));
         }
     }
     let mut output = skein_lib::Writer::new(length);
@@ -237,11 +246,16 @@ fn text_blocks(tokens: (&Document, json::Span), limits: &Limits) -> Result<Box<[
     Ok(output.finish())
 }
 
-fn elements(tokens: (&Document, json::Span), limits: &Limits) -> Result<List<Json>, DecodeError> {
-    let offsets = json::array(tokens, limits.parts)?;
+fn elements(
+    tokens: (&Document, json::Span),
+    limits: &Limits,
+    count: u32,
+    cap: crate::Cap,
+) -> Result<List<Json>, DecodeError> {
+    let offsets = json::array_limit(tokens, count, cap)?;
     let mut elements = List::with_capacity(offsets.len());
     for offset in &offsets {
-        let value = Json::from_view(json::value_at(tokens, *offset)?, limits)?;
+        let value = Json::from_view(json::value_at(tokens, *offset)?, &limits.request_document())?;
         elements.push(value).expect("one value per admitted array element");
     }
     Ok(elements)
@@ -269,7 +283,7 @@ fn text(tokens: (&Document, json::Span), name: &[u8]) -> Result<Box<[u8]>, Decod
 pub fn encode_event(event: &Event, limits: &Limits) -> Result<Box<[u8]>, DecodeError> {
     match event {
         Event::Added { block: BlockStart::ToolCall { input, .. }, .. } => {
-            let input = Json::from_bytes(input, limits)?;
+            let input = Json::from_bytes(input, &limits.document())?;
             if json::kind(input.view(), 0) != Some(Kind::ObjectStart) {
                 return Err(DecodeError::WrongType);
             }
@@ -278,17 +292,17 @@ pub fn encode_event(event: &Event, limits: &Limits) -> Result<Box<[u8]>, DecodeE
             super::response::thinking_head(head, text, signature, limits)?;
         }
         Event::Added { block: BlockStart::Redacted { value }, .. } => {
-            let value = Json::from_view(value.view(), limits)?;
+            let value = Json::from_view(value.view(), &limits.document())?;
             super::response::validate_redacted(value.view())?;
-            if value.to_bytes(limits)?.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
+            if value.to_bytes(&limits.document())?.len() > usize::try_from(limits.reasoning).expect("u32 fits usize") {
+                return Err(DecodeError::limit(crate::Cap::Reasoning, limits.reasoning));
             }
         }
         Event::Added { block: BlockStart::Opaque { value }, .. } => {
-            let value = Json::from_view(value.view(), limits)?;
+            let value = Json::from_view(value.view(), &limits.document())?;
             super::response::validate_opaque(value.view())?;
-            if value.to_bytes(limits)?.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
+            if value.to_bytes(&limits.document())?.len() > usize::try_from(limits.reasoning).expect("u32 fits usize") {
+                return Err(DecodeError::limit(crate::Cap::Reasoning, limits.reasoning));
             }
         }
         Event::Started { .. }
@@ -304,7 +318,7 @@ pub fn encode_event(event: &Event, limits: &Limits) -> Result<Box<[u8]>, DecodeE
     let bounded = limits.writer_limits();
     let mut measure = Encoder::measure(&bounded);
     write_event(&mut measure, event, limits);
-    let len = openai::measured(measure, bounded, crate::Cap::Document)?;
+    let len = openai::measured(measure, bounded, crate::Cap::Retained)?;
     let mut output = Encoder::write(len, &bounded);
     write_event(&mut output, event, limits);
     Ok(output.finish())
@@ -422,7 +436,7 @@ fn write_block(out: &mut Encoder, block: &BlockStart, limits: &Limits) {
             out.key(b"name");
             out.string(name);
             out.key(b"input");
-            Json::from_bytes(input, limits).expect("event input admitted before measurement").write(out);
+            Json::from_bytes(input, &limits.document()).expect("event input admitted before measurement").write(out);
             out.object_end();
         }
         BlockStart::Thinking { text, signature, head } => {

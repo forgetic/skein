@@ -12,7 +12,7 @@ pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limit
         return Err(Error::Unsupported);
     }
     validate(&prompt, provider, limits)?;
-    let mut tools = List::with_capacity(limits.parts);
+    let mut tools = List::with_capacity(limits.tools);
     for tool in &prompt.tools {
         let raw = openai::Tool {
             name: tool.name.clone(),
@@ -20,10 +20,10 @@ pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limit
             schema: tool.schema.clone(),
         };
         if tools.push(raw).is_err() {
-            return Err(Error::limit(crate::Cap::Parts, limits.parts));
+            return Err(Error::limit(crate::Cap::Tools, limits.tools));
         }
     }
-    let mut input = List::with_capacity(limits.parts);
+    let mut input = List::with_capacity(limits.history_items);
     for message in &prompt.messages {
         for block in &message.content {
             match block {
@@ -38,7 +38,7 @@ pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limit
             }
             let item = input_block(block, message.role)?;
             if input.push(item).is_err() {
-                return Err(Error::limit(crate::Cap::Parts, limits.parts));
+                return Err(Error::limit(crate::Cap::HistoryItems, limits.history_items));
             }
         }
     }
@@ -61,13 +61,15 @@ pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limit
 }
 
 fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Result<(), Error> {
-    let count = usize::try_from(limits.parts).expect("u32 fits usize");
-    if prompt.tools.len() > count || prompt.messages.len() > count || prompt.model.is_empty() {
-        return Err(if prompt.model.is_empty() {
-            Error::Invalid
-        } else {
-            Error::limit(crate::Cap::Parts, limits.parts)
-        });
+    if prompt.model.is_empty() {
+        return Err(Error::Invalid);
+    }
+    if prompt.tools.len() > usize::try_from(limits.tools).expect("bounded tools") {
+        return Err(Error::limit(crate::Cap::Tools, limits.tools));
+    }
+    let count = usize::try_from(limits.history_items).expect("bounded history");
+    if prompt.messages.len() > count {
+        return Err(Error::limit(crate::Cap::HistoryItems, limits.history_items));
     }
     validate_choice(&prompt.choice, &prompt.tools)?;
     let mut budget: u64 = 0;
@@ -97,68 +99,74 @@ fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Res
     }
     let mut blocks: usize = 0;
     for message in &prompt.messages {
-        blocks = blocks.checked_add(message.content.len()).ok_or(Error::limit(crate::Cap::Parts, limits.parts))?;
+        blocks = blocks
+            .checked_add(message.content.len())
+            .ok_or(Error::limit(crate::Cap::HistoryItems, limits.history_items))?;
         if blocks > count {
-            return Err(Error::limit(crate::Cap::Parts, limits.parts));
+            return Err(Error::limit(crate::Cap::HistoryItems, limits.history_items));
         }
         for block in &message.content {
-            match block {
-                Block::Oversize { .. } | Block::Cut { .. } => return Err(Error::Invalid),
-                Block::Dropped { .. } => {}
-                Block::Text { text, replay } => {
-                    charge_text(text, &mut budget, limits)?;
-                    charge_replay(replay.as_ref(), provider, &mut budget, limits)?;
-                    metadata(replay.as_ref(), b"id", b"phase")?;
-                    if replay.is_some() && message.role != Role::Assistant {
-                        return Err(Error::Invalid);
-                    }
-                }
-                Block::Refusal { text, replay } => {
-                    if message.role != Role::Assistant {
-                        return Err(Error::Invalid);
-                    }
-                    charge_text(text, &mut budget, limits)?;
-                    charge_replay(replay.as_ref(), provider, &mut budget, limits)?;
-                    metadata(replay.as_ref(), b"id", b"phase")?;
-                }
-                Block::ToolCall { id, name, arguments, replay } => {
-                    if message.role != Role::Assistant || id.is_empty() || name.is_empty() {
-                        return Err(Error::Invalid);
-                    }
-                    charge_text(id, &mut budget, limits)?;
-                    charge_text(name, &mut budget, limits)?;
-                    charge_text(arguments, &mut budget, limits)?;
-                    charge_replay(replay.as_ref(), provider, &mut budget, limits)?;
-                    metadata(replay.as_ref(), b"item_id", b"item_id")?;
-                }
-                Block::ToolResult { id, text, is_error } => {
-                    if message.role != Role::User || id.is_empty() {
-                        return Err(Error::Invalid);
-                    }
-                    charge_text(id, &mut budget, limits)?;
-                    charge_text(text, &mut budget, limits)?;
-                    if *is_error {
-                        let len = text
-                            .len()
-                            .checked_add(TOOL_ERROR.len())
-                            .ok_or(Error::limit(crate::Cap::String, limits.string_bytes))?;
-                        if len > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
-                            return Err(Error::limit(crate::Cap::String, limits.string_bytes));
-                        }
-                        charge(TOOL_ERROR.len(), &mut budget, limits)?;
-                    }
-                }
-                Block::Reasoning { replay } => {
-                    if message.role != Role::Assistant {
-                        return Err(Error::Invalid);
-                    }
-                    charge_replay(Some(replay), provider, &mut budget, limits)?;
-                }
-            }
+            validate_block(block, message.role, provider, &mut budget, limits)?;
         }
     }
     Ok(())
 }
+fn validate_block(
+    block: &Block,
+    role: Role,
+    provider: Provider,
+    budget: &mut u64,
+    limits: &openai::Limits,
+) -> Result<(), Error> {
+    match block {
+        Block::Oversize { .. } | Block::Cut { .. } => return Err(Error::Invalid),
+        Block::Dropped { .. } => {}
+        Block::Text { text, replay } => {
+            charge_text(text, budget, limits)?;
+            charge_replay(replay.as_ref(), provider, budget, limits, limits.metadata, crate::Cap::Metadata)?;
+            metadata(replay.as_ref(), b"id", b"phase")?;
+            if replay.is_some() && role != Role::Assistant {
+                return Err(Error::Invalid);
+            }
+        }
+        Block::Refusal { text, replay } => {
+            if role != Role::Assistant {
+                return Err(Error::Invalid);
+            }
+            charge_text(text, budget, limits)?;
+            charge_replay(replay.as_ref(), provider, budget, limits, limits.metadata, crate::Cap::Metadata)?;
+            metadata(replay.as_ref(), b"id", b"phase")?;
+        }
+        Block::ToolCall { id, name, arguments, replay } => {
+            if role != Role::Assistant || id.is_empty() || name.is_empty() {
+                return Err(Error::Invalid);
+            }
+            charge_text(id, budget, limits)?;
+            charge_text(name, budget, limits)?;
+            charge_text(arguments, budget, limits)?;
+            charge_replay(replay.as_ref(), provider, budget, limits, limits.metadata, crate::Cap::Metadata)?;
+            metadata(replay.as_ref(), b"item_id", b"item_id")?;
+        }
+        Block::ToolResult { id, text, is_error } => {
+            if role != Role::User || id.is_empty() {
+                return Err(Error::Invalid);
+            }
+            charge_text(id, budget, limits)?;
+            charge_text(text, budget, limits)?;
+            if *is_error {
+                charge(TOOL_ERROR.len(), budget, limits)?;
+            }
+        }
+        Block::Reasoning { replay } => {
+            if role != Role::Assistant {
+                return Err(Error::Invalid);
+            }
+            charge_replay(Some(replay), provider, budget, limits, limits.reasoning, crate::Cap::Reasoning)?;
+        }
+    }
+    Ok(())
+}
+
 /// The offered list stays intact; Only is local policy, not client filtering.
 pub(crate) fn validate_choice(choice: &crate::ToolChoice, tools: &[crate::Tool]) -> Result<(), Error> {
     match choice {
@@ -187,33 +195,27 @@ pub(crate) fn validate_choice(choice: &crate::ToolChoice, tools: &[crate::Tool])
 }
 
 fn charge_text(value: &[u8], budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
-    if value.len() > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
-        return Err(Error::limit(crate::Cap::String, limits.string_bytes));
-    }
-    let bounded = writer::Limits { depth: limits.depth, length: limits.request_bytes };
+    let bounded = writer::Limits { depth: limits.depth, length: limits.request };
     let mut text = writer::Encoder::measure(&bounded);
     text.string(value);
     match text.measured() {
         Ok(_) => charge(value.len(), budget, limits),
         Err(writer::Refusal::Text | writer::Refusal::Number) => Err(Error::Invalid),
-        Err(writer::Refusal::TooLong) => Err(Error::limit(crate::Cap::Request, limits.request_bytes)),
+        Err(writer::Refusal::TooLong) => Err(Error::limit(crate::Cap::Request, limits.request)),
         Err(writer::Refusal::TooDeep) => Err(Error::limit(crate::Cap::Depth, limits.depth)),
     }
 }
 fn charge(size: usize, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
     *budget = budget
         .checked_add(u64::try_from(size).expect("usize fits u64"))
-        .ok_or(Error::limit(crate::Cap::Request, limits.request_bytes))?;
-    if *budget > u64::from(limits.request_bytes) {
-        return Err(Error::limit(crate::Cap::Request, limits.request_bytes));
+        .ok_or(Error::limit(crate::Cap::Request, limits.request))?;
+    if *budget > u64::from(limits.request) {
+        return Err(Error::limit(crate::Cap::Request, limits.request));
     }
     Ok(())
 }
 fn charge_json(value: &openai::Json, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
-    if value.document().len() > limits.tokens {
-        return Err(Error::limit(crate::Cap::Tokens, limits.tokens));
-    }
-    let mut measure = writer::Encoder::measure(&limits.writer_limits());
+    let mut measure = writer::Encoder::measure(&writer::Limits { depth: limits.depth, length: limits.request });
     let view = value.view();
     for index in 0..openai::json::len(view) {
         charge(1, budget, limits)?;
@@ -234,7 +236,7 @@ fn charge_json(value: &openai::Json, budget: &mut u64, limits: &openai::Limits) 
     value.write(&mut measure);
     match measure.measured() {
         Ok(_) => Ok(()),
-        Err(writer::Refusal::TooLong) => Err(Error::limit(crate::Cap::Document, limits.document_bytes)),
+        Err(writer::Refusal::TooLong) => Err(Error::limit(crate::Cap::Request, limits.request)),
         Err(writer::Refusal::TooDeep) => Err(Error::limit(crate::Cap::Depth, limits.depth)),
         Err(writer::Refusal::Text | writer::Refusal::Number) => Err(Error::Invalid),
     }
@@ -244,6 +246,8 @@ fn charge_replay(
     provider: Provider,
     budget: &mut u64,
     limits: &openai::Limits,
+    maximum: u32,
+    cap: crate::Cap,
 ) -> Result<(), Error> {
     if let Some(replay) = replay {
         if replay.provider != provider {
@@ -251,6 +255,51 @@ fn charge_replay(
         }
         if openai::json::kind(replay.value.view(), 0) != Some(Kind::ObjectStart) {
             return Err(Error::Invalid);
+        }
+        let known_reasoning = if cap == crate::Cap::Reasoning && provider == Provider::OpenAiCodex {
+            let view = replay.value.view();
+            let kind = match openai::json::field(view, b"type") {
+                Ok(kind) => kind,
+                Err(error) => return Err(decode(error)),
+            };
+            match openai::json::optional_at(view, kind) {
+                Ok(Some(kind)) => match openai::json::text_ref(kind) {
+                    Ok(kind) => kind == b"reasoning",
+                    Err(error) => return Err(decode(error)),
+                },
+                Ok(None) => false,
+                Err(error) => return Err(decode(error)),
+            }
+        } else {
+            false
+        };
+        if known_reasoning {
+            let view = replay.value.view();
+            let encrypted = match openai::json::field(view, b"encrypted_content") {
+                Ok(encrypted) => encrypted,
+                Err(error) => return Err(decode(error)),
+            };
+            match openai::json::optional_at(view, encrypted) {
+                Ok(Some(encrypted)) => match openai::json::text_ref(encrypted) {
+                    Ok(text) if text.len() > usize::try_from(maximum).expect("bounded reasoning") => {
+                        return Err(Error::limit(cap, maximum));
+                    }
+                    Ok(_) => {}
+                    Err(error) => return Err(decode(error)),
+                },
+                Ok(None) => {}
+                Err(error) => return Err(decode(error)),
+            }
+        } else {
+            let bounded = writer::Limits { depth: limits.depth, length: maximum };
+            let mut measure = writer::Encoder::measure(&bounded);
+            replay.value.write(&mut measure);
+            match measure.measured() {
+                Ok(_) => {}
+                Err(writer::Refusal::TooLong) => return Err(Error::limit(cap, maximum)),
+                Err(writer::Refusal::TooDeep) => return Err(Error::limit(crate::Cap::Depth, limits.depth)),
+                Err(writer::Refusal::Text | writer::Refusal::Number) => return Err(Error::Invalid),
+            }
         }
         charge_json(&replay.value, budget, limits)?;
     }
@@ -416,7 +465,7 @@ pub(crate) fn part(value: openai::Part, limits: &openai::Limits) -> Result<Block
             if refusal { Ok(Block::Refusal { text, replay }) } else { Ok(Block::Text { text, replay }) }
         }
         openai::Part::Opaque { bytes } => {
-            let value = match openai::Json::from_bytes(&bytes, limits) {
+            let value = match openai::Json::from_bytes(&bytes, &limits.document()) {
                 Ok(value) => value,
                 Err(error) => return Err(decode(error)),
             };
@@ -444,35 +493,21 @@ fn replay(
     // Synthesized text/refusal/tool metadata must obey the same raw replay
     // cap as native opaque blocks. Json admission measures escaped bytes
     // before emission; the measuring pass allocates no serialized byte buffer.
-    let mut bounded = *limits;
-    bounded.document_bytes = bounded.document_bytes.min(bounded.opaque_bytes);
+    let bounded = limits.metadata_document();
     let mut measure = writer::Encoder::measure(&bounded.writer_limits());
     write_replay(&mut measure, first, value, second, optional);
     let length = match measure.measured() {
         Ok(length) => length,
-        Err(error) => {
-            return Err(decode(match error {
-                writer::Refusal::TooLong => openai::DecodeError::limit(
-                    if bounded.document_bytes == limits.opaque_bytes {
-                        crate::Cap::Opaque
-                    } else {
-                        crate::Cap::Document
-                    },
-                    bounded.document_bytes,
-                ),
-                writer::Refusal::TooDeep => openai::DecodeError::limit(crate::Cap::Depth, limits.depth),
-                writer::Refusal::Text | writer::Refusal::Number => openai::DecodeError::Malformed,
-            }));
-        }
+        Err(writer::Refusal::TooLong) => return Err(Error::limit(crate::Cap::Metadata, limits.metadata)),
+        Err(writer::Refusal::TooDeep) => return Err(Error::limit(crate::Cap::Depth, limits.depth)),
+        Err(writer::Refusal::Text | writer::Refusal::Number) => return Err(Error::Invalid),
     };
     let mut out = writer::Encoder::write(length, &bounded.writer_limits());
     write_replay(&mut out, first, value, second, optional);
     match openai::Json::from_bytes(&out.finish(), &bounded) {
         Ok(value) => Ok(Replay { provider: Provider::OpenAiCodex, value }),
-        Err(openai::DecodeError::TooLarge { which: crate::Cap::Document, bound })
-            if bounded.document_bytes == limits.opaque_bytes =>
-        {
-            Err(Error::Limit { which: crate::Cap::Opaque, bound })
+        Err(openai::DecodeError::TooLarge { which: crate::Cap::Retained, bound }) => {
+            Err(Error::Limit { which: crate::Cap::Metadata, bound })
         }
         Err(error) => Err(decode(error)),
     }
@@ -541,16 +576,22 @@ mod tests {
     use alloc::boxed::Box;
     use skein_lib::{Duration, bytes};
     const LIMITS: openai::Limits = openai::Limits {
-        request_bytes: 8192,
-        document_bytes: 8192,
-        string_bytes: 2048,
+        request: 8192,
+        retained: 8192,
+        strings: 2048,
         depth: 16,
         tokens: 1024,
-        parts: 16,
-        input_bytes: 2048,
-        opaque_bytes: 2048,
-        answer_bytes: 4096,
+        output_items: 16,
+        input: 2048,
+        reasoning: 2048,
+        answer: 4096,
         detail_bytes: 256,
+
+        tools: 16,
+        history_items: 16,
+        metadata: 2048,
+        receiving: 1_048_576,
+        skip: 8192,
     };
     fn prompt(role: Role, block: Block) -> Prompt {
         Prompt {
@@ -590,7 +631,7 @@ mod tests {
                 }]
             );
             let wire = openai::encode_request(&raw, &LIMITS).expect("replay wire");
-            let value = openai::Json::from_bytes(&wire, &LIMITS).expect("valid document");
+            let value = openai::Json::from_bytes(&wire, &LIMITS.document()).expect("valid document");
             assert_eq!(openai::decode_request(&value, &LIMITS).expect("replay decodes"), raw);
         }
     }
@@ -640,7 +681,7 @@ mod tests {
                 Block::ToolResult { id: bytes::copy_of(b"call"), text: bytes::copy_of(b"result\ntext"), is_error };
             let raw = request(prompt(Role::User, block), Provider::OpenAiCodex, &LIMITS).expect("tool result");
             let wire = openai::encode_request(&raw, &LIMITS).expect("encoded result");
-            let json = openai::Json::from_bytes(&wire, &LIMITS).expect("request JSON");
+            let json = openai::Json::from_bytes(&wire, &LIMITS.document()).expect("request JSON");
             let decoded = openai::decode_request(&json, &LIMITS).expect("request replay");
             let output = if is_error { b"Error: result\ntext".as_slice() } else { b"result\ntext".as_slice() };
             assert_eq!(
@@ -649,12 +690,9 @@ mod tests {
             );
         }
         let mut limits = LIMITS;
-        limits.string_bytes = 8;
+        limits.strings = 8;
         let block = Block::ToolResult { id: bytes::copy_of(b"call"), text: bytes::copy_of(b"no"), is_error: true };
-        assert_eq!(
-            request(prompt(Role::User, block), Provider::OpenAiCodex, &limits),
-            Err(Error::limit(crate::Cap::String, 8))
-        );
+        request(prompt(Role::User, block), Provider::OpenAiCodex, &limits).unwrap();
     }
     #[test]
     fn malformed_tool_arguments_are_preserved_received_and_replayed_as_text() {
@@ -685,11 +723,13 @@ mod tests {
         let raw = request(prompt(Role::Assistant, block), Provider::OpenAiCodex, &LIMITS).expect("reasoning replay");
         assert_eq!(
             raw.input.as_ref(),
-            &[openai::Input::Opaque { value: openai::Json::from_bytes(value, &LIMITS).expect("reasoning value") }]
+            &[openai::Input::Opaque {
+                value: openai::Json::from_bytes(value, &LIMITS.document()).expect("reasoning value")
+            }]
         );
         let replay = Replay {
             provider: Provider::OpenAiCodex,
-            value: openai::Json::from_bytes(br#"{"type":"message"}"#, &LIMITS).expect("JSON object"),
+            value: openai::Json::from_bytes(br#"{"type":"message"}"#, &LIMITS.document()).expect("JSON object"),
         };
         assert_eq!(
             request(prompt(Role::Assistant, Block::Reasoning { replay }), Provider::OpenAiCodex, &LIMITS),
@@ -704,20 +744,17 @@ mod tests {
         assert_eq!(request(prompt(Role::User, refusal), Provider::OpenAiCodex, &LIMITS), Err(Error::Invalid));
         let text = Block::Text { text: bytes::copy_of(b"long text"), replay: None };
         let mut limits = LIMITS;
-        limits.string_bytes = 4;
-        assert_eq!(
-            request(prompt(Role::User, text), Provider::OpenAiCodex, &limits),
-            Err(Error::limit(crate::Cap::String, 4))
-        );
+        limits.strings = 4;
+        request(prompt(Role::User, text), Provider::OpenAiCodex, &limits).unwrap();
         let mut limits = LIMITS;
-        limits.parts = 0;
+        limits.history_items = 0;
         assert_eq!(
             request(
                 prompt(Role::User, Block::Text { text: bytes::copy_of(b""), replay: None }),
                 Provider::OpenAiCodex,
                 &limits
             ),
-            Err(Error::limit(crate::Cap::Parts, 0))
+            Err(Error::limit(crate::Cap::HistoryItems, 0))
         );
     }
     #[test]
@@ -729,7 +766,7 @@ mod tests {
         ] {
             let replay = Replay {
                 provider: Provider::OpenAiCodex,
-                value: openai::Json::from_bytes(value, &LIMITS).expect("valid object"),
+                value: openai::Json::from_bytes(value, &LIMITS.document()).expect("valid object"),
             };
             let block = Block::Text { text: bytes::copy_of(b"answer"), replay: Some(replay) };
             assert_eq!(request(prompt(Role::Assistant, block), Provider::OpenAiCodex, &LIMITS), Err(Error::Invalid));
@@ -763,7 +800,7 @@ mod tests {
         prompt.tools = Box::new([crate::Tool {
             name: bytes::copy_of(b"read"),
             description: Box::new([]),
-            schema: openai::Json::from_bytes(b"{}", &LIMITS).expect("schema object"),
+            schema: openai::Json::from_bytes(b"{}", &LIMITS.document()).expect("schema object"),
         }]);
         for names in [
             [].as_slice(),

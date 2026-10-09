@@ -43,16 +43,17 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
         ("parallel-tool-calls", 617, 89, 2),
         ("tool-result-final", 679, 15, 0),
     ] {
-        let dialect = skein_llm::DocumentLimits {
-            request_bytes: 65536,
-            document_bytes: 65536,
-            string_bytes: 32768,
+        let dialect = skein_llm::openai::Limits {
+            request: 65536,
+            retained: 65536,
+            strings: 32768,
             tokens: 4096,
-            parts: 64,
-            ..limits().dialect
+            output_items: 64,
+            ..limits().native()
         };
         let captured_request = archive(scenario, "request.json");
-        let wrapper = skein_llm::Json::from_bytes(&captured_request, &dialect).expect("historical request wrapper");
+        let wrapper =
+            skein_llm::Json::from_bytes(&captured_request, &dialect.document()).expect("historical request wrapper");
         let document = wrapper.document();
         let bodies: Vec<_> = (0..document.len())
             .filter_map(|index| {
@@ -71,7 +72,7 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
             panic!("one preserved captured body");
         };
         let request = skein_llm::anthropic::decode_request(
-            &skein_llm::Json::from_bytes(body, &dialect).expect("historical body"),
+            &skein_llm::Json::from_bytes(body, &dialect.document()).expect("historical body"),
             &dialect,
         )
         .expect("shared peer grammar admits captured request");

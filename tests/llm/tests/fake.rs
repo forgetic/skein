@@ -24,7 +24,7 @@ fn input(provider: skein_llm::Provider, owner: u64) -> skein_llm::Call {
         description: b"Caller description".as_slice().into(),
         schema: skein_llm::Json::from_bytes(
             br#"{"type":"object","properties":{"opaque":{"type":"string"}},"x-caller-extension":[1,null,true]}"#,
-            &limits().dialect,
+            &limits().native().request_document(),
         )
         .expect("whole caller schema"),
     }]);
@@ -164,7 +164,8 @@ fn actual_client_and_independent_byte_peer_relay_whole_schema_call_and_feedback(
         assert_eq!(query.tools[0].name.as_ref(), b"caller_tool");
         assert_eq!(query.tools[0].description.as_ref(), b"Caller description");
         assert_eq!(
-            skein_llm::Json::from_bytes(&query.tools[0].parameters, &limits().dialect).expect("actual schema"),
+            skein_llm::Json::from_bytes(&query.tools[0].parameters, &(limits().native()).document())
+                .expect("actual schema"),
             input(provider, 9).prompt.tools[0].schema,
             "whole semantic schema survives shared client and peer"
         );
@@ -298,7 +299,7 @@ fn routing_bound() -> u64 {
         + skein_fake_llm_domain::worst_case(&skein_llm_world::fake::config())
             .expect("external actual script domain bound")
         + 8 * 32768
-        + 16 * u64::from(limits().dialect.document_bytes)
+        + 16 * u64::from(limits().retained)
         + 128 * 1024
 }
 
@@ -438,13 +439,13 @@ fn actual_byte_peer_preserves_opaque_extensions_refusal_stop_and_continuation_re
         };
         assert_eq!(text.as_ref(), b"actual refusal");
         let restored = skein_llm::Replay::from_bytes(
-            &replay.to_bytes(&limits().dialect).expect("durable envelope"),
-            &limits().dialect,
+            &replay.to_bytes( &(limits().native()).document()).expect("durable envelope"),
+            &limits().native().request_document(),
         )
         .expect("restore actual replay");
         assert_eq!(
             restored.value,
-            skein_llm::Json::from_bytes(opaque, &limits().dialect).expect("whole caller opaque value")
+            skein_llm::Json::from_bytes(opaque, &(limits().native()).document()).expect("whole caller opaque value")
         );
         let [query] = world.queries.as_slice() else {
             panic!("one outside request");
@@ -481,7 +482,7 @@ Some(fresh)
             panic!("opaque and visible prior completion reached native request peer");
         };
         assert_eq!(
-            skein_llm::Json::from_bytes(bytes, &limits().dialect).expect("actual continuation opaque document"),
+            skein_llm::Json::from_bytes(bytes, &(limits().native()).document()).expect("actual continuation opaque document"),
             restored.value
         );
         assert_eq!(text.as_ref(), b"actual refusal");
@@ -578,7 +579,7 @@ fn escaped_calls_at_the_input_edge_and_one_over_complete_beside_a_normal_call() 
     for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
         for below in [false, true] {
             let mut bounds = limits();
-            bounds.dialect.input_bytes = u32::try_from(arguments.len()).expect("tiny argument cap") - u32::from(below);
+            bounds.input = u32::try_from(arguments.len()).expect("tiny argument cap") - u32::from(below);
             let scripts = Box::new([Script {
                 cue: b"caller-script".as_slice().into(),
                 turns: Box::new([Turn {
@@ -644,8 +645,8 @@ fn scripted_provider_output_cuts_complete_and_are_refused_in_history() {
 fn oversized_arguments_charge_only_the_call_id_and_name() {
     for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
         let mut bounds = limits();
-        bounds.dialect.input_bytes = 3;
-        bounds.dialect.answer_bytes = 32; // 21-byte fake call ID plus 11-byte caller name.
+        bounds.input = 3;
+        bounds.answer = 32; // 21-byte fake call ID plus 11-byte caller name.
         let scripts = Box::new([Script {
             cue: b"caller-script".as_slice().into(),
             turns: Box::new([Turn {
@@ -673,16 +674,14 @@ fn scripted_codex_reasoning_drops_only_by_owner_opt_in_and_can_remain_in_history
     let opaque = br#"{"type":"reasoning","id":"opaque_1","encrypted_content":"signed","summary":[]}"#;
     for enabled in [false, true] {
         let mut bounds = limits();
-        bounds.dialect.opaque_bytes = u32::try_from(opaque.len() - 1).unwrap();
+        bounds.reasoning = 5;
         bounds.drop_reasoning = enabled;
         let mut world = Exchange::new(input(skein_llm::Provider::OpenAiCodex, 1), bounds, opaque_script(opaque));
         world.start();
         world.run();
         if enabled {
             let answer = completion(&world).clone();
-            assert!(
-                matches!(answer.content.as_ref(), [Block::Dropped { bytes }, Block::Text { .. }] if *bytes == u64::try_from(opaque.len()).unwrap())
-            );
+            assert!(matches!(answer.content.as_ref(), [Block::Dropped { bytes }, Block::Text { .. }] if *bytes == 6));
             let mut next = input(skein_llm::Provider::OpenAiCodex, 2);
             next.prompt.messages = Box::new([Message { role: Role::Assistant, content: answer.content }]);
             let next = client::Client::prepare(next, &bounds).unwrap();
@@ -694,7 +693,7 @@ fn scripted_codex_reasoning_drops_only_by_owner_opt_in_and_can_remain_in_history
                 [skein_fake_llm_domain::api::Part::Text { .. }]
             ));
         } else {
-            assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Opaque, bound }, .. } if *bound == u64::from(bounds.dialect.opaque_bytes))));
+            assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Reasoning, bound }, .. } if *bound == u64::from(bounds.reasoning))));
         }
     }
 }
@@ -716,14 +715,15 @@ fn echoed_completion_json(world: &Exchange, bounds: &client::Limits) -> skein_ll
     let events = skein_http_world::reference::events(&response.body, &bounds.sse);
     let terminal =
         events.events.iter().find(|event| event.name == b"response.completed").expect("actual terminal wire echo");
-    skein_llm::Json::from_bytes(&terminal.data, &bounds.dialect)
+    skein_llm::Json::from_bytes(&terminal.data, &bounds.native().document())
         .expect("reference framing and bounded terminal document")
 }
 
 #[test]
 fn configured_codex_echoes_preserve_the_completion_past_the_previous_token_cliff() {
     let mut bounds = limits();
-    bounds.dialect.parts = 32;
+    bounds.output_items = 32;
+    bounds.history_items = 32;
     let echo = skein_llm::openai::Echo { instructions: true, tools: true, attribution_bytes: 24 };
     let mut plain = Exchange::new(echo_input(1), bounds, scripts());
     plain.start();
@@ -748,12 +748,12 @@ fn configured_codex_echoes_preserve_the_completion_past_the_previous_token_cliff
     let edge = tokens.len();
     let request = skein_llm::Json::from_bytes(
         &skein_http_world::reference::request(&echoed.requests, &skein_llm_world::fake::limits(&bounds).http).body,
-        &bounds.dialect,
+        &bounds.native().request_document(),
     )
     .unwrap();
     assert!(request.document().len() < tokens.len(), "attribution cliff exceeds the admitted request");
     for cap in [edge, edge - 1] {
-        bounds.dialect.tokens = cap;
+        bounds.tokens = cap;
         let mut world = Exchange::new_with_codex_echo(echo_input(1), bounds, scripts(), echo);
         world.start();
         world.run();
@@ -828,11 +828,11 @@ fn actual_request_heads_match_the_independent_http_reader_on_both_dialects() {
 fn explicit_call_reasoning_policy_overrides_the_default_without_changing_wire_bytes() {
     let provider = skein_llm::Provider::OpenAiCodex;
     let opaque = br#"{"type":"reasoning","id":"r","encrypted_content":"signed","summary":[]}"#;
-    let mut request_bytes = None;
+    let mut request = None;
     for enabled in [false, true] {
         let mut bounds = limits();
         bounds.drop_reasoning = !enabled;
-        bounds.dialect.opaque_bytes = u32::try_from(opaque.len() - 1).expect("bounded fixture");
+        bounds.reasoning = 5;
         let input = input(provider, 71);
         let endpoint = input.endpoint.clone();
         let credential = skein_llm::Credential {
@@ -844,16 +844,19 @@ fn explicit_call_reasoning_policy_overrides_the_default_without_changing_wire_by
         let mut world = Exchange::prepared(machine, endpoint, credential, bounds, opaque_script(opaque));
         world.start();
         world.run();
-        match &request_bytes {
+        match &request {
             Some(expected) => assert_eq!(&world.requests, expected, "policy never changes provider request bytes"),
-            None => request_bytes = Some(world.requests.clone()),
+            None => request = Some(world.requests.clone()),
         }
         if enabled {
             assert!(matches!(completion(&world).content.as_ref(), [Block::Dropped { .. }, Block::Text { .. }]));
         } else {
             assert!(world.seen.iter().any(|event| matches!(
                 event,
-                client::Event::Failed { failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Opaque, .. }, .. }
+                client::Event::Failed {
+                    failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Reasoning, .. },
+                    ..
+                }
             )));
             assert!(!world.seen.iter().any(|event| matches!(event, client::Event::Completed { .. })));
         }

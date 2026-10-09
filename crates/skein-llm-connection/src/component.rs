@@ -363,13 +363,8 @@ impl Component {
                     if self.lifecycle == Lifecycle::Aborting {
                         up.push(Event::Cancelled { call: waiting.call });
                     } else {
-                        let bound = self
-                            .endpoints
-                            .get(waiting.endpoint)
-                            .expect("admitted endpoint")
-                            .limits
-                            .dialect
-                            .detail_bytes;
+                        let bound =
+                            self.endpoints.get(waiting.endpoint).expect("admitted endpoint").limits.detail_bytes;
                         let detail = b"timed out waiting for the whole call";
                         let take = detail.len().min(usize::try_from(bound).expect("u32 fits usize"));
                         up.push(Event::Failed {

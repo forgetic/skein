@@ -202,7 +202,7 @@ fn anthropic_part(part: anthropic::Part, limits: &openai::Limits) -> Result<Bloc
             Ok(Block::ToolCall { id, name, arguments: input, replay: None })
         }
         anthropic::Part::Opaque { bytes: value } => {
-            let value = match openai::Json::from_bytes(&value, limits) {
+            let value = match openai::Json::from_bytes(&value, &limits.document()) {
                 Ok(value) => value,
                 Err(error) => return Err(translate::decode(error)),
             };
@@ -221,35 +221,31 @@ pub(crate) fn event_filter(provider: Provider) -> collector::Filter {
 
 /// Total receive failure translation; named text caps retain their owner.
 pub(crate) fn failure(error: collector::Error, limits: &client::Limits) -> Failure {
-    let bounded = &limits.dialect;
+    let bounded = &limits.native();
     match error {
         collector::Error::TooManyTokens => {
             Failure::Limit { which: crate::Cap::Tokens, bound: u64::from(bounded.tokens) }
         }
         collector::Error::TooMuchText { cap: None } => {
-            Failure::Limit { which: crate::Cap::Document, bound: u64::from(bounded.document_bytes) }
+            Failure::Limit { which: crate::Cap::Retained, bound: u64::from(bounded.retained) }
         }
         collector::Error::TooMuchText { cap: Some(cap) } => {
             if cap == filter::REASONING {
-                Failure::Limit { which: crate::Cap::Opaque, bound: u64::from(bounded.opaque_bytes) }
+                Failure::Limit { which: crate::Cap::Reasoning, bound: u64::from(bounded.reasoning) }
             } else if cap == filter::STRINGS {
-                Failure::Limit { which: crate::Cap::String, bound: u64::from(bounded.string_bytes) }
+                Failure::Limit { which: crate::Cap::Strings, bound: u64::from(bounded.strings) }
             } else {
                 Failure::Protocol
             }
         }
-        collector::Error::SkippedTooLong => {
-            Failure::Limit { which: crate::Cap::Event, bound: u64::from(limits.sse.event) }
-        }
+        collector::Error::SkippedTooLong => Failure::Limit { which: crate::Cap::Skip, bound: u64::from(limits.skip) },
         collector::Error::Duplicate | collector::Error::NotTagged => Failure::Protocol,
         collector::Error::Tokenizer(error) => match error {
             tokenizer::Error::TooDeep => Failure::Limit { which: crate::Cap::Depth, bound: u64::from(bounded.depth) },
             tokenizer::Error::StringTooLong => {
-                Failure::Limit { which: crate::Cap::String, bound: u64::from(bounded.string_bytes) }
+                Failure::Limit { which: crate::Cap::Strings, bound: u64::from(bounded.strings) }
             }
-            tokenizer::Error::TooLong => {
-                Failure::Limit { which: crate::Cap::Event, bound: u64::from(limits.sse.event) }
-            }
+            tokenizer::Error::TooLong => Failure::Limit { which: crate::Cap::Skip, bound: u64::from(limits.skip) },
             tokenizer::Error::Stream(_) => Failure::Unavailable,
             tokenizer::Error::Unexpected
             | tokenizer::Error::Trailing
@@ -277,7 +273,7 @@ fn receive_long(
     let mut length = None;
     let kind = json::value_at(root, json::required(root, b"type")?)?;
     if openai::response::long_text(kind).is_some() {
-        return Err(openai::DecodeError::limit(crate::Cap::String, limits.string_bytes));
+        return Err(openai::DecodeError::limit(crate::Cap::Strings, limits.strings));
     }
     let kind = json::text_ref(kind)?;
     match decoder {
@@ -329,7 +325,7 @@ fn receive_long(
                         };
                         let text = json::value_at(delta, json::required(delta, name)?)?;
                         if openai::response::long_text(text).is_some() {
-                            return Err(openai::DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
+                            return Err(openai::DecodeError::limit(crate::Cap::Reasoning, limits.reasoning));
                         }
                     }
                     _ => {}
@@ -338,13 +334,13 @@ fn receive_long(
         }
     }
     if let Some(length) = length
-        && length <= u64::from(limits.input_bytes)
+        && length <= u64::from(limits.input)
     {
-        return Err(openai::DecodeError::limit(crate::Cap::String, limits.string_bytes));
+        return Err(openai::DecodeError::limit(crate::Cap::Strings, limits.strings));
     }
     for index in 0..value.document().len() {
         if value.document().token(index).expect("collected record").kind == Kind::Long && allowed != Some(index) {
-            return Err(openai::DecodeError::limit(crate::Cap::String, limits.string_bytes));
+            return Err(openai::DecodeError::limit(crate::Cap::Strings, limits.strings));
         }
     }
     Ok(length)

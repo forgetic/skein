@@ -10,22 +10,22 @@ pub(crate) const REASONING: collector::Cap = collector::Cap::new(1);
 pub(crate) const STRINGS: collector::Cap = collector::Cap::new(2);
 
 pub(crate) fn caps(limits: &client::Limits) -> [u32; 3] {
-    [limits.dialect.input_bytes, limits.dialect.opaque_bytes, limits.dialect.string_bytes]
+    [limits.input, limits.reasoning, limits.strings]
 }
 
 pub(crate) fn collector(limits: &client::Limits) -> collector::Limits {
     let bounds = caps(limits);
     collector::Limits {
         tokenizer: tokenizer::Limits {
-            depth: limits.dialect.depth,
+            depth: limits.depth,
             string: bounds[0].max(bounds[1]).max(bounds[2]),
             number: 32,
             chunk: limits.sse.chunk,
-            length: limits.sse.event,
+            length: limits.skip,
         },
-        tokens: limits.dialect.tokens,
-        text: limits.dialect.document_bytes,
-        skip: u64::from(limits.sse.event),
+        tokens: limits.tokens,
+        text: limits.retained,
+        skip: u64::from(limits.skip),
     }
 }
 

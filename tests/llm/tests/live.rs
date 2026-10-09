@@ -38,17 +38,17 @@ fn live_limits() -> client::Limits {
     limits.http.headers = 64;
     limits.http.read = 4096;
     limits.http.send = 4096;
-    limits.sse.line = 262_144;
-    limits.sse.event = 524_288;
+    limits.skip = 262_144;
+    limits.skip = 524_288;
     limits.sse.chunk = 4096;
-    limits.dialect.request_bytes = 524_288;
-    limits.dialect.document_bytes = 524_288;
-    limits.dialect.string_bytes = 262_144;
-    limits.dialect.tokens = 32_768;
-    limits.dialect.parts = 64;
-    limits.dialect.input_bytes = 262_144;
-    limits.dialect.opaque_bytes = 262_144;
-    limits.dialect.answer_bytes = 524_288;
+    limits.request = 524_288;
+    limits.retained = 524_288;
+    limits.strings = 262_144;
+    limits.tokens = 32_768;
+    limits.output_items = 64;
+    limits.input = 262_144;
+    limits.reasoning = 262_144;
+    limits.answer = 524_288;
     limits.error_bytes = 8192;
     limits
 }
@@ -353,7 +353,7 @@ fn tool_round_trip(provider: Provider) {
     first.prompt.tools = Box::new([Tool {
         name: bytes("skein_lookup"),
         description: bytes("Returns the secret test value for a key. You must call this to discover the value."),
-        schema: Json::from_bytes(br#"{"type":"object","properties":{"key":{"type":"string","enum":["live"]}},"required":["key"],"additionalProperties":false}"#, &live_limits().dialect).expect("valid tool schema or arguments"),
+        schema: Json::from_bytes(br#"{"type":"object","properties":{"key":{"type":"string","enum":["live"]}},"required":["key"],"additionalProperties":false}"#, &(live_limits().native()).document()).expect("valid tool schema or arguments"),
     }]);
     let tools = first.prompt.tools.clone();
     let mut history = first.prompt.messages.to_vec();
@@ -379,9 +379,9 @@ fn tool_round_trip(provider: Provider) {
     let (id, name, arguments) = calls[0];
     assert!(!id.is_empty());
     assert_eq!(name.as_ref(), b"skein_lookup");
-    let parsed = Json::from_bytes(arguments, &live_limits().dialect).expect("complete tool JSON");
-    let expected =
-        Json::from_bytes(br#"{"key":"live"}"#, &live_limits().dialect).expect("valid tool schema or arguments");
+    let parsed = Json::from_bytes(arguments, &(live_limits().native()).document()).expect("complete tool JSON");
+    let expected = Json::from_bytes(br#"{"key":"live"}"#, &(live_limits().native()).document())
+        .expect("valid tool schema or arguments");
     assert_eq!(parsed, expected);
     let argument_deltas: Vec<u8> = events
         .iter()

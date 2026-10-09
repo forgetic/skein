@@ -4,7 +4,8 @@
 //! step and retain no references in machine state. Provider meaning stays in
 //! the native codecs. `from_bytes` collects a complete value; `from_document`
 //! admits a producer's owned document; the writer emits the document whole.
-use crate::openai::{DecodeError, Limits};
+use crate::DocumentLimits as Limits;
+use crate::openai::DecodeError;
 use alloc::boxed::Box;
 use skein_json::{Compact, Document, Kind, collector, document, tokenizer, writer};
 use skein_lib::stream::{Down, Read, Up};
@@ -33,14 +34,14 @@ enum Frame {
 impl Json {
     /// Parses and admits a complete bounded value with the generic collector.
     pub fn from_bytes(input: &[u8], limits: &Limits) -> Result<Json, DecodeError> {
-        if input.len() > usize::try_from(limits.document_bytes).expect("u32 fits usize") {
-            return Err(DecodeError::limit(crate::Cap::Document, limits.document_bytes));
+        if input.len() > usize::try_from(limits.bytes).expect("u32 fits usize") {
+            return Err(DecodeError::limit(crate::Cap::Retained, limits.bytes));
         }
         let bounded = collector::Limits {
             tokenizer: limits.tokenizer_limits(),
             tokens: limits.tokens,
-            text: limits.document_bytes,
-            skip: u64::from(limits.document_bytes),
+            text: limits.bytes,
+            skip: u64::from(limits.bytes),
         };
         let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: bounded };
         let mut machine = collector::Collector::new(collector::Filter { root: collector::Keep::Value }, &bounded, &[])
@@ -92,15 +93,15 @@ impl Json {
         if document.len() > limits.tokens {
             return Err(DecodeError::limit(crate::Cap::Tokens, limits.tokens));
         }
-        if document.text_len() > limits.document_bytes {
-            return Err(DecodeError::limit(crate::Cap::Document, limits.document_bytes));
+        if document.text_len() > limits.bytes {
+            return Err(DecodeError::limit(crate::Cap::Retained, limits.bytes));
         }
         for index in 0..document.len() {
             let record = document.token(index).expect("index within document");
             match record.kind {
                 Kind::Key | Kind::String | Kind::Number => {
-                    if record.len > limits.string_bytes {
-                        return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
+                    if record.len > limits.strings {
+                        return Err(DecodeError::limit(crate::Cap::Strings, limits.strings));
                     }
                 }
                 Kind::Long => return Err(DecodeError::Malformed),
@@ -119,7 +120,7 @@ impl Json {
         value.write(&mut measure);
         match measure.measured() {
             Ok(_) => Ok(value),
-            Err(writer::Refusal::TooLong) => Err(DecodeError::limit(crate::Cap::Document, limits.document_bytes)),
+            Err(writer::Refusal::TooLong) => Err(DecodeError::limit(crate::Cap::Retained, limits.bytes)),
             Err(writer::Refusal::TooDeep) => Err(DecodeError::limit(crate::Cap::Depth, limits.depth)),
             Err(writer::Refusal::Text | writer::Refusal::Number) => Err(DecodeError::Malformed),
         }
@@ -135,7 +136,7 @@ impl Json {
         let bounded = limits.writer_limits();
         let mut measure = writer::Encoder::measure(&bounded);
         self.write(&mut measure);
-        let len = crate::openai::common::measured(measure, bounded, crate::Cap::Document)?;
+        let len = crate::openai::common::measured(measure, bounded, crate::Cap::Retained)?;
         let mut write = writer::Encoder::write(len, &bounded);
         self.write(&mut write);
         Ok(write.finish())
@@ -165,10 +166,10 @@ impl Json {
         for index in 0..count {
             size = size
                 .checked_add(u32::try_from(record_text(view, index)?.len()).or(Err(DecodeError::Malformed))?)
-                .ok_or(DecodeError::limit(crate::Cap::Document, limits.document_bytes))?;
+                .ok_or(DecodeError::limit(crate::Cap::Retained, limits.bytes))?;
         }
-        if size > limits.document_bytes {
-            return Err(DecodeError::limit(crate::Cap::Document, limits.document_bytes));
+        if size > limits.bytes {
+            return Err(DecodeError::limit(crate::Cap::Retained, limits.bytes));
         }
         let mut text = List::with_capacity(size);
         let mut records = List::with_capacity(count);
@@ -263,7 +264,7 @@ fn collector_error(error: collector::Error, limits: &Limits) -> DecodeError {
     match error {
         collector::Error::Tokenizer(error) => tokenizer_error(error, limits),
         collector::Error::TooManyTokens => DecodeError::limit(crate::Cap::Tokens, limits.tokens),
-        collector::Error::TooMuchText { cap: _ } => DecodeError::limit(crate::Cap::Document, limits.document_bytes),
+        collector::Error::TooMuchText { cap: _ } => DecodeError::limit(crate::Cap::Retained, limits.bytes),
         collector::Error::SkippedTooLong => unreachable!("Value skips no fields"),
         collector::Error::Duplicate | collector::Error::NotTagged => unreachable!("Value interprets no fields"),
     }
@@ -470,6 +471,10 @@ pub(crate) fn boolean(view: (&Document, Span)) -> Result<bool, DecodeError> {
 }
 
 pub(crate) fn array(view: (&Document, Span), count: u32) -> Result<List<u32>, DecodeError> {
+    array_limit(view, count, crate::Cap::OutputItems)
+}
+
+pub(crate) fn array_limit(view: (&Document, Span), count: u32, cap: crate::Cap) -> Result<List<u32>, DecodeError> {
     if kind(view, 0) != Some(Kind::ArrayStart) {
         return Err(DecodeError::WrongType);
     }
@@ -480,7 +485,7 @@ pub(crate) fn array(view: (&Document, Span), count: u32) -> Result<List<u32>, De
             return Ok(offsets);
         }
         if offsets.push(at).is_err() {
-            return Err(DecodeError::limit(crate::Cap::Parts, count));
+            return Err(DecodeError::limit(cap, count));
         }
         at = span(view, at)?;
     }
@@ -500,9 +505,9 @@ pub(crate) fn value_at(view: (&Document, Span), offset: u32) -> Result<(&Documen
 
 fn tokenizer_error(error: tokenizer::Error, limits: &Limits) -> DecodeError {
     match error {
-        tokenizer::Error::TooLong => DecodeError::limit(crate::Cap::Document, limits.document_bytes),
+        tokenizer::Error::TooLong => DecodeError::limit(crate::Cap::Retained, limits.bytes),
         tokenizer::Error::TooDeep => DecodeError::limit(crate::Cap::Depth, limits.depth),
-        tokenizer::Error::StringTooLong => DecodeError::limit(crate::Cap::String, limits.string_bytes),
+        tokenizer::Error::StringTooLong => DecodeError::limit(crate::Cap::Strings, limits.strings),
         tokenizer::Error::NumberTooLong => DecodeError::limit(crate::Cap::Number, limits.tokenizer_limits().number),
         tokenizer::Error::Unexpected
         | tokenizer::Error::Trailing

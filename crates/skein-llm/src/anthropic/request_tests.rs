@@ -4,16 +4,22 @@ use alloc::boxed::Box;
 use skein_lib::bytes;
 
 const LIMITS: openai::Limits = openai::Limits {
-    request_bytes: 8192,
-    document_bytes: 8192,
-    string_bytes: 2048,
+    request: 8192,
+    retained: 8192,
+    strings: 2048,
     depth: 16,
     tokens: 1024,
-    parts: 16,
-    input_bytes: 2048,
-    opaque_bytes: 2048,
-    answer_bytes: 4096,
+    output_items: 16,
+    input: 2048,
+    reasoning: 2048,
+    answer: 4096,
     detail_bytes: 256,
+
+    tools: 16,
+    history_items: 16,
+    metadata: 2048,
+    receiving: 1_048_576,
+    skip: 8192,
 };
 
 fn prompt(role: Role, block: Block) -> Prompt {
@@ -37,7 +43,7 @@ fn reasoning(value: &[u8]) -> Block {
     Block::Reasoning {
         replay: Replay {
             provider: Provider::Anthropic,
-            value: Json::from_bytes(value, &LIMITS).expect("reasoning JSON"),
+            value: Json::from_bytes(value, &LIMITS.document()).expect("reasoning JSON"),
         },
     }
 }
@@ -65,7 +71,7 @@ fn signed_and_redacted_reasoning_tool_calls_and_native_error_results_replay_in_o
     prompt.max_output_tokens = Some(9000);
     let schema = Json::from_bytes(
         br#"{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}"#,
-        &LIMITS,
+        &LIMITS.document(),
     )
     .expect("tool schema");
     prompt.tools =
@@ -138,7 +144,8 @@ fn malformed_unsigned_and_duplicate_reasoning_cannot_replay() {
     }
     let replay = Replay {
         provider: Provider::OpenAiCodex,
-        value: Json::from_bytes(br#"{"type":"thinking","thinking":"a","signature":"s"}"#, &LIMITS).expect("JSON"),
+        value: Json::from_bytes(br#"{"type":"thinking","thinking":"a","signature":"s"}"#, &LIMITS.document())
+            .expect("JSON"),
     };
     assert_eq!(
         measure_request(&prompt(Role::Assistant, Block::Reasoning { replay }), 4096, &LIMITS),
@@ -178,26 +185,27 @@ fn roles_utf8_object_arguments_and_tool_identifiers_are_checked_before_encoding(
         };
         assert_eq!(measure_request(&prompt(Role::Assistant, tool), 4096, &LIMITS), Err(Error::Invalid));
     }
-    let replay = Replay { provider: Provider::Anthropic, value: Json::from_bytes(b"{}", &LIMITS).expect("JSON") };
+    let replay =
+        Replay { provider: Provider::Anthropic, value: Json::from_bytes(b"{}", &LIMITS.document()).expect("JSON") };
     let block = Block::Text { text: bytes::copy_of(b"a"), replay: Some(replay) };
     assert_eq!(measure_request(&prompt(Role::Assistant, block), 4096, &LIMITS), Err(Error::Unsupported));
 }
 
 #[test]
-fn escaped_wire_bytes_string_tokens_blocks_arguments_and_depth_have_hard_bounds() {
+fn request_bytes_history_and_depth_bound_sent_arguments_without_receiving_caps() {
     let request = prompt(Role::User, text(b"\\\"\n"));
     let length = measure_request(&request, 4096, &LIMITS).expect("full request");
     let mut limits = LIMITS;
-    limits.request_bytes = length;
+    limits.request = length;
     assert_eq!(measure_request(&request, 4096, &limits), Ok(length));
-    limits.request_bytes = length.checked_sub(1).expect("nonempty request");
-    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Request, limits.request_bytes)));
+    limits.request = length.checked_sub(1).expect("nonempty request");
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Request, limits.request)));
     limits = LIMITS;
-    limits.string_bytes = 2;
-    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::String, 2)));
+    limits.strings = 2;
+    measure_request(&request, 4096, &limits).unwrap();
     limits = LIMITS;
-    limits.parts = 0;
-    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Parts, 0)));
+    limits.history_items = 0;
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::HistoryItems, 0)));
     limits = LIMITS;
     limits.depth = 3;
     assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Depth, 3)));
@@ -209,37 +217,37 @@ fn escaped_wire_bytes_string_tokens_blocks_arguments_and_depth_have_hard_bounds(
     };
     let prompt = prompt(Role::Assistant, tool);
     limits = LIMITS;
-    limits.string_bytes = 2;
-    assert_eq!(measure_request(&prompt, 4096, &limits), Err(Error::limit(crate::Cap::String, 2)));
+    limits.strings = 2;
+    measure_request(&prompt, 4096, &limits).unwrap();
     limits = LIMITS;
     limits.tokens = 2;
-    assert_eq!(measure_request(&prompt, 4096, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
+    measure_request(&prompt, 4096, &limits).unwrap();
 }
 
 #[test]
-fn prebuilt_replay_and_schema_obey_the_current_admission_limits() {
+fn prebuilt_replay_obeys_reasoning_and_sent_schema_obeys_the_whole_request() {
     let signed = br#"{"type":"thinking","thinking":"a","signature":"s"}"#;
     let mut request = prompt(Role::Assistant, reasoning(signed));
     let mut limits = LIMITS;
-    limits.opaque_bytes = 10;
-    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Opaque, 10)));
+    limits.reasoning = 10;
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Reasoning, 10)));
     limits = LIMITS;
     limits.tokens = 2;
-    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
+    measure_request(&request, 4096, &limits).unwrap();
     request.messages = Box::new([Message { role: Role::User, content: Box::new([text(b"hello")]) }]);
     request.tools = Box::new([Tool {
         name: bytes::copy_of(b"custom_tool"),
         description: bytes::copy_of(b"custom description"),
         schema: Json::from_bytes(
             br#"{"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":false}"#,
-            &LIMITS,
+            &LIMITS.document(),
         )
         .expect("schema JSON"),
     }]);
-    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
+    measure_request(&request, 4096, &limits).unwrap();
     limits = LIMITS;
-    limits.document_bytes = 2;
-    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Document, 2)));
+    limits.retained = 2;
+    measure_request(&request, 4096, &limits).unwrap();
 }
 
 #[test]
@@ -305,14 +313,14 @@ fn explicit_identity_blocks_remain_subject_to_instruction_and_wire_limits() {
     request.instructions = super::identity::instructions(b"extra").expect("identity instructions");
     let length = measure_request(&request, 4096, &LIMITS).expect("identity request measurement");
     let mut limits = LIMITS;
-    limits.request_bytes = length;
+    limits.request = length;
     assert_eq!(measure_request(&request, 4096, &limits), Ok(length));
-    limits.request_bytes = length.checked_sub(1).expect("nonempty identity request");
-    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Request, limits.request_bytes)));
+    limits.request = length.checked_sub(1).expect("nonempty identity request");
+    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::Request, limits.request)));
     limits = LIMITS;
-    limits.string_bytes = u32::try_from(request.instructions.len().checked_sub(1).expect("nonempty instructions"))
+    limits.strings = u32::try_from(request.instructions.len().checked_sub(1).expect("nonempty instructions"))
         .expect("small instructions");
-    assert_eq!(measure_request(&request, 4096, &limits), Err(Error::limit(crate::Cap::String, limits.string_bytes)));
+    measure_request(&request, 4096, &limits).unwrap();
     request.instructions = super::identity::instructions(&[0xff]).expect("owned instructions");
     assert_eq!(measure_request(&request, 4096, &LIMITS), Err(Error::Invalid));
 }
@@ -326,15 +334,15 @@ fn opaque_extension_fields_survive_native_replay_and_bound_admission() {
         let input = prompt(Role::Assistant, reasoning(value));
         let wire = encode_request(&input, 4096, &LIMITS).expect("bounded replay with provider extension");
         assert!(bytes::find(&wire, value).is_some(), "the complete opaque value survives");
-        let limits = openai::Limits { opaque_bytes: 1, ..LIMITS };
-        assert_eq!(measure_request(&input, 4096, &limits), Err(Error::limit(crate::Cap::Opaque, 1)));
+        let limits = openai::Limits { reasoning: 1, ..LIMITS };
+        assert_eq!(measure_request(&input, 4096, &limits), Err(Error::limit(crate::Cap::Reasoning, 1)));
     }
 }
 
 #[test]
 fn peer_request_admits_native_core_before_corrupted_controls() {
     let good = r#"{"model":"model","stream":true,"max_tokens":32,"tools":[{"name":"tool","input_schema":{"type":"object","extension":[null,true]}}],"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"tool","input":{"whole":1}}]}],"unknown_deployment_option":{"untouched":true}}"#;
-    let value = Json::from_bytes(good.as_bytes(), &LIMITS).expect("positive native document");
+    let value = Json::from_bytes(good.as_bytes(), &LIMITS.document()).expect("positive native document");
     let decoded = super::decode_request(&value, &LIMITS).expect("native core admitted");
     assert_eq!(decoded.prompt.model.as_ref(), b"model");
     assert_eq!(decoded.prompt.tools.len(), 1);
@@ -358,7 +366,7 @@ fn peer_request_admits_native_core_before_corrupted_controls() {
     ] {
         let wire = good.replace(old, replacement);
         assert_ne!(wire.as_bytes(), good.as_bytes(), "negative actually changes native core");
-        let value = Json::from_bytes(wire.as_bytes(), &LIMITS).expect("corruption retains JSON syntax");
+        let value = Json::from_bytes(wire.as_bytes(), &LIMITS.document()).expect("corruption retains JSON syntax");
         assert!(super::decode_request(&value, &LIMITS).is_err(), "native core corruption {old} rejected");
     }
 }
@@ -372,11 +380,11 @@ fn tool_choice_none_is_native_and_auto_and_only_are_omitted() {
         prompt.tools = Box::new([Tool {
             name: bytes::copy_of(b"read"),
             description: Box::new([]),
-            schema: Json::from_bytes(b"{}", &LIMITS).expect("schema object"),
+            schema: Json::from_bytes(b"{}", &LIMITS.document()).expect("schema object"),
         }]);
         prompt.choice = choice.clone();
         let wire = encode_request(&prompt, 4096, &LIMITS).expect("choice is bounded");
-        let value = Json::from_bytes(&wire, &LIMITS).expect("request document");
+        let value = Json::from_bytes(&wire, &LIMITS.document()).expect("request document");
         let decoded = super::decode_request(&value, &LIMITS).expect("peer decodes choice");
         assert_eq!(decoded.prompt.tools, prompt.tools);
         match choice {
@@ -388,8 +396,9 @@ fn tool_choice_none_is_native_and_auto_and_only_are_omitted() {
                 let tokens = value.view();
                 let at = openai::json::required(tokens, b"tool_choice").expect("native choice");
                 let choice =
-                    Json::from_view(openai::json::value_at(tokens, at).expect("choice object"), &LIMITS).unwrap();
-                assert_eq!(choice.to_bytes(&LIMITS).unwrap().as_ref(), br#"{"type":"none"}"#);
+                    Json::from_view(openai::json::value_at(tokens, at).expect("choice object"), &LIMITS.document())
+                        .unwrap();
+                assert_eq!(choice.to_bytes(&LIMITS.document()).unwrap().as_ref(), br#"{"type":"none"}"#);
                 assert_eq!(decoded.prompt.choice, crate::ToolChoice::None);
             }
         }
@@ -412,7 +421,7 @@ fn declared_output_sets_the_default_and_admits_only_caps_at_or_below_it() {
     let declared = 12345;
     let mut request = prompt(Role::User, text(b"hello"));
     let wire = encode_request(&request, declared, &LIMITS).unwrap();
-    let decoded = super::decode_request(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap();
+    let decoded = super::decode_request(&Json::from_bytes(&wire, &LIMITS.document()).unwrap(), &LIMITS).unwrap();
     assert_eq!(decoded.prompt.max_output_tokens, Some(declared));
     request.max_output_tokens = Some(declared);
     assert_eq!(encode_request(&request, declared, &LIMITS).unwrap(), wire);
@@ -449,7 +458,7 @@ fn cache_markers_follow_shape_and_never_modify_native_reasoning() {
             Block::Dropped { bytes: 7 },
         ]);
         let wire = encode_request(&request, 4096, &LIMITS).unwrap();
-        let actual = super::decode_request(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap();
+        let actual = super::decode_request(&Json::from_bytes(&wire, &LIMITS.document()).unwrap(), &LIMITS).unwrap();
         assert_eq!(&*actual.marks, &[Mark::System { block: 1 }, Mark::Message { message: 0, block: 0 }]);
         assert_eq!(bytes::count(&wire, b"cache_control", 5), 2);
         assert_eq!(bytes::find(&wire, b"ttl"), None);
@@ -459,7 +468,7 @@ fn cache_markers_follow_shape_and_never_modify_native_reasoning() {
     }
     request.messages[0].content = Box::new([reasoning(signed)]);
     let wire = encode_request(&request, 4096, &LIMITS).unwrap();
-    let actual = super::decode_request(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap();
+    let actual = super::decode_request(&Json::from_bytes(&wire, &LIMITS.document()).unwrap(), &LIMITS).unwrap();
     assert_eq!(&*actual.marks, &[Mark::System { block: 1 }]);
     request.instructions = Box::new([]);
     let wire = encode_request(&request, 4096, &LIMITS).unwrap();
@@ -483,7 +492,7 @@ fn native_peer_admits_four_cache_marks_and_refuses_invalid_markers() {
         "]}]}",
     ]
     .join("");
-    let value = Json::from_bytes(wire.as_bytes(), &LIMITS).unwrap();
+    let value = Json::from_bytes(wire.as_bytes(), &LIMITS.document()).unwrap();
     assert_eq!(super::decode_request(&value, &LIMITS).unwrap().marks.len(), 4);
     for changed in [
         wire.replace(&[marked; 3].join(","), &[marked; 4].join(",")),
@@ -495,7 +504,7 @@ fn native_peer_admits_four_cache_marks_and_refuses_invalid_markers() {
         ),
         wire.replace(marked, r#"{"type":"redacted_thinking","data":"s","cache_control":{"type":"ephemeral"}}"#),
     ] {
-        let value = Json::from_bytes(changed.as_bytes(), &LIMITS).unwrap();
+        let value = Json::from_bytes(changed.as_bytes(), &LIMITS.document()).unwrap();
         let _error = super::decode_request(&value, &LIMITS).expect_err("invalid cache marker");
     }
 }

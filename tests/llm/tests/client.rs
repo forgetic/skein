@@ -223,7 +223,7 @@ fn codex_accepts_sse_without_content_type_but_rejects_explicit_wrong_or_duplicat
 #[test]
 fn malformed_truncated_and_oversized_streams_fail_once() {
     let mut small = limits();
-    small.sse.line = 32;
+    small.skip = 32;
     for (wire, bounds) in [
         (response(200, "Content-Type: text/event-stream\r\n", b"data: not-json\n\n", false), limits()),
         (
@@ -410,10 +410,10 @@ fn completed_messages_replay_reasoning_message_ids_and_tool_ids_on_next_turn() {
 #[test]
 fn independent_caps_bound_requests_errors_deltas_and_tool_arguments() {
     let mut tiny_request = limits();
-    tiny_request.dialect.request_bytes = 32;
+    tiny_request.request = 32;
     assert!(matches!(client::Client::prepare(call(1), &tiny_request), Err(Error::Limit { .. })));
     let mut token_cap = limits();
-    token_cap.dialect.tokens = 2;
+    token_cap.tokens = 2;
     let mut world = World::new(call(1), token_cap, text_response(false), 3);
     world.request(client::Request::Start);
     world.run();
@@ -442,7 +442,7 @@ fn independent_caps_bound_requests_errors_deltas_and_tool_arguments() {
     world.assert_once();
 
     let mut bounded = limits();
-    bounded.dialect.input_bytes = 2;
+    bounded.input = 2;
     let tool_documents = [
         r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"fc_1","type":"function_call"}}"#,
         r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":"{\"x\":1}"}}"#,
@@ -465,7 +465,7 @@ fn independent_caps_bound_requests_errors_deltas_and_tool_arguments() {
     );
 
     let mut bounded = limits();
-    bounded.dialect.answer_bytes = 1;
+    bounded.answer = 1;
     // Admission checks the prompt against the same answer cap, so use an
     // empty prompt while the incoming text delta exceeds it.
     let mut request = call(1);
@@ -502,7 +502,7 @@ fn exact_request_head_cap_is_checked_before_transport_binding() {
         &limits(),
     )
     .unwrap();
-    let content_length_extra = limits().dialect.request_bytes.to_string().len() - wire_body.to_string().len();
+    let content_length_extra = limits().request.to_string().len() - wire_body.to_string().len();
     assert_eq!(
         usize::try_from(measured).unwrap(),
         head_end + content_length_extra,
@@ -682,8 +682,10 @@ fn receiving_caps_admit_the_edge_and_refuse_one_over_by_name() {
     let head = u32::try_from(wire.windows(4).position(|part| part == b"\r\n\r\n").unwrap() + 4).unwrap();
     let document = u32::try_from(documents.iter().map(|document| document.len()).max().unwrap()).unwrap();
     let retained = values_text_edge(&documents);
-    let values: Vec<_> =
-        documents.iter().map(|text| Json::from_bytes(text.as_bytes(), &limits().dialect).unwrap()).collect();
+    let values: Vec<_> = documents
+        .iter()
+        .map(|text| Json::from_bytes(text.as_bytes(), &(limits().native()).document()).unwrap())
+        .collect();
     let tokens = values.iter().map(|value| value.document().len()).max().unwrap();
     let string = values
         .iter()
@@ -701,35 +703,33 @@ fn receiving_caps_admit_the_edge_and_refuse_one_over_by_name() {
         .unwrap();
     let opaque = u32::try_from(br#"{"id":"msg_1","phase":"final_answer"}"#.len()).unwrap();
     for (which, edge) in [
-        (Cap::Head, head),
-        (Cap::Document, retained),
+        (Cap::ResponseHead, head),
+        (Cap::Retained, retained),
         (Cap::Tokens, tokens),
-        (Cap::String, string),
+        (Cap::Strings, string),
         (Cap::Depth, 4),
-        (Cap::Line, document + 6),
-        (Cap::Event, document + 8),
-        (Cap::Parts, 1),
+        (Cap::Skip, document + 8),
+        (Cap::OutputItems, 1),
         (Cap::Answer, 31),
-        (Cap::Opaque, opaque),
+        (Cap::Metadata, opaque),
     ] {
         for bound in [edge, edge - 1] {
             let mut bounds = limits();
             match which {
-                Cap::Head => bounds.http.head = bound,
-                Cap::Document => bounds.dialect.document_bytes = bound,
-                Cap::Tokens => bounds.dialect.tokens = bound,
-                Cap::String => bounds.dialect.string_bytes = bound,
-                Cap::Depth => bounds.dialect.depth = bound,
-                Cap::Line => bounds.sse.line = bound,
-                Cap::Event => bounds.sse.event = bound,
-                Cap::Parts => {
+                Cap::ResponseHead => bounds.http.head = bound,
+                Cap::Retained => bounds.retained = bound,
+                Cap::Tokens => bounds.tokens = bound,
+                Cap::Strings => bounds.strings = bound,
+                Cap::Depth => bounds.depth = bound,
+                Cap::Skip => bounds.skip = bound,
+                Cap::OutputItems => {
                     if bound == 0 {
                         continue;
                     }
-                    bounds.dialect.parts = bound;
+                    bounds.output_items = bound;
                 }
-                Cap::Answer => bounds.dialect.answer_bytes = bound,
-                Cap::Opaque => bounds.dialect.opaque_bytes = bound,
+                Cap::Answer => bounds.answer = bound,
+                Cap::Metadata => bounds.metadata = bound,
                 _ => unreachable!(),
             }
             let mut input = call(10);
@@ -759,11 +759,11 @@ fn receiving_caps_admit_the_edge_and_refuse_one_over_by_name() {
 fn header_fields_and_sse_fields_keep_their_own_exact_bounds() {
     use skein_llm::Cap;
     let document = TERMINAL;
-    for (which, edge) in [(Cap::Headers, 8), (Cap::Field, 7)] {
+    for (which, edge) in [(Cap::ResponseFields, 8), (Cap::Field, 7)] {
         for bound in [edge, edge - 1] {
             let mut bounds = limits();
             let wire = match which {
-                Cap::Headers => {
+                Cap::ResponseFields => {
                     bounds.http.headers = bound;
                     response(
                         200,
@@ -807,7 +807,7 @@ fn header_fields_and_sse_fields_keep_their_own_exact_bounds() {
 #[test]
 fn an_error_documents_retained_token_limit_keeps_the_http_status() {
     let mut bounds = limits();
-    bounds.dialect.tokens = 2;
+    bounds.tokens = 2;
     let wire = response(
         401,
         "Content-Type: application/json\r\n",
@@ -883,7 +883,7 @@ fn owner_timeouts_keep_every_phase_and_clip_the_detail_without_repeating_a_termi
     ] {
         for bound in [7, 128] {
             let mut caps = limits();
-            caps.dialect.detail_bytes = bound;
+            caps.detail_bytes = bound;
             let mut world = World::new(call(1), caps, text_response(false), 41);
             let failure = Failure::TimedOut { phase };
             world.abort(failure);
@@ -905,7 +905,8 @@ fn values_text_edge(documents: &[&str]) -> u32 {
     documents
         .iter()
         .map(|text| {
-            let value = skein_llm::Json::from_bytes(text.as_bytes(), &limits().dialect).expect("handwritten event");
+            let value = skein_llm::Json::from_bytes(text.as_bytes(), &(limits().native()).document())
+                .expect("handwritten event");
             value.document().text_len()
         })
         .max()

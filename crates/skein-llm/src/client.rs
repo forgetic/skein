@@ -26,14 +26,65 @@ use crate::{
 pub struct Limits {
     pub http: http::Limits,
     pub sse: sse::Limits,
-    pub dialect: crate::DocumentLimits,
+    /// Bytes of one encoded request.
+    pub request: u32,
+    /// Model-written bytes in one completion, excluding opaque reasoning.
+    pub answer: u32,
+    /// Argument bytes of one call; larger inputs become oversize blocks.
+    pub input: u32,
+    /// Bytes of one provider reasoning item.
+    pub reasoning: u32,
+    /// Bytes of other replay metadata belonging to one block.
+    pub metadata: u32,
+    /// Blocks and content indexes in one completion.
+    pub output_items: u32,
+    /// Longest retained decoded string.
+    pub strings: u32,
+    /// Retained tokens of one event.
+    pub tokens: u32,
+    /// Retained decoded text of one event.
+    pub retained: u32,
+    /// Answer reservation beside the measured request in the owner's pool.
+    pub receiving: u32,
+    /// Scanned wire bytes of one event, never buffered as a whole.
+    pub skip: u32,
+    /// Tools in one request.
+    pub tools: u32,
+    /// Messages and blocks in one request.
+    pub history_items: u32,
+    pub depth: u32,
+    pub detail_bytes: u32,
     /// A non-success response body. At its cap the connection is closed.
     pub error_bytes: u32,
-    /// Drop Codex reasoning past the opaque cap; Anthropic thinking still fails.
+    /// Drop Codex reasoning past its cap; Anthropic thinking still fails.
     /// Default for direct prepare; explicit per-call preparation overrides it.
     pub drop_reasoning: bool,
     /// The endpoint model's declared completion ceiling, in tokens.
     pub declared_output_tokens: u32,
+}
+
+impl Limits {
+    /// The native codec's independent limits for this endpoint's dialect.
+    #[must_use]
+    pub const fn native(&self) -> openai::Limits {
+        openai::Limits {
+            request: self.request,
+            answer: self.answer,
+            input: self.input,
+            reasoning: self.reasoning,
+            metadata: self.metadata,
+            output_items: self.output_items,
+            strings: self.strings,
+            tokens: self.tokens,
+            retained: self.retained,
+            receiving: self.receiving,
+            skip: self.skip,
+            tools: self.tools,
+            history_items: self.history_items,
+            depth: self.depth,
+            detail_bytes: self.detail_bytes,
+        }
+    }
 }
 
 /// The owner's byte bounds on bearer and account values at one endpoint.
@@ -67,20 +118,20 @@ pub fn request_head(endpoint: &Endpoint, credential: &CredentialLimits, limits: 
         Provider::Anthropic => 0,
     };
     let mut count =
-        endpoint.headers.len().checked_add(5).ok_or(Error::limit(crate::Cap::Headers, limits.http.headers))?;
+        endpoint.headers.len().checked_add(5).ok_or(Error::limit(crate::Cap::ResponseFields, limits.http.headers))?;
     for field in &fields {
         if field.is_some() {
-            count = count.checked_add(1).ok_or(Error::limit(crate::Cap::Headers, limits.http.headers))?;
+            count = count.checked_add(1).ok_or(Error::limit(crate::Cap::ResponseFields, limits.http.headers))?;
         }
     }
     if count > usize::try_from(limits.http.headers).expect("u32 fits usize") {
-        return Err(Error::limit(crate::Cap::Headers, limits.http.headers));
+        return Err(Error::limit(crate::Cap::ResponseFields, limits.http.headers));
     }
     let measured = head_length(
         endpoint,
         usize::try_from(credential.access_token).expect("u32 fits usize"),
         account_bytes,
-        limits.dialect.request_bytes,
+        limits.request,
         &fields,
     )?;
     match u32::try_from(measured) {
@@ -241,13 +292,13 @@ impl Client {
     /// Stored endpoint bounds remain unchanged for connection reuse.
     pub fn prepare_with_reasoning_drop(input: Call, limits: &Limits, enabled: bool) -> Result<Client, Error> {
         if limits.http.headers < 6 {
-            return Err(Error::limit(crate::Cap::Headers, limits.http.headers));
+            return Err(Error::limit(crate::Cap::ResponseFields, limits.http.headers));
         }
         for (which, bound) in [
             (crate::Cap::ErrorBody, limits.error_bytes),
-            (crate::Cap::Parts, limits.dialect.parts),
-            (crate::Cap::Depth, limits.dialect.depth),
-            (crate::Cap::Tokens, limits.dialect.tokens),
+            (crate::Cap::OutputItems, limits.output_items),
+            (crate::Cap::Depth, limits.depth),
+            (crate::Cap::Tokens, limits.tokens),
         ] {
             if bound == 0 {
                 return Err(Error::limit(which, bound));
@@ -260,22 +311,23 @@ impl Client {
         let affinity = input.prompt.affinity;
         let (headers, body) = match provider {
             Provider::OpenAiCodex => {
-                let request = translate::request(input.prompt, provider, &limits.dialect)?;
-                let length = match openai::measure_request(&request, &limits.dialect) {
+                let request = translate::request(input.prompt, provider, &limits.native())?;
+                let length = match openai::measure_request(&request, &limits.native()) {
                     Ok(length) => length,
                     Err(error) => return Err(admission(error)),
                 };
                 let headers = headers(&input.endpoint, &input.credential, affinity, limits, length)?;
-                let body = match openai::encode_request(&request, &limits.dialect) {
+                let body = match openai::encode_request(&request, &limits.native()) {
                     Ok(body) => body,
                     Err(error) => return Err(admission(error)),
                 };
                 (headers, body)
             }
             Provider::Anthropic => {
-                let length = anthropic::measure_request(&input.prompt, limits.declared_output_tokens, &limits.dialect)?;
+                let length =
+                    anthropic::measure_request(&input.prompt, limits.declared_output_tokens, &limits.native())?;
                 let headers = headers(&input.endpoint, &input.credential, affinity, limits, length)?;
-                let body = anthropic::encode_request(&input.prompt, limits.declared_output_tokens, &limits.dialect)?;
+                let body = anthropic::encode_request(&input.prompt, limits.declared_output_tokens, &limits.native())?;
                 (headers, body)
             }
         };
@@ -294,9 +346,9 @@ impl Client {
             state: State::Prepared,
             outcome: Outcome::Pending,
             http: http::Client::new(&limits.http),
-            sse: sse::Reader::new(&limits.sse),
-            decoder: Some(dialect::Decoder::new(provider, &limits.dialect, enabled)),
-            content: Some(List::with_capacity(limits.dialect.parts)),
+            sse: sse::Reader::new(&event_stream(limits)),
+            decoder: Some(dialect::Decoder::new(provider, &limits.native(), enabled)),
+            content: Some(List::with_capacity(limits.output_items)),
             content_bytes: 0,
             call: Some(call),
             upload: Some(body),
@@ -500,7 +552,7 @@ pub fn resume(client: &mut Client, env: &Env<Limits>, above: &mut Queue<Event>, 
         } else if client.state == State::Streaming && client.asked {
             let decoder = client.decoder.as_mut().expect("a streaming client has its decoder");
             if decoder.has_ready() {
-                decoder.ready(&env.limits.dialect, &mut client.outputs);
+                decoder.ready(&env.limits.native(), &mut client.outputs);
             } else if client.sse.waiting() == sse::Waiting::Next {
                 sse_down(client, env, sse::Request::Next);
             } else if client.sse.waiting() == sse::Waiting::Above {
@@ -590,7 +642,7 @@ fn sent_evidence(client: &mut Client, below: &Queue<Down>, before: u32) {
 }
 
 fn sse_down(client: &mut Client, env: &Env<Limits>, request: sse::Request) {
-    let child = Env { now: env.now, wall: env.wall, limits: env.limits.sse };
+    let child = Env { now: env.now, wall: env.wall, limits: event_stream(&env.limits) };
     sse::down(&mut client.sse, &child, request, &mut client.sse_events, &mut client.sse_below);
     route_sse_down(client);
 }
@@ -690,9 +742,11 @@ fn http_failure(error: http::Error, limits: &Limits) -> Failure {
         | http::Error::Chunk
         | http::Error::Trailer
         | http::Error::Upgrade => Failure::Protocol,
-        http::Error::HeadTooLong => Failure::Limit { which: crate::Cap::Head, bound: u64::from(limits.http.head) },
+        http::Error::HeadTooLong => {
+            Failure::Limit { which: crate::Cap::ResponseHead, bound: u64::from(limits.http.head) }
+        }
         http::Error::TooManyHeaders => {
-            Failure::Limit { which: crate::Cap::Headers, bound: u64::from(limits.http.headers) }
+            Failure::Limit { which: crate::Cap::ResponseFields, bound: u64::from(limits.http.headers) }
         }
     }
 }
@@ -731,7 +785,7 @@ fn response_head(
 fn body_event(client: &mut Client, event: Up, env: &Env<Limits>, above: &mut Queue<Event>, below: &mut Queue<Down>) {
     match client.state {
         State::Streaming => {
-            let child = Env { now: env.now, wall: env.wall, limits: env.limits.sse };
+            let child = Env { now: env.now, wall: env.wall, limits: event_stream(&env.limits) };
             sse::up(&mut client.sse, &child, event, &mut client.sse_events, &mut client.sse_below);
             route_sse_down(client);
         }
@@ -763,6 +817,10 @@ fn body_event(client: &mut Client, event: Up, env: &Env<Limits>, above: &mut Que
     }
 }
 
+fn event_stream(limits: &Limits) -> sse::Limits {
+    sse::Limits { line: limits.skip, event: limits.skip, field: limits.sse.field, chunk: limits.sse.chunk }
+}
+
 fn sse_event(
     client: &mut Client,
     event: sse::Event,
@@ -788,14 +846,14 @@ fn sse_event(
                 EventData::Collected(document) => decoder.event(
                     &dispatch.name,
                     document,
-                    &env.limits.dialect,
+                    &env.limits.native(),
                     env.wall,
                     client.status,
                     client.rate,
                     &mut client.outputs,
                 ),
                 EventData::SentinelEnd => {
-                    decoder.end(&env.limits.dialect, &mut client.outputs);
+                    decoder.end(&env.limits.native(), &mut client.outputs);
                     Ok(())
                 }
                 EventData::Idle | EventData::First | EventData::Json | EventData::Sentinel(_) => {
@@ -815,15 +873,12 @@ fn sse_event(
         }
         sse::Event::Ended => {
             let decoder = client.decoder.as_mut().expect("the streaming state has its decoder");
-            decoder.end(&env.limits.dialect, &mut client.outputs);
+            decoder.end(&env.limits.native(), &mut client.outputs);
         }
         sse::Event::Failed(error) => {
             let failure = match error {
-                sse::Error::LineTooLong => {
-                    Failure::Limit { which: crate::Cap::Line, bound: u64::from(env.limits.sse.line) }
-                }
-                sse::Error::EventTooLong => {
-                    Failure::Limit { which: crate::Cap::Event, bound: u64::from(env.limits.sse.event) }
+                sse::Error::LineTooLong | sse::Error::EventTooLong => {
+                    Failure::Limit { which: crate::Cap::Skip, bound: u64::from(env.limits.skip) }
                 }
                 sse::Error::FieldTooLong => {
                     Failure::Limit { which: crate::Cap::Field, bound: u64::from(env.limits.sse.field) }
@@ -948,14 +1003,11 @@ fn output(
                 let size = block_size(&block);
                 let next = client.content_bytes.checked_add(size);
                 match next {
-                    Some(next) if next <= u64::from(env.limits.dialect.answer_bytes) => client.content_bytes = next,
+                    Some(next) if next <= u64::from(env.limits.answer) => client.content_bytes = next,
                     Some(_) | None => {
                         fail(
                             client,
-                            Failure::Limit {
-                                which: crate::Cap::Answer,
-                                bound: u64::from(env.limits.dialect.answer_bytes),
-                            },
+                            Failure::Limit { which: crate::Cap::Answer, bound: u64::from(env.limits.answer) },
                             bytes::copy_of(b""),
                             above,
                         );
@@ -967,7 +1019,7 @@ fn output(
                 if content.push(block.clone()).is_err() {
                     fail(
                         client,
-                        Failure::Limit { which: crate::Cap::Parts, bound: u64::from(env.limits.dialect.parts) },
+                        Failure::Limit { which: crate::Cap::OutputItems, bound: u64::from(env.limits.output_items) },
                         bytes::copy_of(b""),
                         above,
                     );
@@ -1043,7 +1095,7 @@ fn fail(client: &mut Client, failure: Failure, detail: Box<[u8]>, above: &mut Qu
     client.content = None;
     let detail = match failure {
         Failure::Limit { which, bound } => openai::limit_detail(which, bound),
-        Failure::TimedOut { phase } => openai::clip_detail(timeout_detail(phase), client.limits.dialect.detail_bytes),
+        Failure::TimedOut { phase } => openai::clip_detail(timeout_detail(phase), client.limits.detail_bytes),
         Failure::Unauthorized
         | Failure::Exhausted { .. }
         | Failure::RateLimited { .. }
@@ -1054,7 +1106,7 @@ fn fail(client: &mut Client, failure: Failure, detail: Box<[u8]>, above: &mut Qu
         | Failure::Protocol
         | Failure::Cancelled => detail,
     };
-    let detail = openai::clip_detail(&detail, client.limits.dialect.detail_bytes);
+    let detail = openai::clip_detail(&detail, client.limits.detail_bytes);
     above.push(Event::Failed { owner: client.owner, failure, evidence: client.evidence, detail });
 }
 
@@ -1070,9 +1122,9 @@ fn timeout_detail(phase: crate::Phase) -> &'static [u8] {
 }
 
 fn error_end(client: &mut Client, env: &Env<Limits>, above: &mut Queue<Event>) {
-    let mut limits = env.limits.dialect;
-    limits.document_bytes = env.limits.error_bytes;
-    let decoded = match openai::Json::from_bytes(client.error.as_slice(), &limits) {
+    let mut limits = env.limits.native();
+    limits.skip = env.limits.error_bytes;
+    let decoded = match openai::Json::from_bytes(client.error.as_slice(), &limits.document()) {
         Ok(json) => openai::decode_error(&json, &limits),
         Err(error) => Err(error),
     };
@@ -1187,9 +1239,9 @@ pub fn largest_room(limits: &Limits) -> u32 {
 pub fn worst_case(limits: &Limits) -> Option<u64> {
     if limits.error_bytes == 0
         || limits.http.headers < 6
-        || limits.dialect.parts == 0
-        || limits.dialect.depth == 0
-        || limits.dialect.tokens == 0
+        || limits.output_items == 0
+        || limits.depth == 0
+        || limits.tokens == 0
         || sse::largest_demand(&limits.sse) > limits.http.read
         || tokenizer::largest_demand(&filter::collector(limits).tokenizer) > limits.sse.chunk
     {
@@ -1198,11 +1250,11 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     u64::try_from(size_of::<Client>())
         .ok()?
         .checked_add(http::worst_case(&limits.http)?)?
-        .checked_add(sse::worst_case(&limits.sse)?)?
-        .checked_add(openai::worst_case(&limits.dialect)?.max(anthropic::worst_case(&limits.dialect)?))?
-        .checked_add(List::<Block>::worst_case(limits.dialect.parts)?.checked_mul(3)?)?
-        .checked_add(u64::from(limits.dialect.answer_bytes).checked_mul(4)?)?
-        .checked_add(u64::from(limits.dialect.request_bytes).checked_mul(4)?)?
+        .checked_add(sse::worst_case(&event_stream(limits))?)?
+        .checked_add(openai::worst_case(&limits.native())?.max(anthropic::worst_case(&limits.native())?))?
+        .checked_add(List::<Block>::worst_case(limits.output_items)?.checked_mul(3)?)?
+        .checked_add(u64::from(limits.answer).checked_mul(4)?)?
+        .checked_add(u64::from(limits.request).checked_mul(4)?)?
         .checked_add(u64::from(limits.http.request).checked_mul(4)?)?
         .checked_add(
             collector::worst_case(&filter::collector(limits), &filter::caps(limits), &openai::filter::EVENT)?.max(
@@ -1262,16 +1314,21 @@ fn headers(
     let mut fixed_count = 5_usize;
     for field in &fields {
         if field.is_some() {
-            fixed_count = fixed_count.checked_add(1).ok_or(Error::limit(crate::Cap::Headers, limits.http.headers))?;
+            fixed_count =
+                fixed_count.checked_add(1).ok_or(Error::limit(crate::Cap::ResponseFields, limits.http.headers))?;
         }
     }
     if total > usize::try_from(limits.http.request).expect("u32 fits usize") {
         return Err(Error::limit(crate::Cap::RequestHead, limits.http.request));
     }
-    if endpoint.headers.len().checked_add(fixed_count).ok_or(Error::limit(crate::Cap::Headers, limits.http.headers))?
+    if endpoint
+        .headers
+        .len()
+        .checked_add(fixed_count)
+        .ok_or(Error::limit(crate::Cap::ResponseFields, limits.http.headers))?
         > usize::try_from(limits.http.headers).expect("u32 fits usize")
     {
-        return Err(Error::limit(crate::Cap::Headers, limits.http.headers));
+        return Err(Error::limit(crate::Cap::ResponseFields, limits.http.headers));
     }
     let mut headers = List::with_capacity(limits.http.headers);
     for (name, value) in [

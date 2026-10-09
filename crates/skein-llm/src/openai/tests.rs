@@ -18,22 +18,28 @@ use skein_json::Token;
 use skein_lib::{Duration, Queue, Wall, bytes};
 
 const LIMITS: Limits = Limits {
-    request_bytes: 65536,
-    document_bytes: 65536,
-    string_bytes: 16384,
+    request: 65536,
+    retained: 65536,
+    strings: 16384,
     depth: 32,
     tokens: 4096,
-    parts: 32,
-    input_bytes: 8192,
-    opaque_bytes: 8192,
-    answer_bytes: 32768,
+    output_items: 32,
+    input: 8192,
+    reasoning: 8192,
+    answer: 32768,
     detail_bytes: 256,
+
+    tools: 32,
+    history_items: 32,
+    metadata: 8192,
+    receiving: 1_048_576,
+    skip: 65536,
 };
 fn owned(b: &[u8]) -> Box<[u8]> {
     bytes::copy_of(b)
 }
 fn value(b: &[u8]) -> Json {
-    Json::from_bytes(b, &LIMITS).unwrap()
+    Json::from_bytes(b, &LIMITS.document()).unwrap()
 }
 fn request() -> Request {
     Request {
@@ -117,12 +123,12 @@ fn dechunk(input: &[u8]) -> Vec<u8> {
 fn measured_request_replays_all_input_kinds_and_bounded_raw_arguments() {
     let request = request();
     let body = encode_request(&request, &LIMITS).unwrap();
-    let document = Json::from_bytes(&body, &LIMITS).unwrap();
+    let document = Json::from_bytes(&body, &LIMITS.document()).unwrap();
     assert_eq!(decode_request(&document, &LIMITS).unwrap(), request);
-    assert_eq!(body.as_ref(), document.to_bytes(&LIMITS).unwrap().as_ref());
+    assert_eq!(body.as_ref(), document.to_bytes(&LIMITS.document()).unwrap().as_ref());
     assert!(bytes::find(&body, b"max_output_tokens").is_none());
     assert_eq!(
-        encode_request(&request, &Limits { request_bytes: u32::try_from(body.len()).unwrap() - 1, ..LIMITS }),
+        encode_request(&request, &Limits { request: u32::try_from(body.len()).unwrap() - 1, ..LIMITS }),
         Err(DecodeError::limit(crate::Cap::Request, u32::try_from(body.len()).unwrap() - 1))
     );
     for (arguments, encoded) in [
@@ -137,15 +143,12 @@ fn measured_request_replays_all_input_kinds_and_bounded_raw_arguments() {
             name: owned(b"read"),
             arguments: owned(arguments),
         }]);
-        let bounded = Limits { string_bytes: u32::try_from(arguments.len()).unwrap(), ..LIMITS };
+        let bounded = Limits { strings: u32::try_from(arguments.len()).unwrap(), ..LIMITS };
         let body = encode_request(&raw, &bounded).unwrap();
         assert!(bytes::find(&body, encoded).is_some(), "exact native argument string, without inner parsing");
-        let document = Json::from_bytes(&body, &LIMITS).unwrap();
+        let document = Json::from_bytes(&body, &LIMITS.document()).unwrap();
         assert_eq!(decode_request(&document, &bounded).unwrap(), raw);
-        assert_eq!(
-            encode_request(&raw, &Limits { string_bytes: bounded.string_bytes - 1, ..LIMITS }),
-            Err(DecodeError::limit(crate::Cap::String, bounded.string_bytes - 1))
-        );
+        encode_request(&raw, &Limits { strings: bounded.strings - 1, ..LIMITS }).unwrap();
     }
     let mut invalid = request.clone();
     invalid.input = Box::new([Input::FunctionCall {
@@ -171,7 +174,7 @@ fn function_call_without_provider_item_id_omits_the_optional_field() {
     }]);
     let body = encode_request(&request, &LIMITS).unwrap();
     assert!(bytes::find(&body, br#""id":"#).is_none());
-    let document = Json::from_bytes(&body, &LIMITS).unwrap();
+    let document = Json::from_bytes(&body, &LIMITS.document()).unwrap();
     assert_eq!(decode_request(&document, &LIMITS).unwrap(), request);
 }
 
@@ -228,7 +231,7 @@ fn synthetic_parallel_tools_reasoning_and_message_heads_keep_order() {
         })
         .collect();
     assert_eq!(parts.len(), 4);
-    assert_eq!(parts[0], &Part::Opaque { bytes: reasoning.to_bytes(&LIMITS).unwrap() });
+    assert_eq!(parts[0], &Part::Opaque { bytes: reasoning.to_bytes(&LIMITS.document()).unwrap() });
     assert_eq!(
         parts[1],
         &Part::Text { id: owned(b"m"), phase: Some(owned(b"commentary")), text: owned(b"hello"), refusal: false }
@@ -262,7 +265,7 @@ fn input_cap_discards_input_and_answer_limit_emits_one_failed_terminal() {
         },
         Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
     ];
-    let trace = stream(&events, &Limits { input_bytes: 3, ..LIMITS });
+    let trace = stream(&events, &Limits { input: 3, ..LIMITS });
     assert!(trace.iter().any(|out| match out {
         Output::Part(Part::ToolCall { input, too_large: true, bytes: 12, cut: false, .. }) if input.is_empty() => true,
         _ => false,
@@ -279,7 +282,7 @@ fn input_cap_discards_input_and_answer_limit_emits_one_failed_terminal() {
         },
         Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
     ];
-    let trace = stream(&events, &Limits { answer_bytes: 4, ..LIMITS });
+    let trace = stream(&events, &Limits { answer: 4, ..LIMITS });
     assert!(match trace.last() {
         Some(Output::Failed { failure: Failure::Limit { .. }, .. }) => true,
         _ => false,
@@ -442,39 +445,43 @@ fn completed_usage_keeps_cached_over_total_and_done_honors_incomplete_status() {
 #[test]
 fn malformed_tokens_duplicates_and_every_document_limit_are_refused() {
     for bytes in [b"{]".as_slice(), b"[1,]", b"{}{}", b"\"\\ud800\"", b"{\"a\":}"] {
-        assert_eq!(Json::from_bytes(bytes, &LIMITS).unwrap_err(), DecodeError::Malformed);
+        assert_eq!(Json::from_bytes(bytes, &LIMITS.document()).unwrap_err(), DecodeError::Malformed);
     }
     let tokens = [Token::ObjectStart, Token::Key(owned(b"a")), Token::ObjectEnd];
     assert_eq!(
         Json::from_document(
             skein_json::Document::from_tokens(&tokens, &skein_json::document::Limits { tokens: 3, text: 1 }).unwrap(),
-            &LIMITS
+            &LIMITS.document()
         ),
         Err(DecodeError::Malformed)
     );
     assert_eq!(
-        Json::from_bytes(b"{}", &Limits { tokens: 1, ..LIMITS }),
+        Json::from_bytes(b"{}", &(Limits { tokens: 1, ..LIMITS }).document()),
         Err(DecodeError::limit(crate::Cap::Tokens, 1))
     );
     assert_eq!(
-        Json::from_bytes(br#"{"deep":[{}]}"#, &Limits { depth: 2, ..LIMITS }).unwrap_err(),
+        Json::from_bytes(br#"{"deep":[{}]}"#, &(Limits { depth: 2, ..LIMITS }).document()).unwrap_err(),
         DecodeError::limit(crate::Cap::Depth, 2)
     );
     assert_eq!(
-        Json::from_bytes(b"\"long\"", &Limits { string_bytes: 3, ..LIMITS }).unwrap_err(),
-        DecodeError::limit(crate::Cap::String, 3)
+        Json::from_bytes(b"\"long\"", &(Limits { strings: 3, ..LIMITS }).document()).unwrap_err(),
+        DecodeError::limit(crate::Cap::Strings, 3)
     );
     assert_eq!(
         decode_event(&value(br#"{"type":"response.created","type":"error"}"#), &LIMITS),
         Err(DecodeError::Malformed)
     );
-    assert!(worst_case(&LIMITS).unwrap() > u64::from(LIMITS.answer_bytes));
-    let oversized = Limits { parts: u32::MAX, ..LIMITS };
+    assert!(worst_case(&LIMITS).unwrap() > u64::from(LIMITS.answer));
+    let oversized = Limits { output_items: u32::MAX, ..LIMITS };
     assert!(
         worst_case(&oversized).unwrap() > worst_case(&LIMITS).unwrap(),
         "large finite bounds must be reported to the caller"
     );
-    assert_eq!(worst_case(&Limits { parts: u32::MAX, tokens: u32::MAX, ..LIMITS }), None);
+    let large = Limits { output_items: u32::MAX, tokens: u32::MAX, reasoning: u32::MAX, ..LIMITS };
+    assert!(worst_case(&large).unwrap() > worst_case(&LIMITS).unwrap());
+    let overflowing =
+        Limits { output_items: u32::MAX, input: u32::MAX, strings: u32::MAX, retained: u32::MAX, ..large };
+    assert_eq!(worst_case(&overflowing), None);
 }
 
 fn assert_archive_deltas(trace: &[Output]) {
@@ -502,7 +509,7 @@ fn archived_real_provider_requests_and_answers_match_known_completions() {
         ("tool-call", 76, 18, 1, 0),
         ("tool-result-final", 116, 12, 0, 0),
     ] {
-        let wrapper = Json::from_bytes(&fixture(scenario, "request.json"), &LIMITS).unwrap();
+        let wrapper = Json::from_bytes(&fixture(scenario, "request.json"), &LIMITS.document()).unwrap();
         let body =
             json::text_ref(json::value_at(wrapper.view(), json::required(wrapper.view(), b"body").unwrap()).unwrap())
                 .unwrap();
@@ -701,7 +708,7 @@ fn server_refuses_request_limit_even_when_document_limit_is_larger() {
     let body = encode_request(&request(), &LIMITS).unwrap();
     let document = value(&body);
     assert_eq!(
-        decode_request(&document, &Limits { request_bytes: u32::try_from(body.len()).unwrap() - 1, ..LIMITS }),
+        decode_request(&document, &Limits { request: u32::try_from(body.len()).unwrap() - 1, ..LIMITS }),
         Err(DecodeError::limit(crate::Cap::Request, u32::try_from(body.len()).unwrap() - 1))
     );
 }
@@ -783,7 +790,7 @@ fn delta_references_and_cumulative_size_are_checked_and_failure_is_terminal() {
             Event::TextDelta { index: 0, content_index: 0, text: owned(b"ignored") },
             Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
         ],
-        &Limits { answer_bytes: 3, ..LIMITS },
+        &Limits { answer: 3, ..LIMITS },
     );
     assert_eq!(trace.len(), 3);
     assert_eq!(trace[1], Output::TextDelta { index: 0, content_index: 0, text: owned(b"ab") });
@@ -821,16 +828,16 @@ fn refusal_replays_with_provider_content_type_and_user_refusal_is_rejected() {
 #[test]
 fn zero_capacity_limits_refuse_without_panicking_and_diagnostics_obey_the_cap() {
     assert_eq!(
-        encode_request(&request(), &Limits { request_bytes: 0, ..LIMITS }),
+        encode_request(&request(), &Limits { request: 0, ..LIMITS }),
         Err(DecodeError::limit(crate::Cap::Request, 0))
     );
     for limits in [
-        Limits { document_bytes: 0, ..LIMITS },
-        Limits { string_bytes: 0, ..LIMITS },
+        Limits { skip: 0, ..LIMITS },
+        Limits { strings: 0, ..LIMITS },
         Limits { depth: 0, ..LIMITS },
         Limits { tokens: 0, ..LIMITS },
     ] {
-        let error = Json::from_bytes(br#"{"a":[]}"#, &limits).unwrap_err();
+        let error = Json::from_bytes(br#"{"a":[]}"#, &limits.document()).unwrap_err();
         assert!(match error {
             DecodeError::TooLarge { bound: 0, .. } => true,
             _ => false,
@@ -838,28 +845,34 @@ fn zero_capacity_limits_refuse_without_panicking_and_diagnostics_obey_the_cap() 
     }
     let trace = stream(
         &[Event::Added { index: 0, id: owned(b"m"), kind: owned(b"message") }],
-        &Limits { parts: 0, detail_bytes: 2, ..LIMITS },
+        &Limits { output_items: 0, detail_bytes: 2, ..LIMITS },
     );
     assert_eq!(
         trace,
         Vec::from([Output::Failed {
-            failure: Failure::Limit { which: crate::Cap::Parts, bound: 0 },
+            failure: Failure::Limit { which: crate::Cap::OutputItems, bound: 0 },
             detail: owned(b"co")
         }])
     );
     let trace = stream(&[Event::Progress], &Limits { detail_bytes: 0, ..LIMITS });
     assert_eq!(trace.last(), Some(&Output::Failed { failure: Failure::Protocol, detail: owned(b"") }));
     let limits = Limits {
-        request_bytes: 0,
-        document_bytes: 0,
-        string_bytes: 0,
+        request: 0,
+        retained: 0,
+        strings: 0,
         depth: 0,
         tokens: 0,
-        parts: 0,
-        input_bytes: 0,
-        opaque_bytes: 0,
-        answer_bytes: 0,
+        output_items: 0,
+        input: 0,
+        reasoning: 0,
+        answer: 0,
         detail_bytes: 0,
+
+        tools: 0,
+        history_items: 0,
+        metadata: 0,
+        receiving: 1_048_576,
+        skip: 0,
     };
     assert!(worst_case(&limits).is_some(), "zero capacities still have a finite scratch bound");
 }
@@ -891,7 +904,7 @@ fn separate_opaque_tool_ids_each_obey_string_and_joint_answer_caps() {
         },
         Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
     ];
-    let exact = Limits { string_bytes: 13, answer_bytes: 20, ..LIMITS };
+    let exact = Limits { strings: 13, answer: 20, ..LIMITS };
     let trace = stream(&events, &exact);
     assert_eq!(
         trace[1],
@@ -906,7 +919,7 @@ fn separate_opaque_tool_ids_each_obey_string_and_joint_answer_caps() {
         })
     );
     assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::NONE }));
-    let trace = stream(&events, &Limits { answer_bytes: 19, ..exact });
+    let trace = stream(&events, &Limits { answer: 19, ..exact });
     assert!(match trace.last() {
         Some(Output::Failed { failure: Failure::Limit { .. }, .. }) => true,
         _ => false,
@@ -930,10 +943,10 @@ fn separate_opaque_tool_ids_each_obey_string_and_joint_answer_caps() {
             Event::Completed { stop: Stop::EndTurn, usage: Usage::NONE },
         ];
         assert_eq!(
-            stream(&events, &Limits { string_bytes: 14, answer_bytes: 27, ..exact }).last(),
+            stream(&events, &Limits { strings: 14, answer: 27, ..exact }).last(),
             Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::NONE })
         );
-        let trace = stream(&events, &Limits { string_bytes: 13, answer_bytes: 27, ..exact });
+        let trace = stream(&events, &Limits { strings: 13, answer: 27, ..exact });
         assert!(match trace.last() {
             Some(Output::Failed { failure: Failure::Limit { .. }, .. }) => true,
             _ => false,
@@ -943,9 +956,9 @@ fn separate_opaque_tool_ids_each_obey_string_and_joint_answer_caps() {
 
 #[test]
 fn numerals_keep_the_fixed_tokenizer_cap_distinct_from_strings() {
-    let limits = Limits { string_bytes: 64, ..LIMITS };
-    Json::from_bytes(&[b'1'; 32], &limits).unwrap();
-    assert_eq!(Json::from_bytes(&[b'1'; 33], &limits), Err(DecodeError::limit(crate::Cap::Number, 32)));
+    let limits = Limits { strings: 64, ..LIMITS };
+    Json::from_bytes(&[b'1'; 32], &limits.document()).unwrap();
+    assert_eq!(Json::from_bytes(&[b'1'; 33], &limits.document()), Err(DecodeError::limit(crate::Cap::Number, 32)));
 }
 
 #[test]
@@ -956,7 +969,7 @@ fn tool_choice_encodes_auto_none_and_only_without_filtering() {
         let mut request = request();
         request.choice = choice.clone();
         let wire = encode_request(&request, &LIMITS).expect("bounded choice");
-        let value = Json::from_bytes(&wire, &LIMITS).expect("request object");
+        let value = Json::from_bytes(&wire, &LIMITS.document()).expect("request object");
         let tokens = value.view();
         let encoded =
             json::text_ref(json::value_at(tokens, json::required(tokens, b"tool_choice").unwrap()).unwrap()).unwrap();
@@ -991,7 +1004,7 @@ fn unfinished_native_call_keeps_its_identity_and_arguments_at_the_output_cap() {
     ];
     for event in &events {
         let wire = encode_event(event, &LIMITS).expect("native event");
-        assert_eq!(decode_event(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap(), *event);
+        assert_eq!(decode_event(&Json::from_bytes(&wire, &LIMITS.document()).unwrap(), &LIMITS).unwrap(), *event);
     }
     let trace = stream(&events, &LIMITS);
     assert!(trace.iter().any(|output| match output {
@@ -1026,7 +1039,7 @@ fn escaped_argument_text_is_counted_at_the_input_edge_and_one_over() {
     ];
     for below in [false, true] {
         let input = u32::try_from(arguments.len()).unwrap() - u32::from(below);
-        let limits = Limits { input_bytes: input, ..LIMITS };
+        let limits = Limits { input, ..LIMITS };
         let trace = stream(&events, &limits);
         let part = trace
             .iter()
@@ -1069,7 +1082,7 @@ fn a_native_done_item_marked_incomplete_is_a_cut_and_requires_the_output_cap() {
         Event::Completed { stop: Stop::MaxTokens, usage: Usage::NONE },
     ];
     let wire = encode_event(&events[1], &LIMITS).expect("incomplete provider item");
-    assert_eq!(decode_event(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap(), events[1]);
+    assert_eq!(decode_event(&Json::from_bytes(&wire, &LIMITS.document()).unwrap(), &LIMITS).unwrap(), events[1]);
     let trace = stream(&events, &LIMITS);
     assert!(trace.iter().any(|output| match output {
         Output::Part(Part::ToolCall { input, cut: true, .. }) => input.as_ref() == b"{broken",
@@ -1092,10 +1105,14 @@ fn reasoning_drop_is_opt_in_at_one_over_and_never_drops_unknown_items() {
         raw.extend_from_slice(kind);
         raw.extend_from_slice(br#"","id":"r","encrypted_content":"secret","summary":[]}"#);
         let opaque = value(&raw);
-        let size = u32::try_from(opaque.to_bytes(&LIMITS).unwrap().len()).unwrap();
+        let size = if kind == b"reasoning" {
+            6
+        } else {
+            u32::try_from(opaque.to_bytes(&LIMITS.document()).unwrap().len()).unwrap()
+        };
         for (cap, enabled) in [(size, false), (size, true), (size - 1, false), (size - 1, true)] {
             let mut bounds = LIMITS;
-            bounds.opaque_bytes = cap;
+            bounds.reasoning = cap;
             let mut decoder = StreamDecoder::with_reasoning_drop(&bounds, enabled);
             let mut out = Queue::with_capacity(crate::openai::MAX_OUT);
             let mut trace = Vec::new();
@@ -1123,7 +1140,7 @@ fn reasoning_drop_is_opt_in_at_one_over_and_never_drops_unknown_items() {
                 }));
             } else {
                 assert!(trace.iter().any(|event| match event {
-                    Output::Failed { failure: Failure::Limit { which: crate::Cap::Opaque, bound }, .. } =>
+                    Output::Failed { failure: Failure::Limit { which: crate::Cap::Reasoning, bound }, .. } =>
                         *bound == u64::from(cap),
                     _ => false,
                 }));
@@ -1231,9 +1248,9 @@ fn compact_ranges_borrow_nested_text_and_admit_only_the_selected_value() {
     assert_eq!(json::unsigned(json::value_at(array, *offsets.get(0).unwrap()).unwrap()).unwrap(), 1);
     let nested = json::value_at(array, *offsets.get(1).unwrap()).unwrap();
     assert_eq!(json::text_ref(json::value_at(nested, json::required(nested, b"x").unwrap()).unwrap()).unwrap(), b"s");
-    let copied = Json::from_view(selected, &LIMITS).unwrap();
+    let copied = Json::from_view(selected, &LIMITS.document()).unwrap();
     assert_eq!(copied, value(br#"{"message":"abc","array":[1,{"x":"s"}]}"#));
-    assert_eq!(copied.to_bytes(&LIMITS).unwrap().as_ref(), br#"{"message":"abc","array":[1,{"x":"s"}]}"#);
+    assert_eq!(copied.to_bytes(&LIMITS.document()).unwrap().as_ref(), br#"{"message":"abc","array":[1,{"x":"s"}]}"#);
     assert!(
         copied.document().text_len() < source.document().text_len(),
         "selected admission retains only its own text"
@@ -1248,7 +1265,7 @@ fn a_discarded_string_length_is_not_a_neutral_writable_json_value() {
         &skein_json::document::Limits { tokens: 1, text: 0 },
     )
     .unwrap();
-    assert_eq!(Json::from_document(document, &LIMITS), Err(DecodeError::Malformed));
+    assert_eq!(Json::from_document(document, &LIMITS.document()), Err(DecodeError::Malformed));
 }
 
 fn projected(input: &[u8], provider: crate::Provider) -> skein_json::Document {

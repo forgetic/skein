@@ -235,7 +235,7 @@ fn codex_calls_complete_reuse_and_replay_one_plaintext_connection() {
 fn per_call_reasoning_policy(endpoint_default: bool) {
     let mut client_limits = skein_llm_world::limits();
     client_limits.drop_reasoning = endpoint_default;
-    client_limits.dialect.opaque_bytes = 24;
+    client_limits.reasoning = 5;
     let mut endpoints = List::with_capacity(1);
     endpoints
         .push(Endpoint {
@@ -295,7 +295,7 @@ fn per_call_reasoning_policy(endpoint_default: bool) {
             match event {
                 Event::Delta { call, .. } => component.down(&env, Request::Next { call }, &mut up, &mut io),
                 Event::Block { call, block } => {
-                    assert!(matches!(block, skein_llm::Block::Dropped { bytes } if bytes > 24));
+                    assert!(matches!(block, skein_llm::Block::Dropped { bytes: 6 }));
                     dropped += 1;
                     component.down(&env, Request::Next { call }, &mut up, &mut io);
                 }
@@ -305,7 +305,7 @@ fn per_call_reasoning_policy(endpoint_default: bool) {
                 }
                 Event::Failed { call, failure, .. } => {
                     assert_eq!(call, Token::new(9));
-                    assert_eq!(failure, skein_llm::Failure::Limit { which: skein_llm::Cap::Opaque, bound: 24 });
+                    assert_eq!(failure, skein_llm::Failure::Limit { which: skein_llm::Cap::Reasoning, bound: 5 });
                     failed += 1;
                 }
                 Event::Closed => closed = true,

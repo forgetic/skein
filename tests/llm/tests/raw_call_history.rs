@@ -71,10 +71,16 @@ fn restore(block: &Block) -> Block {
     assert_eq!(id.as_ref(), b"raw_call");
     assert_eq!(name.as_ref(), b"host_action");
     assert_eq!(arguments.as_ref(), RAW);
-    let durable =
-        replay.as_ref().expect("actual item metadata").to_bytes(&limits().dialect).expect("bounded durable record");
-    let replay = Replay::from_bytes(&durable, &limits().dialect).expect("restore actual metadata");
-    assert_eq!(replay.value.to_bytes(&limits().dialect).expect("raw metadata").as_ref(), br#"{"item_id":"raw_item"}"#);
+    let durable = replay
+        .as_ref()
+        .expect("actual item metadata")
+        .to_bytes(&limits().native().document())
+        .expect("bounded durable record");
+    let replay = Replay::from_bytes(&durable, &(limits().native()).document()).expect("restore actual metadata");
+    assert_eq!(
+        replay.value.to_bytes(&(limits().native()).document()).expect("raw metadata").as_ref(),
+        br#"{"item_id":"raw_item"}"#
+    );
     Block::ToolCall { id: id.clone(), name: name.clone(), arguments: arguments.clone(), replay: Some(replay) }
 }
 
@@ -96,8 +102,9 @@ fn next(block: Block, error: bool) -> Call {
 
 fn native(world: &World) -> openai::Request {
     let at = world.sent.windows(4).position(|bytes| bytes == b"\r\n\r\n").expect("actual request head") + 4;
-    let document = Json::from_bytes(&world.sent[at..], &world.env.limits.dialect).expect("actual native request");
-    openai::decode_request(&document, &world.env.limits.dialect).expect("raw argument string is representable")
+    let document =
+        Json::from_bytes(&world.sent[at..], &world.env.limits.native().document()).expect("actual native request");
+    openai::decode_request(&document, &world.env.limits.native()).expect("raw argument string is representable")
 }
 
 fn evidence(request: &openai::Request) -> bool {
@@ -153,7 +160,7 @@ fn actual_malformed_call_replays_with_exact_error_feedback_and_corrects() {
     let [block] = completed(&first, 61).content.as_ref() else {
         panic!("one actual malformed call");
     };
-    assert!(Json::from_bytes(RAW, &limits().dialect).is_err(), "application must not execute this body");
+    assert!(Json::from_bytes(RAW, &(limits().native()).document()).is_err(), "application must not execute this body");
     let restored = restore(block);
     close(&mut first);
     let mut second = World::new(next(restored.clone(), true), limits(), source(true), 29);
@@ -166,7 +173,7 @@ fn actual_malformed_call_replays_with_exact_error_feedback_and_corrects() {
     assert_eq!(id.as_ref(), b"fixed_call");
     assert_eq!(name.as_ref(), b"host_action");
     assert_eq!(arguments.as_ref(), FIXED);
-    assert!(Json::from_bytes(arguments, &limits().dialect).is_ok(), "corrected object is representable");
+    assert!(Json::from_bytes(arguments, &(limits().native()).document()).is_ok(), "corrected object is representable");
     let observed = native(&second);
     corruptions(&observed);
     close(&mut second);
@@ -213,26 +220,23 @@ fn history(arguments: &[u8]) -> Call {
 }
 
 #[test]
-fn native_and_client_admission_bound_raw_strings_and_utf8_without_inner_parsing() {
+fn sent_raw_arguments_use_request_bytes_and_validate_utf8_without_inner_parsing() {
     let mut bounds = limits();
-    bounds.dialect.string_bytes = 8;
+    bounds.strings = 8;
     for raw in [b"".as_slice(), b"broken", b"123", b"[]", b"\"\\\n{bad!"] {
         let request = raw_request(raw);
-        let wire = openai::encode_request(&request, &bounds.dialect).expect("bounded native argument string");
-        let value = Json::from_bytes(&wire, &limits().dialect).expect("complete actual outer document");
-        assert_eq!(openai::decode_request(&value, &bounds.dialect).expect("native raw string roundtrip"), request);
+        let wire = openai::encode_request(&request, &bounds.native()).expect("bounded native argument string");
+        let value = Json::from_bytes(&wire, &(limits().native()).document()).expect("complete actual outer document");
+        assert_eq!(openai::decode_request(&value, &bounds.native()).expect("native raw string roundtrip"), request);
         assert!(client::Client::prepare(history(raw), &bounds).is_ok(), "generic admission accepts bounded raw text");
     }
     let exact = b"\"\\\n{bad!";
     assert_eq!(exact.len(), 8, "attained raw cap");
     assert!(client::Client::prepare(history(exact), &bounds).is_ok());
     let over = b"\"\\\n{bad!!";
-    assert_eq!(
-        openai::encode_request(&raw_request(over), &bounds.dialect),
-        Err(openai::DecodeError::TooLarge { which: skein_llm::Cap::String, bound: 8 })
-    );
-    assert!(matches!(client::Client::prepare(history(over), &bounds), Err(Error::Limit { .. })));
-    assert_eq!(openai::encode_request(&raw_request(&[0xff]), &bounds.dialect), Err(openai::DecodeError::Malformed));
+    assert!(openai::encode_request(&raw_request(over), &bounds.native()).is_ok());
+    assert!(client::Client::prepare(history(over), &bounds).is_ok());
+    assert_eq!(openai::encode_request(&raw_request(&[0xff]), &bounds.native()), Err(openai::DecodeError::Malformed));
     assert!(matches!(client::Client::prepare(history(&[0xff]), &bounds), Err(Error::Invalid)));
 }
 
@@ -240,16 +244,13 @@ fn native_and_client_admission_bound_raw_strings_and_utf8_without_inner_parsing(
 fn native_and_actual_client_request_bounds_charge_complete_escaped_history() {
     let request = raw_request(RAW);
     let mut bounds = limits();
-    let wire = openai::encode_request(&request, &bounds.dialect).expect("escaped malformed string fits");
-    bounds.dialect.request_bytes = u32::try_from(wire.len()).expect("small actual native document");
-    assert_eq!(openai::encode_request(&request, &bounds.dialect).expect("exact escaped cap"), wire);
-    bounds.dialect.request_bytes -= 1;
+    let wire = openai::encode_request(&request, &bounds.native()).expect("escaped malformed string fits");
+    bounds.request = u32::try_from(wire.len()).expect("small actual native document");
+    assert_eq!(openai::encode_request(&request, &bounds.native()).expect("exact escaped cap"), wire);
+    bounds.request -= 1;
     assert_eq!(
-        openai::encode_request(&request, &bounds.dialect),
-        Err(openai::DecodeError::TooLarge {
-            which: skein_llm::Cap::Request,
-            bound: u64::from(bounds.dialect.request_bytes)
-        })
+        openai::encode_request(&request, &bounds.native()),
+        Err(openai::DecodeError::TooLarge { which: skein_llm::Cap::Request, bound: u64::from(bounds.request) })
     );
 
     let mut world = World::new(history(RAW), limits(), text_response(false), 37);
@@ -260,14 +261,14 @@ fn native_and_actual_client_request_bounds_charge_complete_escaped_history() {
     let length = world.sent.len() - at;
     close(&mut world);
     bounds = limits();
-    bounds.dialect.request_bytes = u32::try_from(length).expect("small escaped request");
+    bounds.request = u32::try_from(length).expect("small escaped request");
     let mut exact = World::new(history(RAW), bounds, text_response(false), 41);
     exact.request(client::Request::Start);
     exact.run();
     completed(&exact, 71);
     assert_eq!(exact.sent.len() - at, length, "whole actual escaped body reaches receiving cap");
     close(&mut exact);
-    bounds.dialect.request_bytes -= 1;
+    bounds.request -= 1;
     assert!(
         matches!(client::Client::prepare(history(RAW), &bounds), Err(Error::Limit { .. })),
         "refusal occurs before Start/stream/terminal"

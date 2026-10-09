@@ -277,10 +277,9 @@ fn random_and_scripted_full_and_truncated_tool_scratch_stays_within_the_bound() 
 #[test]
 fn configured_codex_echo_request_and_entry_scratch_fit_the_peer_price() {
     let mut bounds = skein_llm_world::limits();
-    bounds.dialect.parts = 32;
-    bounds.dialect.document_bytes = 32768;
-    bounds.sse.line = 32768;
-    bounds.sse.event = 32768;
+    bounds.output_items = 32;
+    bounds.retained = 32768;
+    bounds.skip = 32768;
     let observations = skein_llm_world::fake::ObservationLimits {
         heads: 1,
         head_bytes: 8192,
@@ -289,7 +288,7 @@ fn configured_codex_echo_request_and_entry_scratch_fit_the_peer_price() {
         queries: 1,
         query_bytes: 65536,
         pending: 0,
-        request_bytes: 32768,
+        request: 32768,
         response_bytes: 65536,
     };
     let echo = skein_llm::openai::Echo { instructions: true, tools: true, attribution_bytes: 256 };

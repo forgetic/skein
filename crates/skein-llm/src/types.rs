@@ -180,29 +180,33 @@ pub enum Cap {
     /// The configured bound on encoded request head.
     RequestHead,
     /// The configured bound on response head.
-    Head,
+    ResponseHead,
     /// The configured bound on HTTP header field count.
-    Headers,
-    /// The configured bound on SSE line.
-    Line,
-    /// The configured bound on SSE event.
-    Event,
+    ResponseFields,
+    /// Scanned wire bytes of one event.
+    Skip,
     /// The configured bound on an SSE event type or identifier.
     Field,
-    /// The configured bound on JSON document.
-    Document,
+    /// The configured bound on retained decoded text.
+    Retained,
     /// The configured bound on retained JSON tokens.
     Tokens,
     /// The configured bound on JSON nesting depth.
     Depth,
     /// The configured bound on retained string.
-    String,
+    Strings,
     /// The fixed tokenizer bound on a numeral.
     Number,
-    /// The configured bound on opaque replay.
-    Opaque,
-    /// The configured bound on completion or history parts.
-    Parts,
+    /// The configured bound on provider reasoning replay.
+    Reasoning,
+    /// The configured bound on completion items.
+    OutputItems,
+    /// The configured bound on other replay metadata.
+    Metadata,
+    /// The configured bound on offered tools.
+    Tools,
+    /// The configured bound on history messages and blocks.
+    HistoryItems,
     /// The endpoint model's declared completion ceiling in tokens.
     Output,
     /// The configured bound on completion answer.
@@ -220,18 +224,20 @@ impl Cap {
         match self {
             Cap::Request => b"encoded request body",
             Cap::RequestHead => b"encoded request head",
-            Cap::Head => b"response head",
-            Cap::Headers => b"HTTP header field count",
-            Cap::Line => b"SSE line",
-            Cap::Event => b"SSE event",
+            Cap::ResponseHead => b"response head",
+            Cap::ResponseFields => b"HTTP header field count",
+            Cap::Skip => b"scanned event bytes",
             Cap::Field => b"SSE field",
-            Cap::Document => b"JSON document",
+            Cap::Retained => b"retained text",
             Cap::Tokens => b"retained JSON tokens",
             Cap::Depth => b"JSON nesting depth",
-            Cap::String => b"retained string",
+            Cap::Strings => b"retained strings",
             Cap::Number => b"JSON numeral",
-            Cap::Opaque => b"opaque replay",
-            Cap::Parts => b"completion or history parts",
+            Cap::Reasoning => b"reasoning item",
+            Cap::OutputItems => b"completion items",
+            Cap::Tools => b"offered tools",
+            Cap::HistoryItems => b"history items",
+            Cap::Metadata => b"replay metadata",
             Cap::Output => b"declared output tokens",
             Cap::Answer => b"completion answer",
             Cap::ErrorBody => b"provider error body",

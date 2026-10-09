@@ -55,14 +55,14 @@ pub struct Client {
     completions: Queue<kernel::Complete>,
     received: Vec<Event>,
     calls: u32,
-    input_bytes: usize,
+    input: usize,
     completed: u32,
     closed: bool,
     bound: u64,
 }
 
 impl Client {
-    fn new(transport: Transport, calls: u32, input_bytes: usize) -> Self {
+    fn new(transport: Transport, calls: u32, input: usize) -> Self {
         let limits = limits(calls);
         let mut endpoints = List::with_capacity(1);
         endpoints
@@ -88,7 +88,7 @@ impl Client {
             completions: Queue::with_capacity(ROOM),
             received: Vec::with_capacity(32),
             calls,
-            input_bytes,
+            input,
             completed: 0,
             closed: false,
             bound,
@@ -120,11 +120,11 @@ impl Client {
             let call = skein_llm_world::call(token.raw());
             let mut prompt = call.prompt;
             prompt.instructions = CUE.into();
-            if self.input_bytes > 0 {
+            if self.input > 0 {
                 prompt.messages = Box::new([skein_llm::Message {
                     role: skein_llm::Role::User,
                     content: Box::new([skein_llm::Block::Text {
-                        text: vec![b'x'; self.input_bytes].into_boxed_slice(),
+                        text: vec![b'x'; self.input].into_boxed_slice(),
                         replay: None,
                     }]),
                 }]);
@@ -352,7 +352,7 @@ struct Judge {
     passed: bool,
     teardown_started: bool,
     query_times: std::collections::BTreeMap<Token, Time>,
-    input_bytes: usize,
+    input: usize,
 }
 
 impl Referee<Process> for Judge {
@@ -414,12 +414,12 @@ impl Referee<Process> for Judge {
                             llm::Observation::Query { connection, query } => {
                                 assert_eq!(query.system.as_ref(), CUE);
                                 self.query_times.entry(*connection).or_insert(now);
-                                if self.input_bytes > 0 {
+                                if self.input > 0 {
                                     assert_eq!(query.messages.len(), 1);
                                     assert_eq!(query.messages[0].parts.len(), 1);
                                     match &query.messages[0].parts[0] {
                                         api::Part::Text { text } => {
-                                            assert_eq!(text.len(), self.input_bytes);
+                                            assert_eq!(text.len(), self.input);
                                             assert!(text.iter().all(|byte| *byte == b'x'));
                                         }
                                         part @ (api::Part::Opaque { .. }
@@ -491,9 +491,9 @@ pub fn run_with_input(
     transport: Transport,
     large: bool,
     memory: Memory,
-    input_bytes: usize,
+    input: usize,
 ) -> Outcome<Process> {
-    run_with_shutdown(seed, faulted, transport, large, memory, input_bytes, false)
+    run_with_shutdown(seed, faulted, transport, large, memory, input, false)
 }
 
 /// A live peer that ignores half-close waits for io to settle the client.
@@ -504,7 +504,7 @@ pub fn run_with_shutdown(
     transport: Transport,
     large: bool,
     memory: Memory,
-    input_bytes: usize,
+    input: usize,
     ignore_half_close: bool,
 ) -> Outcome<Process> {
     let calls = if large { 2 } else { 1 };
@@ -516,7 +516,7 @@ pub fn run_with_shutdown(
         passed: false,
         teardown_started: false,
         query_times: std::collections::BTreeMap::new(),
-        input_bytes,
+        input,
     };
     let mut config = Config::calm();
     config.wall = skein_tls_world::pki::VALID;
@@ -585,7 +585,7 @@ pub fn run_with_shutdown(
         }
         Process::Peer(Box::new(peer))
     });
-    world.spawn(|| Process::Client(Box::new(Client::new(transport, calls, input_bytes))));
+    world.spawn(|| Process::Client(Box::new(Client::new(transport, calls, input))));
     world.run()
 }
 

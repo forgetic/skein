@@ -199,8 +199,8 @@ impl StreamDecoder {
                 if !self.started || self.ending || self.active.is_some() || index != self.next {
                     return Err(DecodeError::Malformed);
                 }
-                if index >= limits.parts {
-                    return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
+                if index >= limits.output_items {
+                    return Err(DecodeError::limit(crate::Cap::OutputItems, limits.output_items));
                 }
                 self.active = Some(self.start(block, limits)?);
             }
@@ -224,7 +224,8 @@ impl StreamDecoder {
                 self.check_active(index)?;
                 let active = self.active.take().ok_or(DecodeError::Malformed)?;
                 let part = finish(active, limits)?;
-                self.next = self.next.checked_add(1).ok_or(DecodeError::limit(crate::Cap::Parts, limits.parts))?;
+                self.next =
+                    self.next.checked_add(1).ok_or(DecodeError::limit(crate::Cap::OutputItems, limits.output_items))?;
                 match part {
                     part @ Part::ToolCall { .. } => self.pending = Some(part),
                     part @ (Part::Text { .. } | Part::Opaque { .. }) => self.emit(part, limits, out)?,
@@ -294,9 +295,9 @@ impl StreamDecoder {
         self.part_bytes = self
             .part_bytes
             .checked_add(u64::try_from(len).expect("slice length fits u64"))
-            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes))?;
-        if self.part_bytes > u64::from(limits.answer_bytes) {
-            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes));
+            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer))?;
+        if self.part_bytes > u64::from(limits.answer) {
+            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer));
         }
         out.push(Output::Part(part));
         Ok(())
@@ -305,23 +306,23 @@ impl StreamDecoder {
         match block {
             BlockStart::Text { text } => {
                 self.reserve_received(text.len(), limits)?;
-                let mut value = List::with_capacity(limits.answer_bytes);
-                append(&mut value, &text, crate::Cap::Opaque)?;
+                let mut value = List::with_capacity(limits.answer);
+                append(&mut value, &text, crate::Cap::Reasoning)?;
                 Ok(Active::Text { text: value })
             }
             BlockStart::ToolCall { id, name, input } => {
-                let string_limit = usize::try_from(limits.string_bytes).expect("u32 fits usize");
+                let string_limit = usize::try_from(limits.strings).expect("u32 fits usize");
                 if id.is_empty() || name.is_empty() {
                     return Err(DecodeError::Malformed);
                 }
                 if id.len() > string_limit || name.len() > string_limit {
-                    return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
+                    return Err(DecodeError::limit(crate::Cap::Strings, limits.strings));
                 }
                 self.reserve_received(id.len().saturating_add(name.len()), limits)?;
-                let mut value = List::with_capacity(limits.input_bytes);
+                let mut value = List::with_capacity(limits.input);
                 let too_large = input.len() > usize::try_from(value.room()).expect("u32 fits usize");
                 if !too_large {
-                    append(&mut value, &input, crate::Cap::String)?;
+                    append(&mut value, &input, crate::Cap::Strings)?;
                 }
                 Ok(Active::ToolCall {
                     id,
@@ -334,32 +335,32 @@ impl StreamDecoder {
             }
             BlockStart::Thinking { text, signature, head } => {
                 let head = thinking_head(&head, &text, &signature, limits)?;
-                let serialized = head.to_bytes(limits)?;
-                if serialized.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                    return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
+                let serialized = head.to_bytes(&limits.document())?;
+                if serialized.len() > usize::try_from(limits.reasoning).expect("u32 fits usize") {
+                    return Err(DecodeError::limit(crate::Cap::Reasoning, limits.reasoning));
                 }
                 self.reserve_received(serialized.len(), limits)?;
-                let mut value = List::with_capacity(limits.opaque_bytes);
-                let mut signed = List::with_capacity(limits.opaque_bytes);
-                append(&mut value, &text, crate::Cap::Opaque)?;
-                append(&mut signed, &signature, crate::Cap::Opaque)?;
+                let mut value = List::with_capacity(limits.reasoning);
+                let mut signed = List::with_capacity(limits.reasoning);
+                append(&mut value, &text, crate::Cap::Reasoning)?;
+                append(&mut signed, &signature, crate::Cap::Reasoning)?;
                 Ok(Active::Thinking { text: value, signature: signed, head })
             }
             BlockStart::Redacted { value } => {
                 validate_redacted(value.view())?;
-                let data = value.to_bytes(limits)?;
-                if data.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                    return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
+                let data = value.to_bytes(&limits.document())?;
+                if data.len() > usize::try_from(limits.reasoning).expect("u32 fits usize") {
+                    return Err(DecodeError::limit(crate::Cap::Reasoning, limits.reasoning));
                 }
                 self.reserve_received(data.len(), limits)?;
                 Ok(Active::Opaque { bytes: data })
             }
             BlockStart::Opaque { value } => {
-                let value = Json::from_view(value.view(), limits)?;
+                let value = Json::from_view(value.view(), &limits.document())?;
                 validate_opaque(value.view())?;
-                let data = value.to_bytes(limits)?;
-                if data.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                    return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
+                let data = value.to_bytes(&limits.document())?;
+                if data.len() > usize::try_from(limits.reasoning).expect("u32 fits usize") {
+                    return Err(DecodeError::limit(crate::Cap::Reasoning, limits.reasoning));
                 }
                 self.reserve_received(data.len(), limits)?;
                 Ok(Active::Opaque { bytes: data })
@@ -409,7 +410,7 @@ impl StreamDecoder {
                             *too_large = true;
                             input.clear();
                         } else {
-                            append(input, &fragment, crate::Cap::String)?;
+                            append(input, &fragment, crate::Cap::Strings)?;
                         }
                     }
                     out.push(Output::ArgumentsDelta { index, delta: fragment });
@@ -420,7 +421,7 @@ impl StreamDecoder {
             },
             Delta::Thinking { text: fragment } => match active {
                 Active::Thinking { text, .. } => {
-                    append(text, &fragment, crate::Cap::Opaque)?;
+                    append(text, &fragment, crate::Cap::Reasoning)?;
                     out.push(Output::ReasoningDelta { index, summary_index: 0, text: fragment });
                 }
                 Active::Text { .. } | Active::ToolCall { .. } | Active::Opaque { .. } => {
@@ -429,7 +430,7 @@ impl StreamDecoder {
             },
             Delta::Signature { text } => match active {
                 Active::Thinking { signature, .. } => {
-                    append(signature, &text, crate::Cap::Opaque)?;
+                    append(signature, &text, crate::Cap::Reasoning)?;
                 }
                 Active::Text { .. } | Active::ToolCall { .. } | Active::Opaque { .. } => {
                     return Err(DecodeError::Malformed);
@@ -442,9 +443,9 @@ impl StreamDecoder {
         self.received_bytes = self
             .received_bytes
             .checked_add(u64::try_from(len).expect("usize fits u64"))
-            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes))?;
-        if self.received_bytes > u64::from(limits.answer_bytes) {
-            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes));
+            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer))?;
+        if self.received_bytes > u64::from(limits.answer) {
+            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer));
         }
         Ok(())
     }
@@ -468,7 +469,7 @@ impl StreamDecoder {
 }
 
 pub(super) fn thinking_head(head: &Json, text: &[u8], signature: &[u8], limits: &Limits) -> Result<Json, DecodeError> {
-    let head = Json::from_view(head.view(), limits)?;
+    let head = Json::from_view(head.view(), &limits.document())?;
     let tokens = head.view();
     if text_ref(tokens, b"type")? != b"thinking" {
         return Err(DecodeError::WrongType);
@@ -476,8 +477,8 @@ pub(super) fn thinking_head(head: &Json, text: &[u8], signature: &[u8], limits: 
     if text_ref(tokens, b"thinking")? != text || optional_text(tokens, b"signature")?.as_ref() != signature {
         return Err(DecodeError::Malformed);
     }
-    if head.to_bytes(limits)?.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-        return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
+    if head.to_bytes(&limits.document())?.len() > usize::try_from(limits.reasoning).expect("u32 fits usize") {
+        return Err(DecodeError::limit(crate::Cap::Reasoning, limits.reasoning));
     }
     Ok(head)
 }
@@ -500,13 +501,11 @@ fn finish(active: Active, limits: &Limits) -> Result<Part, DecodeError> {
             if signature.is_empty() {
                 return Err(DecodeError::Malformed);
             }
-            let bounded = skein_json::writer::Limits {
-                depth: limits.depth,
-                length: limits.opaque_bytes.min(limits.document_bytes),
-            };
+            let bounded =
+                skein_json::writer::Limits { depth: limits.depth, length: limits.reasoning.min(limits.retained) };
             let mut measure = skein_json::writer::Encoder::measure(&bounded);
             write_thinking(&mut measure, &head, text.as_slice(), signature.as_slice());
-            let len = crate::openai::measured(measure, bounded, crate::Cap::Opaque)?;
+            let len = crate::openai::measured(measure, bounded, crate::Cap::Reasoning)?;
             let mut out = skein_json::writer::Encoder::write(len, &bounded);
             write_thinking(&mut out, &head, text.as_slice(), signature.as_slice());
             Ok(Part::Opaque { bytes: out.finish() })
@@ -594,21 +593,21 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
                     BlockStart::ToolCall {
                         id: text(block, b"id")?,
                         name: text(block, b"name")?,
-                        input: Json::from_view(input, limits)?.to_bytes(limits)?,
+                        input: Json::from_view(input, &limits.document())?.to_bytes(&limits.document())?,
                     }
                 }
                 b"thinking" => BlockStart::Thinking {
                     text: text(block, b"thinking")?,
                     signature: optional_text(block, b"signature")?,
-                    head: Json::from_view(block, limits)?,
+                    head: Json::from_view(block, &limits.document())?,
                 },
                 b"redacted_thinking" => {
                     validate_redacted(block)?;
-                    BlockStart::Redacted { value: Json::from_view(block, limits)? }
+                    BlockStart::Redacted { value: Json::from_view(block, &limits.document())? }
                 }
                 _ => {
                     validate_opaque(block)?;
-                    BlockStart::Opaque { value: Json::from_view(block, limits)? }
+                    BlockStart::Opaque { value: Json::from_view(block, &limits.document())? }
                 }
             };
             Ok(Event::Added { index: index(tokens)?, block })
@@ -701,10 +700,10 @@ fn index(tokens: (&Document, json::Span)) -> Result<u32, DecodeError> {
 /// the common JSON event/parser/writer and the owner's output queue storage.
 #[must_use]
 pub fn decoder_worst_case(limits: &Limits) -> Option<u64> {
-    u64::from(limits.answer_bytes)
-        .checked_add(u64::from(limits.input_bytes).checked_mul(2)?)?
-        .checked_add(u64::from(limits.opaque_bytes).checked_mul(4)?)?
-        .checked_add(u64::from(limits.string_bytes).checked_mul(2)?)?
+    u64::from(limits.answer)
+        .checked_add(u64::from(limits.input).checked_mul(2)?)?
+        .checked_add(u64::from(limits.reasoning).checked_mul(4)?)?
+        .checked_add(u64::from(limits.strings).checked_mul(2)?)?
         .checked_add(List::<skein_json::Compact>::worst_case(limits.tokens)?.checked_mul(2)?)?
-        .checked_add(u64::from(limits.document_bytes).checked_mul(2)?)
+        .checked_add(u64::from(limits.retained).checked_mul(2)?)
 }

@@ -421,7 +421,7 @@ fn cancellation_settles_once_and_reuse_keeps_provider_binding() {
 #[test]
 fn oversized_arguments_complete_and_truncated_http_fails_once() {
     let mut bounded = limits();
-    bounded.dialect.input_bytes = 2;
+    bounded.input = 2;
     let documents = [
         START,
         r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool","name":"read","input":{}}}"#,
@@ -455,14 +455,14 @@ fn owner_reasoning_drop_never_discards_anthropic_thinking_past_the_cap() {
     for enabled in [false, true] {
         let mut bounds = limits();
         bounds.drop_reasoning = enabled;
-        bounds.dialect.opaque_bytes = u32::try_from(block.len() - 1).unwrap();
+        bounds.reasoning = u32::try_from(block.len() - 1).unwrap();
         let documents = [START, added.as_str(), BLOCK_STOP, END_TURN, STOP];
         let mut world = World::new(anthropic_call(1), bounds, stream(&documents, true), 18);
         world.fragmentation(1, 2);
         world.request(client::Request::Start);
         world.run();
         world.assert_once();
-        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Limit { which: skein_llm::Cap::Opaque, bound }, .. } if *bound == u64::from(bounds.dialect.opaque_bytes))));
+        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Limit { which: skein_llm::Cap::Reasoning, bound }, .. } if *bound == u64::from(bounds.reasoning))));
     }
 }
 
@@ -508,7 +508,7 @@ fn explicit_call_reasoning_policy_never_drops_anthropic_thinking() {
     for enabled in [false, true] {
         let mut bounds = skein_llm_world::limits();
         bounds.drop_reasoning = !enabled;
-        bounds.dialect.opaque_bytes = 24;
+        bounds.reasoning = 24;
         let mut input = skein_llm_world::call(78);
         input.endpoint = skein_llm::Endpoint::anthropic();
         input.credential = skein_llm::Credential::anthropic(b"fake-token".as_slice().into());
@@ -528,7 +528,7 @@ fn explicit_call_reasoning_policy_never_drops_anthropic_thinking() {
         assert!(world.seen.iter().any(|event| matches!(
             event,
             client::Event::Failed {
-                failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Opaque, bound: 24 },
+                failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Reasoning, bound: 24 },
                 ..
             }
         )));

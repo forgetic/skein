@@ -3,33 +3,51 @@ use alloc::boxed::Box;
 use skein_json::{Compact, collector, document, tokenizer, writer};
 use skein_lib::{Duration, List, Wall, bytes};
 
+/// Native codec bounds for one endpoint; each dialect receives its own value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Limits {
-    pub request_bytes: u32,
-    pub document_bytes: u32,
-    pub string_bytes: u32,
+    pub request: u32,
+    pub retained: u32,
+    pub strings: u32,
     pub depth: u32,
     pub tokens: u32,
-    pub parts: u32,
-    pub input_bytes: u32,
-    pub opaque_bytes: u32,
-    pub answer_bytes: u32,
+    pub output_items: u32,
+    pub tools: u32,
+    pub history_items: u32,
+    pub metadata: u32,
+    pub receiving: u32,
+    pub skip: u32,
+    pub input: u32,
+    pub reasoning: u32,
+    pub answer: u32,
     pub detail_bytes: u32,
 }
 impl Limits {
+    /// Neutral admission for a request or standalone native fixture.
+    #[must_use]
+    pub const fn document(&self) -> crate::DocumentLimits {
+        crate::DocumentLimits { bytes: self.skip, strings: self.strings, depth: self.depth, tokens: self.tokens }
+    }
+    /// Caller input is bounded by the whole request, without a sent-string cap.
+    #[must_use]
+    pub const fn request_document(&self) -> crate::DocumentLimits {
+        crate::DocumentLimits { bytes: self.request, strings: self.request, depth: self.depth, tokens: self.request }
+    }
+    #[must_use]
+    pub const fn metadata_document(&self) -> crate::DocumentLimits {
+        crate::DocumentLimits { bytes: self.metadata, strings: self.strings, depth: self.depth, tokens: self.tokens }
+    }
+    #[must_use]
+    pub const fn reasoning_document(&self) -> crate::DocumentLimits {
+        crate::DocumentLimits { bytes: self.reasoning, strings: self.strings, depth: self.depth, tokens: self.tokens }
+    }
     #[must_use]
     pub const fn writer_limits(&self) -> writer::Limits {
-        writer::Limits { depth: self.depth, length: self.document_bytes }
+        writer::Limits { depth: self.depth, length: self.skip }
     }
     #[must_use]
     pub const fn tokenizer_limits(&self) -> tokenizer::Limits {
-        tokenizer::Limits {
-            depth: self.depth,
-            string: self.string_bytes,
-            number: 32,
-            chunk: 256,
-            length: self.document_bytes,
-        }
+        tokenizer::Limits { depth: self.depth, string: self.strings, number: 32, chunk: 256, length: self.skip }
     }
 }
 /// A conservative bound for native admission, request encoding and decoded
@@ -38,19 +56,16 @@ impl Limits {
 pub fn worst_case(limits: &Limits) -> Option<u64> {
     // Native temporary values belong to the request, answer or replay
     // budgets. A discarded wire event contributes no document-sized buffer.
-    let temporary = limits.request_bytes.max(limits.answer_bytes).max(limits.input_bytes).max(limits.opaque_bytes);
+    let temporary = limits.request.max(limits.answer).max(limits.input).max(limits.reasoning).max(limits.metadata);
     let tokens = document::worst_case(&document::Limits { tokens: limits.tokens, text: temporary })?;
     // Translation validates the aggregate request before it clones it.
     // Every JSON token costs at least one byte in that request budget.
     // The caller's prompt and its translated copy may coexist until encoding.
-    let request_count = u64::from(limits.tokens)
-        .checked_mul(u64::from(limits.parts))?
-        .checked_mul(2)?
-        .min(u64::from(limits.request_bytes));
+    let request_count = u64::from(limits.request);
     let request_tokens = request_count.checked_mul(u64::try_from(size_of::<Compact>()).ok()?)?.checked_mul(2)?;
-    let answer_records = u64::from(limits.parts)
+    let answer_records = u64::from(limits.output_items)
         .checked_mul(u64::from(limits.tokens))?
-        .min(u64::from(limits.answer_bytes))
+        .min(u64::from(limits.answer))
         .checked_mul(u64::try_from(size_of::<Compact>()).ok()?)?
         .checked_mul(2)?;
     // Whole-value collection remains a neutral JSON admission entrance for
@@ -65,11 +80,11 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         &[],
         &collector::Filter { root: collector::Keep::Value },
     )?;
-    let request_slots = List::<Input>::worst_case(limits.parts)?
-        .checked_add(List::<Tool>::worst_case(limits.parts)?)?
+    let request_slots = List::<Input>::worst_case(limits.history_items)?
+        .checked_add(List::<Tool>::worst_case(limits.tools)?)?
         .checked_mul(2)?;
     let documents = u64::from(temporary).checked_mul(8)?;
-    let answer = u64::from(limits.answer_bytes).checked_mul(4)?;
+    let answer = u64::from(limits.answer).checked_mul(4)?;
     tokens
         .checked_mul(4)?
         .checked_add(request_tokens)?
@@ -78,7 +93,7 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(request_slots)?
         .checked_add(documents)?
         .checked_add(answer)?
-        .checked_add(u64::from(limits.request_bytes))?
+        .checked_add(u64::from(limits.request))?
         .checked_add(tokenizer::worst_case(&limits.tokenizer_limits())?)?
         .checked_add(writer::worst_case(&writer::Limits { depth: limits.depth, length: temporary })?)?
         .checked_add(crate::openai::response::decoder_worst_case(limits)?)
