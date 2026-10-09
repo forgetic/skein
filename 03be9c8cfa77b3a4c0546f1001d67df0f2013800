@@ -1,0 +1,13 @@
+Reliability skein 05.4: SSE data face
+
+Tip: 03be9c8cfa77b3a4c0546f1001d67df0f2013800
+Parent: 57b47980f3ae21ad40f64b0cc41e28faa9cbfc56
+Final rebased-tip gate: heavy 665, scripts/check.sh, 2026-10-09 13:04:50–13:05:34 UTC (44 s).
+Formatting, clippy workspace/all-targets -D warnings, standalone skein-tls check passed.
+Focused: 1619 passed, 3.234 s. Fuzzy: 88 passed, 9.082 s. Browser: 6 passed, 3.920 s.
+Serial HTTP/protocol measure: heavy 654, profile measure -j 1, 64 passed, 4.215 s.
+Targeted native SSE tests cover fills/scans/line reads, CRLF and CR, late metadata, withdrawal/crossed delivery, cut, mid-event limit, close and undemanded body end with held-line overflow.
+Allocator: reader peak exactly112 bytes under chunk24/field16; small64-byte and1MiB events both40 bytes under chunk4/field8, equal worst_case.
+Stack/protocol: direct tokenizer face, arrays/empty events, JSON whole but SSE cut before dispatch is dropped; shutdown withdrawal routing verified by focused and fuzzy worlds.
+Probes: none required for 05.4 (deterministic tests).
+No push or design/coordinator-file edits.
