@@ -43,7 +43,8 @@ impl Json {
             skip: u64::from(limits.document_bytes),
         };
         let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: bounded };
-        let mut machine = collector::Collector::new(collector::Filter { root: collector::Keep::Value }, &bounded, &[]);
+        let mut machine = collector::Collector::new(collector::Filter { root: collector::Keep::Value }, &bounded, &[])
+            .expect("valid filter");
         let mut above = Queue::with_capacity(1);
         let mut below = Queue::with_capacity(1);
         collector::down(&mut machine, &env, collector::Request::Collect, &mut above, &mut below);
@@ -249,7 +250,7 @@ fn collector_error(error: collector::Error, limits: &Limits) -> DecodeError {
         collector::Error::TooManyTokens => DecodeError::limit(crate::Cap::Tokens, limits.tokens),
         collector::Error::TooMuchText { cap: _ } => DecodeError::limit(crate::Cap::Document, limits.document_bytes),
         collector::Error::SkippedTooLong => unreachable!("Value skips no fields"),
-        collector::Error::Duplicate => unreachable!("Value interprets no fields"),
+        collector::Error::Duplicate | collector::Error::NotTagged => unreachable!("Value interprets no fields"),
     }
 }
 

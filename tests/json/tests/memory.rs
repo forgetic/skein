@@ -286,6 +286,15 @@ fn collect_memory(
     filter: skein_json::collector::Filter,
     limits: skein_json::collector::Limits,
 ) -> (u64, u64) {
+    collect_memory_caps(document, filter, limits, &[])
+}
+
+fn collect_memory_caps(
+    document: &[u8],
+    filter: skein_json::collector::Filter,
+    limits: skein_json::collector::Limits,
+    caps: &[u32],
+) -> (u64, u64) {
     use skein_json::collector::{self, Collector, Event, Request};
     let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
     let mut above = Queue::with_capacity(1);
@@ -294,10 +303,10 @@ fn collect_memory(
         (u32::try_from(document.len()).expect("bounded document")).max(json::largest_demand(&limits.tokenizer)),
     );
     intake.append(document).expect("all bytes fit");
-    let bound = collector::worst_case(&limits, &[], &filter).expect("priced limits");
+    let bound = collector::worst_case(&limits, caps, &filter).expect("priced limits");
     let meter = Meter::new();
     meter.start();
-    let mut collector = Collector::new(filter, &limits, &[]);
+    let mut collector = Collector::new(filter, &limits, caps).expect("valid filter");
     let mut most = meter.end().peak();
     let mut demand = None;
     for step in 0..8 * document.len() + 64 {
@@ -316,7 +325,7 @@ fn collect_memory(
             assert!(matches!(event, Event::Collected(_)), "{event:?}");
             drop(event);
             let span = skein_heap::Span::start();
-            collector.restart(filter);
+            collector.restart();
             assert_eq!(span.end(), skein_heap::Grown { peak: 0, net: 0 }, "restart keeps every buffer");
             return (most, bound);
         }
@@ -343,4 +352,32 @@ fn collector_skipped_megabytes_add_no_memory_and_full_counts_reach_the_bound() {
     let exact = Limits { tokenizer: json::Limits { chunk: 4, ..limits.tokenizer }, tokens: 4, text: 5, ..limits };
     let (peak, bound) = collect_memory(br#"{"keep":1}"#, filter, exact);
     assert_eq!(peak, bound, "one full reusable document and its full emitted copy");
+}
+
+#[test]
+fn tagged_losing_candidates_hold_no_memory_after_their_counts() {
+    use skein_json::collector::{Cap, Filter, Keep, Key, Limits, Node, Tagged, Variant};
+    const TAG: Tagged = Tagged {
+        tag: b"type",
+        known: &[
+            Variant { value: b"small", children: &[Node { key: Key::Field(b"id"), keep: Keep::Value }] },
+            Variant { value: b"large", children: &[Node { key: Key::Field(b"body"), keep: Keep::Value }] },
+        ],
+        unknown: Cap::new(0),
+    };
+    let filter = Filter { root: Keep::Tagged(&TAG) };
+    let limits = Limits {
+        tokenizer: json::Limits { depth: 4, string: 32, number: 8, chunk: 8, length: 2 << 20 },
+        tokens: 6,
+        text: 12,
+        skip: 2 << 20,
+    };
+    let small = format!("{{\"body\":\"{}\",\"id\":1,\"type\":\"small\"}}", "a".repeat(64));
+    let large = format!("{{\"body\":\"{}\",\"id\":1,\"type\":\"small\"}}", "a".repeat(1 << 20));
+    let (peak, bound) = collect_memory_caps(small.as_bytes(), filter, limits, &[2]);
+    assert_eq!(peak, bound, "the selected variant attains the retained document bound");
+    assert_eq!(
+        collect_memory_caps(small.as_bytes(), filter, limits, &[2]).0,
+        collect_memory_caps(large.as_bytes(), filter, limits, &[2]).0
+    );
 }

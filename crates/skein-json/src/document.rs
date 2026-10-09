@@ -239,6 +239,85 @@ impl Builder {
         Ok(())
     }
 
+    pub(crate) fn push_compact(&mut self, record: &Compact, bytes: &[u8]) -> Result<(), Error> {
+        if self.tokens.room() == 0 {
+            return Err(Error::TooManyTokens);
+        }
+        let len = match record.kind {
+            Kind::Long => record.len,
+            Kind::Key | Kind::String | Kind::Number => u32::try_from(bytes.len()).or(Err(Error::TooMuchText))?,
+            Kind::ObjectStart
+            | Kind::ObjectEnd
+            | Kind::ArrayStart
+            | Kind::ArrayEnd
+            | Kind::True
+            | Kind::False
+            | Kind::Null => 0,
+        };
+        let start = match record.kind {
+            Kind::Key | Kind::String | Kind::Number => {
+                if len > self.text.room() {
+                    return Err(Error::TooMuchText);
+                }
+                let start = self.text.len();
+                for &byte in bytes {
+                    self.text.push(byte).expect("admitted copied text");
+                }
+                start
+            }
+            Kind::ObjectStart
+            | Kind::ObjectEnd
+            | Kind::ArrayStart
+            | Kind::ArrayEnd
+            | Kind::True
+            | Kind::False
+            | Kind::Null
+            | Kind::Long => 0,
+        };
+        self.tokens.push(Compact { kind: record.kind, start, len }).expect("admitted copied record");
+        Ok(())
+    }
+
+    pub(crate) fn truncate(&mut self, records: u32, text: u32) {
+        assert!(records <= self.tokens.len() && text <= self.text.len(), "truncate only removes stored data");
+        self.tokens.truncate(records);
+        self.text.truncate(text);
+    }
+
+    /// Compacts one selected range to an earlier position, without allocating.
+    pub(crate) fn copy_within(&mut self, start: u32, end: u32, records: u32, text: u32) -> (u32, u32) {
+        assert!(records <= start && start <= end && end <= self.tokens.len(), "selection moves only toward the prefix");
+        let mut next_record = records;
+        let mut next_text = text;
+        for index in start..end {
+            let mut record = *self.tokens.get(index).expect("selected source record");
+            match record.kind {
+                Kind::Key | Kind::String | Kind::Number => {
+                    assert!(next_text <= record.start, "selected text moves only toward the prefix");
+                    let source = record.start;
+                    record.start = next_text;
+                    for offset in 0..record.len {
+                        let source_at = source.checked_add(offset).expect("admitted source text range");
+                        let byte = *self.text.get(source_at).expect("selected source byte");
+                        *self.text.get_mut(next_text).expect("destination remains within stored text") = byte;
+                        next_text = next_text.checked_add(1).expect("selected text fits the existing buffer");
+                    }
+                }
+                Kind::ObjectStart
+                | Kind::ObjectEnd
+                | Kind::ArrayStart
+                | Kind::ArrayEnd
+                | Kind::True
+                | Kind::False
+                | Kind::Null
+                | Kind::Long => {}
+            }
+            *self.tokens.get_mut(next_record).expect("destination remains within stored records") = record;
+            next_record = next_record.checked_add(1).expect("selected records fit the existing buffer");
+        }
+        (next_record, next_text)
+    }
+
     pub(crate) fn len(&self) -> u32 {
         self.tokens.len()
     }

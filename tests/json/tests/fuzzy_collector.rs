@@ -128,3 +128,60 @@ fn unchanged_extension(rng: &mut Rng, seed: u64, limits: Limits, settings: &Sett
         world::collect(&added, selective, roomy, settings, seed).outcome
     );
 }
+
+#[test]
+fn tagged_projections_ignore_random_extensions_and_field_order() {
+    use skein_json::collector::{Tagged, Variant};
+    const TAGGED: Tagged = Tagged {
+        tag: b"type",
+        known: &[
+            Variant { value: b"small", children: &[Node { key: Key::Field(b"id"), keep: Keep::Value }] },
+            Variant { value: b"large", children: &[Node { key: Key::Field(b"body"), keep: Keep::Text(Cap::new(0)) }] },
+        ],
+        unknown: Cap::new(1),
+    };
+    let filter = Filter { root: Keep::Tagged(&TAGGED) };
+    let mut long = false;
+    let mut omitted = false;
+    for seed in 0..1_000 {
+        let mut rng = Rng::new(seed + 0x007A_66ED);
+        let extension = generate::render(
+            &mut rng,
+            &generate::tokens(&mut Rng::new(seed), Shape { depth: 3, width: 3, string: 12 }),
+        );
+        let tag = if rng.chance(500) { "small" } else { "large" };
+        let body = "x".repeat(usize::try_from(rng.below(32)).expect("small body"));
+        let mut fields = [
+            format!("\"type\":\"{tag}\""),
+            "\"id\":1".into(),
+            format!("\"body\":\"{body}\""),
+            format!("\"extension\":{}", String::from_utf8(extension).unwrap()),
+        ];
+        for index in (1..fields.len()).rev() {
+            fields.swap(index, usize::try_from(rng.below((index + 1) as u64)).expect("field index"));
+        }
+        let document = format!("{{{}}}", fields.join(","));
+        let limits = Limits {
+            tokenizer: skein_json::tokenizer::Limits {
+                depth: 8,
+                string: 32,
+                number: 64,
+                chunk: u32::try_from(rng.between(1, 8)).expect("small chunk"),
+                length: 4096,
+            },
+            tokens: 6,
+            text: 13,
+            skip: 4096,
+        };
+        let settings = Settings::calm(&mut rng, limits.tokenizer);
+        let run = world::collect(document.as_bytes(), filter, limits, &settings, seed);
+        let (expected, skipped, _) = reference::prune(document.as_bytes(), filter, &limits).unwrap();
+        assert_eq!(run.outcome, Some(expected.clone()), "seed {seed}: {document}");
+        if let Event::Collected(document) = expected {
+            assert_eq!(run.counts.skipped, skipped, "seed {seed}: {document:?}");
+            long |= (0..document.len()).any(|index| document.token(index).unwrap().kind == skein_json::Kind::Long);
+            omitted |= tag == "small";
+        }
+    }
+    assert!(long && omitted);
+}

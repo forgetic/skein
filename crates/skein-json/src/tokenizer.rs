@@ -227,6 +227,8 @@ impl Tokenizer {
                 },
                 mode: Mode::Next,
                 read: 0,
+                token_start: 0,
+                token_end: 0,
             },
         }
     }
@@ -237,6 +239,11 @@ impl Tokenizer {
             State::Over => self.reset(),
             State::Idle(_) | State::Reading(_) | State::Closed => unreachable!("restart follows a document outcome"),
         }
+    }
+
+    /// The last token's wire boundaries, excluding its leading separators and lookahead.
+    pub(crate) fn token_wire(&self) -> (u32, u32) {
+        (self.document.token_start, self.document.token_end)
     }
 
     /// Delivered bytes in the outstanding skip, excluding its leading separators.
@@ -262,6 +269,8 @@ impl Tokenizer {
         self.document.expect = Expect::Value;
         self.document.mode = Mode::Next;
         self.document.read = 0;
+        self.document.token_start = 0;
+        self.document.token_end = 0;
         self.state = State::Idle(Held::Nothing);
     }
 
@@ -434,6 +443,8 @@ struct Document {
     mode: Mode,
     /// The bytes delivered so far, at most [`Limits::length`].
     read: u32,
+    token_start: u32,
+    token_end: u32,
 }
 
 /// Retention and framing of the demand outstanding above.
@@ -533,6 +544,7 @@ fn next(document: &mut Document, limits: &Limits, held: Held, above: &mut Queue<
         Held::ByteThenEnd(byte) => match significant(document, limits, byte) {
             Step::Token(token, held) => complete_token(document, token, held_end(held), above),
             Step::Long(length) => {
+                document.token_end = document.read;
                 above.push(Event::Long(length));
                 State::Idle(Held::End)
             }
@@ -581,6 +593,7 @@ fn settle(document: &mut Document, step: Step, above: &mut Queue<Event>) -> Stat
     match step {
         Step::Token(token, held) => complete_token(document, token, held, above),
         Step::Long(length) => {
+            document.token_end = document.read;
             above.push(Event::Long(length));
             State::Idle(Held::Nothing)
         }
@@ -590,6 +603,23 @@ fn settle(document: &mut Document, step: Step, above: &mut Queue<Event>) -> Stat
 }
 
 fn complete_token(document: &mut Document, token: Token, held: Held, above: &mut Queue<Event>) -> State {
+    let lookahead = match held {
+        Held::Byte(_) | Held::ByteThenEnd(_) => 1,
+        Held::Nothing => match token {
+            Token::Number(_) => 1,
+            Token::ObjectStart
+            | Token::ObjectEnd
+            | Token::ArrayStart
+            | Token::ArrayEnd
+            | Token::Key(_)
+            | Token::String(_)
+            | Token::True
+            | Token::False
+            | Token::Null => 0,
+        },
+        Held::End | Held::Failed(_) => 0,
+    };
+    document.token_end = document.read.checked_sub(lookahead).expect("the token preceded its lookahead");
     match document.mode {
         Mode::Next | Mode::Text(_) | Mode::Skip { depth: _, start: None } => above.push(Event::Token(token)),
         Mode::Skip { depth, start: Some(start) } => {
@@ -733,6 +763,7 @@ fn significant(document: &mut Document, limits: &Limits, byte: u8) -> Step {
 
 /// The first byte of a value.
 fn value(document: &mut Document, limits: &Limits, byte: u8) -> Step {
+    document.token_start = document.read.checked_sub(1).expect("the value opener was delivered");
     match &mut document.mode {
         Mode::Skip { start, .. } => {
             if start.is_none() {
@@ -759,6 +790,9 @@ fn value(document: &mut Document, limits: &Limits, byte: u8) -> Step {
 }
 
 fn begin_string(document: &mut Document, limits: &Limits, key: bool) -> Step {
+    if key {
+        document.token_start = document.read.checked_sub(1).expect("the key quote was delivered");
+    }
     let retention = match document.mode {
         Mode::Next => Retention::Strict(limits.string),
         Mode::Text(cap) => Retention::Capped(cap),
@@ -783,6 +817,7 @@ fn start(document: &mut Document, container: Container) -> Step {
 
 /// The end of an object or an array, which must be the innermost open.
 fn end(document: &mut Document, container: Container) -> Step {
+    document.token_start = document.read.checked_sub(1).expect("the closer was delivered");
     // A document that fails is over, so a pop that does not match is not
     // undone.
     match document.open.pop() {

@@ -541,6 +541,61 @@ impl Pruned<'_> {
         self.tokens.push(Compact { kind, start, len: u32::try_from(bytes.len()).expect("a generated bounded string") });
         Ok(())
     }
+    fn tag_variant(
+        &self,
+        at: usize,
+        end: usize,
+        tag: &'static skein_json::collector::Tagged,
+    ) -> Result<Option<&'static skein_json::collector::Variant>, skein_json::collector::Error> {
+        use skein_json::collector::Error;
+        let mut tag_value = None;
+        let mut child = at + 1;
+        while child < end - 1 {
+            let Token::Key(key) = &self.parser.tokens[child] else { unreachable!() };
+            if key.as_ref() == tag.tag {
+                if tag_value.is_some() {
+                    return Err(Error::Duplicate);
+                }
+                let Token::String(value) = &self.parser.tokens[child + 1] else {
+                    return Err(Error::NotTagged);
+                };
+                tag_value = Some(value.as_ref());
+            }
+            child = self
+                .parser
+                .values
+                .iter()
+                .find(|value| value.token == child + 1)
+                .expect("the independent parser recorded every value")
+                .end_token;
+        }
+        Ok(tag.known.iter().find(|variant| Some(variant.value) == tag_value))
+    }
+
+    fn unknown(
+        &mut self,
+        at: usize,
+        end: usize,
+        cap_name: skein_json::collector::Cap,
+    ) -> Result<usize, skein_json::collector::Error> {
+        use skein_json::collector::Error;
+        let cap = crate::COLLECTOR_CAPS[usize::from(cap_name.index())] as usize;
+        let mut text = 0;
+        for token in &self.parser.tokens[at..end] {
+            if self.tokens.len() == self.limits.tokens as usize {
+                return Err(Error::TooManyTokens);
+            }
+            if let Token::Key(bytes) | Token::String(bytes) | Token::Number(bytes) = token {
+                text += bytes.len();
+            }
+            if text > cap {
+                return Err(Error::TooMuchText { cap: Some(cap_name) });
+            }
+            self.push(token, false)?;
+        }
+        Ok(end)
+    }
+
     fn value(&mut self, at: usize, keep: skein_json::collector::Keep) -> Result<usize, skein_json::collector::Error> {
         use skein_json::collector::{Error, Keep, Key};
         let span =
@@ -563,7 +618,21 @@ impl Pruned<'_> {
                 if let Keep::Text(_) = keep {
                     return self.value(at, Keep::Value);
                 }
-                let Keep::Into(nodes) = keep else { unreachable!() };
+                let (nodes, tag_field) = match keep {
+                    Keep::Into(nodes) => (nodes, None),
+                    Keep::Tagged(tag) => {
+                        if !matches!(token, Token::ObjectStart) {
+                            return Err(Error::NotTagged);
+                        }
+                        let variant = self.tag_variant(at, span.end_token, tag)?;
+                        if let Some(variant) = variant {
+                            (variant.children, Some(tag.tag))
+                        } else {
+                            return self.unknown(at, span.end_token, tag.unknown);
+                        }
+                    }
+                    Keep::Value | Keep::Text(_) => unreachable!(),
+                };
                 self.push(token, false)?;
                 let object = matches!(token, Token::ObjectStart);
                 let mut child = at + 1;
@@ -580,14 +649,19 @@ impl Pruned<'_> {
                         Key::Each => !object,
                     });
                     let value = child + usize::from(object);
-                    if let Some(node) = selected {
+                    let selected_keep = if key == tag_field && tag_field.is_some() {
+                        Some(Keep::Value)
+                    } else {
+                        selected.map(|node| node.keep)
+                    };
+                    if let Some(keep) = selected_keep {
                         if let Some(key) = key {
                             if !seen.insert(key) {
                                 return Err(Error::Duplicate);
                             }
                             self.push(&self.parser.tokens[child], false)?;
                         }
-                        child = self.value(value, node.keep)?;
+                        child = self.value(value, keep)?;
                     } else {
                         let dropped = self
                             .parser

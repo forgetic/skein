@@ -78,6 +78,12 @@ impl<T> List<T> {
         self.items.last()
     }
 
+    /// Removes a suffix without changing the allocated capacity.
+    pub fn truncate(&mut self, length: u32) {
+        assert!(length <= self.len(), "truncate only removes a suffix");
+        self.items.truncate(usize::try_from(length).expect("u32 fits usize"));
+    }
+
     /// Empties the list, keeping its capacity: a list refilled in place
     /// allocates nothing.
     pub fn clear(&mut self) {
