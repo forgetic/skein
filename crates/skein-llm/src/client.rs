@@ -27,6 +27,56 @@ pub struct Limits {
     pub error_bytes: u32,
 }
 
+/// The owner's byte bounds on bearer and account values at one endpoint.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct CredentialLimits {
+    pub access_token: u32,
+    pub account_id: u32,
+}
+
+/// Check credential bytes before constructing the bounded request head.
+pub fn check_credential(credential: &crate::Credential, limits: &CredentialLimits) -> Result<(), Error> {
+    if credential.access_token.len() > usize::try_from(limits.access_token).expect("u32 fits usize")
+        || credential.account_id.len() > usize::try_from(limits.account_id).expect("u32 fits usize")
+    {
+        return Err(Error::Limit);
+    }
+    Ok(())
+}
+
+/// Measure the largest request head from endpoint configuration and owner bounds
+/// (llm-connection.md, section 3), without copying a credential or body.
+pub fn request_head(endpoint: &Endpoint, credential: &CredentialLimits, limits: &Limits) -> Result<u32, Error> {
+    if credential.access_token == 0 {
+        return Err(Error::Invalid);
+    }
+    let fields = provider_headers(endpoint, &[]);
+    let account_bytes = match endpoint.provider {
+        Provider::OpenAiCodex => usize::try_from(credential.account_id).expect("u32 fits usize"),
+        Provider::Anthropic => 0,
+    };
+    let mut count = endpoint.headers.len().checked_add(5).ok_or(Error::Limit)?;
+    for field in &fields {
+        if field.is_some() {
+            count = count.checked_add(1).ok_or(Error::Limit)?;
+        }
+    }
+    if count > usize::try_from(limits.http.headers).expect("u32 fits usize") {
+        return Err(Error::Limit);
+    }
+    let measured = head_length(
+        endpoint,
+        usize::try_from(credential.access_token).expect("u32 fits usize"),
+        account_bytes,
+        limits.dialect.request_bytes,
+        &fields,
+    )?;
+    match u32::try_from(measured) {
+        Ok(measured) => Ok(measured),
+        Err(_) => Err(Error::Limit),
+    }
+}
+
 const HTTP_EVENTS: u32 = 4;
 const SSE_EVENTS: u32 = 2;
 const REQUESTS: u32 = 4;
@@ -903,60 +953,17 @@ fn headers(
         Provider::Anthropic if !credential.account_id.is_empty() => return Err(Error::Invalid),
         Provider::OpenAiCodex | Provider::Anthropic => {}
     }
-    let fields = provider_headers(endpoint, credential);
-    let mut fixed_count: usize = 5;
-    for &byte in &endpoint.target {
-        if !(0x21..=0x7e).contains(&byte) || byte == b'#' {
-            return Err(Error::Invalid);
+    let fields = provider_headers(endpoint, &credential.account_id);
+    let total =
+        head_length(endpoint, credential.access_token.len(), credential.account_id.len(), body_length, &fields)?;
+    let mut fixed_count = 5_usize;
+    for field in &fields {
+        if field.is_some() {
+            fixed_count = fixed_count.checked_add(1).ok_or(Error::Limit)?;
         }
     }
-    if endpoint.headers.len() > usize::try_from(limits.http.headers).expect("u32 fits usize") {
-        return Err(Error::Limit);
-    }
-    let mut total = endpoint.authority.len().checked_add(endpoint.target.len()).ok_or(Error::Limit)?;
-    total = total.checked_add(credential.access_token.len()).ok_or(Error::Limit)?;
-    total = total.checked_add(credential.account_id.len()).ok_or(Error::Limit)?;
-    for (index, header) in endpoint.headers.iter().enumerate() {
-        if reserved(&header.name) || !header_name(&header.name) || !header_value(&header.value) {
-            return Err(Error::Invalid);
-        }
-        for previous in endpoint.headers.get(..index).ok_or(Error::Invalid)? {
-            if previous.is(&header.name) {
-                return Err(Error::Invalid);
-            }
-        }
-        total = total.checked_add(header.name.len()).ok_or(Error::Limit)?;
-        total = total.checked_add(header.value.len()).ok_or(Error::Limit)?;
-        total = total.checked_add(4).ok_or(Error::Limit)?;
-    }
-    // Exact wire length: the measured body fixes the Content-Length digits.
-    // Check it before allocating any request head or credential copy.
-    for fixed in [
-        b"POST ".as_slice(),
-        b" HTTP/1.1\r\n",
-        b"Host: \r\n",
-        b"Content-Type: application/json\r\n",
-        b"Accept: text/event-stream\r\n",
-        b"Accept-Encoding: identity\r\n",
-        b"Authorization: Bearer \r\n",
-        b"Content-Length: \r\n",
-        b"\r\n",
-    ] {
-        total = total.checked_add(fixed.len()).ok_or(Error::Limit)?;
-    }
-    for (name, value) in fields.iter().flatten() {
-        fixed_count = fixed_count.checked_add(1).ok_or(Error::Limit)?;
-        total = total.checked_add(name.len()).ok_or(Error::Limit)?;
-        // Codex account bytes were counted with the credential above.
-        if !name.eq_ignore_ascii_case(b"chatgpt-account-id") {
-            total = total.checked_add(value.len()).ok_or(Error::Limit)?;
-        }
-        total = total.checked_add(4).ok_or(Error::Limit)?;
-    }
-    let length = Decimal::of(u64::from(body_length));
-    total = total.checked_add(length.as_bytes().len()).ok_or(Error::Limit)?;
     if total > usize::try_from(limits.http.request).expect("u32 fits usize")
-        || endpoint.headers.len().saturating_add(fixed_count)
+        || endpoint.headers.len().checked_add(fixed_count).ok_or(Error::Limit)?
             > usize::try_from(limits.http.headers).expect("u32 fits usize")
     {
         return Err(Error::Limit);
@@ -990,12 +997,69 @@ fn headers(
     Ok(headers.into_boxed())
 }
 
-fn provider_headers<'a>(
+fn head_length(
     endpoint: &Endpoint,
-    credential: &'a crate::Credential,
-) -> [Option<(&'static [u8], &'a [u8])>; 2] {
+    token_bytes: usize,
+    account_bytes: usize,
+    body_length: u32,
+    fields: &[Option<(&[u8], &[u8])>],
+) -> Result<usize, Error> {
+    if endpoint.authority.is_empty() || !valid_authority(&endpoint.authority) || endpoint.target.first() != Some(&b'/')
+    {
+        return Err(Error::Invalid);
+    }
+    for &byte in &endpoint.target {
+        if !(0x21..=0x7e).contains(&byte) || byte == b'#' {
+            return Err(Error::Invalid);
+        }
+    }
+    let mut total = endpoint.authority.len().checked_add(endpoint.target.len()).ok_or(Error::Limit)?;
+    total = total.checked_add(token_bytes).ok_or(Error::Limit)?;
+    total = total.checked_add(account_bytes).ok_or(Error::Limit)?;
+    for (index, header) in endpoint.headers.iter().enumerate() {
+        if reserved(&header.name) || !header_name(&header.name) || !header_value(&header.value) {
+            return Err(Error::Invalid);
+        }
+        for previous in endpoint.headers.get(..index).ok_or(Error::Invalid)? {
+            if previous.is(&header.name) {
+                return Err(Error::Invalid);
+            }
+        }
+        total = total.checked_add(header.name.len()).ok_or(Error::Limit)?;
+        total = total.checked_add(header.value.len()).ok_or(Error::Limit)?;
+        total = total.checked_add(4).ok_or(Error::Limit)?;
+    }
+    // Exact wire length: the measured body fixes the Content-Length digits.
+    // Check it before allocating any request head or credential copy.
+    for fixed in [
+        b"POST ".as_slice(),
+        b" HTTP/1.1\r\n",
+        b"Host: \r\n",
+        b"Content-Type: application/json\r\n",
+        b"Accept: text/event-stream\r\n",
+        b"Accept-Encoding: identity\r\n",
+        b"Authorization: Bearer \r\n",
+        b"Content-Length: \r\n",
+        b"\r\n",
+    ] {
+        total = total.checked_add(fixed.len()).ok_or(Error::Limit)?;
+    }
+    for (name, value) in fields.iter().flatten() {
+        total = total.checked_add(name.len()).ok_or(Error::Limit)?;
+        // Codex account bytes were counted with the credential above.
+        if !name.eq_ignore_ascii_case(b"chatgpt-account-id") {
+            total = total.checked_add(value.len()).ok_or(Error::Limit)?;
+        }
+        total = total.checked_add(4).ok_or(Error::Limit)?;
+    }
+    let length = Decimal::of(u64::from(body_length));
+    total = total.checked_add(length.as_bytes().len()).ok_or(Error::Limit)?;
+    Ok(total)
+}
+
+fn provider_headers<'a>(endpoint: &Endpoint, account_id: &'a [u8]) -> [Option<(&'static [u8], &'a [u8])>; 2] {
     match endpoint.provider {
-        Provider::OpenAiCodex => [Some((b"chatgpt-account-id", &credential.account_id)), None],
+        Provider::OpenAiCodex => [Some((b"chatgpt-account-id", account_id)), None],
         Provider::Anthropic => [
             default_header(endpoint, b"anthropic-version", b"2023-06-01"),
             default_header(endpoint, b"anthropic-beta", b"oauth-2025-04-20"),

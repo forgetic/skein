@@ -32,7 +32,6 @@ fn limits() -> Limits {
             retry: Duration::from_millis(10),
         },
         tls: skein_tls::client::Limits { read: 4096, send: 4096, records: skein_tls::client::MAX_RECORD },
-        llm: skein_llm_world::limits(),
     }
 }
 
@@ -112,6 +111,8 @@ impl World {
                     skein_llm_connection::Transport::Plaintext
                 },
                 llm: call.endpoint,
+                limits: skein_llm_world::limits(),
+                credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
             })
             .expect("one endpoint");
         let mut world = World {

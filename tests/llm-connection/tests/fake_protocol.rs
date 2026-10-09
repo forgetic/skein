@@ -35,7 +35,6 @@ fn limits() -> Limits {
             retry: Duration::from_millis(10),
         },
         tls: skein_tls::client::Limits { read: 4096, send: 4096, records: skein_tls::client::MAX_RECORD },
-        llm: skein_llm_world::limits(),
     }
 }
 
@@ -83,6 +82,8 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
             address: Addr::from((Ipv4Addr::LOCALHOST, 443)),
             transport: skein_llm_connection::Transport::Plaintext,
             llm: call.endpoint,
+            limits: skein_llm_world::limits(),
+            credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
         })
         .expect("one endpoint");
     let mut component = Component::new(endpoints, &limits()).expect("component");

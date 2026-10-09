@@ -102,7 +102,6 @@ pub fn limits(calls: u32) -> Limits {
             retry: Duration::from_millis(10),
         },
         tls: skein_tls::client::Limits { read: 4096, send: 4096, records: skein_tls::client::MAX_RECORD },
-        llm: skein_llm_world::limits(),
     }
 }
 
@@ -304,11 +303,19 @@ impl World {
         limits.endpoints = endpoint_count;
         let mut endpoints = List::with_capacity(endpoint_count);
         for endpoint in 0..endpoint_count {
+            let mut client_limits = skein_llm_world::limits();
+            if endpoint > 0 {
+                client_limits.http.send = 47;
+                client_limits.http.read = 384;
+                client_limits.sse.chunk = 192;
+            }
             endpoints
                 .push(Endpoint {
                     address: (Ipv4Addr::LOCALHOST, 80 + u16::try_from(endpoint).expect("test endpoint")).into(),
                     transport: skein_llm_connection::Transport::Plaintext,
                     llm: skein_llm::Endpoint::codex(),
+                    limits: client_limits,
+                    credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
                 })
                 .expect("endpoint");
         }

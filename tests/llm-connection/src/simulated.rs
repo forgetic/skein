@@ -38,7 +38,6 @@ fn limits(calls: u32) -> Limits {
             retry: Duration::from_millis(1),
         },
         tls: skein_tls::client::Limits { read: 4096, send: 4096, records: skein_tls::client::MAX_RECORD },
-        llm: skein_llm_world::limits(),
     }
 }
 
@@ -59,11 +58,23 @@ pub struct Client {
     input_bytes: usize,
     completed: u32,
     closed: bool,
+    bound: u64,
 }
 
 impl Client {
     fn new(transport: Transport, calls: u32, input_bytes: usize) -> Self {
         let limits = limits(calls);
+        let mut endpoints = List::with_capacity(1);
+        endpoints
+            .push(Endpoint {
+                address: (Ipv4Addr::LOCALHOST, 80).into(),
+                transport: skein_llm_connection::Transport::Plaintext,
+                llm: skein_llm::Endpoint::codex(),
+                limits: skein_llm_world::limits(),
+                credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
+            })
+            .expect("endpoint bound");
+        let bound = skein_llm_connection::worst_case(&limits, &endpoints).expect("component bound");
         Self {
             io: io::Io::new(&limits.io),
             limits,
@@ -80,6 +91,7 @@ impl Client {
             input_bytes,
             completed: 0,
             closed: false,
+            bound,
         }
     }
 
@@ -97,6 +109,8 @@ impl Client {
                     },
                 },
                 llm: call.endpoint,
+                limits: skein_llm_world::limits(),
+                credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
             })
             .expect("one endpoint");
         let mut component = Component::new(endpoints, &self.limits).expect("configured component");
@@ -258,8 +272,7 @@ impl Host for Client {
             && !self.component.as_ref().is_some_and(Component::has_work)
     }
     fn worst_case(&self) -> u64 {
-        skein_llm_connection::worst_case(&self.limits)
-            .expect("component bound")
+        self.bound
             .checked_add(io::worst_case(&self.limits.io).expect("io bound"))
             .expect("combined bound")
             .checked_add(u64::from(ROOM) * 256 + 32 * 131_072)
@@ -504,7 +517,7 @@ pub fn run_with_shutdown(
     let mut world = World::new(seed, config, judge, memory);
     world.spawn(|| {
         let client_limits = limits(calls);
-        let protocol_limits = skein_llm_world::fake::limits(&client_limits.llm);
+        let protocol_limits = skein_llm_world::fake::limits(&skein_llm_world::limits());
         let mut domain_limits = skein_llm_world::fake::config();
         domain_limits.calls = calls;
         domain_limits.answer_bytes =

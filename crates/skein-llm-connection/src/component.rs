@@ -65,11 +65,16 @@ pub const MAX_OUT: MaxOut = MaxOut { above: 64, below: 64 };
 
 impl Component {
     /// Validates bounds and stream capacities before the loop starts.
-    pub fn new(endpoints: List<Endpoint>, limits: &Limits) -> Result<Component, EndpointError> {
+    pub fn new(mut endpoints: List<Endpoint>, limits: &Limits) -> Result<Component, EndpointError> {
         if endpoints.len() > limits.endpoints {
             return Err(EndpointError::TooMany);
         }
-        if worst_case(limits).is_none() || limits.per_endpoint > limits.connections {
+        if limits.endpoints == 0
+            || limits.connections == 0
+            || limits.calls == 0
+            || limits.per_endpoint == 0
+            || limits.per_endpoint > limits.connections
+        {
             return Err(EndpointError::Limits);
         }
         if limits.connections < limits.calls {
@@ -82,28 +87,55 @@ impl Component {
                 Err(_) => unreachable!("one record per conversation"),
             }
         }
-        for destination in &endpoints {
+        for index in 0..endpoints.len() {
+            let destination = endpoints.get_mut(index).expect("configured endpoint");
+            destination.limits.http.request =
+                match llm::client::request_head(&destination.llm, &destination.credential, &destination.limits) {
+                    Ok(head) => head,
+                    Err(error) => return Err(EndpointError::Client(error)),
+                };
+            let read = llm::client::largest_read(&destination.limits);
+            let send = llm::client::largest_room(&destination.limits);
+            let sse = destination.limits.sse.chunk;
+            if sse > destination.limits.http.read {
+                return Err(EndpointError::SseChunkHttpRead { demand: sse, cap: destination.limits.http.read });
+            }
             match &destination.transport {
                 Transport::Tls { .. } => {
-                    if llm::client::largest_read(&limits.llm) > limits.tls.read
-                        || llm::client::largest_room(&limits.llm) > limits.tls.send
-                        || skein_tls::client::LARGEST_READ > limits.io.largest_read()
-                        || skein_tls::client::largest_room(&limits.tls) > limits.io.largest_room()
-                    {
-                        return Err(EndpointError::Stream);
+                    if read > limits.tls.read {
+                        return Err(EndpointError::HttpReadTlsRead { demand: read, cap: limits.tls.read });
+                    }
+                    if send > limits.tls.send {
+                        return Err(EndpointError::HttpSendTlsSend { demand: send, cap: limits.tls.send });
+                    }
+                    if tls::LARGEST_READ > limits.io.largest_read() {
+                        return Err(EndpointError::TlsReadIoIntake {
+                            demand: tls::LARGEST_READ,
+                            cap: limits.io.largest_read(),
+                        });
+                    }
+                    if tls::largest_room(&limits.tls) > limits.io.largest_room() {
+                        return Err(EndpointError::TlsSendIoOutput {
+                            demand: tls::largest_room(&limits.tls),
+                            cap: limits.io.largest_room(),
+                        });
                     }
                 }
                 Transport::Plaintext => {
                     if !destination.address.ip().is_loopback() {
                         return Err(EndpointError::PlaintextAddress);
                     }
-                    if llm::client::largest_read(&limits.llm) > limits.io.largest_read()
-                        || llm::client::largest_room(&limits.llm) > limits.io.largest_room()
-                    {
-                        return Err(EndpointError::Stream);
+                    if read > limits.io.largest_read() {
+                        return Err(EndpointError::HttpReadIoIntake { demand: read, cap: limits.io.largest_read() });
+                    }
+                    if send > limits.io.largest_room() {
+                        return Err(EndpointError::HttpSendIoOutput { demand: send, cap: limits.io.largest_room() });
                     }
                 }
             }
+        }
+        if worst_case(limits, &endpoints).is_none() {
+            return Err(EndpointError::Limits);
         }
         Ok(Component {
             endpoints,
@@ -137,8 +169,12 @@ impl Component {
         if self.outstanding() >= self.limits.calls {
             return Err(Refusal::Calls { bound: self.limits.calls });
         }
+        match llm::client::check_credential(&credential, &destination.credential) {
+            Ok(()) => {}
+            Err(error) => return Err(Refusal::Client(error)),
+        }
         let input = Call { owner: call, prompt, credential, endpoint: destination.llm.clone() };
-        match llm::client::Client::prepare(input, &self.limits.llm) {
+        match llm::client::Client::prepare(input, &destination.limits) {
             Ok(client) => Ok(client),
             Err(error) => Err(Refusal::Client(error)),
         }
@@ -433,6 +469,12 @@ impl Component {
         up.push(Event::Closed);
     }
 
+    /// Checked heap bound using the normalized limits of configured endpoints.
+    #[must_use]
+    pub fn worst_case(&self) -> Option<u64> {
+        worst_case(&self.limits, &self.endpoints)
+    }
+
     /// Releases settled connection slots at the owning loop's reclaim point.
     pub fn reclaim(&mut self) {
         self.connections.reclaim();
@@ -622,8 +664,15 @@ impl Component {
             }
             Transport::Plaintext => None,
         };
-        let mut connection =
-            Connection::new(endpoint, waiting.call, tls, waiting.prepared, crate::Deadlines::none(), env.now);
+        let mut connection = Connection::new(
+            endpoint,
+            waiting.call,
+            tls,
+            waiting.prepared,
+            destination.limits,
+            crate::Deadlines::none(),
+            env.now,
+        );
         connection.deadlines = waiting.deadlines;
         connection.sync_deadlines(env);
         if self.lifecycle == Lifecycle::Closing {

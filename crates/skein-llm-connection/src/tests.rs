@@ -25,23 +25,6 @@ fn limits() -> Limits {
             retry: Duration::from_millis(10),
         },
         tls: skein_tls::client::Limits { read: 4096, send: 4096, records: skein_tls::client::MAX_RECORD },
-        llm: skein_llm::client::Limits {
-            http: skein_http::client::Limits { request: 4096, head: 4096, headers: 32, read: 256, send: 31 },
-            sse: skein_http::sse::Limits { line: 4096, event: 8192, field: 128, chunk: 128 },
-            dialect: skein_llm::DocumentLimits {
-                request_bytes: 8192,
-                document_bytes: 8192,
-                string_bytes: 4096,
-                depth: 32,
-                tokens: 1024,
-                parts: 16,
-                input_bytes: 2048,
-                opaque_bytes: 2048,
-                answer_bytes: 8192,
-                detail_bytes: 256,
-            },
-            error_bytes: 4096,
-        },
     }
 }
 
@@ -59,6 +42,8 @@ fn endpoint() -> Endpoint {
             trust: skein_tls::Config::new(roots, &[]).expect("valid test trust"),
         },
         llm: skein_llm::Endpoint::codex(),
+        limits: client_limits(),
+        credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
     }
 }
 
@@ -114,7 +99,10 @@ fn startup_rejects_impossible_limits() {
     config.io.intake = 1;
     let mut endpoints = List::with_capacity(1);
     endpoints.push(endpoint()).expect("one endpoint fits");
-    assert_eq!(Component::new(endpoints, &config).err(), Some(EndpointError::Stream));
+    assert_eq!(
+        Component::new(endpoints, &config).err(),
+        Some(EndpointError::TlsReadIoIntake { demand: skein_tls::client::LARGEST_READ, cap: 1 })
+    );
     let mut config = limits();
     config.connections = 0;
     assert_eq!(Component::new(List::with_capacity(0), &config).err(), Some(EndpointError::Limits));
@@ -332,6 +320,8 @@ fn plaintext_admission_checks_the_exact_loopback_ranges() {
                 address: address.parse().expect("test address"),
                 transport: Transport::Plaintext,
                 llm: skein_llm::Endpoint::codex(),
+                limits: client_limits(),
+                credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
             })
             .expect("one endpoint");
         assert_eq!(
@@ -350,6 +340,8 @@ fn plaintext_connect_starts_http_and_never_arms_a_handshake_deadline() {
             address: Addr::from((Ipv4Addr::LOCALHOST, 80)),
             transport: Transport::Plaintext,
             llm: skein_llm::Endpoint::codex(),
+            limits: client_limits(),
+            credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
         })
         .expect("one endpoint");
     let mut config = limits();
@@ -556,4 +548,179 @@ fn fewer_connections_than_conversations_is_rejected_by_name() {
         Component::new(List::with_capacity(0), &config).err(),
         Some(EndpointError::ConnectionsCalls { connections: 1, calls: 2 })
     );
+}
+
+fn client_limits() -> skein_llm::client::Limits {
+    skein_llm::client::Limits {
+        http: skein_http::client::Limits { request: 4096, head: 4096, headers: 32, read: 256, send: 31 },
+        sse: skein_http::sse::Limits { line: 4096, event: 8192, field: 128, chunk: 128 },
+        dialect: skein_llm::DocumentLimits {
+            request_bytes: 8192,
+            document_bytes: 8192,
+            string_bytes: 4096,
+            depth: 32,
+            tokens: 1024,
+            parts: 16,
+            input_bytes: 2048,
+            opaque_bytes: 2048,
+            answer_bytes: 8192,
+            detail_bytes: 256,
+        },
+        error_bytes: 4096,
+    }
+}
+
+#[test]
+fn each_transport_supplies_its_native_pieces() {
+    let config = limits();
+    let mut destination = endpoint();
+    destination.pieces(&config);
+    assert_eq!(destination.limits.http.send, skein_tls::client::MAX_PLAINTEXT);
+    assert_eq!(destination.limits.http.read, config.tls.read);
+    assert_eq!(destination.limits.sse.chunk, config.tls.read);
+    destination.transport = Transport::Plaintext;
+    destination.pieces(&config);
+    assert_eq!(destination.limits.http.send, config.io.output);
+    assert_eq!(destination.limits.http.read, config.io.intake);
+    assert_eq!(destination.limits.sse.chunk, config.io.intake);
+}
+
+#[test]
+fn the_measured_head_accepts_a_credential_at_its_bound_and_refuses_one_byte_more() {
+    let config = limits();
+    let mut destination = endpoint();
+    destination.llm.headers =
+        Box::new([skein_http::Header { name: bytes::copy_of(b"x-owner"), value: bytes::copy_of(b"declared") }]);
+    destination.credential = skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 };
+    let mut endpoints = List::with_capacity(1);
+    endpoints.push(destination).expect("endpoint");
+    let component = Component::new(endpoints, &config).expect("measured endpoint");
+    let mut at_bound = credential();
+    at_bound.access_token = Box::new([b'x'; 2048]);
+    at_bound.account_id = Box::new([b'y'; 128]);
+    drop(
+        component.admit(Token::new(7), 0, prompt(), at_bound).expect("the measured head holds the declared credential"),
+    );
+    let mut too_long = credential();
+    too_long.access_token = Box::new([b'x'; 2049]);
+    assert_eq!(
+        component.admit(Token::new(8), 0, prompt(), too_long).err(),
+        Some(Refusal::Client(skein_llm::Error::Limit))
+    );
+}
+
+#[test]
+fn two_endpoints_drive_uploads_with_their_own_client_limits() {
+    let mut config = limits();
+    config.endpoints = 2;
+    config.connections = 2;
+    config.calls = 2;
+    config.io.sockets = 2;
+    let mut endpoints = List::with_capacity(2);
+    for send in [16, 64] {
+        let mut destination = endpoint();
+        destination.transport = Transport::Plaintext;
+        destination.limits.http.send = send;
+        endpoints.push(destination).expect("endpoint");
+    }
+    let mut component = Component::new(endpoints, &config).expect("two endpoints");
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: config };
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    for index in 0..2 {
+        component.down(
+            &env,
+            Request::Start {
+                call: Token::new(u64::from(index) + 7),
+                endpoint: index,
+                prompt: prompt(),
+                credential: credential(),
+                deadlines: Deadlines::none(),
+            },
+            &mut up,
+            &mut io,
+        );
+        let owner = match io.pop().expect("connect") {
+            Lower::Connect { owner, .. } => owner,
+            other @ (Lower::Listen { .. }
+            | Lower::Bind { .. }
+            | Lower::Reject { .. }
+            | Lower::Stream { .. }
+            | Lower::Output { .. }
+            | Lower::Spawn { .. }
+            | Lower::Signal { .. }
+            | Lower::Close { .. }
+            | Lower::Abort { .. }) => panic!("expected connect, got {other:?}"),
+        };
+        component.up(&env, LowerEvent::Connecting { owner, socket: owner }, &mut up, &mut io);
+        component.up(&env, LowerEvent::Connected { owner }, &mut up, &mut io);
+        component.up(&env, LowerEvent::Stream { owner, up: skein_lib::stream::Up::Room }, &mut up, &mut io);
+        let expected = if index == 0 { 16 } else { 64 };
+        let mut found = false;
+        for _ in 0..io.len() {
+            match io.pop().expect("io request") {
+                Lower::Stream { down: skein_lib::stream::Down::Demand { room, .. }, .. } if room == expected => {
+                    found = true;
+                }
+                Lower::Stream { .. }
+                | Lower::Connect { .. }
+                | Lower::Close { .. }
+                | Lower::Abort { .. }
+                | Lower::Listen { .. }
+                | Lower::Bind { .. }
+                | Lower::Reject { .. }
+                | Lower::Output { .. }
+                | Lower::Spawn { .. }
+                | Lower::Signal { .. } => {}
+            }
+        }
+        assert!(found, "the endpoint's upload piece is used");
+    }
+}
+
+#[test]
+fn construction_names_each_stream_capacity_relationship() {
+    for check in 0_u32..7 {
+        let mut config = limits();
+        let mut destination = endpoint();
+        let read = skein_llm::client::largest_read(&destination.limits);
+        let head = skein_llm::client::request_head(&destination.llm, &destination.credential, &destination.limits)
+            .expect("head bound");
+        let expected = match check {
+            0 => {
+                destination.transport = Transport::Plaintext;
+                config.io.intake = 1;
+                EndpointError::HttpReadIoIntake { demand: read, cap: 1 }
+            }
+            1 => {
+                destination.transport = Transport::Plaintext;
+                config.io.output = 1;
+                EndpointError::HttpSendIoOutput { demand: head, cap: 1 }
+            }
+            2 => {
+                config.tls.read = 1;
+                EndpointError::HttpReadTlsRead { demand: read, cap: 1 }
+            }
+            3 => {
+                config.tls.send = 1;
+                EndpointError::HttpSendTlsSend { demand: head, cap: 1 }
+            }
+            4 => {
+                config.io.intake = 1;
+                EndpointError::TlsReadIoIntake { demand: skein_tls::client::LARGEST_READ, cap: 1 }
+            }
+            5 => {
+                config.io.output = 1;
+                EndpointError::TlsSendIoOutput { demand: skein_tls::client::largest_room(&config.tls), cap: 1 }
+            }
+            6 => {
+                destination.limits.sse.chunk = 257;
+                EndpointError::SseChunkHttpRead { demand: 257, cap: 256 }
+            }
+            _ => unreachable!("seven relationships"),
+        };
+        let mut endpoints = List::with_capacity(1);
+        endpoints.push(destination).expect("endpoint");
+        assert_eq!(Component::new(endpoints, &config).err(), Some(expected));
+    }
 }

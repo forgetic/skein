@@ -116,3 +116,18 @@ fn a_new_call_does_not_pass_an_older_waiter_after_a_record_is_cancelled() {
         assert!(event.contains(&format!("call: Token({token})")), "{event}");
     }
 }
+
+#[test]
+fn two_endpoints_with_different_client_limits_each_complete_and_replay() {
+    assert_replays(73, 79, |seed| {
+        let mut world = World::configured(seed, 2, 1, 2);
+        world.request(Request::Cancel { call: Token::new(8) });
+        world.start_at(10, 1, Deadlines::none());
+        world.request(Request::Close);
+        world.finish();
+        assert_eq!(world.judge.completed, 2);
+        assert_eq!(world.judge.cancelled, 1);
+        assert_eq!(world.connections(), 2);
+        (world.trace, world.events)
+    });
+}

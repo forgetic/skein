@@ -5,7 +5,7 @@ use core::net::Ipv4Addr;
 use skein_heap::{Counting, Meter};
 use skein_io::kernel::Addr;
 use skein_lib::{Duration, Env, List, Queue, Time, Token};
-use skein_llm_connection::{Component, Deadlines, Endpoint, Event, Limits, MAX_OUT, Request, worst_case};
+use skein_llm_connection::{Component, Deadlines, Endpoint, Event, Limits, MAX_OUT, Request};
 use skein_tls_world::pki;
 
 #[global_allocator]
@@ -32,9 +32,7 @@ fn full_pool_stays_within_its_checked_bound() {
             retry: Duration::from_millis(10),
         },
         tls: skein_tls::client::Limits { read: 4096, send: 4096, records: skein_tls::client::MAX_RECORD },
-        llm: skein_llm_world::limits(),
     };
-    let bound = worst_case(&limits).expect("representable pool bound");
     let meter = Meter::new();
     meter.start();
     let mut endpoints = List::with_capacity(1);
@@ -46,6 +44,8 @@ fn full_pool_stays_within_its_checked_bound() {
                 trust: pki::client(&[]),
             },
             llm: skein_llm::Endpoint::codex(),
+            limits: skein_llm_world::limits(),
+            credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
         })
         .expect("one endpoint");
     let first = skein_llm_world::call(7);
@@ -55,6 +55,7 @@ fn full_pool_stays_within_its_checked_bound() {
     let mut io = Queue::with_capacity(MAX_OUT.below);
     let env = Env { now: Time::ZERO, wall: pki::VALID, limits };
     let mut component = Component::new(endpoints, &limits).expect("component");
+    let bound = component.worst_case().expect("representable pool bound");
     component.down(
         &env,
         Request::Start {
@@ -151,10 +152,10 @@ fn an_owner_close_in_each_phase_fits_the_checked_pool_bound() {
         [Point::Waiting, Point::Connecting, Point::Head, Point::Streaming, Point::Draining, Point::Idle, Point::Closing]
     {
         let calls = if point == Point::Waiting { 2 } else { 1 };
-        let bound = worst_case(&skein_llm_connection_world::world::limits(calls)).expect("pool bound");
         let meter = Meter::new();
         meter.start();
         let mut world = World::configured(53, calls, 1, 1);
+        let bound = world.component.worst_case().expect("pool bound");
         if point == Point::Closing {
             world.until(Point::Idle);
             world.delay_close = true;
@@ -175,16 +176,38 @@ fn an_owner_close_in_each_phase_fits_the_checked_pool_bound() {
 #[test]
 fn every_declared_waiting_record_and_its_prepared_client_fit_the_checked_bound() {
     use skein_llm_connection_world::world::{Point, World};
-    let bound = worst_case(&skein_llm_connection_world::world::limits(8)).expect("pool bound");
     let meter = Meter::new();
     meter.start();
     let mut world = World::configured(59, 8, 1, 1);
+    let bound = world.component.worst_case().expect("pool bound");
     world.until(Point::Head);
     world.request(Request::Close);
     world.finish();
     assert_eq!(world.judge.completed, 8);
     let sample = meter.end();
     assert!(sample.peak() <= bound, "waiting peak {} exceeds {bound}", sample.peak());
+    drop(world);
+    assert_eq!(meter.held(), 0);
+}
+
+#[test]
+fn two_endpoints_with_different_limits_fit_their_measured_component_bound() {
+    use skein_llm_connection_world::world::World;
+    let small = World::configured(83, 3, 1, 1);
+    let small_bound = small.component.worst_case().expect("small endpoint bound");
+    drop(small);
+    let meter = Meter::new();
+    meter.start();
+    let mut world = World::configured(89, 3, 1, 2);
+    let bound = world.component.worst_case().expect("two endpoint bound");
+    assert!(bound > small_bound, "the larger endpoint contributes to the checked bound");
+    world.request(Request::Cancel { call: Token::new(9) });
+    world.start_at(10, 1, Deadlines::none());
+    world.request(Request::Close);
+    world.finish();
+    assert_eq!(world.judge.completed, 3);
+    let sample = meter.end();
+    assert!(sample.peak() <= bound, "two endpoint peak {} exceeds {bound}", sample.peak());
     drop(world);
     assert_eq!(meter.held(), 0);
 }
