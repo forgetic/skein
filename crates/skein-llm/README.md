@@ -46,7 +46,10 @@ The caller schedules deadlines using `waiting()`, and reports them through
 `abort(..., Failure::TimedOut, ...)`. There are no automatic retries; failures
 include structured classification and evidence of whether the request may
 have reached the provider. Limits remain fixed across all entry points and
-connection reuse.
+connection reuse. Admission `Error::Limit` and active `Failure::Limit` carry
+the exact `Cap` and its configured `bound`. Failure detail is derived from
+that evidence; `Evidence::Response { status }` preserves the HTTP status
+on every failure after a response head, including non-JSON error bodies.
 
 For Anthropic, use `Endpoint::anthropic()` and
 `Credential::anthropic(access_token)`. Sign-in, refresh and secure token storage

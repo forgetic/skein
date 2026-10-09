@@ -117,3 +117,84 @@ fn anthropic_seeded_fragmentation_and_grants_preserve_completion() {
         assert_eq!(world.machine.waiting(), client::Waiting::Idle);
     }
 }
+
+#[test]
+#[expect(clippy::wildcard_enum_match_arm, reason = "the referee extracts only failure terminals")]
+fn randomized_receiving_limits_name_the_cap_and_the_bound_that_was_passed() {
+    use skein_llm::Cap;
+    for seed in 1..=96 {
+        let mut bounds = limits();
+        let bound = u32::try_from(seed % 7 + 1).unwrap();
+        let which = match seed % 6 {
+            0 => {
+                bounds.dialect.tokens = bound;
+                Cap::Tokens
+            }
+            1 => {
+                bounds.dialect.document_bytes = bound;
+                Cap::Document
+            }
+            2 => {
+                bounds.dialect.answer_bytes = bound;
+                Cap::Answer
+            }
+            3 => {
+                bounds.sse.line = bound;
+                Cap::Line
+            }
+            4 => {
+                bounds.sse.event = bound;
+                Cap::Event
+            }
+            5 => {
+                bounds.dialect.parts = 1;
+                Cap::Parts
+            }
+            _ => unreachable!(),
+        };
+        let expected_bound = if which == Cap::Parts { 1 } else { u64::from(bound) };
+        let mut input = call(seed);
+        input.prompt.messages = Box::new([]);
+        let wire = if which == Cap::Parts {
+            let documents = [
+                skein_llm_world::TEXT_ADDED,
+                skein_llm_world::TEXT_DONE,
+                r#"{"type":"response.output_item.added","output_index":1,"item":{"id":"second","type":"message"}}"#,
+                r#"{"type":"response.output_item.done","output_index":1,"item":{"id":"second","type":"message","content":[{"type":"output_text","text":"more"}]}}"#,
+                skein_llm_world::TERMINAL,
+            ];
+            skein_llm_world::response(
+                200,
+                "Content-Type: text/event-stream\r\n",
+                &skein_llm_world::events(&documents),
+                false,
+            )
+        } else {
+            text_response(seed % 2 == 0)
+        };
+        let mut world = World::new(input, bounds, wire, seed);
+        world.fragmentation(u32::try_from(seed % 19 + 1).unwrap(), 1);
+        world.request(client::Request::Start);
+        world.run();
+        world.settle();
+        world.assert_once();
+        let failures: Vec<_> = world
+            .seen
+            .iter()
+            .filter_map(|event| match event {
+                client::Event::Failed { failure, evidence, .. } => Some((*failure, *evidence)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            failures,
+            [(Failure::Limit { which, bound: expected_bound }, client::Evidence::Response { status: 200 })],
+            "seed {seed}"
+        );
+        // The independently written tape exceeds each tiny cap: its answer is
+        // Hello plus native identity, its first document has more than seven
+        // tokens/bytes, and its SSE framing has more than seven bytes. A parts
+        // cap of one cannot accept its second output block.
+        assert!(expected_bound < 8);
+    }
+}

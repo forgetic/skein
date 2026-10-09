@@ -134,8 +134,12 @@ impl StreamDecoder {
                     out.push(Output::Progress);
                 }
             }
-            Err(DecodeError::TooLarge) => {
-                self.fail(Failure::Limit, bytes::copy_of(b"Anthropic stream exceeds configured limits"), out);
+            Err(DecodeError::TooLarge { which, bound }) => {
+                self.fail(
+                    Failure::Limit { which, bound },
+                    bytes::copy_of(b"Anthropic stream exceeds configured limits"),
+                    out,
+                );
             }
             Err(DecodeError::Malformed | DecodeError::Missing | DecodeError::WrongType) => {
                 self.fail(Failure::Protocol, bytes::copy_of(b"malformed Anthropic stream"), out);
@@ -178,7 +182,7 @@ impl StreamDecoder {
                     return Err(DecodeError::Malformed);
                 }
                 if index >= limits.parts {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
                 }
                 self.active = Some(self.start(block, limits)?);
             }
@@ -205,11 +209,11 @@ impl StreamDecoder {
                     Part::Opaque { bytes } => bytes.len(),
                 };
                 let total = self.part_bytes.checked_add(u64::try_from(len).expect("usize fits u64"));
-                self.part_bytes = total.ok_or(DecodeError::TooLarge)?;
+                self.part_bytes = total.ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes))?;
                 if self.part_bytes > u64::from(limits.answer_bytes) {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes));
                 }
-                self.next = self.next.checked_add(1).ok_or(DecodeError::TooLarge)?;
+                self.next = self.next.checked_add(1).ok_or(DecodeError::limit(crate::Cap::Parts, limits.parts))?;
                 out.push(Output::Part(part));
             }
             Event::MessageDelta { stop, usage } => {
@@ -248,7 +252,7 @@ impl StreamDecoder {
             BlockStart::Text { text } => {
                 self.reserve_received(text.len(), limits)?;
                 let mut value = List::with_capacity(limits.answer_bytes);
-                append(&mut value, &text)?;
+                append(&mut value, &text, crate::Cap::Opaque)?;
                 Ok(Active::Text { text: value })
             }
             BlockStart::ToolCall { id, name, input } => {
@@ -257,13 +261,13 @@ impl StreamDecoder {
                     return Err(DecodeError::Malformed);
                 }
                 if id.len() > string_limit || name.len() > string_limit {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
                 }
                 self.reserve_received(id.len().saturating_add(name.len()).saturating_add(input.len()), limits)?;
                 let mut value = List::with_capacity(limits.input_bytes);
                 let too_large = input.len() > usize::try_from(value.room()).expect("u32 fits usize");
                 if !too_large {
-                    append(&mut value, &input)?;
+                    append(&mut value, &input, crate::Cap::Input)?;
                 }
                 Ok(Active::ToolCall { id, name, input: value, fragmented: false, too_large })
             }
@@ -271,20 +275,20 @@ impl StreamDecoder {
                 let head = thinking_head(&head, &text, &signature, limits)?;
                 let serialized = head.to_bytes(limits)?;
                 if serialized.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
                 }
                 self.reserve_received(serialized.len(), limits)?;
                 let mut value = List::with_capacity(limits.opaque_bytes);
                 let mut signed = List::with_capacity(limits.opaque_bytes);
-                append(&mut value, &text)?;
-                append(&mut signed, &signature)?;
+                append(&mut value, &text, crate::Cap::Opaque)?;
+                append(&mut signed, &signature, crate::Cap::Opaque)?;
                 Ok(Active::Thinking { text: value, signature: signed, head })
             }
             BlockStart::Redacted { value } => {
                 validate_redacted(value.as_tokens())?;
                 let data = value.to_bytes(limits)?;
                 if data.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
                 }
                 self.reserve_received(data.len(), limits)?;
                 Ok(Active::Opaque { bytes: data })
@@ -294,7 +298,7 @@ impl StreamDecoder {
                 validate_opaque(value.as_tokens())?;
                 let data = value.to_bytes(limits)?;
                 if data.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
                 }
                 self.reserve_received(data.len(), limits)?;
                 Ok(Active::Opaque { bytes: data })
@@ -311,7 +315,7 @@ impl StreamDecoder {
         let active = self.active.as_mut().ok_or(DecodeError::Malformed)?;
         match (active, delta) {
             (Active::Text { text }, Delta::Text { text: fragment }) => {
-                append(text, &fragment)?;
+                append(text, &fragment, crate::Cap::Answer)?;
                 out.push(Output::TextDelta { index, content_index: 0, text: fragment });
             }
             (Active::ToolCall { input, fragmented, too_large, .. }, Delta::Arguments { text: fragment }) => {
@@ -325,16 +329,18 @@ impl StreamDecoder {
                         *too_large = true;
                         input.clear();
                     } else {
-                        append(input, &fragment)?;
+                        append(input, &fragment, crate::Cap::Input)?;
                     }
                 }
                 out.push(Output::ArgumentsDelta { index, delta: fragment });
             }
             (Active::Thinking { text, .. }, Delta::Thinking { text: fragment }) => {
-                append(text, &fragment)?;
+                append(text, &fragment, crate::Cap::Opaque)?;
                 out.push(Output::ReasoningDelta { index, summary_index: 0, text: fragment });
             }
-            (Active::Thinking { signature, .. }, Delta::Signature { text }) => append(signature, &text)?,
+            (Active::Thinking { signature, .. }, Delta::Signature { text }) => {
+                append(signature, &text, crate::Cap::Opaque)?;
+            }
             (
                 Active::Text { .. } | Active::ToolCall { .. } | Active::Thinking { .. } | Active::Opaque { .. },
                 Delta::Text { .. } | Delta::Arguments { .. } | Delta::Thinking { .. } | Delta::Signature { .. },
@@ -346,15 +352,26 @@ impl StreamDecoder {
         self.received_bytes = self
             .received_bytes
             .checked_add(u64::try_from(len).expect("usize fits u64"))
-            .ok_or(DecodeError::TooLarge)?;
+            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes))?;
         if self.received_bytes > u64::from(limits.answer_bytes) {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes));
         }
         Ok(())
     }
     fn fail(&mut self, failure: Failure, detail: Box<[u8]>, out: &mut Queue<Output>) {
         self.active = None;
         self.over = true;
+        let detail = match failure {
+            Failure::Limit { which, bound } => crate::openai::limit_detail(which, bound),
+            Failure::Protocol
+            | Failure::Unauthorized
+            | Failure::Exhausted { .. }
+            | Failure::RateLimited { .. }
+            | Failure::Overloaded
+            | Failure::Unavailable
+            | Failure::ContextTooLong
+            | Failure::Invalid => detail,
+        };
         out.push(Output::Failed { failure, detail: clip_detail(&detail, self.detail_bytes) });
     }
 }
@@ -369,16 +386,16 @@ pub(super) fn thinking_head(head: &Json, text: &[u8], signature: &[u8], limits: 
         return Err(DecodeError::Malformed);
     }
     if head.to_bytes(limits)?.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-        return Err(DecodeError::TooLarge);
+        return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
     }
     Ok(head)
 }
-fn append(out: &mut List<u8>, data: &[u8]) -> Result<(), DecodeError> {
+fn append(out: &mut List<u8>, data: &[u8], cap: crate::Cap) -> Result<(), DecodeError> {
     if data.len() > usize::try_from(out.room()).expect("u32 fits usize") {
-        return Err(DecodeError::TooLarge);
+        return Err(DecodeError::limit(cap, out.capacity()));
     }
     for &byte in data {
-        out.push(byte).or(Err(DecodeError::TooLarge))?;
+        out.push(byte).or(Err(DecodeError::limit(cap, out.capacity())))?;
     }
     Ok(())
 }
@@ -398,7 +415,7 @@ fn finish(active: Active, limits: &Limits) -> Result<Part, DecodeError> {
             };
             let mut measure = skein_json::writer::Encoder::measure(&bounded);
             write_thinking(&mut measure, &head, text.as_slice(), signature.as_slice());
-            let len = crate::openai::measured(measure)?;
+            let len = crate::openai::measured(measure, bounded, crate::Cap::Opaque)?;
             let mut out = skein_json::writer::Encoder::write(len, &bounded);
             write_thinking(&mut out, &head, text.as_slice(), signature.as_slice());
             Ok(Part::Opaque { bytes: out.finish() })
@@ -585,7 +602,7 @@ fn text(tokens: &[Token], name: &[u8]) -> Result<Box<[u8]>, DecodeError> {
     json::text(field(tokens, name)?)
 }
 fn index(tokens: &[Token]) -> Result<u32, DecodeError> {
-    u32::try_from(json::unsigned(field(tokens, b"index")?)?).or(Err(DecodeError::TooLarge))
+    u32::try_from(json::unsigned(field(tokens, b"index")?)?).or(Err(DecodeError::Malformed))
 }
 /// Includes the active block's buffers and replay JSON construction, excluding
 /// the common JSON event/parser/writer and the owner's output queue storage.

@@ -155,7 +155,7 @@ fn provider_error_body_end_and_http_done_share_one_terminal() {
         world.request(client::Request::Start);
         world.run();
         world.assert_once();
-        assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure, evidence: client::Evidence::Response, .. } if *failure == expected)), "{:?}", world.seen);
+        assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure, evidence: client::Evidence::Response { status: actual }, .. } if *failure == expected && *actual == status)), "{:?}", world.seen);
         world.settle();
         world.settle();
         world.assert_once();
@@ -411,14 +411,14 @@ fn completed_messages_replay_reasoning_message_ids_and_tool_ids_on_next_turn() {
 fn independent_caps_bound_requests_errors_deltas_and_tool_arguments() {
     let mut tiny_request = limits();
     tiny_request.dialect.request_bytes = 32;
-    assert!(matches!(client::Client::prepare(call(1), &tiny_request), Err(Error::Limit)));
+    assert!(matches!(client::Client::prepare(call(1), &tiny_request), Err(Error::Limit { .. })));
     let mut token_cap = limits();
     token_cap.dialect.tokens = 2;
     let mut world = World::new(call(1), token_cap, text_response(false), 3);
     world.request(client::Request::Start);
     world.run();
     world.assert_once();
-    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Limit, .. })));
+    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Limit { .. }, .. })));
     let mut short_errors = limits();
     short_errors.error_bytes = 16;
     let mut world = World::new(
@@ -430,7 +430,14 @@ fn independent_caps_bound_requests_errors_deltas_and_tool_arguments() {
     world.request(client::Request::Start);
     world.run();
     world.assert_once();
-    assert!(world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::RateLimited { retry_after }, .. } if *retry_after == Duration::from_secs(4))));
+    assert!(world.seen.iter().any(|e| matches!(
+        e,
+        client::Event::Failed {
+            failure: Failure::Limit { which: skein_llm::Cap::ErrorBody, bound: 16 },
+            evidence: client::Evidence::Response { status: 429 },
+            ..
+        }
+    )));
     world.settle();
     world.assert_once();
 
@@ -451,7 +458,7 @@ fn independent_caps_bound_requests_errors_deltas_and_tool_arguments() {
     world.run();
     world.assert_once();
     assert!(
-        world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Limit, .. })),
+        world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Limit { .. }, .. })),
         "{:?}",
         world.seen
     );
@@ -468,7 +475,7 @@ fn independent_caps_bound_requests_errors_deltas_and_tool_arguments() {
     world.run();
     world.assert_once();
     assert!(
-        world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Limit, .. })),
+        world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Limit { .. }, .. })),
         "{:?}",
         world.seen
     );
@@ -484,7 +491,7 @@ fn exact_request_head_cap_is_checked_before_transport_binding() {
     exact.http.request = u32::try_from(head_end).unwrap();
     assert!(client::Client::prepare(call(1), &exact).is_ok());
     exact.http.request -= 1;
-    assert!(matches!(client::Client::prepare(call(1), &exact), Err(Error::Limit)));
+    assert!(matches!(client::Client::prepare(call(1), &exact), Err(Error::Limit { .. })));
 }
 
 #[test]
@@ -599,4 +606,199 @@ fn lower_eof_with_a_buffered_provider_terminal_closes_without_another_next() {
     );
     world.settle();
     world.assert_once();
+}
+
+#[test]
+#[expect(clippy::wildcard_enum_match_arm, reason = "focused controls inspect failures and their selected caps")]
+fn non_json_errors_keep_their_status_and_exact_error_body_bound() {
+    for status in [401, 429, 503] {
+        let body = b"upstream failed";
+        for bound in [body.len(), body.len() - 1] {
+            let mut bounds = limits();
+            bounds.error_bytes = u32::try_from(bound).unwrap();
+            let mut world = World::new(call(9), bounds, response(status, "", body, false), 9);
+            world.fragmentation(1, 1);
+            world.request(client::Request::Start);
+            world.run();
+            world.settle();
+            world.assert_once();
+            let failed: Vec<_> = world
+                .seen
+                .iter()
+                .filter_map(|event| match event {
+                    client::Event::Failed { failure, evidence, detail, .. } => Some((*failure, *evidence, detail)),
+                    _ => None,
+                })
+                .collect();
+            let [(failure, evidence, detail)] = failed.as_slice() else { panic!("one failed terminal") };
+            assert_eq!(*evidence, client::Evidence::Response { status });
+            if bound < body.len() {
+                assert_eq!(
+                    *failure,
+                    Failure::Limit { which: skein_llm::Cap::ErrorBody, bound: u64::try_from(bound).unwrap() }
+                );
+                assert_eq!(detail.as_ref(), format!("provider error body exceeds bound {bound}").as_bytes());
+            } else {
+                let expected = match status {
+                    401 => Failure::Unauthorized,
+                    429 => Failure::RateLimited { retry_after: Duration::ZERO },
+                    503 => Failure::Overloaded,
+                    _ => unreachable!(),
+                };
+                assert_eq!(*failure, expected);
+                assert_eq!(detail.as_ref(), format!("provider HTTP error {status}").as_bytes());
+            }
+        }
+    }
+}
+
+#[test]
+#[expect(clippy::wildcard_enum_match_arm, reason = "focused controls inspect failures and their selected caps")]
+fn receiving_caps_admit_the_edge_and_refuse_one_over_by_name() {
+    use skein_json::Token as JsonToken;
+    use skein_llm::{Cap, Json};
+    let documents = [skein_llm_world::TEXT_ADDED, skein_llm_world::TEXT_DELTA, skein_llm_world::TEXT_DONE, TERMINAL];
+    let wire = text_response(false);
+    let head = u32::try_from(wire.windows(4).position(|part| part == b"\r\n\r\n").unwrap() + 4).unwrap();
+    let document = u32::try_from(documents.iter().map(|document| document.len()).max().unwrap()).unwrap();
+    let values: Vec<_> =
+        documents.iter().map(|text| Json::from_bytes(text.as_bytes(), &limits().dialect).unwrap()).collect();
+    let tokens = u32::try_from(values.iter().map(|value| value.as_tokens().len()).max().unwrap()).unwrap();
+    let string = u32::try_from(
+        values
+            .iter()
+            .flat_map(Json::as_tokens)
+            .filter_map(|token| match token {
+                JsonToken::Key(text) | JsonToken::String(text) => Some(text.len()),
+                _ => None,
+            })
+            .max()
+            .unwrap(),
+    )
+    .unwrap();
+    let opaque = u32::try_from(br#"{"id":"msg_1","phase":"final_answer"}"#.len()).unwrap();
+    for (which, edge) in [
+        (Cap::Head, head),
+        (Cap::Document, document),
+        (Cap::Tokens, tokens),
+        (Cap::String, string),
+        (Cap::Depth, 4),
+        (Cap::Line, document + 6),
+        (Cap::Event, document + 8),
+        (Cap::Parts, 1),
+        (Cap::Answer, 31),
+        (Cap::Opaque, opaque),
+    ] {
+        for bound in [edge, edge - 1] {
+            let mut bounds = limits();
+            match which {
+                Cap::Head => bounds.http.head = bound,
+                Cap::Document => bounds.dialect.document_bytes = bound,
+                Cap::Tokens => bounds.dialect.tokens = bound,
+                Cap::String => bounds.dialect.string_bytes = bound,
+                Cap::Depth => bounds.dialect.depth = bound,
+                Cap::Line => bounds.sse.line = bound,
+                Cap::Event => bounds.sse.event = bound,
+                Cap::Parts => {
+                    if bound == 0 {
+                        continue;
+                    }
+                    bounds.dialect.parts = bound;
+                }
+                Cap::Answer => bounds.dialect.answer_bytes = bound,
+                Cap::Opaque => bounds.dialect.opaque_bytes = bound,
+                _ => unreachable!(),
+            }
+            let mut input = call(10);
+            input.prompt.messages = Box::new([]);
+            let mut world = World::new(input, bounds, wire.clone(), 10);
+            world.fragmentation(1, 1);
+            world.request(client::Request::Start);
+            world.run();
+            world.settle();
+            world.assert_once();
+            if bound == edge {
+                assert!(
+                    world.seen.iter().any(|event| matches!(event, client::Event::Completed { .. })),
+                    "{which:?} {bound}: {:?}",
+                    world.seen
+                );
+            } else {
+                assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Limit { which: actual, bound: actual_bound }, .. } if *actual == which && *actual_bound == u64::from(bound))), "{which:?} {bound}: {:?}", world.seen);
+            }
+        }
+    }
+}
+
+#[test]
+#[expect(clippy::wildcard_enum_match_arm, reason = "focused controls inspect failures and their selected caps")]
+fn header_fields_and_sse_fields_keep_their_own_exact_bounds() {
+    use skein_llm::Cap;
+    let document = TERMINAL;
+    for (which, edge) in [(Cap::Headers, 8), (Cap::Field, 7)] {
+        for bound in [edge, edge - 1] {
+            let mut bounds = limits();
+            let wire = match which {
+                Cap::Headers => {
+                    bounds.http.headers = bound;
+                    response(
+                        200,
+                        "Content-Type: text/event-stream\r\nA: a\r\nB: b\r\nC: c\r\nD: d\r\nE: e\r\nF: f\r\n",
+                        &events(&[document]),
+                        false,
+                    )
+                }
+                Cap::Field => {
+                    bounds.sse.field = bound;
+                    response(
+                        200,
+                        "Content-Type: text/event-stream\r\n",
+                        format!("event: example\ndata: {document}\n\n").as_bytes(),
+                        false,
+                    )
+                }
+                _ => unreachable!(),
+            };
+            let mut world = World::new(call(11), bounds, wire, 11);
+            world.fragmentation(1, 1);
+            world.request(client::Request::Start);
+            world.run();
+            world.settle();
+            world.assert_once();
+            if bound == edge {
+                assert!(
+                    world.seen.iter().any(|event| matches!(event, client::Event::Completed { .. })),
+                    "{which:?}: {:?}",
+                    world.seen
+                );
+            } else {
+                assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Limit { which: actual, bound: actual_bound }, .. } if *actual == which && *actual_bound == u64::from(bound))), "{which:?}: {:?}", world.seen);
+            }
+        }
+    }
+}
+
+#[test]
+fn an_error_documents_retained_token_limit_keeps_the_http_status() {
+    let mut bounds = limits();
+    bounds.dialect.tokens = 2;
+    let wire = response(
+        401,
+        "Content-Type: application/json\r\n",
+        br#"{"error":{"code":"invalid_api_key","message":"denied"}}"#,
+        false,
+    );
+    let mut world = World::new(call(12), bounds, wire, 12);
+    world.request(client::Request::Start);
+    world.run();
+    world.settle();
+    world.assert_once();
+    assert!(world.seen.iter().any(|event| matches!(
+        event,
+        client::Event::Failed {
+            failure: Failure::Limit { which: skein_llm::Cap::Tokens, bound: 2 },
+            evidence: client::Evidence::Response { status: 401 },
+            ..
+        }
+    )));
 }

@@ -22,7 +22,7 @@ impl Json {
     /// tokenizer tokens with `Collector` to keep tokenization incremental.
     pub fn from_bytes(input: &[u8], limits: &Limits) -> Result<Json, DecodeError> {
         if input.len() > usize::try_from(limits.document_bytes).expect("u32 fits usize") {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::limit(crate::Cap::Document, limits.document_bytes));
         }
         let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits.tokenizer_limits() };
         let mut machine = tokenizer::Tokenizer::new(&env.limits);
@@ -57,7 +57,7 @@ impl Json {
                     };
                     if count <= remaining.len() {
                         let delivery = bytes::copy_of(remaining.get(..count).ok_or(DecodeError::Malformed)?);
-                        at = at.checked_add(count).ok_or(DecodeError::TooLarge)?;
+                        at = at.checked_add(count).ok_or(DecodeError::Malformed)?;
                         tokenizer::up(&mut machine, &env, Up::Bytes(delivery), &mut above, &mut below);
                     } else {
                         tokenizer::up(&mut machine, &env, Up::End, &mut above, &mut below);
@@ -69,7 +69,7 @@ impl Json {
                 match event {
                     tokenizer::Event::Token(token) => collector.push(token)?,
                     tokenizer::Event::Done => return collector.finish(limits),
-                    tokenizer::Event::Failed(error) => return Err(tokenizer_error(error)),
+                    tokenizer::Event::Failed(error) => return Err(tokenizer_error(error, limits)),
                     tokenizer::Event::Long(_) | tokenizer::Event::Skipped(_) => unreachable!("only Next is demanded"),
                     tokenizer::Event::Closed => return Err(DecodeError::Malformed),
                 }
@@ -96,7 +96,7 @@ impl Json {
         let bounded = limits.writer_limits();
         let mut measure = writer::Encoder::measure(&bounded);
         self.write(&mut measure);
-        let len = crate::openai::common::measured(measure)?;
+        let len = crate::openai::common::measured(measure, bounded, crate::Cap::Document)?;
         let mut write = writer::Encoder::write(len, &bounded);
         self.write(&mut write);
         Ok(write.finish())
@@ -144,12 +144,17 @@ impl Collector {
             | Token::Null => 1,
         };
         if size > usize::try_from(self.string_limit).expect("u32 fits usize") {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::limit(crate::Cap::String, self.string_limit));
         }
-        let bytes =
-            self.bytes.checked_add(u64::try_from(size).expect("usize fits u64")).ok_or(DecodeError::TooLarge)?;
-        if bytes > u64::from(self.byte_limit) || self.tokens.room() == 0 {
-            return Err(DecodeError::TooLarge);
+        let bytes = self
+            .bytes
+            .checked_add(u64::try_from(size).expect("usize fits u64"))
+            .ok_or(DecodeError::limit(crate::Cap::Document, self.byte_limit))?;
+        if bytes > u64::from(self.byte_limit) {
+            return Err(DecodeError::limit(crate::Cap::Document, self.byte_limit));
+        }
+        if self.tokens.room() == 0 {
+            return Err(DecodeError::limit(crate::Cap::Tokens, self.tokens.capacity()));
         }
         Ok(bytes)
     }
@@ -160,7 +165,7 @@ impl Collector {
                 self.bytes = bytes;
                 Ok(())
             }
-            Err(_) => Err(DecodeError::TooLarge),
+            Err(_) => Err(DecodeError::limit(crate::Cap::Tokens, self.tokens.capacity())),
         }
     }
     pub fn finish(self, limits: &Limits) -> Result<Json, DecodeError> {
@@ -170,7 +175,8 @@ impl Collector {
         value.write(&mut measure);
         match measure.measured() {
             Ok(_) => Ok(value),
-            Err(writer::Refusal::TooLong | writer::Refusal::TooDeep) => Err(DecodeError::TooLarge),
+            Err(writer::Refusal::TooLong) => Err(DecodeError::limit(crate::Cap::Document, limits.document_bytes)),
+            Err(writer::Refusal::TooDeep) => Err(DecodeError::limit(crate::Cap::Depth, limits.depth)),
             Err(writer::Refusal::Text | writer::Refusal::Number) => Err(DecodeError::Malformed),
         }
     }
@@ -230,7 +236,7 @@ fn validate(tokens: &[Token], depth: u32) -> Result<(), DecodeError> {
                 if let Some(frame) = frame
                     && open.push(frame).is_err()
                 {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::Depth, depth));
                 }
             }
         }
@@ -249,16 +255,16 @@ pub(crate) fn span(tokens: &[Token], at: usize) -> Result<usize, DecodeError> {
             for (offset, token) in tokens.get(at..).ok_or(DecodeError::Malformed)?.iter().enumerate() {
                 match token {
                     Token::ObjectStart | Token::ArrayStart => {
-                        depth = depth.checked_add(1).ok_or(DecodeError::TooLarge)?;
+                        depth = depth.checked_add(1).ok_or(DecodeError::Malformed)?;
                     }
                     Token::ObjectEnd | Token::ArrayEnd => {
                         depth = depth.checked_sub(1).ok_or(DecodeError::Malformed)?;
                         if depth == 0 {
                             return at
                                 .checked_add(offset)
-                                .ok_or(DecodeError::TooLarge)?
+                                .ok_or(DecodeError::Malformed)?
                                 .checked_add(1)
-                                .ok_or(DecodeError::TooLarge);
+                                .ok_or(DecodeError::Malformed);
                         }
                     }
                     Token::Key(_) | Token::String(_) | Token::Number(_) | Token::True | Token::False | Token::Null => {}
@@ -267,7 +273,7 @@ pub(crate) fn span(tokens: &[Token], at: usize) -> Result<usize, DecodeError> {
             Err(DecodeError::Malformed)
         }
         Token::String(_) | Token::Number(_) | Token::True | Token::False | Token::Null => {
-            at.checked_add(1).ok_or(DecodeError::TooLarge)
+            at.checked_add(1).ok_or(DecodeError::Malformed)
         }
         Token::ObjectEnd | Token::ArrayEnd | Token::Key(_) => Err(DecodeError::Malformed),
     }
@@ -283,13 +289,13 @@ pub(crate) fn field(tokens: &[Token], name: &[u8]) -> Result<Option<u32>, Decode
         match tokens.get(at) {
             Some(Token::ObjectEnd) => return Ok(found),
             Some(Token::Key(key)) => {
-                let start = at.checked_add(1).ok_or(DecodeError::TooLarge)?;
+                let start = at.checked_add(1).ok_or(DecodeError::Malformed)?;
                 at = span(tokens, start)?;
                 if key.as_ref() == name {
                     if found.is_some() {
                         return Err(DecodeError::Malformed);
                     }
-                    found = Some(u32::try_from(start).or(Err(DecodeError::TooLarge))?);
+                    found = Some(u32::try_from(start).or(Err(DecodeError::Malformed))?);
                 }
             }
             Some(
@@ -344,9 +350,9 @@ pub(crate) fn unsigned(tokens: &[Token]) -> Result<u64, DecodeError> {
         }
         n = n
             .checked_mul(10)
-            .ok_or(DecodeError::TooLarge)?
+            .ok_or(DecodeError::Malformed)?
             .checked_add(u64::from(byte.wrapping_sub(b'0')))
-            .ok_or(DecodeError::TooLarge)?;
+            .ok_or(DecodeError::Malformed)?;
     }
     Ok(n)
 }
@@ -368,10 +374,10 @@ pub(crate) fn array(tokens: &[Token], count: u32) -> Result<List<u32>, DecodeErr
             return Ok(offsets);
         }
         let Ok(offset) = u32::try_from(at) else {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::Malformed);
         };
         if offsets.push(offset).is_err() {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::limit(crate::Cap::Parts, count));
         }
         at = span(tokens, at)?;
     }
@@ -383,12 +389,12 @@ pub(crate) fn value_at(tokens: &[Token], offset: u32) -> Result<&[Token], Decode
     tokens.get(start..end).ok_or(DecodeError::Malformed)
 }
 
-fn tokenizer_error(error: tokenizer::Error) -> DecodeError {
+fn tokenizer_error(error: tokenizer::Error, limits: &Limits) -> DecodeError {
     match error {
-        tokenizer::Error::TooLong
-        | tokenizer::Error::TooDeep
-        | tokenizer::Error::StringTooLong
-        | tokenizer::Error::NumberTooLong => DecodeError::TooLarge,
+        tokenizer::Error::TooLong => DecodeError::limit(crate::Cap::Document, limits.document_bytes),
+        tokenizer::Error::TooDeep => DecodeError::limit(crate::Cap::Depth, limits.depth),
+        tokenizer::Error::StringTooLong => DecodeError::limit(crate::Cap::String, limits.string_bytes),
+        tokenizer::Error::NumberTooLong => DecodeError::limit(crate::Cap::Number, limits.tokenizer_limits().number),
         tokenizer::Error::Unexpected
         | tokenizer::Error::Trailing
         | tokenizer::Error::Number

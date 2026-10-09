@@ -414,7 +414,11 @@ fn unauthorized(provider: Provider) {
             | client::Event::Closed => None,
         })
         .collect();
-    assert_eq!(failures, [(Failure::Unauthorized, client::Evidence::Response)], "real auth failure: {events:?}");
+    assert_eq!(
+        failures,
+        [(Failure::Unauthorized, client::Evidence::Response { status: 401 })],
+        "real auth failure: {events:?}"
+    );
     assert!(!events.iter().any(|event| matches!(event, client::Event::Completed { .. })));
 }
 #[test]

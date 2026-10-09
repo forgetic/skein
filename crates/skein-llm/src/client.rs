@@ -4,6 +4,9 @@
 //! [`Client::has_work`] holds. `Next` demands one data event; terminal faults
 //! need no demand. On `Close`, close the real stream and acknowledge its
 //! settlement with [`closed`]. The caller owns deadlines and retry policy.
+//! The client keeps its measured request, bounded response and observed status;
+//! it knows no socket, credential store or reason to retry. Admission and
+//! receiving failures retain their configured cap (llm.md, section 2.5).
 
 use alloc::boxed::Box;
 use core::mem;
@@ -36,10 +39,11 @@ pub struct CredentialLimits {
 
 /// Check credential bytes before constructing the bounded request head.
 pub fn check_credential(credential: &crate::Credential, limits: &CredentialLimits) -> Result<(), Error> {
-    if credential.access_token.len() > usize::try_from(limits.access_token).expect("u32 fits usize")
-        || credential.account_id.len() > usize::try_from(limits.account_id).expect("u32 fits usize")
-    {
-        return Err(Error::Limit);
+    if credential.access_token.len() > usize::try_from(limits.access_token).expect("u32 fits usize") {
+        return Err(Error::limit(crate::Cap::AccessToken, limits.access_token));
+    }
+    if credential.account_id.len() > usize::try_from(limits.account_id).expect("u32 fits usize") {
+        return Err(Error::limit(crate::Cap::AccountId, limits.account_id));
     }
     Ok(())
 }
@@ -55,14 +59,15 @@ pub fn request_head(endpoint: &Endpoint, credential: &CredentialLimits, limits: 
         Provider::OpenAiCodex => usize::try_from(credential.account_id).expect("u32 fits usize"),
         Provider::Anthropic => 0,
     };
-    let mut count = endpoint.headers.len().checked_add(5).ok_or(Error::Limit)?;
+    let mut count =
+        endpoint.headers.len().checked_add(5).ok_or(Error::limit(crate::Cap::Headers, limits.http.headers))?;
     for field in &fields {
         if field.is_some() {
-            count = count.checked_add(1).ok_or(Error::Limit)?;
+            count = count.checked_add(1).ok_or(Error::limit(crate::Cap::Headers, limits.http.headers))?;
         }
     }
     if count > usize::try_from(limits.http.headers).expect("u32 fits usize") {
-        return Err(Error::Limit);
+        return Err(Error::limit(crate::Cap::Headers, limits.http.headers));
     }
     let measured = head_length(
         endpoint,
@@ -73,7 +78,7 @@ pub fn request_head(endpoint: &Endpoint, credential: &CredentialLimits, limits: 
     )?;
     match u32::try_from(measured) {
         Ok(measured) => Ok(measured),
-        Err(_) => Err(Error::Limit),
+        Err(_) => Err(Error::Limit { which: crate::Cap::RequestHead, bound: u64::from(u32::MAX) }),
     }
 }
 
@@ -101,7 +106,10 @@ pub enum Request {
 pub enum Evidence {
     Unsent,
     Unknown,
-    Response,
+    /// The peer sent this HTTP status before the failure.
+    Response {
+        status: u16,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -204,8 +212,21 @@ impl Client {
     /// Validates and measures before touching a connection or holding the
     /// final encoded body. The caller binds its transport to this endpoint.
     pub fn prepare(input: Call, limits: &Limits) -> Result<Client, Error> {
+        if limits.http.headers < 6 {
+            return Err(Error::limit(crate::Cap::Headers, limits.http.headers));
+        }
+        for (which, bound) in [
+            (crate::Cap::ErrorBody, limits.error_bytes),
+            (crate::Cap::Parts, limits.dialect.parts),
+            (crate::Cap::Depth, limits.dialect.depth),
+            (crate::Cap::Tokens, limits.dialect.tokens),
+        ] {
+            if bound == 0 {
+                return Err(Error::limit(which, bound));
+            }
+        }
         if worst_case(limits).is_none() {
-            return Err(Error::Limit);
+            return Err(Error::Invalid);
         }
         let provider = input.endpoint.provider;
         let (headers, body) = match provider {
@@ -283,7 +304,10 @@ impl Client {
     /// first output. The connection owner clears its head deadline here.
     #[must_use]
     pub fn response_received(&self) -> bool {
-        self.evidence == Evidence::Response
+        match self.evidence {
+            Evidence::Response { .. } => true,
+            Evidence::Unsent | Evidence::Unknown => false,
+        }
     }
 
     /// True only for runnable work, never for output blocked on `Next`.
@@ -573,7 +597,7 @@ fn http_event(
             }
         }
         http::Event::Failed(error) => {
-            let failure = http_failure(error);
+            let failure = http_failure(error, &env.limits);
             fail(client, failure, bytes::copy_of(b"HTTP exchange failed"), above);
             closing(client, env, above, below);
         }
@@ -584,7 +608,7 @@ fn http_event(
 fn queued_http_failure(client: &Client) -> Option<Failure> {
     for event in &client.http_events {
         match event {
-            http::Event::Failed(error) => return Some(http_failure(*error)),
+            http::Event::Failed(error) => return Some(http_failure(*error, &client.limits)),
             http::Event::Response(_)
             | http::Event::Upload(_)
             | http::Event::Body(_)
@@ -595,7 +619,7 @@ fn queued_http_failure(client: &Client) -> Option<Failure> {
     None
 }
 
-fn http_failure(error: http::Error) -> Failure {
+fn http_failure(error: http::Error, limits: &Limits) -> Failure {
     match error {
         http::Error::Refused(_) => Failure::Invalid,
         http::Error::Closed(_) | http::Error::Stream(_) => Failure::Unavailable,
@@ -608,7 +632,10 @@ fn http_failure(error: http::Error) -> Failure {
         | http::Error::Chunk
         | http::Error::Trailer
         | http::Error::Upgrade => Failure::Protocol,
-        http::Error::HeadTooLong | http::Error::TooManyHeaders => Failure::Limit,
+        http::Error::HeadTooLong => Failure::Limit { which: crate::Cap::Head, bound: u64::from(limits.http.head) },
+        http::Error::TooManyHeaders => {
+            Failure::Limit { which: crate::Cap::Headers, bound: u64::from(limits.http.headers) }
+        }
     }
 }
 
@@ -619,7 +646,7 @@ fn response_head(
     above: &mut Queue<Event>,
     below: &mut Queue<Down>,
 ) {
-    client.evidence = Evidence::Response;
+    client.evidence = Evidence::Response { status: response.status };
     client.status = response.status;
     for header in &response.headers {
         client.rate.observe(&header.name, &header.value);
@@ -656,8 +683,13 @@ fn body_event(client: &mut Client, event: Up, env: &Env<Limits>, above: &mut Que
                 for &byte in data.iter().take(room) {
                     client.error.push(byte).expect("error bytes are within their cap");
                 }
-                if data.len() > room || client.error.room() == 0 {
-                    error_end(client, env, above);
+                if data.len() > room {
+                    fail(
+                        client,
+                        Failure::Limit { which: crate::Cap::ErrorBody, bound: u64::from(env.limits.error_bytes) },
+                        bytes::copy_of(b""),
+                        above,
+                    );
                     closing(client, env, above, below);
                 } else {
                     client.requests.push(http::Request::Body(Down::Demand { read: Read::Fill(1), room: 0 }));
@@ -691,7 +723,7 @@ fn sse_event(
                 decoder.event(&message, &env.limits.dialect, env.wall, client.status, client.rate, &mut client.outputs);
             if let Err(error) = parsed {
                 let failure = match error {
-                    openai::DecodeError::TooLarge => Failure::Limit,
+                    openai::DecodeError::TooLarge { which, bound } => Failure::Limit { which, bound },
                     openai::DecodeError::Malformed | openai::DecodeError::Missing | openai::DecodeError::WrongType => {
                         Failure::Protocol
                     }
@@ -706,7 +738,15 @@ fn sse_event(
         }
         sse::Event::Failed(error) => {
             let failure = match error {
-                sse::Error::LineTooLong | sse::Error::EventTooLong | sse::Error::FieldTooLong => Failure::Limit,
+                sse::Error::LineTooLong => {
+                    Failure::Limit { which: crate::Cap::Line, bound: u64::from(env.limits.sse.line) }
+                }
+                sse::Error::EventTooLong => {
+                    Failure::Limit { which: crate::Cap::Event, bound: u64::from(env.limits.sse.event) }
+                }
+                sse::Error::FieldTooLong => {
+                    Failure::Limit { which: crate::Cap::Field, bound: u64::from(env.limits.sse.field) }
+                }
                 sse::Error::Stream(_) => Failure::Unavailable,
             };
             fail(client, failure, bytes::copy_of(b"event stream failed"), above);
@@ -734,14 +774,27 @@ fn output(
                 match next {
                     Some(next) if next <= u64::from(env.limits.dialect.answer_bytes) => client.content_bytes = next,
                     Some(_) | None => {
-                        fail(client, Failure::Limit, bytes::copy_of(b"completion exceeds its byte limit"), above);
+                        fail(
+                            client,
+                            Failure::Limit {
+                                which: crate::Cap::Answer,
+                                bound: u64::from(env.limits.dialect.answer_bytes),
+                            },
+                            bytes::copy_of(b""),
+                            above,
+                        );
                         closing(client, env, above, below);
                         return;
                     }
                 }
                 let content = client.content.as_mut().expect("a pending call holds its completion");
                 if content.push(block.clone()).is_err() {
-                    fail(client, Failure::Limit, bytes::copy_of(b"completion exceeds its part limit"), above);
+                    fail(
+                        client,
+                        Failure::Limit { which: crate::Cap::Parts, bound: u64::from(env.limits.dialect.parts) },
+                        bytes::copy_of(b""),
+                        above,
+                    );
                     closing(client, env, above, below);
                 } else {
                     client.asked = false;
@@ -750,7 +803,7 @@ fn output(
             }
             Err(error) => {
                 let failure = match error {
-                    Error::Limit => Failure::Limit,
+                    Error::Limit { which, bound } => Failure::Limit { which, bound },
                     Error::Invalid | Error::Unsupported => Failure::Protocol,
                 };
                 fail(client, failure, bytes::copy_of(b"completion translation failed"), above);
@@ -794,9 +847,37 @@ fn fail(client: &mut Client, failure: Failure, detail: Box<[u8]>, above: &mut Qu
     if client.outcome != Outcome::Pending {
         return;
     }
+    // A decoded head can be queued when an unsolicited lower failure wins
+    // over undemanded provider output. Its status is still observed evidence.
+    for event in &client.http_events {
+        match event {
+            http::Event::Response(response) => {
+                client.status = response.status;
+                client.evidence = Evidence::Response { status: response.status };
+            }
+            http::Event::Upload(_)
+            | http::Event::Body(_)
+            | http::Event::Done(_)
+            | http::Event::Failed(_)
+            | http::Event::Closed => {}
+        }
+    }
     client.outcome = Outcome::Terminal;
     client.asked = false;
     client.content = None;
+    let detail = match failure {
+        Failure::Limit { which, bound } => openai::limit_detail(which, bound),
+        Failure::Unauthorized
+        | Failure::Exhausted { .. }
+        | Failure::RateLimited { .. }
+        | Failure::Overloaded
+        | Failure::Unavailable
+        | Failure::ContextTooLong
+        | Failure::Invalid
+        | Failure::Protocol
+        | Failure::Cancelled
+        | Failure::TimedOut => detail,
+    };
     let detail = openai::clip_detail(&detail, client.limits.dialect.detail_bytes);
     above.push(Event::Failed { owner: client.owner, failure, evidence: client.evidence, detail });
 }
@@ -804,14 +885,33 @@ fn fail(client: &mut Client, failure: Failure, detail: Box<[u8]>, above: &mut Qu
 fn error_end(client: &mut Client, env: &Env<Limits>, above: &mut Queue<Event>) {
     let mut limits = env.limits.dialect;
     limits.document_bytes = env.limits.error_bytes;
-    let error = match openai::Json::from_bytes(client.error.as_slice(), &limits) {
-        Ok(json) => openai::decode_error(&json, &limits).ok(),
-        Err(_) => None,
+    let decoded = match openai::Json::from_bytes(client.error.as_slice(), &limits) {
+        Ok(json) => openai::decode_error(&json, &limits),
+        Err(error) => Err(error),
+    };
+    let error = match decoded {
+        Ok(error) => Some(error),
+        Err(openai::DecodeError::TooLarge { which, bound }) => {
+            client.error.clear();
+            fail(client, Failure::Limit { which, bound }, bytes::copy_of(b""), above);
+            return;
+        }
+        Err(openai::DecodeError::Malformed | openai::DecodeError::Missing | openai::DecodeError::WrongType) => None,
     };
     let failure = translate::failure(openai::classify(client.status, error.as_ref(), client.rate, env.wall));
     let detail = match error {
         Some(error) => error.message,
-        None => bytes::copy_of(b"provider HTTP error"),
+        None => {
+            let status = Decimal::of(u64::from(client.status));
+            let length = b"provider HTTP error "
+                .len()
+                .checked_add(status.as_bytes().len())
+                .expect("status diagnostic fits usize");
+            let mut detail = Writer::new(length);
+            detail.put(b"provider HTTP error ").expect("measured prefix");
+            detail.put(status.as_bytes()).expect("measured HTTP status");
+            detail.finish()
+        }
     };
     client.error.clear();
     fail(client, failure, detail, above);
@@ -926,7 +1026,7 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
 
 fn admission(error: openai::DecodeError) -> Error {
     match error {
-        openai::DecodeError::TooLarge => Error::Limit,
+        openai::DecodeError::TooLarge { which, bound } => Error::Limit { which, bound },
         openai::DecodeError::Malformed | openai::DecodeError::Missing | openai::DecodeError::WrongType => {
             Error::Invalid
         }
@@ -959,14 +1059,16 @@ fn headers(
     let mut fixed_count = 5_usize;
     for field in &fields {
         if field.is_some() {
-            fixed_count = fixed_count.checked_add(1).ok_or(Error::Limit)?;
+            fixed_count = fixed_count.checked_add(1).ok_or(Error::limit(crate::Cap::Headers, limits.http.headers))?;
         }
     }
-    if total > usize::try_from(limits.http.request).expect("u32 fits usize")
-        || endpoint.headers.len().checked_add(fixed_count).ok_or(Error::Limit)?
-            > usize::try_from(limits.http.headers).expect("u32 fits usize")
+    if total > usize::try_from(limits.http.request).expect("u32 fits usize") {
+        return Err(Error::limit(crate::Cap::RequestHead, limits.http.request));
+    }
+    if endpoint.headers.len().checked_add(fixed_count).ok_or(Error::limit(crate::Cap::Headers, limits.http.headers))?
+        > usize::try_from(limits.http.headers).expect("u32 fits usize")
     {
-        return Err(Error::Limit);
+        return Err(Error::limit(crate::Cap::Headers, limits.http.headers));
     }
     let mut headers = List::with_capacity(limits.http.headers);
     for (name, value) in [
@@ -984,7 +1086,11 @@ fn headers(
             .push(Header { name: bytes::copy_of(name), value: bytes::copy_of(value) })
             .expect("provider headers fit the checked cap");
     }
-    let len = credential.access_token.len().checked_add(7).ok_or(Error::Limit)?;
+    let len = credential
+        .access_token
+        .len()
+        .checked_add(7)
+        .ok_or(Error::limit(crate::Cap::RequestHead, limits.http.request))?;
     let mut bearer = Writer::new(len);
     bearer.put(b"Bearer ").expect("the bearer prefix was measured");
     bearer.put(&credential.access_token).expect("the token was measured");
@@ -1013,9 +1119,9 @@ fn head_length(
             return Err(Error::Invalid);
         }
     }
-    let mut total = endpoint.authority.len().checked_add(endpoint.target.len()).ok_or(Error::Limit)?;
-    total = total.checked_add(token_bytes).ok_or(Error::Limit)?;
-    total = total.checked_add(account_bytes).ok_or(Error::Limit)?;
+    let mut total = endpoint.authority.len().checked_add(endpoint.target.len()).ok_or(Error::Invalid)?;
+    total = total.checked_add(token_bytes).ok_or(Error::Invalid)?;
+    total = total.checked_add(account_bytes).ok_or(Error::Invalid)?;
     for (index, header) in endpoint.headers.iter().enumerate() {
         if reserved(&header.name) || !header_name(&header.name) || !header_value(&header.value) {
             return Err(Error::Invalid);
@@ -1025,9 +1131,9 @@ fn head_length(
                 return Err(Error::Invalid);
             }
         }
-        total = total.checked_add(header.name.len()).ok_or(Error::Limit)?;
-        total = total.checked_add(header.value.len()).ok_or(Error::Limit)?;
-        total = total.checked_add(4).ok_or(Error::Limit)?;
+        total = total.checked_add(header.name.len()).ok_or(Error::Invalid)?;
+        total = total.checked_add(header.value.len()).ok_or(Error::Invalid)?;
+        total = total.checked_add(4).ok_or(Error::Invalid)?;
     }
     // Exact wire length: the measured body fixes the Content-Length digits.
     // Check it before allocating any request head or credential copy.
@@ -1042,18 +1148,18 @@ fn head_length(
         b"Content-Length: \r\n",
         b"\r\n",
     ] {
-        total = total.checked_add(fixed.len()).ok_or(Error::Limit)?;
+        total = total.checked_add(fixed.len()).ok_or(Error::Invalid)?;
     }
     for (name, value) in fields.iter().flatten() {
-        total = total.checked_add(name.len()).ok_or(Error::Limit)?;
+        total = total.checked_add(name.len()).ok_or(Error::Invalid)?;
         // Codex account bytes were counted with the credential above.
         if !name.eq_ignore_ascii_case(b"chatgpt-account-id") {
-            total = total.checked_add(value.len()).ok_or(Error::Limit)?;
+            total = total.checked_add(value.len()).ok_or(Error::Invalid)?;
         }
-        total = total.checked_add(4).ok_or(Error::Limit)?;
+        total = total.checked_add(4).ok_or(Error::Invalid)?;
     }
     let length = Decimal::of(u64::from(body_length));
-    total = total.checked_add(length.as_bytes().len()).ok_or(Error::Limit)?;
+    total = total.checked_add(length.as_bytes().len()).ok_or(Error::Invalid)?;
     Ok(total)
 }
 

@@ -460,7 +460,7 @@ fn opaque_envelope_and_extended_thinking_transit_fit_counted_bounds() {
                 drop(decoded);
                 drop(encoded);
             }
-            Err(skein_llm::Error::Limit) => {
+            Err(skein_llm::Error::Limit { .. }) => {
                 let grown = span.end();
                 assert!(
                     grown.peak <= i64::try_from(bound).expect("bounded signed comparison"),

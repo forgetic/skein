@@ -119,7 +119,7 @@ fn measured_request_replays_all_input_kinds_and_bounded_raw_arguments() {
     assert!(bytes::find(&body, b"max_output_tokens").is_none());
     assert_eq!(
         encode_request(&request, &Limits { request_bytes: u32::try_from(body.len()).unwrap() - 1, ..LIMITS }),
-        Err(DecodeError::TooLarge)
+        Err(DecodeError::limit(crate::Cap::Request, u32::try_from(body.len()).unwrap() - 1))
     );
     for (arguments, encoded) in [
         (b"[]".as_slice(), br#""arguments":"[]""#.as_slice()),
@@ -140,7 +140,7 @@ fn measured_request_replays_all_input_kinds_and_bounded_raw_arguments() {
         assert_eq!(decode_request(&document, &bounded).unwrap(), raw);
         assert_eq!(
             encode_request(&raw, &Limits { string_bytes: bounded.string_bytes - 1, ..LIMITS }),
-            Err(DecodeError::TooLarge)
+            Err(DecodeError::limit(crate::Cap::String, bounded.string_bytes - 1))
         );
     }
     let mut invalid = request.clone();
@@ -277,7 +277,7 @@ fn input_cap_discards_input_and_answer_limit_emits_one_failed_terminal() {
     ];
     let trace = stream(&events, &Limits { answer_bytes: 4, ..LIMITS });
     assert!(match trace.last() {
-        Some(Output::Failed { failure: Failure::Limit, .. }) => true,
+        Some(Output::Failed { failure: Failure::Limit { .. }, .. }) => true,
         _ => false,
     });
     assert_eq!(
@@ -430,14 +430,17 @@ fn malformed_tokens_duplicates_and_every_document_limit_are_refused() {
     }
     let tokens = [Token::ObjectStart, Token::Key(owned(b"a")), Token::ObjectEnd];
     assert_eq!(Json::from_tokens(&tokens, &LIMITS), Err(DecodeError::Malformed));
-    assert_eq!(Json::from_bytes(b"{}", &Limits { tokens: 1, ..LIMITS }), Err(DecodeError::TooLarge));
+    assert_eq!(
+        Json::from_bytes(b"{}", &Limits { tokens: 1, ..LIMITS }),
+        Err(DecodeError::limit(crate::Cap::Tokens, 1))
+    );
     assert_eq!(
         Json::from_bytes(br#"{"deep":[{}]}"#, &Limits { depth: 2, ..LIMITS }).unwrap_err(),
-        DecodeError::TooLarge
+        DecodeError::limit(crate::Cap::Depth, 2)
     );
     assert_eq!(
         Json::from_bytes(b"\"long\"", &Limits { string_bytes: 3, ..LIMITS }).unwrap_err(),
-        DecodeError::TooLarge
+        DecodeError::limit(crate::Cap::String, 3)
     );
     assert_eq!(
         decode_event(&value(br#"{"type":"response.created","type":"error"}"#), &LIMITS),
@@ -670,7 +673,7 @@ fn server_refuses_request_limit_even_when_document_limit_is_larger() {
     let document = value(&body);
     assert_eq!(
         decode_request(&document, &Limits { request_bytes: u32::try_from(body.len()).unwrap() - 1, ..LIMITS }),
-        Err(DecodeError::TooLarge)
+        Err(DecodeError::limit(crate::Cap::Request, u32::try_from(body.len()).unwrap() - 1))
     );
 }
 
@@ -756,7 +759,7 @@ fn delta_references_and_cumulative_size_are_checked_and_failure_is_terminal() {
     assert_eq!(trace.len(), 3);
     assert_eq!(trace[1], Output::TextDelta { index: 0, content_index: 0, text: owned(b"ab") });
     assert!(match trace[2] {
-        Output::Failed { failure: Failure::Limit, .. } => true,
+        Output::Failed { failure: Failure::Limit { .. }, .. } => true,
         _ => false,
     });
     for bytes in [
@@ -788,20 +791,33 @@ fn refusal_replays_with_provider_content_type_and_user_refusal_is_rejected() {
 
 #[test]
 fn zero_capacity_limits_refuse_without_panicking_and_diagnostics_obey_the_cap() {
-    assert_eq!(encode_request(&request(), &Limits { request_bytes: 0, ..LIMITS }), Err(DecodeError::TooLarge));
+    assert_eq!(
+        encode_request(&request(), &Limits { request_bytes: 0, ..LIMITS }),
+        Err(DecodeError::limit(crate::Cap::Request, 0))
+    );
     for limits in [
         Limits { document_bytes: 0, ..LIMITS },
         Limits { string_bytes: 0, ..LIMITS },
         Limits { depth: 0, ..LIMITS },
         Limits { tokens: 0, ..LIMITS },
     ] {
-        assert_eq!(Json::from_bytes(br#"{"a":[]}"#, &limits), Err(DecodeError::TooLarge));
+        let error = Json::from_bytes(br#"{"a":[]}"#, &limits).unwrap_err();
+        assert!(match error {
+            DecodeError::TooLarge { bound: 0, .. } => true,
+            _ => false,
+        });
     }
     let trace = stream(
         &[Event::Added { index: 0, id: owned(b"m"), kind: owned(b"message") }],
         &Limits { parts: 0, detail_bytes: 2, ..LIMITS },
     );
-    assert_eq!(trace, Vec::from([Output::Failed { failure: Failure::Limit, detail: owned(b"Ch") }]));
+    assert_eq!(
+        trace,
+        Vec::from([Output::Failed {
+            failure: Failure::Limit { which: crate::Cap::Parts, bound: 0 },
+            detail: owned(b"co")
+        }])
+    );
     let trace = stream(&[Event::Progress], &Limits { detail_bytes: 0, ..LIMITS });
     assert_eq!(trace.last(), Some(&Output::Failed { failure: Failure::Protocol, detail: owned(b"") }));
     let limits = Limits {
@@ -861,7 +877,7 @@ fn separate_opaque_tool_ids_each_obey_string_and_joint_answer_caps() {
     assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO }));
     let trace = stream(&events, &Limits { answer_bytes: 19, ..exact });
     assert!(match trace.last() {
-        Some(Output::Failed { failure: Failure::Limit, .. }) => true,
+        Some(Output::Failed { failure: Failure::Limit { .. }, .. }) => true,
         _ => false,
     });
     for item_long in [false, true] {
@@ -888,8 +904,15 @@ fn separate_opaque_tool_ids_each_obey_string_and_joint_answer_caps() {
         );
         let trace = stream(&events, &Limits { string_bytes: 13, answer_bytes: 27, ..exact });
         assert!(match trace.last() {
-            Some(Output::Failed { failure: Failure::Limit, .. }) => true,
+            Some(Output::Failed { failure: Failure::Limit { .. }, .. }) => true,
             _ => false,
         });
     }
+}
+
+#[test]
+fn numerals_keep_the_fixed_tokenizer_cap_distinct_from_strings() {
+    let limits = Limits { string_bytes: 64, ..LIMITS };
+    Json::from_bytes(&[b'1'; 32], &limits).unwrap();
+    assert_eq!(Json::from_bytes(&[b'1'; 33], &limits), Err(DecodeError::limit(crate::Cap::Number, 32)));
 }

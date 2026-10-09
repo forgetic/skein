@@ -345,7 +345,7 @@ fn run_idle_stall_expires_after_response_head(seed: u64) -> World {
     world.wire.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n");
     world.run_until_head();
     world.at(Time::from_nanos(1_000_000_000));
-    assert_failure(&world, Failure::TimedOut, Evidence::Response);
+    assert_failure(&world, Failure::TimedOut, Evidence::Response { status: 200 });
     world
 }
 
@@ -373,7 +373,7 @@ fn run_a_provider_ping_rearms_idle_without_consuming_next(seed: u64) -> World {
     world.component.fire(&at_one, &mut world.up, &mut world.io);
     assert!(world.up.is_empty(), "a ping extends the idle interval");
     world.at(Time::from_nanos(1_500_000_000));
-    assert_failure(&world, Failure::TimedOut, Evidence::Response);
+    assert_failure(&world, Failure::TimedOut, Evidence::Response { status: 200 });
     world
 }
 
@@ -390,7 +390,7 @@ fn run_truncated_response_has_one_failed_terminal(seed: u64) -> World {
     }
     assert_eq!(world.terminals.len(), 1);
     match &world.terminals[0] {
-        Event::Failed { evidence, .. } => assert_eq!(*evidence, Evidence::Response),
+        Event::Failed { evidence, .. } => assert_eq!(*evidence, Evidence::Response { status: 200 }),
         other @ (Event::Closed
         | Event::Refused { .. }
         | Event::Delta { .. }

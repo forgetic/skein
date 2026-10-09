@@ -1,4 +1,7 @@
-//! Owned vocabulary shared by LLM providers. Replay data remains opaque to callers.
+//! Owned LLM vocabulary and typed refusals (llm.md, sections 2 and 2.5).
+//! Prompts and completions keep caller-owned bytes; replay remains opaque.
+//! These values know no transport, timer or retry policy; Client admission
+//! and terminals carry the cap and bound unchanged.
 use crate::Json;
 use alloc::boxed::Box;
 use skein_http::Header;
@@ -142,11 +145,90 @@ pub enum Delta {
     ToolArguments { index: u32, delta: Box<[u8]> },
     Reasoning { index: u32, summary_index: u32, text: Box<[u8]> },
 }
+/// A local admission or receiving cap named in a failure (llm.md, section 2.5).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Cap {
+    /// The configured bound on encoded request body.
+    Request,
+    /// The configured bound on encoded request head.
+    RequestHead,
+    /// The configured bound on response head.
+    Head,
+    /// The configured bound on HTTP header field count.
+    Headers,
+    /// The configured bound on SSE line.
+    Line,
+    /// The configured bound on SSE event.
+    Event,
+    /// The configured bound on an SSE event type or identifier.
+    Field,
+    /// The configured bound on JSON document.
+    Document,
+    /// The configured bound on retained JSON tokens.
+    Tokens,
+    /// The configured bound on JSON nesting depth.
+    Depth,
+    /// The configured bound on retained string.
+    String,
+    /// The fixed tokenizer bound on a numeral.
+    Number,
+    /// The configured bound on tool argument text.
+    Input,
+    /// The configured bound on opaque replay.
+    Opaque,
+    /// The configured bound on completion or history parts.
+    Parts,
+    /// The configured bound on completion answer.
+    Answer,
+    /// The configured bound on provider error body.
+    ErrorBody,
+    /// The configured bound on access token.
+    AccessToken,
+    /// The configured bound on account identifier.
+    AccountId,
+}
+
+impl Cap {
+    pub(crate) const fn name(self) -> &'static [u8] {
+        match self {
+            Cap::Request => b"encoded request body",
+            Cap::RequestHead => b"encoded request head",
+            Cap::Head => b"response head",
+            Cap::Headers => b"HTTP header field count",
+            Cap::Line => b"SSE line",
+            Cap::Event => b"SSE event",
+            Cap::Field => b"SSE field",
+            Cap::Document => b"JSON document",
+            Cap::Tokens => b"retained JSON tokens",
+            Cap::Depth => b"JSON nesting depth",
+            Cap::String => b"retained string",
+            Cap::Number => b"JSON numeral",
+            Cap::Input => b"tool argument text",
+            Cap::Opaque => b"opaque replay",
+            Cap::Parts => b"completion or history parts",
+            Cap::Answer => b"completion answer",
+            Cap::ErrorBody => b"provider error body",
+            Cap::AccessToken => b"access token",
+            Cap::AccountId => b"account identifier",
+        }
+    }
+}
+
+impl Error {
+    pub(crate) fn limit(which: Cap, bound: u32) -> Error {
+        Error::Limit { which, bound: u64::from(bound) }
+    }
+}
+
 /// A rejected call has produced no traffic and no terminal event.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Error {
     Invalid,
-    Limit,
+    /// A configured local cap refused admission.
+    Limit {
+        which: Cap,
+        bound: u64,
+    },
     Unsupported,
 }
 /// The terminal outcome of an accepted call. Retry policy belongs to its owner.
@@ -163,7 +245,11 @@ pub enum Failure {
     Unavailable,
     ContextTooLong,
     Invalid,
-    Limit,
+    /// A configured local cap ended the accepted call.
+    Limit {
+        which: Cap,
+        bound: u64,
+    },
     Protocol,
     Cancelled,
     /// The caller's timer expired and it aborted the call.

@@ -1,6 +1,6 @@
 //! `ChatGPT` Responses documents, both sides, and an ordered answer decoder.
 mod common;
-pub(crate) use common::measured;
+pub(crate) use common::{limit_detail, measured};
 pub mod identity;
 pub(crate) mod json;
 mod request;

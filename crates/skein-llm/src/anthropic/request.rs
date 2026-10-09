@@ -21,7 +21,7 @@ pub fn measure_request(prompt: &Prompt, limits: &openai::Limits) -> Result<u32, 
     let bounded = writer::Limits { depth: limits.depth, length: limits.request_bytes };
     let mut out = writer::Encoder::measure(&bounded);
     write_request(&mut out, prompt, limits)?;
-    measured(out)
+    measured(out, bounded, crate::Cap::Request)
 }
 
 pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), Error> {
@@ -30,7 +30,7 @@ pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), E
         return Err(Error::Invalid);
     }
     if prompt.tools.len() > count || prompt.messages.len() > count {
-        return Err(Error::Limit);
+        return Err(Error::limit(crate::Cap::Parts, limits.parts));
     }
     if prompt.cache_key.is_some() {
         return Err(Error::Unsupported);
@@ -59,9 +59,9 @@ pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), E
         if message.content.is_empty() {
             return Err(Error::Invalid);
         }
-        blocks = blocks.checked_add(message.content.len()).ok_or(Error::Limit)?;
+        blocks = blocks.checked_add(message.content.len()).ok_or(Error::limit(crate::Cap::Parts, limits.parts))?;
         if blocks > count {
-            return Err(Error::Limit);
+            return Err(Error::limit(crate::Cap::Parts, limits.parts));
         }
         for block in &message.content {
             validate_block(block, message.role, &mut budget, limits)?;
@@ -96,7 +96,7 @@ fn validate_block(block: &Block, role: Role, budget: &mut u64, limits: &openai::
             text(id, budget, limits)?;
             text(name, budget, limits)?;
             if arguments.len() > usize::try_from(limits.input_bytes).expect("u32 fits usize") {
-                return Err(Error::Limit);
+                return Err(Error::limit(crate::Cap::Input, limits.input_bytes));
             }
             charge(arguments.len(), budget, limits)
         }
@@ -119,7 +119,7 @@ fn validate_block(block: &Block, role: Role, budget: &mut u64, limits: &openai::
             let bounded = writer::Limits { depth: limits.depth, length: limits.opaque_bytes };
             let mut measure = writer::Encoder::measure(&bounded);
             replay.value.write(&mut measure);
-            let _length = measured(measure)?;
+            let _length = measured(measure, bounded, crate::Cap::Opaque)?;
             validate_reasoning(&replay.value)
         }
     }
@@ -179,23 +179,30 @@ fn field_text<'a>(tokens: &'a [Token], key: &[u8]) -> Result<&'a [u8], Error> {
 }
 
 fn charge(size: usize, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
-    *budget = budget.checked_add(u64::try_from(size).expect("usize fits u64")).ok_or(Error::Limit)?;
-    if *budget > u64::from(limits.request_bytes) { Err(Error::Limit) } else { Ok(()) }
+    *budget = budget
+        .checked_add(u64::try_from(size).expect("usize fits u64"))
+        .ok_or(Error::limit(crate::Cap::Request, limits.request_bytes))?;
+    if *budget > u64::from(limits.request_bytes) {
+        Err(Error::limit(crate::Cap::Request, limits.request_bytes))
+    } else {
+        Ok(())
+    }
 }
 
 fn text(value: &[u8], budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
     if value.len() > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
-        return Err(Error::Limit);
+        return Err(Error::limit(crate::Cap::String, limits.string_bytes));
     }
     let mut measure = writer::Encoder::measure(&writer::Limits { depth: limits.depth, length: limits.request_bytes });
     measure.string(value);
-    let _length = measured(measure)?;
+    let _length =
+        measured(measure, writer::Limits { depth: limits.depth, length: limits.request_bytes }, crate::Cap::Request)?;
     charge(value.len(), budget, limits)
 }
 
 fn json(value: &Json, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
     if value.as_tokens().len() > usize::try_from(limits.tokens).expect("u32 fits usize") {
-        return Err(Error::Limit);
+        return Err(Error::limit(crate::Cap::Tokens, limits.tokens));
     }
     for token in value.as_tokens() {
         charge(1, budget, limits)?;
@@ -212,14 +219,15 @@ fn json(value: &Json, budget: &mut u64, limits: &openai::Limits) -> Result<(), E
     }
     let mut measure = writer::Encoder::measure(&limits.writer_limits());
     value.write(&mut measure);
-    let _length = measured(measure)?;
+    let _length = measured(measure, limits.writer_limits(), crate::Cap::Document)?;
     Ok(())
 }
 
-fn measured(out: writer::Encoder) -> Result<u32, Error> {
+fn measured(out: writer::Encoder, limits: writer::Limits, cap: crate::Cap) -> Result<u32, Error> {
     match out.measured() {
         Ok(length) => Ok(length),
-        Err(writer::Refusal::TooLong | writer::Refusal::TooDeep) => Err(Error::Limit),
+        Err(writer::Refusal::TooLong) => Err(Error::limit(cap, limits.length)),
+        Err(writer::Refusal::TooDeep) => Err(Error::limit(crate::Cap::Depth, limits.depth)),
         Err(writer::Refusal::Text | writer::Refusal::Number) => Err(Error::Invalid),
     }
 }

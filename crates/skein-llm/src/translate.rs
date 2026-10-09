@@ -19,7 +19,7 @@ pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limit
             schema: tool.schema.clone(),
         };
         if tools.push(raw).is_err() {
-            return Err(Error::Limit);
+            return Err(Error::limit(crate::Cap::Parts, limits.parts));
         }
     }
     let mut input = List::with_capacity(limits.parts);
@@ -27,7 +27,7 @@ pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limit
         for block in &message.content {
             let item = input_block(block, message.role)?;
             if input.push(item).is_err() {
-                return Err(Error::Limit);
+                return Err(Error::limit(crate::Cap::Parts, limits.parts));
             }
         }
     }
@@ -48,7 +48,11 @@ pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limit
 fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Result<(), Error> {
     let count = usize::try_from(limits.parts).expect("u32 fits usize");
     if prompt.tools.len() > count || prompt.messages.len() > count || prompt.model.is_empty() {
-        return Err(if prompt.model.is_empty() { Error::Invalid } else { Error::Limit });
+        return Err(if prompt.model.is_empty() {
+            Error::Invalid
+        } else {
+            Error::limit(crate::Cap::Parts, limits.parts)
+        });
     }
     let mut budget: u64 = 0;
     charge_text(&prompt.model, &mut budget, limits)?;
@@ -69,9 +73,9 @@ fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Res
     }
     let mut blocks: usize = 0;
     for message in &prompt.messages {
-        blocks = blocks.checked_add(message.content.len()).ok_or(Error::Limit)?;
+        blocks = blocks.checked_add(message.content.len()).ok_or(Error::limit(crate::Cap::Parts, limits.parts))?;
         if blocks > count {
-            return Err(Error::Limit);
+            return Err(Error::limit(crate::Cap::Parts, limits.parts));
         }
         for block in &message.content {
             match block {
@@ -108,9 +112,12 @@ fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Res
                     charge_text(id, &mut budget, limits)?;
                     charge_text(text, &mut budget, limits)?;
                     if *is_error {
-                        let len = text.len().checked_add(TOOL_ERROR.len()).ok_or(Error::Limit)?;
+                        let len = text
+                            .len()
+                            .checked_add(TOOL_ERROR.len())
+                            .ok_or(Error::limit(crate::Cap::String, limits.string_bytes))?;
                         if len > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
-                            return Err(Error::Limit);
+                            return Err(Error::limit(crate::Cap::String, limits.string_bytes));
                         }
                         charge(TOOL_ERROR.len(), &mut budget, limits)?;
                     }
@@ -128,7 +135,7 @@ fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Res
 }
 fn charge_text(value: &[u8], budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
     if value.len() > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
-        return Err(Error::Limit);
+        return Err(Error::limit(crate::Cap::String, limits.string_bytes));
     }
     let bounded = writer::Limits { depth: limits.depth, length: limits.request_bytes };
     let mut text = writer::Encoder::measure(&bounded);
@@ -136,19 +143,22 @@ fn charge_text(value: &[u8], budget: &mut u64, limits: &openai::Limits) -> Resul
     match text.measured() {
         Ok(_) => charge(value.len(), budget, limits),
         Err(writer::Refusal::Text | writer::Refusal::Number) => Err(Error::Invalid),
-        Err(writer::Refusal::TooLong | writer::Refusal::TooDeep) => Err(Error::Limit),
+        Err(writer::Refusal::TooLong) => Err(Error::limit(crate::Cap::Request, limits.request_bytes)),
+        Err(writer::Refusal::TooDeep) => Err(Error::limit(crate::Cap::Depth, limits.depth)),
     }
 }
 fn charge(size: usize, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
-    *budget = budget.checked_add(u64::try_from(size).expect("usize fits u64")).ok_or(Error::Limit)?;
+    *budget = budget
+        .checked_add(u64::try_from(size).expect("usize fits u64"))
+        .ok_or(Error::limit(crate::Cap::Request, limits.request_bytes))?;
     if *budget > u64::from(limits.request_bytes) {
-        return Err(Error::Limit);
+        return Err(Error::limit(crate::Cap::Request, limits.request_bytes));
     }
     Ok(())
 }
 fn charge_json(value: &openai::Json, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
     if value.as_tokens().len() > usize::try_from(limits.tokens).expect("u32 fits usize") {
-        return Err(Error::Limit);
+        return Err(Error::limit(crate::Cap::Tokens, limits.tokens));
     }
     let mut measure = writer::Encoder::measure(&limits.writer_limits());
     for token in value.as_tokens() {
@@ -168,7 +178,8 @@ fn charge_json(value: &openai::Json, budget: &mut u64, limits: &openai::Limits) 
     }
     match measure.measured() {
         Ok(_) => Ok(()),
-        Err(writer::Refusal::TooLong | writer::Refusal::TooDeep) => Err(Error::Limit),
+        Err(writer::Refusal::TooLong) => Err(Error::limit(crate::Cap::Document, limits.document_bytes)),
+        Err(writer::Refusal::TooDeep) => Err(Error::limit(crate::Cap::Depth, limits.depth)),
         Err(writer::Refusal::Text | writer::Refusal::Number) => Err(Error::Invalid),
     }
 }
@@ -257,7 +268,7 @@ fn input_block(block: &Block, role: Role) -> Result<openai::Input, Error> {
         }),
         Block::ToolResult { id, text, is_error } => {
             let output = if *is_error {
-                let len = text.len().checked_add(TOOL_ERROR.len()).ok_or(Error::Limit)?;
+                let len = text.len().checked_add(TOOL_ERROR.len()).ok_or(Error::Invalid)?;
                 let mut output = Writer::new(len);
                 output.put(TOOL_ERROR).expect("the error prefix was measured");
                 output.put(text).expect("the error result was measured");
@@ -329,7 +340,7 @@ pub(crate) fn part(value: openai::Part, limits: &openai::Limits) -> Result<Block
         }
         openai::Part::ToolCall { call_id, item_id, name, input, too_large } => {
             if too_large {
-                return Err(Error::Limit);
+                return Err(Error::limit(crate::Cap::Input, limits.input_bytes));
             }
             let mut tokens = List::with_capacity(4);
             push(&mut tokens, Token::ObjectStart)?;
@@ -344,7 +355,7 @@ pub(crate) fn part(value: openai::Part, limits: &openai::Limits) -> Result<Block
 fn push(tokens: &mut List<Token>, token: Token) -> Result<(), Error> {
     match tokens.push(token) {
         Ok(()) => Ok(()),
-        Err(_) => Err(Error::Limit),
+        Err(_) => Err(Error::limit(crate::Cap::Tokens, tokens.capacity())),
     }
 }
 fn replay(tokens: &[Token], limits: &openai::Limits) -> Result<Replay, Error> {
@@ -355,6 +366,11 @@ fn replay(tokens: &[Token], limits: &openai::Limits) -> Result<Replay, Error> {
     bounded.document_bytes = bounded.document_bytes.min(bounded.opaque_bytes);
     match openai::Json::from_tokens(tokens, &bounded) {
         Ok(value) => Ok(Replay { provider: Provider::OpenAiCodex, value }),
+        Err(openai::DecodeError::TooLarge { which: crate::Cap::Document, bound })
+            if bounded.document_bytes == limits.opaque_bytes =>
+        {
+            Err(Error::Limit { which: crate::Cap::Opaque, bound })
+        }
         Err(error) => Err(decode(error)),
     }
 }
@@ -366,7 +382,7 @@ fn replay(tokens: &[Token], limits: &openai::Limits) -> Result<Replay, Error> {
 #[must_use]
 pub const fn decode(error: crate::DocumentError) -> Error {
     match error {
-        openai::DecodeError::TooLarge => Error::Limit,
+        openai::DecodeError::TooLarge { which, bound } => Error::Limit { which, bound },
         openai::DecodeError::Malformed | openai::DecodeError::Missing | openai::DecodeError::WrongType => {
             Error::Invalid
         }
@@ -391,7 +407,7 @@ pub(crate) const fn usage(value: openai::Usage) -> Usage {
 }
 pub(crate) const fn failure(value: openai::Failure) -> Failure {
     match value {
-        openai::Failure::Limit => Failure::Limit,
+        openai::Failure::Limit { which, bound } => Failure::Limit { which, bound },
         openai::Failure::Protocol => Failure::Protocol,
         openai::Failure::Unauthorized => Failure::Unauthorized,
         openai::Failure::Exhausted { retry_after } => Failure::Exhausted { retry_after },
@@ -517,7 +533,10 @@ mod tests {
         let mut limits = LIMITS;
         limits.string_bytes = 8;
         let block = Block::ToolResult { id: bytes::copy_of(b"call"), text: bytes::copy_of(b"no"), is_error: true };
-        assert_eq!(request(prompt(Role::User, block), Provider::OpenAiCodex, &limits), Err(Error::Limit));
+        assert_eq!(
+            request(prompt(Role::User, block), Provider::OpenAiCodex, &limits),
+            Err(Error::limit(crate::Cap::String, 8))
+        );
     }
     #[test]
     fn malformed_tool_arguments_are_preserved_received_and_replayed_as_text() {
@@ -566,7 +585,10 @@ mod tests {
         let text = Block::Text { text: bytes::copy_of(b"long text"), replay: None };
         let mut limits = LIMITS;
         limits.string_bytes = 4;
-        assert_eq!(request(prompt(Role::User, text), Provider::OpenAiCodex, &limits), Err(Error::Limit));
+        assert_eq!(
+            request(prompt(Role::User, text), Provider::OpenAiCodex, &limits),
+            Err(Error::limit(crate::Cap::String, 4))
+        );
         let mut limits = LIMITS;
         limits.parts = 0;
         assert_eq!(
@@ -575,7 +597,7 @@ mod tests {
                 Provider::OpenAiCodex,
                 &limits
             ),
-            Err(Error::Limit)
+            Err(Error::limit(crate::Cap::Parts, 0))
         );
     }
     #[test]

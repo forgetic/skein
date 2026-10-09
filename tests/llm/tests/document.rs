@@ -33,7 +33,12 @@ fn neutral_document_errors_distinguish_receiving_limits_from_invalid_input() {
     let request = openai::decode_request(&document, &LIMITS).expect("the complete request has the correct shape");
     assert_eq!(request.model.as_ref(), b"caller");
     let controls: [(&[u8], u32, DocumentError, Error); 4] = [
-        (valid, 1, DocumentError::TooLarge, Error::Limit),
+        (
+            valid,
+            1,
+            DocumentError::TooLarge { which: skein_llm::Cap::Document, bound: 1 },
+            Error::Limit { which: skein_llm::Cap::Document, bound: 1 },
+        ),
         (b"{", 1024, DocumentError::Malformed, Error::Invalid),
         (b"{}", 1024, DocumentError::Missing, Error::Invalid),
         (b"[]", 1024, DocumentError::WrongType, Error::Invalid),

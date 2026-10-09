@@ -119,8 +119,11 @@ fn refused(kind: Kind, owner: u64) {
         panic!("one-over raw metadata produces actual Limit, never a completed value");
     };
     assert_eq!(*actual, Token::new(owner));
-    assert_eq!(*failure, Failure::Limit);
-    assert_eq!(*evidence, client::Evidence::Response);
+    assert_eq!(
+        *failure,
+        Failure::Limit { which: skein_llm::Cap::Opaque, bound: u64::from(bounds.dialect.opaque_bytes) }
+    );
+    assert_eq!(*evidence, client::Evidence::Response { status: 200 });
     assert!(
         !world.seen.iter().any(|event| matches!(event, client::Event::Block { .. })),
         "over-cap metadata cannot escape in a completed block"

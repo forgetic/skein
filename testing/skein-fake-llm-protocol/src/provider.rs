@@ -778,7 +778,7 @@ fn response_error(server: &mut Server, service: &Service, env: &Env<Limits>, err
                     anthropic::DecodeError::Malformed
                     | anthropic::DecodeError::Missing
                     | anthropic::DecodeError::WrongType
-                    | anthropic::DecodeError::TooLarge,
+                    | anthropic::DecodeError::TooLarge { .. },
                 ) => bytes::copy_of(b"{}"),
             }
         }
@@ -795,7 +795,7 @@ fn response_error(server: &mut Server, service: &Service, env: &Env<Limits>, err
                     openai::DecodeError::Malformed
                     | openai::DecodeError::Missing
                     | openai::DecodeError::WrongType
-                    | openai::DecodeError::TooLarge,
+                    | openai::DecodeError::TooLarge { .. },
                 ) => bytes::copy_of(b"{}"),
             }
         }

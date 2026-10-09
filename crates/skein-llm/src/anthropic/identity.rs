@@ -20,8 +20,8 @@ pub fn instructions(extra: &[u8]) -> Result<Box<[u8]>, Error> {
     if extra.is_empty() {
         return Ok(bytes::copy_of(CLAUDE_CODE_SYSTEM_IDENTITY));
     }
-    let length = CLAUDE_CODE_SYSTEM_IDENTITY.len().checked_add(2).ok_or(Error::Limit)?;
-    let length = length.checked_add(extra.len()).ok_or(Error::Limit)?;
+    let length = CLAUDE_CODE_SYSTEM_IDENTITY.len().checked_add(2).ok_or(Error::Invalid)?;
+    let length = length.checked_add(extra.len()).ok_or(Error::Invalid)?;
     let mut out = Writer::new(length);
     out.put(CLAUDE_CODE_SYSTEM_IDENTITY).expect("identity length was measured");
     out.put(b"\n\n").expect("separator length was measured");

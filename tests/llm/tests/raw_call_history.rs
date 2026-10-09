@@ -226,8 +226,11 @@ fn native_and_client_admission_bound_raw_strings_and_utf8_without_inner_parsing(
     assert_eq!(exact.len(), 8, "attained raw cap");
     assert!(client::Client::prepare(history(exact), &bounds).is_ok());
     let over = b"\"\\\n{bad!!";
-    assert_eq!(openai::encode_request(&raw_request(over), &bounds.dialect), Err(openai::DecodeError::TooLarge));
-    assert!(matches!(client::Client::prepare(history(over), &bounds), Err(Error::Limit)));
+    assert_eq!(
+        openai::encode_request(&raw_request(over), &bounds.dialect),
+        Err(openai::DecodeError::TooLarge { which: skein_llm::Cap::String, bound: 8 })
+    );
+    assert!(matches!(client::Client::prepare(history(over), &bounds), Err(Error::Limit { .. })));
     assert_eq!(openai::encode_request(&raw_request(&[0xff]), &bounds.dialect), Err(openai::DecodeError::Malformed));
     assert!(matches!(client::Client::prepare(history(&[0xff]), &bounds), Err(Error::Invalid)));
 }
@@ -240,7 +243,13 @@ fn native_and_actual_client_request_bounds_charge_complete_escaped_history() {
     bounds.dialect.request_bytes = u32::try_from(wire.len()).expect("small actual native document");
     assert_eq!(openai::encode_request(&request, &bounds.dialect).expect("exact escaped cap"), wire);
     bounds.dialect.request_bytes -= 1;
-    assert_eq!(openai::encode_request(&request, &bounds.dialect), Err(openai::DecodeError::TooLarge));
+    assert_eq!(
+        openai::encode_request(&request, &bounds.dialect),
+        Err(openai::DecodeError::TooLarge {
+            which: skein_llm::Cap::Request,
+            bound: u64::from(bounds.dialect.request_bytes)
+        })
+    );
 
     let mut world = World::new(history(RAW), limits(), text_response(false), 37);
     world.request(client::Request::Start);
@@ -259,7 +268,7 @@ fn native_and_actual_client_request_bounds_charge_complete_escaped_history() {
     close(&mut exact);
     bounds.dialect.request_bytes -= 1;
     assert!(
-        matches!(client::Client::prepare(history(RAW), &bounds), Err(Error::Limit)),
+        matches!(client::Client::prepare(history(RAW), &bounds), Err(Error::Limit { .. })),
         "refusal occurs before Start/stream/terminal"
     );
 }

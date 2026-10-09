@@ -21,8 +21,14 @@ fn replay_envelopes_keep_tag_fields_and_exact_bounds_before_negative_mutations()
         assert_eq!(replay.to_bytes(&exact), Ok(encoded.clone()));
         assert_eq!(skein_llm::replay_bytes(&exact), Some(u32::try_from(encoded.len()).expect("bounded envelope")));
         let tight = skein_llm::DocumentLimits { opaque_bytes: exact.opaque_bytes - 1, ..exact };
-        assert_eq!(replay.to_bytes(&tight), Err(Error::Limit));
-        assert_eq!(Replay::from_bytes(&encoded, &tight), Err(Error::Limit));
+        assert_eq!(
+            replay.to_bytes(&tight),
+            Err(Error::Limit { which: skein_llm::Cap::Opaque, bound: u64::from(tight.opaque_bytes) })
+        );
+        assert_eq!(
+            Replay::from_bytes(&encoded, &tight),
+            Err(Error::Limit { which: skein_llm::Cap::Opaque, bound: u64::from(tight.opaque_bytes) })
+        );
         for at in 0..encoded.len() {
             assert!(Replay::from_bytes(&encoded[..at], &bounds.dialect).is_err(), "truncation has no complete replay");
         }

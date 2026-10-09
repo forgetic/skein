@@ -190,16 +190,16 @@ fn escaped_wire_bytes_string_tokens_blocks_arguments_and_depth_have_hard_bounds(
     limits.request_bytes = length;
     assert_eq!(measure_request(&request, &limits), Ok(length));
     limits.request_bytes = length.checked_sub(1).expect("nonempty request");
-    assert_eq!(measure_request(&request, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Request, limits.request_bytes)));
     limits = LIMITS;
     limits.string_bytes = 2;
-    assert_eq!(measure_request(&request, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::String, 2)));
     limits = LIMITS;
     limits.parts = 0;
-    assert_eq!(measure_request(&request, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Parts, 0)));
     limits = LIMITS;
     limits.depth = 3;
-    assert_eq!(measure_request(&request, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Depth, 3)));
     let tool = Block::ToolCall {
         id: bytes::copy_of(b"id"),
         name: bytes::copy_of(b"read"),
@@ -209,10 +209,10 @@ fn escaped_wire_bytes_string_tokens_blocks_arguments_and_depth_have_hard_bounds(
     let prompt = prompt(Role::Assistant, tool);
     limits = LIMITS;
     limits.input_bytes = 2;
-    assert_eq!(measure_request(&prompt, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&prompt, &limits), Err(Error::limit(crate::Cap::Input, 2)));
     limits = LIMITS;
     limits.tokens = 2;
-    assert_eq!(measure_request(&prompt, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&prompt, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
 }
 
 #[test]
@@ -221,10 +221,10 @@ fn prebuilt_replay_and_schema_obey_the_current_admission_limits() {
     let mut request = prompt(Role::Assistant, reasoning(signed));
     let mut limits = LIMITS;
     limits.opaque_bytes = 10;
-    assert_eq!(measure_request(&request, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Opaque, 10)));
     limits = LIMITS;
     limits.tokens = 2;
-    assert_eq!(measure_request(&request, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
     request.messages = Box::new([Message { role: Role::User, content: Box::new([text(b"hello")]) }]);
     request.tools = Box::new([Tool {
         name: bytes::copy_of(b"custom_tool"),
@@ -235,10 +235,10 @@ fn prebuilt_replay_and_schema_obey_the_current_admission_limits() {
         )
         .expect("schema JSON"),
     }]);
-    assert_eq!(measure_request(&request, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));
     limits = LIMITS;
     limits.document_bytes = 2;
-    assert_eq!(measure_request(&request, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Document, 2)));
 }
 
 #[test]
@@ -303,11 +303,11 @@ fn explicit_identity_blocks_remain_subject_to_instruction_and_wire_limits() {
     limits.request_bytes = length;
     assert_eq!(measure_request(&request, &limits), Ok(length));
     limits.request_bytes = length.checked_sub(1).expect("nonempty identity request");
-    assert_eq!(measure_request(&request, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::Request, limits.request_bytes)));
     limits = LIMITS;
     limits.string_bytes = u32::try_from(request.instructions.len().checked_sub(1).expect("nonempty instructions"))
         .expect("small instructions");
-    assert_eq!(measure_request(&request, &limits), Err(Error::Limit));
+    assert_eq!(measure_request(&request, &limits), Err(Error::limit(crate::Cap::String, limits.string_bytes)));
     request.instructions = super::identity::instructions(&[0xff]).expect("owned instructions");
     assert_eq!(measure_request(&request, &LIMITS), Err(Error::Invalid));
 }
@@ -322,7 +322,7 @@ fn opaque_extension_fields_survive_native_replay_and_bound_admission() {
         let wire = encode_request(&input, &LIMITS).expect("bounded replay with provider extension");
         assert!(bytes::find(&wire, value).is_some(), "the complete opaque value survives");
         let limits = openai::Limits { opaque_bytes: 1, ..LIMITS };
-        assert_eq!(measure_request(&input, &limits), Err(Error::Limit));
+        assert_eq!(measure_request(&input, &limits), Err(Error::limit(crate::Cap::Opaque, 1)));
     }
 }
 

@@ -15,7 +15,7 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeErr
     let value = Json::from_tokens(value.as_tokens(), limits)?;
     let encoded = value.to_bytes(limits)?;
     if encoded.len() > usize::try_from(limits.request_bytes).expect("u32 fits usize") {
-        return Err(DecodeError::TooLarge);
+        return Err(DecodeError::limit(crate::Cap::Request, limits.request_bytes));
     }
     let tokens = value.as_tokens();
     if required(tokens, b"stream")? != [Token::True] {
@@ -23,7 +23,7 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeErr
     }
     let model = text(tokens, b"model")?;
     let max = json::unsigned(required(tokens, b"max_tokens")?)?;
-    let max = u32::try_from(max).or(Err(DecodeError::TooLarge))?;
+    let max = u32::try_from(max).or(Err(DecodeError::WrongType))?;
     if max == 0 {
         return Err(DecodeError::Malformed);
     }
@@ -40,7 +40,7 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeErr
                     },
                     schema: Json::from_tokens(required(tool, b"input_schema")?, limits)?,
                 })
-                .or(Err(DecodeError::TooLarge))?;
+                .or(Err(DecodeError::limit(crate::Cap::Parts, limits.parts)))?;
         }
     }
     let mut messages = List::with_capacity(limits.parts);
@@ -53,7 +53,9 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeErr
         let mut blocks = List::with_capacity(limits.parts);
         match required(message, b"content")? {
             [Token::String(text)] => {
-                blocks.push(Block::Text { text: text.clone(), replay: None }).or(Err(DecodeError::TooLarge))?;
+                blocks
+                    .push(Block::Text { text: text.clone(), replay: None })
+                    .or(Err(DecodeError::limit(crate::Cap::Parts, limits.parts)))?;
             }
             content => {
                 for block in &elements(content, limits)? {
@@ -85,11 +87,13 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeErr
                             replay: Replay { provider: Provider::Anthropic, value: Json::from_tokens(block, limits)? },
                         },
                     };
-                    blocks.push(block).or(Err(DecodeError::TooLarge))?;
+                    blocks.push(block).or(Err(DecodeError::limit(crate::Cap::Parts, limits.parts)))?;
                 }
             }
         }
-        messages.push(Message { role, content: blocks.into_boxed() }).or(Err(DecodeError::TooLarge))?;
+        messages
+            .push(Message { role, content: blocks.into_boxed() })
+            .or(Err(DecodeError::limit(crate::Cap::Parts, limits.parts)))?;
     }
     let prompt = Prompt {
         model,
@@ -102,7 +106,7 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeErr
     };
     match super::request::validate(&prompt, limits) {
         Ok(()) => Ok(prompt),
-        Err(crate::Error::Limit) => Err(DecodeError::TooLarge),
+        Err(crate::Error::Limit { which, bound }) => Err(DecodeError::TooLarge { which, bound }),
         Err(crate::Error::Invalid | crate::Error::Unsupported) => Err(DecodeError::Malformed),
     }
 }
@@ -133,10 +137,10 @@ fn text_blocks(tokens: &[Token], limits: &Limits) -> Result<Box<[u8]>, DecodeErr
         }
         let text = json::text_ref(required(block, b"text")?)?;
         let separator = usize::from(index > 0);
-        length = length.checked_add(separator).ok_or(DecodeError::TooLarge)?;
-        length = length.checked_add(text.len()).ok_or(DecodeError::TooLarge)?;
+        length = length.checked_add(separator).ok_or(DecodeError::limit(crate::Cap::String, limits.string_bytes))?;
+        length = length.checked_add(text.len()).ok_or(DecodeError::limit(crate::Cap::String, limits.string_bytes))?;
         if length > maximum {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
         }
     }
     let mut output = skein_lib::Writer::new(length);
@@ -192,14 +196,14 @@ pub fn encode_event(event: &Event, limits: &Limits) -> Result<Box<[u8]>, DecodeE
             let value = Json::from_tokens(value.as_tokens(), limits)?;
             super::response::validate_redacted(value.as_tokens())?;
             if value.to_bytes(limits)?.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                return Err(DecodeError::TooLarge);
+                return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
             }
         }
         Event::Added { block: BlockStart::Opaque { value }, .. } => {
             let value = Json::from_tokens(value.as_tokens(), limits)?;
             super::response::validate_opaque(value.as_tokens())?;
             if value.to_bytes(limits)?.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                return Err(DecodeError::TooLarge);
+                return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
             }
         }
         Event::Started { .. }
@@ -215,7 +219,7 @@ pub fn encode_event(event: &Event, limits: &Limits) -> Result<Box<[u8]>, DecodeE
     let bounded = limits.writer_limits();
     let mut measure = Encoder::measure(&bounded);
     write_event(&mut measure, event, limits);
-    let len = openai::measured(measure)?;
+    let len = openai::measured(measure, bounded, crate::Cap::Document)?;
     let mut output = Encoder::write(len, &bounded);
     write_event(&mut output, event, limits);
     Ok(output.finish())

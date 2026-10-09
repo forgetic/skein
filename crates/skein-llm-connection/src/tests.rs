@@ -89,7 +89,10 @@ fn invalid_and_oversized_requests_are_refused() {
     oversized.instructions = Box::new([b'x'; 9000]);
     assert_eq!(
         component.admit(Token::new(7), 0, oversized, credential()).err(),
-        Some(Refusal::Client(skein_llm::Error::Limit))
+        Some(Refusal::Client(skein_llm::Error::Limit {
+            which: skein_llm::Cap::String,
+            bound: u64::from(client_limits().dialect.string_bytes)
+        }))
     );
 }
 
@@ -605,7 +608,7 @@ fn the_measured_head_accepts_a_credential_at_its_bound_and_refuses_one_byte_more
     too_long.access_token = Box::new([b'x'; 2049]);
     assert_eq!(
         component.admit(Token::new(8), 0, prompt(), too_long).err(),
-        Some(Refusal::Client(skein_llm::Error::Limit))
+        Some(Refusal::Client(skein_llm::Error::Limit { which: skein_llm::Cap::AccessToken, bound: 2048 }))
     );
 }
 

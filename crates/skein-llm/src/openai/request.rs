@@ -43,12 +43,12 @@ pub fn measure_request(request: &Request, limits: &Limits) -> Result<u32, Decode
     let bounded = skein_json::writer::Limits { depth: limits.depth, length: limits.request_bytes };
     let mut measure = Encoder::measure(&bounded);
     write_request(&mut measure, request);
-    crate::openai::common::measured(measure)
+    crate::openai::common::measured(measure, bounded, crate::Cap::Request)
 }
 fn validate(request: &Request, limits: &Limits) -> Result<(), DecodeError> {
     let count = usize::try_from(limits.parts).expect("u32 fits usize");
     if request.input.len() > count || request.tools.len() > count {
-        return Err(DecodeError::TooLarge);
+        return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
     }
     for tool in &request.tools {
         if tool.schema.as_tokens().first() != Some(&Token::ObjectStart) {
@@ -61,7 +61,7 @@ fn validate(request: &Request, limits: &Limits) -> Result<(), DecodeError> {
                 // Native history carries arguments as text, not an embedded
                 // document. The measured encoder validates UTF-8 and escaping.
                 if arguments.len() > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
                 }
             }
             Input::Opaque { value } => {
@@ -212,7 +212,11 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
     let mut admission =
         Encoder::measure(&skein_json::writer::Limits { depth: limits.depth, length: limits.request_bytes });
     value.write(&mut admission);
-    let _length = crate::openai::common::measured(admission)?;
+    let _length = crate::openai::common::measured(
+        admission,
+        skein_json::writer::Limits { depth: limits.depth, length: limits.request_bytes },
+        crate::Cap::Request,
+    )?;
     let tokens = value.as_tokens();
     if !json::boolean(json::value_at(tokens, json::required(tokens, b"stream")?)?)?
         || json::boolean(json::value_at(tokens, json::required(tokens, b"store")?)?)?
@@ -238,7 +242,7 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
                 schema: Json::from_tokens(json::value_at(tool, json::required(tool, b"parameters")?)?, limits)?,
             };
             if tools.push(tool).is_err() {
-                return Err(DecodeError::TooLarge);
+                return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
             }
         }
     }
@@ -247,7 +251,7 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
     for &offset in &json::array(values, limits.parts)? {
         let item = read_input(json::value_at(values, offset)?, limits)?;
         if input.push(item).is_err() {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
         }
     }
     let effort = match json::optional_at(tokens, json::field(tokens, b"reasoning")?)? {
@@ -306,6 +310,7 @@ fn read_input(tokens: &[Token], limits: &Limits) -> Result<Input, DecodeError> {
                 crate::openai::common::append(
                     &mut text,
                     json::text_ref(json::value_at(part, json::required(part, key)?)?)?,
+                    crate::Cap::Request,
                 )?;
             }
             Ok(Input::Message {

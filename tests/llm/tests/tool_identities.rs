@@ -250,7 +250,7 @@ fn actual_escaped_item_identity_obeys_raw_metadata_cap_and_retains_lower_settlem
                     )
                 })
                 .collect();
-            let [client::Event::Failed { failure: Failure::Limit, .. }] = terminals.as_slice() else {
+            let [client::Event::Failed { failure: Failure::Limit { .. }, .. }] = terminals.as_slice() else {
                 panic!("one-over item metadata fails before completion");
             };
             assert!(!world.seen.iter().any(|event| matches!(event, client::Event::Block { .. })));

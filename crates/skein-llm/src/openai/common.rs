@@ -73,8 +73,14 @@ pub enum DecodeError {
     /// A field or root value has a type the entrance cannot accept.
     WrongType,
     /// Input, tokens, nesting or measured output exceed caller-supplied limits.
-    TooLarge,
+    TooLarge { which: crate::Cap, bound: u64 },
 }
+impl DecodeError {
+    pub(crate) fn limit(which: crate::Cap, bound: u32) -> DecodeError {
+        DecodeError::TooLarge { which, bound: u64::from(bound) }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Stop {
     EndTurn,
@@ -97,7 +103,10 @@ pub enum Failure {
     /// Provider bytes violate the dialect or end before its terminal event.
     Protocol,
     /// A caller-configured local resource limit was exceeded.
-    Limit,
+    Limit {
+        which: crate::Cap,
+        bound: u64,
+    },
     Unauthorized,
     Exhausted {
         retry_after: Duration,
@@ -212,13 +221,13 @@ pub(crate) fn decimal(bytes: &[u8]) -> Option<u64> {
     }
     Some(n)
 }
-pub(crate) fn append(out: &mut List<u8>, bytes: &[u8]) -> Result<(), DecodeError> {
+pub(crate) fn append(out: &mut List<u8>, bytes: &[u8], cap: crate::Cap) -> Result<(), DecodeError> {
     if bytes.len() > usize::try_from(out.room()).expect("u32 fits usize") {
-        return Err(DecodeError::TooLarge);
+        return Err(DecodeError::limit(cap, out.capacity()));
     }
     for &b in bytes {
         if out.push(b).is_err() {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::limit(cap, out.capacity()));
         }
     }
     Ok(())
@@ -236,10 +245,28 @@ pub(crate) fn clipped(bytes: &[u8], limit: u32) -> Box<[u8]> {
     bytes::copy_of(bytes.get(..count).expect("within bytes"))
 }
 
-pub(crate) fn measured(encoder: writer::Encoder) -> Result<u32, DecodeError> {
+pub(crate) fn measured(encoder: writer::Encoder, limits: writer::Limits, cap: crate::Cap) -> Result<u32, DecodeError> {
     match encoder.measured() {
         Ok(len) => Ok(len),
-        Err(writer::Refusal::TooLong | writer::Refusal::TooDeep) => Err(DecodeError::TooLarge),
+        Err(writer::Refusal::TooLong) => Err(DecodeError::limit(cap, limits.length)),
+        Err(writer::Refusal::TooDeep) => Err(DecodeError::limit(crate::Cap::Depth, limits.depth)),
         Err(writer::Refusal::Text | writer::Refusal::Number) => Err(DecodeError::Malformed),
     }
+}
+
+/// The typed cap is the source of a local limit's diagnostic.
+pub(crate) fn limit_detail(which: crate::Cap, bound: u64) -> Box<[u8]> {
+    let digits = skein_lib::Decimal::of(bound);
+    let length = which
+        .name()
+        .len()
+        .checked_add(digits.as_bytes().len())
+        .expect("fixed diagnostic prefix fits usize")
+        .checked_add(b" exceeds bound ".len())
+        .expect("fixed diagnostic fits usize");
+    let mut out = skein_lib::Writer::new(length);
+    out.put(which.name()).expect("measured cap name");
+    out.put(b" exceeds bound ").expect("measured separator");
+    out.put(digits.as_bytes()).expect("measured bound");
+    out.finish()
 }

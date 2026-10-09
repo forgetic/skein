@@ -186,7 +186,7 @@ fn anthropic_part(part: anthropic::Part, limits: &openai::Limits) -> Result<Bloc
         anthropic::Part::Text { text } => Ok(Block::Text { text, replay: None }),
         anthropic::Part::ToolCall { id, name, input, too_large } => {
             if too_large {
-                return Err(Error::Limit);
+                return Err(Error::limit(crate::Cap::Input, limits.input_bytes));
             }
             Ok(Block::ToolCall { id, name, arguments: input, replay: None })
         }

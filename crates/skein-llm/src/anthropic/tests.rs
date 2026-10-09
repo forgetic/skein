@@ -289,7 +289,7 @@ fn unsigned_thinking_and_invalid_redacted_metadata_reject() {
     ] {
         match event(wire, &LIMITS) {
             Err(DecodeError::Malformed | DecodeError::WrongType) => {}
-            Ok(_) | Err(DecodeError::Missing | DecodeError::TooLarge) => unreachable!("invalid metadata rejects"),
+            Ok(_) | Err(DecodeError::Missing | DecodeError::TooLarge { .. }) => unreachable!("invalid metadata rejects"),
         }
     }
 }
@@ -308,13 +308,13 @@ fn answer_and_part_budgets_bound_aggregate_stream() {
         &limits,
         &mut out,
     );
-    failure(&mut out, Failure::Limit);
+    failure(&mut out, Failure::Limit { which: crate::Cap::Answer, bound: 3 });
     let mut limits = LIMITS;
     limits.parts = 0;
     let mut decoder = StreamDecoder::new(&limits);
     progress(&mut decoder, START, &limits, &mut out);
     feed(&mut decoder, TEXT_START, &limits, &mut out);
-    failure(&mut out, Failure::Limit);
+    failure(&mut out, Failure::Limit { which: crate::Cap::Parts, bound: 0 });
 }
 
 #[test]
@@ -439,7 +439,7 @@ fn unknown_opaque_native_head_keeps_nested_proof_before_kind_cap_and_delta_negat
     feed(&mut decoder, TEXT_STOP, &LIMITS, &mut out);
     assert_eq!(out.pop(), Some(Output::Part(Part::Opaque { bytes: bytes::copy_of(raw) })));
     let tight = Limits { opaque_bytes: u32::try_from(raw.len()).expect("bounded head") - 1, ..LIMITS };
-    assert_eq!(super::encode_event(&event, &tight), Err(DecodeError::TooLarge));
+    assert_eq!(super::encode_event(&event, &tight), Err(DecodeError::limit(crate::Cap::Opaque, tight.opaque_bytes)));
     for raw in [
         b"[1]".as_slice(),
         br#"{"type":""}"#,

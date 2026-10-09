@@ -132,8 +132,12 @@ impl StreamDecoder {
                     out.push(Output::Progress);
                 }
             }
-            Err(DecodeError::TooLarge) => {
-                self.fail(Failure::Limit, bytes::copy_of(b"ChatGPT stream exceeds configured limits"), out);
+            Err(DecodeError::TooLarge { which, bound }) => {
+                self.fail(
+                    Failure::Limit { which, bound },
+                    bytes::copy_of(b"ChatGPT stream exceeds configured limits"),
+                    out,
+                );
             }
             Err(DecodeError::Malformed | DecodeError::Missing | DecodeError::WrongType) => {
                 self.fail(Failure::Protocol, bytes::copy_of(b"malformed ChatGPT stream"), out);
@@ -225,13 +229,13 @@ impl StreamDecoder {
             Event::Added { index, id, kind } => {
                 let limit = usize::try_from(limits.string_bytes).expect("u32 fits usize");
                 if id.len() > limit || kind.len() > limit {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
                 }
                 if index != self.opened.len() {
                     return Err(DecodeError::Malformed);
                 }
                 if self.opened.push(Opened::Active { id, kind }).is_err() {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
                 }
                 out.push(Output::Progress);
             }
@@ -297,22 +301,29 @@ impl StreamDecoder {
         if let Some(sub_index) = sub_index
             && sub_index >= limits.parts
         {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
         }
-        let bytes =
-            self.delta_bytes.checked_add(u64::try_from(size).expect("usize fits u64")).ok_or(DecodeError::TooLarge)?;
+        let bytes = self
+            .delta_bytes
+            .checked_add(u64::try_from(size).expect("usize fits u64"))
+            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes))?;
         if bytes > u64::from(limits.answer_bytes) {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes));
         }
         self.delta_bytes = bytes;
         Ok(())
     }
     fn reserve(&mut self, parts: u32, bytes: usize, limits: &Limits) -> Result<(), DecodeError> {
-        let parts = self.parts.checked_add(parts).ok_or(DecodeError::TooLarge)?;
-        let bytes =
-            self.bytes.checked_add(u64::try_from(bytes).expect("usize fits u64")).ok_or(DecodeError::TooLarge)?;
-        if parts > limits.parts || bytes > u64::from(limits.answer_bytes) {
-            return Err(DecodeError::TooLarge);
+        let parts = self.parts.checked_add(parts).ok_or(DecodeError::limit(crate::Cap::Parts, limits.parts))?;
+        let bytes = self
+            .bytes
+            .checked_add(u64::try_from(bytes).expect("usize fits u64"))
+            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes))?;
+        if parts > limits.parts {
+            return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
+        }
+        if bytes > u64::from(limits.answer_bytes) {
+            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes));
         }
         self.parts = parts;
         self.bytes = bytes;
@@ -322,6 +333,17 @@ impl StreamDecoder {
         self.over = true;
         self.terminal = None;
         self.opened.clear();
+        let detail = match failure {
+            Failure::Limit { which, bound } => common::limit_detail(which, bound),
+            Failure::Protocol
+            | Failure::Unauthorized
+            | Failure::Exhausted { .. }
+            | Failure::RateLimited { .. }
+            | Failure::Overloaded
+            | Failure::Unavailable
+            | Failure::ContextTooLong
+            | Failure::Invalid => detail,
+        };
         let detail = if detail.len() > usize::try_from(self.detail_bytes).expect("u32 fits usize") {
             common::clipped(&detail, self.detail_bytes)
         } else {
@@ -356,7 +378,7 @@ fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits
         Item::FunctionCall { id, call_id, name, arguments } => {
             let cap = usize::try_from(limits.string_bytes).expect("u32 fits usize");
             if id.len() > cap || call_id.len() > cap || name.len() > cap {
-                return Err(DecodeError::TooLarge);
+                return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
             }
             if expected_id != id.as_ref() || expected_kind != b"function_call" {
                 return Err(DecodeError::Malformed);
@@ -378,7 +400,7 @@ fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits
             }
             let bytes = value.to_bytes(limits)?;
             if bytes.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                return Err(DecodeError::TooLarge);
+                return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
             }
             Ok(Prepared { part: Part::Opaque { bytes }, tool: false, refusal: false })
         }
@@ -470,7 +492,7 @@ fn index(tokens: &[Token]) -> Result<u32, DecodeError> {
 fn named_index(tokens: &[Token], field: &[u8]) -> Result<u32, DecodeError> {
     match u32::try_from(json::unsigned(json::value_at(tokens, json::required(tokens, field)?)?)?) {
         Ok(n) => Ok(n),
-        Err(_) => Err(DecodeError::TooLarge),
+        Err(_) => Err(DecodeError::Malformed),
     }
 }
 fn read_item(tokens: &[Token], limits: &Limits) -> Result<Item, DecodeError> {
@@ -500,12 +522,14 @@ fn read_item(tokens: &[Token], limits: &Limits) -> Result<Item, DecodeError> {
                     b"output_text" => common::append(
                         &mut text,
                         json::text_ref(json::value_at(part, json::required(part, b"text")?)?)?,
+                        crate::Cap::Answer,
                     )?,
                     b"refusal" => {
                         refusal = true;
                         common::append(
                             &mut text,
                             json::text_ref(json::value_at(part, json::required(part, b"refusal")?)?)?,
+                            crate::Cap::Answer,
                         )?;
                     }
                     _ => return Err(DecodeError::WrongType),
@@ -572,7 +596,7 @@ pub fn encode_event(event: &Event, limits: &Limits) -> Result<Box<[u8]>, DecodeE
     let bounded = limits.writer_limits();
     let mut measure = Encoder::measure(&bounded);
     write_event(&mut measure, event, None);
-    let len = common::measured(measure)?;
+    let len = common::measured(measure, bounded, crate::Cap::Document)?;
     let mut write = Encoder::write(len, &bounded);
     write_event(&mut write, event, None);
     Ok(write.finish())
@@ -785,7 +809,7 @@ pub fn encode_completion(
     let bounded = limits.writer_limits();
     let mut measure = Encoder::measure(&bounded);
     write_event(&mut measure, &event, Some(request));
-    let len = common::measured(measure)?;
+    let len = common::measured(measure, bounded, crate::Cap::Document)?;
     let mut write = Encoder::write(len, &bounded);
     write_event(&mut write, &event, Some(request));
     Ok(write.finish())

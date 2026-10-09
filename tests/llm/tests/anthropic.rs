@@ -328,7 +328,7 @@ fn nested_provider_errors_classify_http_and_sse_with_retry_headers() {
         world.request(client::Request::Start);
         world.run();
         world.assert_once();
-        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure, evidence: client::Evidence::Response, .. } if *failure == expected)), "{:?}", world.seen);
+        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure, evidence: client::Evidence::Response { .. }, .. } if *failure == expected)), "{:?}", world.seen);
         world.settle();
         world.settle();
         world.assert_once();
@@ -435,7 +435,7 @@ fn bounded_arguments_and_truncated_http_fail_once() {
     world.run();
     world.assert_once();
     assert!(
-        world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Limit, .. })),
+        world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Limit { .. }, .. })),
         "{:?}",
         world.seen
     );
