@@ -1,0 +1,9 @@
+Reliability04.8 final rebased-tip gate PASS
+Tested hash fd094d71335fd60875cb887f649ad814e9a60c02 parent79de3d2fb2db7a24a6a0ea83d6617c60156e48da
+Heavy scripts/check.sh /tmp/skein04-8-gate-rebased.log; fmt, alltargets clippy-Dwarnings, standaloneTLS passed.
+Focused1641/3.325s run60110389-835d-4c11-9024-7d68355220df
+Fuzzy89/8.932s run0c35df03-4001-454f-bfd7-ebffae6ba763
+Browser6/3.819s run19aecc8e-154e-4c38-a960-c3eeb5c30d3e
+Serial3/0.081s run3697410a-9688-4654-b6c5-d045e91a18d7; maxnew0.050s
+Both dialects actual heads match independent HTTP reader; exact owned bytes accepted and peak checked/heldzero; one byte less refuses before retention/query/response.
+No live probe specified or used. Clean main and worktree at guarded ff merge.
