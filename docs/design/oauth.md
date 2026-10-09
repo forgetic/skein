@@ -249,7 +249,7 @@ its index. It has:
 | granted | an account's access token, its generation and how long it is valid |
 | keep | a record to keep durably, for an account the owner keeps (6.4) |
 | expiring | an access-only token has reached its lead before expiry, once |
-| failed | a sign-in, refresh or grant failed: section 4's class, or expired; a sign-in whose record could not be kept fails as not kept, and nothing is lent |
+| failed | a sign-in, refresh or grant failed: section 4's class, or expired; a sign-in whose record could not be kept fails as not kept, and nothing is lent; an account whose private record did not load fails as unloaded, saying where and why (6.4) |
 | closed | the component has settled: its one terminal |
 
 - **One exchange per account at a time** (section 2). A grant asked for
@@ -284,6 +284,48 @@ its index. It has:
   hands in a fresh one.
 - **Nothing else is kept:** a sign-in's state, code and verifier, and the
   client secret, live only in the exchange.
+
+**Loading a private record.** At the start, an account kept in private
+files opens its private directory, making it if absent, then loads its
+file (io.md, 5.3). A grant or a sign-in that arrives meanwhile waits for
+the load, which ends in one of three ways:
+
+- **A record:** the account holds it, as if the owner had handed it in
+  as kept.
+- **No file:** the account holds no record. A grant fails as expired,
+  as for an owner's store with nothing kept. A sign-in goes ahead, and
+  stores its record expecting the name absent.
+- **Unloaded,** with where (the directory or the file) and why:
+  - **Unreadable:** the file loaded but holds no record this version
+    reads, either damaged or of another version (6.2). A grant fails as
+    unloaded. A sign-in goes ahead and replaces the file, stating the
+    digest of the bytes it loaded. This is how a person signs in again
+    after a record's format changes.
+  - **Refused:** io refused the directory or the file unread, naming
+    what it found (a link, the wrong kind, group or other bits, two
+    links, another owner).
+  - **Failed:** io's error.
+  - **Stalled:** no answer within the keeper's file deadline.
+  - **Too large:** a file larger than a record can be.
+
+  For these four, a grant and a sign-in both fail as unloaded. The
+  sign-in fails before its `visit`, so a person is never sent to an
+  issuer for a record that cannot be kept. Nothing is replaced unread,
+  and nothing a check refused is overwritten.
+
+**Loading again.** An account that holds no record loads again before
+it answers its next grant or sign-in. A person who fixes or removes the
+file, or signs in from another process, is then heard without a
+restart. An account that holds a record never reloads it: it owns that
+record, and a store states the record's digest, so a writer elsewhere
+shows up as a conflict, a keep that failed. Each account runs one load
+at a time, and requests that arrive during one wait for it.
+
+**Close and abort.** A load is the component's own work for requests it
+has admitted, so a close lets it finish within its deadline, and the
+waiting requests then end as above. An abort cancels it, and they fail
+as cancelled. A `cancel` of a sign-in that waits for a load ends that
+sign-in at once. The load goes on for the account.
 
 ### 6.5 The redirect
 
