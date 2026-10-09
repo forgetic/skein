@@ -362,6 +362,13 @@ pub struct Limits {
       what its own variant keeps, whatever the order of its fields;
     - the tag given twice, or not a string, fails (`Duplicate`,
       `NotTagged`);
+    - **one way to keep a shared field.** The variants of one `Tagged`
+      node that name the same field keep it the same way: the same
+      `Keep`, a nested `Tagged` included. So the pending projection holds
+      each field once, and a nested `Tagged` under it is pending once, not
+      once per outer variant. A filter that breaks this is refused when
+      the collector is built (`AmbiguousFilter`). Filters are static, so
+      their tests find it;
   - a key the node does not name is read, compared and dropped, and its
     value skipped through the tokenizer's `Skip`.
 - **The result is itself a document.** What is kept goes up in document
@@ -381,14 +388,16 @@ pub struct Limits {
   Fields it does not name may repeat, uninterpreted.
 - **Errors** are the tokenizer's, and `TooManyTokens`, `TooMuchText`
   (with the cap it passed, if a named one), `SkippedTooLong`, `Duplicate`
-  and `NotTagged`.
+  and `NotTagged`; and, when it is built, `AmbiguousFilter`.
 - **`worst_case(&limits, &caps, &filter)`** is the tokenizer's, the walk
   stack, and the buffers the document is kept in, at `tokens` and `text`.
-  Each `Tagged` node on the filter's deepest path adds its provisional
-  candidates: one projection at `tokens` and `text` for each known
-  variant past the first, and one whole copy at its unknown cap. The
-  filter is static, so the collector computes this once, at
-  construction. All of it is allocated with the collector; and the document being handed up, of the same size at
+  Each `Tagged` node of the filter adds its provisional candidates: one
+  projection at `tokens` and `text` for each known variant past the
+  first, and one whole copy at its unknown cap. Shared fields are kept
+  one way, and an array's elements are decided one after another, so
+  each node is pending once at most and the sum bounds every
+  combination. The filter is static, so the collector computes this
+  once, at construction. All of it is allocated with the collector; and the document being handed up, of the same size at
   most, which is the side above's once emitted. A skipped value adds
   nothing to it, whatever its size.
 - **Restarting.** Once its outcome is out, a collector, and its tokenizer,
