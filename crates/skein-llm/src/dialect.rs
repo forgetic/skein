@@ -65,6 +65,7 @@ impl Decoder {
                     event @ (openai::Event::Created { .. }
                     | openai::Event::InProgress { .. }
                     | openai::Event::Added { .. }
+                    | openai::Event::ToolAdded { .. }
                     | openai::Event::Done { .. }
                     | openai::Event::TextDelta { .. }
                     | openai::Event::ArgumentsDelta { .. }
@@ -184,9 +185,12 @@ fn anthropic_outputs(raw: &mut Queue<anthropic::Output>, limits: &openai::Limits
 fn anthropic_part(part: anthropic::Part, limits: &openai::Limits) -> Result<Block, Error> {
     match part {
         anthropic::Part::Text { text } => Ok(Block::Text { text, replay: None }),
-        anthropic::Part::ToolCall { id, name, input, too_large } => {
+        anthropic::Part::ToolCall { id, name, input, too_large, bytes, cut } => {
             if too_large {
-                return Err(Error::limit(crate::Cap::Input, limits.input_bytes));
+                return Ok(Block::Oversize { id, name, bytes });
+            }
+            if cut {
+                return Ok(Block::Cut { id, name, arguments: input });
             }
             Ok(Block::ToolCall { id, name, arguments: input, replay: None })
         }

@@ -419,7 +419,7 @@ fn cancellation_settles_once_and_reuse_keeps_provider_binding() {
 }
 
 #[test]
-fn bounded_arguments_and_truncated_http_fail_once() {
+fn oversized_arguments_complete_and_truncated_http_fails_once() {
     let mut bounded = limits();
     bounded.dialect.input_bytes = 2;
     let documents = [
@@ -435,7 +435,8 @@ fn bounded_arguments_and_truncated_http_fail_once() {
     world.run();
     world.assert_once();
     assert!(
-        world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Limit { .. }, .. })),
+        world.seen.iter().any(|event| matches!(event, client::Event::Completed { completion, .. }
+            if matches!(completion.content.as_ref(), [Block::Oversize { bytes: 12, .. }]))),
         "{:?}",
         world.seen
     );

@@ -8,21 +8,75 @@ use skein_lib::{List, Queue, Wall, bytes};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Item {
-    Message { id: Box<[u8]>, phase: Option<Box<[u8]>>, text: Box<[u8]>, refusal: bool },
-    FunctionCall { id: Box<[u8]>, call_id: Box<[u8]>, name: Box<[u8]>, arguments: Box<[u8]> },
-    Opaque { value: Json },
+    Message {
+        id: Box<[u8]>,
+        phase: Option<Box<[u8]>>,
+        text: Box<[u8]>,
+        refusal: bool,
+    },
+    FunctionCall {
+        id: Box<[u8]>,
+        call_id: Box<[u8]>,
+        name: Box<[u8]>,
+        arguments: Box<[u8]>,
+    },
+    /// The provider closed this unfinished function-call item at its output cap.
+    CutCall {
+        id: Box<[u8]>,
+        call_id: Box<[u8]>,
+        name: Box<[u8]>,
+        arguments: Box<[u8]>,
+    },
+    Opaque {
+        value: Json,
+    },
 }
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Event {
-    Created { echo: Option<Request> },
-    InProgress { echo: Option<Request> },
-    Added { index: u32, id: Box<[u8]>, kind: Box<[u8]> },
-    Done { index: u32, item: Item },
-    TextDelta { index: u32, content_index: u32, text: Box<[u8]> },
-    ArgumentsDelta { index: u32, delta: Box<[u8]> },
-    ReasoningDelta { index: u32, summary_index: u32, text: Box<[u8]> },
-    Completed { stop: Stop, usage: Usage },
-    Failed { error: ProviderError },
+    Created {
+        echo: Option<Request>,
+    },
+    InProgress {
+        echo: Option<Request>,
+    },
+    Added {
+        index: u32,
+        id: Box<[u8]>,
+        kind: Box<[u8]>,
+    },
+    /// A native function-call head retaining the identity for a possible output cut.
+    ToolAdded {
+        index: u32,
+        id: Box<[u8]>,
+        call_id: Box<[u8]>,
+        name: Box<[u8]>,
+        arguments: Box<[u8]>,
+    },
+    Done {
+        index: u32,
+        item: Item,
+    },
+    TextDelta {
+        index: u32,
+        content_index: u32,
+        text: Box<[u8]>,
+    },
+    ArgumentsDelta {
+        index: u32,
+        delta: Box<[u8]>,
+    },
+    ReasoningDelta {
+        index: u32,
+        summary_index: u32,
+        text: Box<[u8]>,
+    },
+    Completed {
+        stop: Stop,
+        usage: Usage,
+    },
+    Failed {
+        error: ProviderError,
+    },
     Progress,
     Unknown,
 }
@@ -52,6 +106,10 @@ pub enum Part {
         input: Box<[u8]>,
         /// Whether the raw argument text exceeded the receiving input cap.
         too_large: bool,
+        /// Total unescaped argument bytes received, including refused bytes.
+        bytes: u64,
+        /// The provider ended this unfinished call at its output cap.
+        cut: bool,
     },
 }
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -75,12 +133,14 @@ pub struct StreamDecoder {
     detail_bytes: u32,
     tools: bool,
     refusal: bool,
+    required_stop: Option<Stop>,
     over: bool,
     terminal: Option<Terminal>,
 }
 #[derive(Debug)]
 enum Opened {
     Active { id: Box<[u8]>, kind: Box<[u8]> },
+    Tool { id: Box<[u8]>, call_id: Box<[u8]>, name: Box<[u8]>, input: List<u8>, bytes: u64, too_large: bool },
     Ready(Prepared),
     Emitted,
 }
@@ -107,6 +167,7 @@ impl StreamDecoder {
             detail_bytes: limits.detail_bytes,
             tools: false,
             refusal: false,
+            required_stop: None,
             over: false,
             terminal: None,
         }
@@ -153,7 +214,7 @@ impl StreamDecoder {
         }
         match self.opened.get(self.next) {
             Some(Opened::Ready(_)) => true,
-            Some(Opened::Active { .. }) => false,
+            Some(Opened::Active { .. } | Opened::Tool { .. }) => false,
             Some(Opened::Emitted) | None => self.terminal.is_some(),
         }
     }
@@ -167,7 +228,7 @@ impl StreamDecoder {
                 break;
             };
             match slot {
-                Opened::Active { .. } => break,
+                Opened::Active { .. } | Opened::Tool { .. } => break,
                 Opened::Emitted => self.next = self.next.saturating_add(1),
                 Opened::Ready(_) => {
                     let state = mem::replace(slot, Opened::Emitted);
@@ -175,7 +236,9 @@ impl StreamDecoder {
                         Opened::Ready(prepared) => {
                             out.push(Output::Part(prepared.part));
                         }
-                        Opened::Active { .. } | Opened::Emitted => unreachable!("the slot was ready"),
+                        Opened::Active { .. } | Opened::Tool { .. } | Opened::Emitted => {
+                            unreachable!("the slot was ready")
+                        }
                     }
                     self.next = self.next.saturating_add(1);
                     break;
@@ -239,12 +302,52 @@ impl StreamDecoder {
                 }
                 out.push(Output::Progress);
             }
+            Event::ToolAdded { index, id, call_id, name, arguments } => {
+                if index != self.opened.len() {
+                    return Err(DecodeError::Malformed);
+                }
+                for text in [&id, &call_id, &name] {
+                    if text.len() > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
+                        return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
+                    }
+                }
+                let bytes = u64::try_from(arguments.len()).expect("slice length fits u64");
+                let mut input = List::with_capacity(limits.input_bytes);
+                let too_large = bytes > u64::from(limits.input_bytes);
+                if !too_large {
+                    for &byte in &arguments {
+                        input.push(byte).expect("admitted initial arguments");
+                    }
+                }
+                self.opened
+                    .push(Opened::Tool { id, call_id, name, input, bytes, too_large })
+                    .or(Err(DecodeError::limit(crate::Cap::Parts, limits.parts)))?;
+                out.push(Output::Progress);
+            }
             Event::TextDelta { index, content_index, text } => {
                 self.delta(index, b"message", Some(content_index), text.len(), limits)?;
                 out.push(Output::TextDelta { index, content_index, text });
             }
             Event::ArgumentsDelta { index, delta } => {
                 self.delta(index, b"function_call", None, delta.len(), limits)?;
+                match self.opened.get_mut(index) {
+                    Some(Opened::Tool { input, bytes, too_large, .. }) => {
+                        *bytes = bytes
+                            .checked_add(u64::try_from(delta.len()).expect("slice length fits u64"))
+                            .ok_or(DecodeError::Malformed)?;
+                        if !*too_large {
+                            if delta.len() > usize::try_from(input.room()).expect("u32 fits usize") {
+                                *too_large = true;
+                                input.clear();
+                            } else {
+                                for &byte in &delta {
+                                    input.push(byte).expect("admitted argument fragment");
+                                }
+                            }
+                        }
+                    }
+                    Some(Opened::Active { .. } | Opened::Ready(_) | Opened::Emitted) | None => {}
+                }
                 out.push(Output::ArgumentsDelta { index, delta });
             }
             Event::ReasoningDelta { index, summary_index, text } => {
@@ -256,32 +359,70 @@ impl StreamDecoder {
                 let state = mem::replace(slot, Opened::Emitted);
                 let prepared = match state {
                     Opened::Active { id, kind } => prepare(item, &id, &kind, limits)?,
+                    Opened::Tool { id, .. } => prepare(item, &id, b"function_call", limits)?,
                     Opened::Ready(_) | Opened::Emitted => return Err(DecodeError::Malformed),
                 };
                 self.reserve(1, part_size(&prepared.part), limits)?;
+                match &prepared.part {
+                    Part::ToolCall { cut: true, .. } => self.required_stop = Some(Stop::MaxTokens),
+                    Part::ToolCall { cut: false, .. } | Part::Text { .. } | Part::Opaque { .. } => {}
+                }
                 self.tools = self.tools || prepared.tool;
                 self.refusal = self.refusal || prepared.refusal;
                 *self.opened.get_mut(index).expect("the slot exists") = Opened::Ready(prepared);
                 self.ready(out);
             }
-            Event::Completed { stop, usage } => {
-                for index in 0..self.opened.len() {
-                    match self.opened.get_mut(index).expect("within the slots") {
-                        slot @ Opened::Active { .. } => match stop {
-                            Stop::EndTurn | Stop::ToolUse => return Err(DecodeError::Malformed),
-                            Stop::MaxTokens | Stop::Refusal => *slot = Opened::Emitted,
-                        },
-                        Opened::Ready(_) | Opened::Emitted => {}
-                    }
-                }
-                self.terminal = Some(Terminal { stop, usage });
-                self.ready(out);
-            }
+            Event::Completed { stop, usage } => self.complete(stop, usage, limits, out)?,
             Event::Failed { error } => {
                 let failure = classify(0, Some(&error), RateLimit::NONE, wall);
                 self.fail(failure, common::clipped(&error.message, limits.detail_bytes), out);
             }
         }
+        Ok(())
+    }
+    fn complete(
+        &mut self,
+        stop: Stop,
+        usage: Usage,
+        limits: &Limits,
+        out: &mut Queue<Output>,
+    ) -> Result<(), DecodeError> {
+        if let Some(expected) = self.required_stop
+            && stop != expected
+        {
+            return Err(DecodeError::Malformed);
+        }
+        for index in 0..self.opened.len() {
+            let slot = self.opened.get_mut(index).expect("within the slots");
+            let state = mem::replace(slot, Opened::Emitted);
+            let state = match state {
+                Opened::Active { .. } => match stop {
+                    Stop::EndTurn | Stop::ToolUse => return Err(DecodeError::Malformed),
+                    Stop::MaxTokens | Stop::Refusal => Opened::Emitted,
+                },
+                Opened::Tool { id, call_id, name, input, bytes, too_large } => match stop {
+                    Stop::EndTurn | Stop::ToolUse => return Err(DecodeError::Malformed),
+                    Stop::Refusal => Opened::Emitted,
+                    Stop::MaxTokens => {
+                        let part = Part::ToolCall {
+                            call_id,
+                            item_id: id,
+                            name,
+                            input: input.into_boxed(),
+                            too_large,
+                            bytes,
+                            cut: true,
+                        };
+                        self.reserve(1, part_size(&part), limits)?;
+                        Opened::Ready(Prepared { part, tool: false, refusal: false })
+                    }
+                },
+                state @ (Opened::Ready(_) | Opened::Emitted) => state,
+            };
+            *self.opened.get_mut(index).expect("within the slots") = state;
+        }
+        self.terminal = Some(Terminal { stop, usage });
+        self.ready(out);
         Ok(())
     }
     fn delta(
@@ -294,7 +435,8 @@ impl StreamDecoder {
     ) -> Result<(), DecodeError> {
         match self.opened.get(index) {
             Some(Opened::Active { kind, .. }) if kind.as_ref() == expected_kind => {}
-            Some(Opened::Active { .. } | Opened::Ready(_) | Opened::Emitted) | None => {
+            Some(Opened::Tool { .. }) if expected_kind == b"function_call" => {}
+            Some(Opened::Active { .. } | Opened::Tool { .. } | Opened::Ready(_) | Opened::Emitted) | None => {
                 return Err(DecodeError::Malformed);
             }
         }
@@ -302,6 +444,9 @@ impl StreamDecoder {
             && sub_index >= limits.parts
         {
             return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
+        }
+        if expected_kind == b"function_call" {
+            return Ok(());
         }
         let bytes = self
             .delta_bytes
@@ -362,8 +507,12 @@ fn part_size(part: &Part) -> usize {
             id.len().saturating_add(phase).saturating_add(text.len())
         }
         Part::Opaque { bytes } => bytes.len(),
-        Part::ToolCall { call_id, item_id, name, input, .. } => {
-            call_id.len().saturating_add(item_id.len()).saturating_add(name.len()).saturating_add(input.len())
+        Part::ToolCall { call_id, item_id, name, input, too_large, cut, .. } => {
+            if *too_large {
+                return call_id.len().saturating_add(name.len());
+            }
+            let item = if *cut { 0 } else { item_id.len() };
+            call_id.len().saturating_add(item).saturating_add(name.len()).saturating_add(input.len())
         }
     }
 }
@@ -375,7 +524,12 @@ fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits
             }
             Ok(Prepared { part: Part::Text { id, phase, text, refusal }, tool: false, refusal })
         }
-        Item::FunctionCall { id, call_id, name, arguments } => {
+        item @ (Item::FunctionCall { .. } | Item::CutCall { .. }) => {
+            let (id, call_id, name, arguments, cut) = match item {
+                Item::FunctionCall { id, call_id, name, arguments } => (id, call_id, name, arguments, false),
+                Item::CutCall { id, call_id, name, arguments } => (id, call_id, name, arguments, true),
+                Item::Message { .. } | Item::Opaque { .. } => unreachable!("a function-call item"),
+            };
             let cap = usize::try_from(limits.string_bytes).expect("u32 fits usize");
             if id.len() > cap || call_id.len() > cap || name.len() > cap {
                 return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
@@ -383,11 +537,12 @@ fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits
             if expected_id != id.as_ref() || expected_kind != b"function_call" {
                 return Err(DecodeError::Malformed);
             }
+            let bytes = u64::try_from(arguments.len()).expect("slice length fits u64");
             let too_large = arguments.len() > usize::try_from(limits.input_bytes).expect("u32 fits usize");
             let input = if too_large { bytes::copy_of(b"") } else { arguments };
             Ok(Prepared {
-                part: Part::ToolCall { call_id, item_id: id, name, input, too_large },
-                tool: true,
+                part: Part::ToolCall { call_id, item_id: id, name, input, too_large, bytes, cut },
+                tool: !cut,
                 refusal: false,
             })
         }
@@ -415,6 +570,20 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
         b"response.in_progress" => Ok(Event::InProgress { echo: None }),
         b"response.output_item.added" => {
             let item = json::value_at(tokens, json::required(tokens, b"item")?)?;
+            if json::text_ref(json::value_at(item, json::required(item, b"type")?)?)? == b"function_call"
+                && json::field(item, b"call_id")?.is_some()
+            {
+                return Ok(Event::ToolAdded {
+                    index: index(tokens)?,
+                    id: json::text(json::value_at(item, json::required(item, b"id")?)?)?,
+                    call_id: json::text(json::value_at(item, json::required(item, b"call_id")?)?)?,
+                    name: json::text(json::value_at(item, json::required(item, b"name")?)?)?,
+                    arguments: match json::optional_at(item, json::field(item, b"arguments")?)? {
+                        Some(value) => json::text(value)?,
+                        None => Box::new([]),
+                    },
+                });
+            }
             Ok(Event::Added {
                 index: index(tokens)?,
                 id: json::text(json::value_at(item, json::required(item, b"id")?)?)?,
@@ -497,12 +666,18 @@ fn named_index(tokens: &[Token], field: &[u8]) -> Result<u32, DecodeError> {
 }
 fn read_item(tokens: &[Token], limits: &Limits) -> Result<Item, DecodeError> {
     match json::text_ref(json::value_at(tokens, json::required(tokens, b"type")?)?)? {
-        b"function_call" => Ok(Item::FunctionCall {
-            id: json::text(json::value_at(tokens, json::required(tokens, b"id")?)?)?,
-            call_id: json::text(json::value_at(tokens, json::required(tokens, b"call_id")?)?)?,
-            name: json::text(json::value_at(tokens, json::required(tokens, b"name")?)?)?,
-            arguments: json::text(json::value_at(tokens, json::required(tokens, b"arguments")?)?)?,
-        }),
+        b"function_call" => {
+            let id = json::text(json::value_at(tokens, json::required(tokens, b"id")?)?)?;
+            let call_id = json::text(json::value_at(tokens, json::required(tokens, b"call_id")?)?)?;
+            let name = json::text(json::value_at(tokens, json::required(tokens, b"name")?)?)?;
+            let arguments = json::text(json::value_at(tokens, json::required(tokens, b"arguments")?)?)?;
+            let status = request::optional_text(tokens, b"status")?;
+            match status.as_deref() {
+                Some(b"incomplete") => Ok(Item::CutCall { id, call_id, name, arguments }),
+                Some(b"completed") | None => Ok(Item::FunctionCall { id, call_id, name, arguments }),
+                Some(_) => Err(DecodeError::Malformed),
+            }
+        }
         b"message" => {
             let values = json::value_at(tokens, json::required(tokens, b"content")?)?;
             let mut text = List::with_capacity(limits.answer_bytes);
@@ -626,6 +801,7 @@ fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Reques
                 Event::Created { .. } => b"response.created",
                 Event::InProgress { .. } => b"response.in_progress",
                 Event::Added { .. }
+                | Event::ToolAdded { .. }
                 | Event::Done { .. }
                 | Event::TextDelta { .. }
                 | Event::ArgumentsDelta { .. }
@@ -646,6 +822,21 @@ fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Reques
                 request::write_tools(out, &request.tools);
             }
             out.object_end();
+        }
+        Event::ToolAdded { index, id, call_id, name, arguments } => {
+            out.string(b"response.output_item.added");
+            out.key(b"output_index");
+            out.unsigned(u64::from(*index));
+            out.key(b"item");
+            write_item(
+                out,
+                &Item::FunctionCall {
+                    id: id.clone(),
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                },
+            );
         }
         Event::Added { index, id, kind } => {
             out.string(b"response.output_item.added");
@@ -751,7 +942,12 @@ fn write_terminal(out: &mut Encoder, stop: Stop, usage: Usage, completion_echo: 
 fn write_item(out: &mut Encoder, item: &Item) {
     match item {
         Item::Opaque { value } => value.write(out),
-        Item::FunctionCall { id, call_id, name, arguments } => {
+        Item::FunctionCall { id, call_id, name, arguments } | Item::CutCall { id, call_id, name, arguments } => {
+            let cut = match item {
+                Item::CutCall { .. } => true,
+                Item::FunctionCall { .. } => false,
+                Item::Message { .. } | Item::Opaque { .. } => unreachable!("a function-call item"),
+            };
             out.object_start();
             out.key(b"type");
             out.string(b"function_call");
@@ -763,6 +959,10 @@ fn write_item(out: &mut Encoder, item: &Item) {
             out.string(name);
             out.key(b"arguments");
             out.string(arguments);
+            if cut {
+                out.key(b"status");
+                out.string(b"incomplete");
+            }
             out.object_end();
         }
         Item::Message { id, phase, text, refusal } => {
@@ -793,8 +993,9 @@ pub(crate) fn decoder_worst_case(limits: &Limits) -> Option<u64> {
     let slots = List::<Opened>::worst_case(limits.parts)?;
     let identifiers = u64::from(limits.parts)
         .checked_mul(u64::from(limits.string_bytes.min(limits.document_bytes)))?
-        .checked_mul(2)?;
-    slots.checked_add(identifiers)?.checked_add(u64::from(limits.answer_bytes))
+        .checked_mul(3)?;
+    let inputs = u64::from(limits.parts).checked_mul(u64::from(limits.input_bytes))?;
+    slots.checked_add(identifiers)?.checked_add(inputs)?.checked_add(u64::from(limits.answer_bytes))
 }
 
 /// Fake-server completion with the instructions/tools echo that the real Codex

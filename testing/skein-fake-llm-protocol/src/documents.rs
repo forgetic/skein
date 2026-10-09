@@ -105,6 +105,7 @@ fn anthropic_request(data: &[u8], limits: &anthropic::Limits) -> Result<api::Que
                 skein_llm::Block::ToolResult { id, text, is_error } => {
                     api::Part::ToolOutput { id, output: text, is_error }
                 }
+                skein_llm::Block::Oversize { .. } | skein_llm::Block::Cut { .. } => return Err(Error::Malformed),
                 skein_llm::Block::Reasoning { replay } => {
                     api::Part::Opaque { bytes: replay.value.to_bytes(limits).or(Err(Error::Malformed))? }
                 }
@@ -289,7 +290,17 @@ fn anthropic_event(
                 api::Part::Opaque { .. } => (b"ping".as_slice(), anthropic::Event::Progress),
                 api::Part::ToolOutput { .. } => return Err(Error::Malformed),
             },
-            2 => (b"content_block_stop".as_slice(), anthropic::Event::Done { index: at }),
+            2 => match part {
+                api::Part::ToolCall { .. } if answer.finish == api::Finish::Length => {
+                    (b"ping".as_slice(), anthropic::Event::Progress)
+                }
+                api::Part::ToolCall { .. }
+                | api::Part::Text { .. }
+                | api::Part::Opaque { .. }
+                | api::Part::ToolOutput { .. } => {
+                    (b"content_block_stop".as_slice(), anthropic::Event::Done { index: at })
+                }
+            },
             _ => return Err(Error::Malformed),
         };
         return Ok(Some((bytes::copy_of(name), event)));
@@ -359,6 +370,29 @@ fn openai_event(
             }
             api::Part::ToolOutput { .. } => return Err(Error::Malformed),
         };
+        match part {
+            api::Part::ToolCall { id: call_id, name, arguments } => {
+                if !done {
+                    return Ok(Some((
+                        bytes::copy_of(b"response.output_item.added"),
+                        openai::Event::ToolAdded {
+                            index,
+                            id,
+                            call_id: call_id.clone(),
+                            name: name.clone(),
+                            arguments: Box::new([]),
+                        },
+                    )));
+                }
+                if answer.finish == api::Finish::Length {
+                    return Ok(Some((
+                        bytes::copy_of(b"response.function_call_arguments.delta"),
+                        openai::Event::ArgumentsDelta { index, delta: arguments.clone() },
+                    )));
+                }
+            }
+            api::Part::Text { .. } | api::Part::Opaque { .. } | api::Part::ToolOutput { .. } => {}
+        }
         return Ok(Some(if done {
             (bytes::copy_of(b"response.output_item.done"), openai::Event::Done { index, item })
         } else {

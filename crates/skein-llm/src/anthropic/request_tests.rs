@@ -210,8 +210,8 @@ fn escaped_wire_bytes_string_tokens_blocks_arguments_and_depth_have_hard_bounds(
     };
     let prompt = prompt(Role::Assistant, tool);
     limits = LIMITS;
-    limits.input_bytes = 2;
-    assert_eq!(measure_request(&prompt, &limits), Err(Error::limit(crate::Cap::Input, 2)));
+    limits.string_bytes = 2;
+    assert_eq!(measure_request(&prompt, &limits), Err(Error::limit(crate::Cap::String, 2)));
     limits = LIMITS;
     limits.tokens = 2;
     assert_eq!(measure_request(&prompt, &limits), Err(Error::limit(crate::Cap::Tokens, 2)));

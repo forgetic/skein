@@ -559,3 +559,99 @@ fn scripted_calls_are_delivered_even_when_tool_choice_is_none() {
         assert_eq!(name.as_ref(), b"caller_tool");
     }
 }
+
+#[test]
+fn escaped_calls_at_the_input_edge_and_one_over_complete_beside_a_normal_call() {
+    let arguments = br#"{"x":"\u0000\u0000"}"#;
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        for below in [false, true] {
+            let mut bounds = limits();
+            bounds.dialect.input_bytes = u32::try_from(arguments.len()).expect("tiny argument cap") - u32::from(below);
+            let scripts = Box::new([Script {
+                cue: b"caller-script".as_slice().into(),
+                turns: Box::new([Turn {
+                    lines: Box::new([
+                        Line::Call { name: b"caller_tool".as_slice().into(), arguments: arguments.as_slice().into() },
+                        Line::Call { name: b"caller_tool".as_slice().into(), arguments: b"{}".as_slice().into() },
+                    ]),
+                    finish: Finish::ToolCalls,
+                    tokens: 8,
+                }]),
+            }]);
+            let mut world = Exchange::new(input(provider, 1), bounds, scripts);
+            world.start();
+            world.run();
+            let answer = completion(&world);
+            assert_eq!(answer.stop, skein_llm::Stop::ToolUse);
+            assert_eq!(answer.content.len(), 2);
+            if below {
+                let Block::Oversize { id, name, bytes } = &answer.content[0] else {
+                    panic!("one over is an oversize block")
+                };
+                assert_eq!(id.as_ref(), b"call_0000000000000001");
+                assert_eq!(name.as_ref(), b"caller_tool");
+                assert_eq!(*bytes, u64::try_from(arguments.len()).expect("bounded bytes"));
+                let mut next = input(provider, 2);
+                next.prompt.messages = Box::new([Message { role: Role::Assistant, content: answer.content.clone() }]);
+                assert_eq!(client::Client::prepare(next, &limits()).err(), Some(skein_llm::Error::Invalid));
+            } else {
+                let Block::ToolCall { arguments: actual, .. } = &answer.content[0] else {
+                    panic!("exact edge is a call")
+                };
+                assert_eq!(actual.as_ref(), arguments);
+            }
+            assert!(matches!(&answer.content[1], Block::ToolCall { arguments, .. } if arguments.as_ref() == b"{}"));
+        }
+    }
+}
+
+#[test]
+fn scripted_provider_output_cuts_complete_and_are_refused_in_history() {
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        let mut call_input = input(provider, 1);
+        call_input.prompt.output_ceiling(provider, 1).expect("caller output ceiling");
+        let mut world = Exchange::new(call_input, limits(), scripts());
+        world.model_ceiling(1);
+        world.start();
+        world.run();
+        let answer = completion(&world);
+        assert_eq!(answer.stop, skein_llm::Stop::MaxTokens);
+        let [Block::Cut { id, name, arguments }] = answer.content.as_ref() else {
+            panic!("one cut outcome: {answer:?}")
+        };
+        assert_eq!(id.as_ref(), b"call_0000000000000001");
+        assert_eq!(name.as_ref(), b"caller_tool");
+        assert_eq!(arguments.as_ref(), br#"{ ""#);
+        let mut next = input(provider, 2);
+        next.prompt.messages = Box::new([Message { role: Role::Assistant, content: answer.content.clone() }]);
+        assert_eq!(client::Client::prepare(next, &limits()).err(), Some(skein_llm::Error::Invalid));
+    }
+}
+
+#[test]
+fn oversized_arguments_charge_only_the_call_id_and_name() {
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        let mut bounds = limits();
+        bounds.dialect.input_bytes = 3;
+        bounds.dialect.answer_bytes = 32; // 21-byte fake call ID plus 11-byte caller name.
+        let scripts = Box::new([Script {
+            cue: b"caller-script".as_slice().into(),
+            turns: Box::new([Turn {
+                lines: Box::new([Line::Call {
+                    name: b"caller_tool".as_slice().into(),
+                    arguments: vec![b'x'; 128].into(),
+                }]),
+                finish: Finish::ToolCalls,
+                tokens: 8,
+            }]),
+        }]);
+        let mut world = Exchange::new(input(provider, 1), bounds, scripts);
+        world.start();
+        world.run();
+        let [Block::Oversize { id, name, bytes }] = completion(&world).content.as_ref() else {
+            panic!("one oversize completion")
+        };
+        assert_eq!(id.len() + name.len(), 32);
+        assert_eq!(*bytes, 128);
+    }
+}

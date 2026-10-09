@@ -543,3 +543,61 @@ fn actual_scripted_byte_peer_and_client_fit_the_composed_heap_envelope() {
     assert_eq!(text.len(), usize::try_from(bounds.dialect.string_bytes).expect("same maximum text cap"));
     assert!(text.iter().all(|byte| *byte == b'x'), "whole maximum payload was conveyed");
 }
+
+#[test]
+fn an_oversized_call_completes_within_the_declared_bound() {
+    use skein_llm::{Block, openai};
+    let mut bounds = limits();
+    bounds.dialect.input_bytes = 3;
+    let events = [
+        openai::Event::ToolAdded {
+            index: 0,
+            id: b"i".as_slice().into(),
+            call_id: b"c".as_slice().into(),
+            name: b"read".as_slice().into(),
+            arguments: Box::new([]),
+        },
+        openai::Event::ArgumentsDelta { index: 0, delta: vec![b'x'; 128].into() },
+        openai::Event::Done {
+            index: 0,
+            item: openai::Item::FunctionCall {
+                id: b"i".as_slice().into(),
+                call_id: b"c".as_slice().into(),
+                name: b"read".as_slice().into(),
+                arguments: vec![b'x'; 128].into(),
+            },
+        },
+        openai::Event::Completed { stop: openai::Stop::ToolUse, usage: openai::Usage::ZERO },
+    ];
+    let meter = Meter::new();
+    let mut body = Vec::new();
+    for event in &events {
+        body.extend_from_slice(b"data: ");
+        body.extend_from_slice(&openai::encode_event(event, &bounds.dialect).expect("bounded provider event"));
+        body.extend_from_slice(b"\n\n");
+    }
+    let wire = skein_llm_world::response(200, "Content-Type: text/event-stream\r\n", &body, false);
+    let bound = client::worst_case(&bounds).expect("checked receiving bound");
+    drop(body);
+    meter.start();
+    let mut world = World::new(call(1), bounds, wire, 3);
+    world.request(client::Request::Start);
+    let measured = meter.end();
+    meter.check(measured, bound, &"oversize preparation");
+    for _ in 0..100_000 {
+        meter.start();
+        let progress = world.tick(true);
+        let measured = meter.end();
+        meter.check(measured, bound, &"oversize actual fragmented event");
+        if !progress {
+            break;
+        }
+    }
+    world.assert_once();
+    assert!(world.seen.iter().any(|event| matches!(event, client::Event::Completed { completion, .. }
+        if matches!(completion.content.as_ref(), [Block::Oversize { bytes: 128, .. }]))));
+    world.request(client::Request::Close);
+    world.settle();
+    drop(world);
+    assert_eq!(meter.held(), 0, "oversize settlement releases owned buffers");
+}

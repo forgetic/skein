@@ -83,7 +83,9 @@ fn admitted(kind: Kind, owner: u64) {
             assert_eq!(arguments.as_ref(), b"{}");
             replay.as_ref().expect("complete actual item ID")
         }
-        Block::ToolResult { .. } | Block::Reasoning { .. } => panic!("expected native item metadata"),
+        Block::ToolResult { .. } | Block::Reasoning { .. } | Block::Oversize { .. } | Block::Cut { .. } => {
+            panic!("expected native item metadata")
+        }
     };
     assert_eq!(replay.value.to_bytes(&bounds.dialect).expect("actual replay serialization").as_ref(), raw(kind));
     let envelope = replay.to_bytes(&bounds.dialect).expect("every admitted actual replay fits its envelope");

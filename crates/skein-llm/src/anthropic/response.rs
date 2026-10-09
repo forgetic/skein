@@ -67,7 +67,7 @@ pub enum Event {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Part {
     Text { text: Box<[u8]> },
-    ToolCall { id: Box<[u8]>, name: Box<[u8]>, input: Box<[u8]>, too_large: bool },
+    ToolCall { id: Box<[u8]>, name: Box<[u8]>, input: Box<[u8]>, too_large: bool, bytes: u64, cut: bool },
     Opaque { bytes: Box<[u8]> },
 }
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -85,7 +85,7 @@ pub const MAX_OUT: u32 = 3;
 #[derive(Debug)]
 enum Active {
     Text { text: List<u8> },
-    ToolCall { id: Box<[u8]>, name: Box<[u8]>, input: List<u8>, fragmented: bool, too_large: bool },
+    ToolCall { id: Box<[u8]>, name: Box<[u8]>, input: List<u8>, fragmented: bool, too_large: bool, bytes: u64 },
     Thinking { text: List<u8>, signature: List<u8>, head: Json },
     Opaque { bytes: Box<[u8]> },
 }
@@ -95,6 +95,7 @@ enum Active {
 #[derive(Debug)]
 pub struct StreamDecoder {
     active: Option<Active>,
+    pending: Option<Part>,
     next: u32,
     started: bool,
     ending: bool,
@@ -110,6 +111,7 @@ impl StreamDecoder {
     pub const fn new(limits: &Limits) -> StreamDecoder {
         StreamDecoder {
             active: None,
+            pending: None,
             next: 0,
             started: false,
             ending: false,
@@ -178,6 +180,9 @@ impl StreamDecoder {
                 self.usage = usage;
             }
             Event::Added { index, block } => {
+                if let Some(part) = self.pending.take() {
+                    self.emit(part, limits, out)?;
+                }
                 if !self.started || self.ending || self.active.is_some() || index != self.next {
                     return Err(DecodeError::Malformed);
                 }
@@ -194,31 +199,48 @@ impl StreamDecoder {
                     | Delta::Thinking { text }
                     | Delta::Signature { text } => text.len(),
                 };
-                self.reserve_received(len, limits)?;
+                match &delta {
+                    Delta::Arguments { .. } => {}
+                    Delta::Text { .. } | Delta::Thinking { .. } | Delta::Signature { .. } => {
+                        self.reserve_received(len, limits)?;
+                    }
+                }
                 self.delta(index, delta, out)?;
             }
             Event::Done { index } => {
                 self.check_active(index)?;
                 let active = self.active.take().ok_or(DecodeError::Malformed)?;
                 let part = finish(active, limits)?;
-                let len = match &part {
-                    Part::Text { text } => text.len(),
-                    Part::ToolCall { id, name, input, .. } => {
-                        id.len().saturating_add(name.len()).saturating_add(input.len())
-                    }
-                    Part::Opaque { bytes } => bytes.len(),
-                };
-                let total = self.part_bytes.checked_add(u64::try_from(len).expect("usize fits u64"));
-                self.part_bytes = total.ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes))?;
-                if self.part_bytes > u64::from(limits.answer_bytes) {
-                    return Err(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes));
-                }
                 self.next = self.next.checked_add(1).ok_or(DecodeError::limit(crate::Cap::Parts, limits.parts))?;
-                out.push(Output::Part(part));
+                match part {
+                    part @ Part::ToolCall { .. } => self.pending = Some(part),
+                    part @ (Part::Text { .. } | Part::Opaque { .. }) => self.emit(part, limits, out)?,
+                }
             }
             Event::MessageDelta { stop, usage } => {
-                if !self.started || self.active.is_some() {
+                if !self.started {
                     return Err(DecodeError::Malformed);
+                }
+                if let Some(active) = self.active.take() {
+                    match active {
+                        active @ Active::ToolCall { .. } if stop == Some(Stop::MaxTokens) => {
+                            self.pending = Some(finish(active, limits)?);
+                            self.next = self.next.checked_add(1).ok_or(DecodeError::Malformed)?;
+                        }
+                        Active::ToolCall { .. }
+                        | Active::Text { .. }
+                        | Active::Thinking { .. }
+                        | Active::Opaque { .. } => return Err(DecodeError::Malformed),
+                    }
+                }
+                if stop.is_some()
+                    && let Some(mut part) = self.pending.take()
+                {
+                    match &mut part {
+                        Part::ToolCall { cut, .. } => *cut = stop == Some(Stop::MaxTokens),
+                        Part::Text { .. } | Part::Opaque { .. } => {}
+                    }
+                    self.emit(part, limits, out)?;
                 }
                 self.ending = true;
                 if let Some(stop) = stop {
@@ -247,6 +269,25 @@ impl StreamDecoder {
         }
         Ok(())
     }
+    fn emit(&mut self, part: Part, limits: &Limits, out: &mut Queue<Output>) -> Result<(), DecodeError> {
+        let len = match &part {
+            Part::Text { text } => text.len(),
+            Part::ToolCall { id, name, input, too_large, .. } => {
+                let arguments = if *too_large { 0 } else { input.len() };
+                id.len().saturating_add(name.len()).saturating_add(arguments)
+            }
+            Part::Opaque { bytes } => bytes.len(),
+        };
+        self.part_bytes = self
+            .part_bytes
+            .checked_add(u64::try_from(len).expect("slice length fits u64"))
+            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes))?;
+        if self.part_bytes > u64::from(limits.answer_bytes) {
+            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer_bytes));
+        }
+        out.push(Output::Part(part));
+        Ok(())
+    }
     fn start(&mut self, block: BlockStart, limits: &Limits) -> Result<Active, DecodeError> {
         match block {
             BlockStart::Text { text } => {
@@ -263,13 +304,20 @@ impl StreamDecoder {
                 if id.len() > string_limit || name.len() > string_limit {
                     return Err(DecodeError::limit(crate::Cap::String, limits.string_bytes));
                 }
-                self.reserve_received(id.len().saturating_add(name.len()).saturating_add(input.len()), limits)?;
+                self.reserve_received(id.len().saturating_add(name.len()), limits)?;
                 let mut value = List::with_capacity(limits.input_bytes);
                 let too_large = input.len() > usize::try_from(value.room()).expect("u32 fits usize");
                 if !too_large {
-                    append(&mut value, &input, crate::Cap::Input)?;
+                    append(&mut value, &input, crate::Cap::String)?;
                 }
-                Ok(Active::ToolCall { id, name, input: value, fragmented: false, too_large })
+                Ok(Active::ToolCall {
+                    id,
+                    name,
+                    input: value,
+                    fragmented: false,
+                    too_large,
+                    bytes: u64::try_from(input.len()).expect("slice length fits u64"),
+                })
             }
             BlockStart::Thinking { text, signature, head } => {
                 let head = thinking_head(&head, &text, &signature, limits)?;
@@ -318,18 +366,23 @@ impl StreamDecoder {
                 append(text, &fragment, crate::Cap::Answer)?;
                 out.push(Output::TextDelta { index, content_index: 0, text: fragment });
             }
-            (Active::ToolCall { input, fragmented, too_large, .. }, Delta::Arguments { text: fragment }) => {
+            (Active::ToolCall { input, fragmented, too_large, bytes, .. }, Delta::Arguments { text: fragment }) => {
                 if !*fragmented {
                     // The start's `{}` is a placeholder, replaced by partial_json.
                     input.clear();
+                    *bytes = 0;
+                    *too_large = false;
                     *fragmented = true;
                 }
+                *bytes = bytes
+                    .checked_add(u64::try_from(fragment.len()).expect("slice length fits u64"))
+                    .ok_or(DecodeError::Malformed)?;
                 if !*too_large {
                     if fragment.len() > usize::try_from(input.room()).expect("u32 fits usize") {
                         *too_large = true;
                         input.clear();
                     } else {
-                        append(input, &fragment, crate::Cap::Input)?;
+                        append(input, &fragment, crate::Cap::String)?;
                     }
                 }
                 out.push(Output::ArgumentsDelta { index, delta: fragment });
@@ -360,6 +413,7 @@ impl StreamDecoder {
     }
     fn fail(&mut self, failure: Failure, detail: Box<[u8]>, out: &mut Queue<Output>) {
         self.active = None;
+        self.pending = None;
         self.over = true;
         let detail = match failure {
             Failure::Limit { which, bound } => crate::openai::limit_detail(which, bound),
@@ -402,8 +456,8 @@ fn append(out: &mut List<u8>, data: &[u8], cap: crate::Cap) -> Result<(), Decode
 fn finish(active: Active, limits: &Limits) -> Result<Part, DecodeError> {
     match active {
         Active::Text { text } => Ok(Part::Text { text: text.into_boxed() }),
-        Active::ToolCall { id, name, input, too_large, .. } => {
-            Ok(Part::ToolCall { id, name, input: input.into_boxed(), too_large })
+        Active::ToolCall { id, name, input, too_large, bytes, .. } => {
+            Ok(Part::ToolCall { id, name, input: input.into_boxed(), too_large, bytes, cut: false })
         }
         Active::Thinking { text, signature, head } => {
             if signature.is_empty() {
@@ -609,7 +663,7 @@ fn index(tokens: &[Token]) -> Result<u32, DecodeError> {
 #[must_use]
 pub fn decoder_worst_case(limits: &Limits) -> Option<u64> {
     u64::from(limits.answer_bytes)
-        .checked_add(u64::from(limits.input_bytes))?
+        .checked_add(u64::from(limits.input_bytes).checked_mul(2)?)?
         .checked_add(u64::from(limits.opaque_bytes).checked_mul(4)?)?
         .checked_add(u64::from(limits.string_bytes).checked_mul(2)?)?
         .checked_add(List::<Token>::worst_case(limits.tokens)?.checked_mul(2)?)?

@@ -12,6 +12,9 @@ Both dialects render `Only` as automatic selection; callers enforce tool policy.
 Ordered `Block` values describe text, refusals, tool calls/results and
 opaque reasoning. Responses expose text, reasoning and tool-argument deltas,
 completed blocks, and one final `Completion` with stop reason and usage.
+Arguments past the input cap arrive as `Oversize`; provider output cuts arrive
+as `Cut`. Both complete normally and are refused in history until the caller
+replaces them; only `ToolCall` represents an executable call.
 Completed blocks preserve provider replay metadata for the next turn.
 
 For Codex, the caller obtains and refreshes an OAuth access token, supplies the

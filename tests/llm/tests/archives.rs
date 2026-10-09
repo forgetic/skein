@@ -14,6 +14,27 @@ fn archive(scenario: &str, file: &str) -> Vec<u8> {
     .expect("preserved historical archive")
 }
 
+fn completion(world: &World) -> &Completion {
+    let completions: Vec<&Completion> = world
+        .seen
+        .iter()
+        .filter_map(|event| match event {
+            client::Event::Completed { completion, .. } => Some(completion),
+            client::Event::Delta { .. }
+            | client::Event::Block { .. }
+            | client::Event::Failed { .. }
+            | client::Event::Cancelled { .. }
+            | client::Event::Reusable
+            | client::Event::Close
+            | client::Event::Closed => None,
+        })
+        .collect();
+    let [completion] = completions.as_slice() else {
+        panic!("archive must complete once: {:?}", world.seen);
+    };
+    completion
+}
+
 #[test]
 fn historical_messages_captures_flow_through_the_actual_shared_client() {
     for (scenario, input_tokens, output_tokens, calls) in [
@@ -64,23 +85,7 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
         world.request(client::Request::Start);
         world.run();
         world.assert_once();
-        let completions: Vec<&Completion> = world
-            .seen
-            .iter()
-            .filter_map(|event| match event {
-                client::Event::Completed { completion, .. } => Some(completion),
-                client::Event::Delta { .. }
-                | client::Event::Block { .. }
-                | client::Event::Failed { .. }
-                | client::Event::Cancelled { .. }
-                | client::Event::Reusable
-                | client::Event::Close
-                | client::Event::Closed => None,
-            })
-            .collect();
-        let [completion] = completions.as_slice() else {
-            panic!("archive must complete once: {:?}", world.seen);
-        };
+        let completion = completion(&world);
         assert_eq!(completion.usage.input_tokens, input_tokens, "known captured input accounting");
         assert_eq!(completion.usage.output_tokens, output_tokens, "known captured output accounting");
         assert_eq!(completion.usage.cache_read_tokens, 0);
@@ -91,7 +96,12 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
             .iter()
             .filter_map(|block| match block {
                 Block::ToolCall { name, arguments, .. } => Some((name, arguments)),
-                Block::Text { .. } | Block::Refusal { .. } | Block::ToolResult { .. } | Block::Reasoning { .. } => None,
+                Block::Text { .. }
+                | Block::Refusal { .. }
+                | Block::ToolResult { .. }
+                | Block::Reasoning { .. }
+                | Block::Oversize { .. }
+                | Block::Cut { .. } => None,
             })
             .collect();
         assert_eq!(actual_calls.len(), calls);
@@ -104,8 +114,12 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
         if scenario == "single-text" {
             assert!(completion.content.iter().any(|block| match block {
                 Block::Text { text, .. } => text.as_ref() == b"hello",
-                Block::Refusal { .. } | Block::ToolCall { .. } | Block::ToolResult { .. } | Block::Reasoning { .. } =>
-                    false,
+                Block::Refusal { .. }
+                | Block::ToolCall { .. }
+                | Block::ToolResult { .. }
+                | Block::Reasoning { .. }
+                | Block::Oversize { .. }
+                | Block::Cut { .. } => false,
             }));
         }
     }

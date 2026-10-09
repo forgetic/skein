@@ -52,6 +52,10 @@ pub enum Block {
     /// flag, so `is_error` prefixes the wire text with `Error: ` when true;
     /// successful text is sent unchanged.
     ToolResult { id: Box<[u8]>, text: Box<[u8]>, is_error: bool },
+    /// A received call past the argument cap; the caller replaces it before replay.
+    Oversize { id: Box<[u8]>, name: Box<[u8]>, bytes: u64 },
+    /// A call cut at the provider's output cap; the caller replaces it before replay.
+    Cut { id: Box<[u8]>, name: Box<[u8]>, arguments: Box<[u8]> },
     /// Provider-owned assistant replay, including encrypted/signed reasoning
     /// and unknown bounded native content-block envelopes.
     /// The payload is opaque; visible reasoning summaries arrive as deltas.
@@ -184,8 +188,6 @@ pub enum Cap {
     String,
     /// The fixed tokenizer bound on a numeral.
     Number,
-    /// The configured bound on tool argument text.
-    Input,
     /// The configured bound on opaque replay.
     Opaque,
     /// The configured bound on completion or history parts.
@@ -215,7 +217,6 @@ impl Cap {
             Cap::Depth => b"JSON nesting depth",
             Cap::String => b"retained string",
             Cap::Number => b"JSON numeral",
-            Cap::Input => b"tool argument text",
             Cap::Opaque => b"opaque replay",
             Cap::Parts => b"completion or history parts",
             Cap::Answer => b"completion answer",

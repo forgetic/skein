@@ -201,6 +201,10 @@ fn block_bytes(block: &skein_llm::Block) -> Option<u64> {
             .checked_add(bytes(arguments)?)?
             .checked_add(replay_bytes(replay.as_ref())?),
         skein_llm::Block::ToolResult { id, text, is_error: _ } => bytes(id)?.checked_add(bytes(text)?),
+        skein_llm::Block::Oversize { id, name, .. } => bytes(id)?.checked_add(bytes(name)?),
+        skein_llm::Block::Cut { id, name, arguments } => {
+            bytes(id)?.checked_add(bytes(name)?)?.checked_add(bytes(arguments)?)
+        }
         skein_llm::Block::Reasoning { replay } => replay_bytes(Some(replay)),
     }
 }
@@ -263,11 +267,16 @@ pub struct Exchange {
 /// Shared peer limits compatible with this world's small client limits.
 #[must_use]
 pub fn limits(bounds: &client::Limits) -> provider::Limits {
+    // The peer may write past a client's receiving answer ceiling. Price that
+    // independent bounded storage through provider::worst_case, including in
+    // extra_worst_case; never make the test peer pre-filter an oversized call.
+    let documents =
+        skein_llm::DocumentLimits { answer_bytes: bounds.dialect.answer_bytes.max(32768), ..bounds.dialect };
     provider::Limits {
         calls: 4,
         http: http::Limits { head: 4096, headers: 32, body: 32768, read: 256, response: 4096, send: 128 },
         sse: sse::Limits { event: 16384, chunk: 128 },
-        documents: documents::Limits { anthropic: bounds.dialect, openai: bounds.dialect, model_ceiling: 4096 },
+        documents: documents::Limits { anthropic: documents, openai: documents, model_ceiling: 4096 },
     }
 }
 
@@ -385,6 +394,13 @@ impl Exchange {
         observation_worst_case(&observations).expect("finite configured peer observation ownership");
         self.observations = Some(observations);
         self.reserve_observations();
+    }
+
+    /// Sets the independent Codex model's output ceiling before any wire progress.
+    pub fn model_ceiling(&mut self, ceiling: u32) {
+        assert_eq!(self.ticks, 0, "model configuration precedes progress");
+        assert!(ceiling > 0, "the independent model has a nonzero ceiling");
+        self.peer_env.limits.documents.model_ceiling = ceiling;
     }
 
     fn reserve_observations(&mut self) {

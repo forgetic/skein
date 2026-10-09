@@ -296,9 +296,12 @@ fn assert_text(events: &[client::Event], expected: &str) -> Completion {
         .iter()
         .flat_map(|block| match block {
             Block::Text { text, .. } => text.to_vec(),
-            Block::Refusal { .. } | Block::ToolCall { .. } | Block::ToolResult { .. } | Block::Reasoning { .. } => {
-                Vec::new()
-            }
+            Block::Refusal { .. }
+            | Block::ToolCall { .. }
+            | Block::ToolResult { .. }
+            | Block::Reasoning { .. }
+            | Block::Oversize { .. }
+            | Block::Cut { .. } => Vec::new(),
         })
         .collect();
     let deltas: Vec<u8> = events
@@ -359,7 +362,12 @@ fn tool_round_trip(provider: Provider) {
         .iter()
         .filter_map(|block| match block {
             Block::ToolCall { id, name, arguments, .. } => Some((id, name, arguments)),
-            Block::Text { .. } | Block::Refusal { .. } | Block::ToolResult { .. } | Block::Reasoning { .. } => None,
+            Block::Text { .. }
+            | Block::Refusal { .. }
+            | Block::ToolResult { .. }
+            | Block::Reasoning { .. }
+            | Block::Oversize { .. }
+            | Block::Cut { .. } => None,
         })
         .collect();
     assert_eq!(calls.len(), 1, "one requested tool call");

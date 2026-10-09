@@ -458,7 +458,8 @@ fn independent_caps_bound_requests_errors_deltas_and_tool_arguments() {
     world.run();
     world.assert_once();
     assert!(
-        world.seen.iter().any(|e| matches!(e, client::Event::Failed { failure: Failure::Limit { .. }, .. })),
+        world.seen.iter().any(|event| matches!(event, client::Event::Completed { completion, .. }
+        if matches!(completion.content.as_ref(), [Block::Oversize { bytes: 7, .. }]))),
         "{:?}",
         world.seen
     );

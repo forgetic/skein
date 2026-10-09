@@ -1302,6 +1302,17 @@ fn block_size(block: &Block) -> u64 {
             }
             replay.as_ref()
         }
+        Block::Oversize { id, name, .. } => {
+            return u64::try_from(id.len())
+                .expect("slice length fits u64")
+                .saturating_add(u64::try_from(name.len()).expect("slice length fits u64"));
+        }
+        Block::Cut { id, name, arguments } => {
+            return u64::try_from(id.len())
+                .expect("slice length fits u64")
+                .saturating_add(u64::try_from(name.len()).expect("slice length fits u64"))
+                .saturating_add(u64::try_from(arguments.len()).expect("slice length fits u64"));
+        }
         Block::ToolResult { id, text, .. } => {
             return u64::try_from(id.len())
                 .expect("a slice length fits u64")

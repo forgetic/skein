@@ -81,6 +81,7 @@ pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), E
 
 fn validate_block(block: &Block, role: Role, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
     match block {
+        Block::Oversize { .. } | Block::Cut { .. } => Err(Error::Invalid),
         Block::Text { text: value, replay } => {
             if role == Role::User && replay.is_some() {
                 return Err(Error::Invalid);
@@ -104,8 +105,8 @@ fn validate_block(block: &Block, role: Role, budget: &mut u64, limits: &openai::
             identifier(name, 128)?;
             text(id, budget, limits)?;
             text(name, budget, limits)?;
-            if arguments.len() > usize::try_from(limits.input_bytes).expect("u32 fits usize") {
-                return Err(Error::limit(crate::Cap::Input, limits.input_bytes));
+            if arguments.len() > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
+                return Err(Error::limit(crate::Cap::String, limits.string_bytes));
             }
             charge(arguments.len(), budget, limits)
         }
@@ -351,6 +352,7 @@ fn write_tools(out: &mut writer::Encoder, tools: &[Tool]) {
 
 fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits) -> Result<(), Error> {
     match block {
+        Block::Oversize { .. } | Block::Cut { .. } => return Err(Error::Invalid),
         Block::Reasoning { replay } => replay.value.write(out),
         Block::Text { text, replay: _ } | Block::Refusal { text, replay: _ } => {
             out.object_start();

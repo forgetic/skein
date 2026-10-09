@@ -89,6 +89,7 @@ fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Res
         }
         for block in &message.content {
             match block {
+                Block::Oversize { .. } | Block::Cut { .. } => return Err(Error::Invalid),
                 Block::Text { text, replay } => {
                     charge_text(text, &mut budget, limits)?;
                     charge_replay(replay.as_ref(), provider, &mut budget, limits)?;
@@ -276,13 +277,18 @@ fn metadata(replay: Option<&Replay>, first: &[u8], second: &[u8]) -> Result<(), 
 }
 fn input_block(block: &Block, role: Role) -> Result<openai::Input, Error> {
     match block {
+        Block::Oversize { .. } | Block::Cut { .. } => Err(Error::Invalid),
         Block::Text { text, replay } | Block::Refusal { text, replay } => {
             let id = replay_text(replay.as_ref(), b"id")?;
             let phase = replay_text(replay.as_ref(), b"phase")?;
             let refusal = match block {
                 Block::Refusal { .. } => true,
                 Block::Text { .. } => false,
-                Block::ToolCall { .. } | Block::ToolResult { .. } | Block::Reasoning { .. } => {
+                Block::ToolCall { .. }
+                | Block::ToolResult { .. }
+                | Block::Reasoning { .. }
+                | Block::Oversize { .. }
+                | Block::Cut { .. } => {
                     unreachable!("text variants entered this arm")
                 }
             };
@@ -375,9 +381,12 @@ pub(crate) fn part(value: openai::Part, limits: &openai::Limits) -> Result<Block
             };
             Ok(Block::Reasoning { replay: Replay { provider: Provider::OpenAiCodex, value } })
         }
-        openai::Part::ToolCall { call_id, item_id, name, input, too_large } => {
+        openai::Part::ToolCall { call_id, item_id, name, input, too_large, bytes, cut } => {
             if too_large {
-                return Err(Error::limit(crate::Cap::Input, limits.input_bytes));
+                return Ok(Block::Oversize { id: call_id, name, bytes });
+            }
+            if cut {
+                return Ok(Block::Cut { id: call_id, name, arguments: input });
             }
             let mut tokens = List::with_capacity(4);
             push(&mut tokens, Token::ObjectStart)?;
@@ -525,6 +534,8 @@ mod tests {
                 name: bytes::copy_of(b"read"),
                 input: bytes::copy_of(br#"{"path":"a"}"#),
                 too_large: false,
+                bytes: u64::try_from(bytes::copy_of(br#"{"path":"a"}"#).len()).expect("slice length fits u64"),
+                cut: false,
             },
             &LIMITS,
         )
@@ -585,6 +596,8 @@ mod tests {
                 name: bytes::copy_of(b"read"),
                 input: bytes::copy_of(b"broken"),
                 too_large: false,
+                bytes: u64::try_from(bytes::copy_of(b"broken").len()).expect("slice length fits u64"),
+                cut: false,
             },
             &LIMITS,
         )
@@ -689,5 +702,61 @@ mod tests {
         prompt.choice = crate::ToolChoice::Only(Box::new([bytes::copy_of(b"read")]));
         request(prompt.clone(), Provider::OpenAiCodex, &LIMITS).expect("offered name accepted");
         crate::anthropic::encode_request(&prompt, &LIMITS).expect("offered name accepted");
+    }
+    #[test]
+    fn oversize_and_cut_are_outcomes_and_neither_can_be_replayed() {
+        for block in [
+            Block::Oversize { id: bytes::copy_of(b"c"), name: bytes::copy_of(b"read"), bytes: 99 },
+            Block::Cut { id: bytes::copy_of(b"c"), name: bytes::copy_of(b"read"), arguments: bytes::copy_of(b"{") },
+        ] {
+            let prompt = prompt(Role::Assistant, block);
+            assert_eq!(request(prompt.clone(), Provider::OpenAiCodex, &LIMITS), Err(Error::Invalid));
+            assert_eq!(crate::anthropic::encode_request(&prompt, &LIMITS), Err(Error::Invalid));
+        }
+        for cut in [false, true] {
+            let native = openai::Part::ToolCall {
+                call_id: bytes::copy_of(b"c"),
+                item_id: bytes::copy_of(b"i"),
+                name: bytes::copy_of(b"read"),
+                input: bytes::copy_of(b"{"),
+                too_large: false,
+                bytes: 1,
+                cut,
+            };
+            let block = part(native, &LIMITS).expect("refused call is a block");
+            if cut {
+                assert_eq!(
+                    block,
+                    Block::Cut {
+                        id: bytes::copy_of(b"c"),
+                        name: bytes::copy_of(b"read"),
+                        arguments: bytes::copy_of(b"{")
+                    }
+                );
+            } else {
+                match block {
+                    Block::ToolCall { .. } => {}
+                    Block::Text { .. }
+                    | Block::Refusal { .. }
+                    | Block::ToolResult { .. }
+                    | Block::Reasoning { .. }
+                    | Block::Oversize { .. }
+                    | Block::Cut { .. } => unreachable!("complete native call"),
+                }
+            }
+        }
+        let native = openai::Part::ToolCall {
+            call_id: bytes::copy_of(b"c"),
+            item_id: bytes::copy_of(b"i"),
+            name: bytes::copy_of(b"read"),
+            input: Box::new([]),
+            too_large: true,
+            bytes: 99,
+            cut: false,
+        };
+        assert_eq!(
+            part(native, &LIMITS),
+            Ok(Block::Oversize { id: bytes::copy_of(b"c"), name: bytes::copy_of(b"read"), bytes: 99 })
+        );
     }
 }

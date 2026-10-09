@@ -261,7 +261,7 @@ fn input_cap_discards_input_and_answer_limit_emits_one_failed_terminal() {
     ];
     let trace = stream(&events, &Limits { input_bytes: 3, ..LIMITS });
     assert!(trace.iter().any(|out| match out {
-        Output::Part(Part::ToolCall { input, too_large: true, .. }) if input.is_empty() => true,
+        Output::Part(Part::ToolCall { input, too_large: true, bytes: 12, cut: false, .. }) if input.is_empty() => true,
         _ => false,
     }));
     assert!(match trace.last() {
@@ -545,11 +545,18 @@ fn archived_real_provider_requests_and_answers_match_known_completions() {
         }
         if scenario == "tool-call" {
             assert!(trace.iter().any(|out| match out {
-                Output::Part(Part::ToolCall { name, input, call_id, item_id, too_large: false })
-                    if name.as_ref() == b"get_weather"
-                        && input.as_ref() == br#"{"city":"Paris"}"#
-                        && !call_id.is_empty()
-                        && !item_id.is_empty() =>
+                Output::Part(Part::ToolCall {
+                    name,
+                    input,
+                    call_id,
+                    item_id,
+                    too_large: false,
+                    bytes: _,
+                    cut: false,
+                }) if name.as_ref() == b"get_weather"
+                    && input.as_ref() == br#"{"city":"Paris"}"#
+                    && !call_id.is_empty()
+                    && !item_id.is_empty() =>
                     true,
                 _ => false,
             }));
@@ -873,6 +880,8 @@ fn separate_opaque_tool_ids_each_obey_string_and_joint_answer_caps() {
             name: owned(b"read"),
             input: owned(b"{}"),
             too_large: false,
+            bytes: u64::try_from(owned(b"{}").len()).expect("slice length fits u64"),
+            cut: false,
         })
     );
     assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO }));
@@ -943,4 +952,113 @@ fn tool_choice_encodes_auto_none_and_only_without_filtering() {
         assert_eq!(decoded.tools, request.tools);
         assert_eq!(decoded.choice, if expected == b"none" { crate::ToolChoice::None } else { crate::ToolChoice::Auto });
     }
+}
+
+#[test]
+fn unfinished_native_call_keeps_its_identity_and_arguments_at_the_output_cap() {
+    let events = [
+        Event::ToolAdded {
+            index: 0,
+            id: owned(b"i"),
+            call_id: owned(b"c"),
+            name: owned(b"read"),
+            arguments: Box::new([]),
+        },
+        Event::ArgumentsDelta { index: 0, delta: owned(br#"{"x":"#) },
+        Event::Completed { stop: Stop::MaxTokens, usage: Usage::ZERO },
+    ];
+    for event in &events {
+        let wire = encode_event(event, &LIMITS).expect("native event");
+        assert_eq!(decode_event(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap(), *event);
+    }
+    let trace = stream(&events, &LIMITS);
+    assert!(trace.iter().any(|output| match output {
+        Output::Part(Part::ToolCall { call_id, name, input, cut: true, bytes: 5, too_large: false, .. }) =>
+            call_id.as_ref() == b"c" && name.as_ref() == b"read" && input.as_ref() == br#"{"x":"#,
+        _ => false,
+    }));
+    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::MaxTokens, usage: Usage::ZERO }));
+}
+
+#[test]
+fn escaped_argument_text_is_counted_at_the_input_edge_and_one_over() {
+    let arguments = br#"{"x":"\u0000\u0000"}"#;
+    let events = [
+        Event::ToolAdded {
+            index: 0,
+            id: owned(b"i"),
+            call_id: owned(b"c"),
+            name: owned(b"read"),
+            arguments: Box::new([]),
+        },
+        Event::Done {
+            index: 0,
+            item: Item::FunctionCall {
+                id: owned(b"i"),
+                call_id: owned(b"c"),
+                name: owned(b"read"),
+                arguments: owned(arguments),
+            },
+        },
+        Event::Completed { stop: Stop::ToolUse, usage: Usage::ZERO },
+    ];
+    for below in [false, true] {
+        let input = u32::try_from(arguments.len()).unwrap() - u32::from(below);
+        let limits = Limits { input_bytes: input, ..LIMITS };
+        let trace = stream(&events, &limits);
+        let part = trace
+            .iter()
+            .find_map(|output| match output {
+                Output::Part(part) => Some(part),
+                _ => None,
+            })
+            .expect("one ordered block");
+        match part {
+            Part::ToolCall { input, too_large, bytes, .. } => {
+                assert_eq!(*too_large, below);
+                assert_eq!(*bytes, u64::try_from(arguments.len()).unwrap());
+                assert_eq!(input.as_ref(), if below { b"".as_slice() } else { arguments.as_slice() });
+            }
+            Part::Text { .. } | Part::Opaque { .. } => unreachable!("one function call outcome"),
+        }
+        assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO }));
+    }
+}
+
+#[test]
+fn a_native_done_item_marked_incomplete_is_a_cut_and_requires_the_output_cap() {
+    let events = [
+        Event::ToolAdded {
+            index: 0,
+            id: owned(b"i"),
+            call_id: owned(b"c"),
+            name: owned(b"read"),
+            arguments: Box::new([]),
+        },
+        Event::Done {
+            index: 0,
+            item: Item::CutCall {
+                id: owned(b"i"),
+                call_id: owned(b"c"),
+                name: owned(b"read"),
+                arguments: owned(b"{broken"),
+            },
+        },
+        Event::Completed { stop: Stop::MaxTokens, usage: Usage::ZERO },
+    ];
+    let wire = encode_event(&events[1], &LIMITS).expect("incomplete provider item");
+    assert_eq!(decode_event(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap(), events[1]);
+    let trace = stream(&events, &LIMITS);
+    assert!(trace.iter().any(|output| match output {
+        Output::Part(Part::ToolCall { input, cut: true, .. }) => input.as_ref() == b"{broken",
+        _ => false,
+    }));
+    assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::MaxTokens, usage: Usage::ZERO }));
+    let mut events = events;
+    events[2] = Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO };
+    let trace = stream(&events, &LIMITS);
+    assert!(match trace.last() {
+        Some(Output::Failed { failure: Failure::Protocol, .. }) => true,
+        _ => false,
+    });
 }

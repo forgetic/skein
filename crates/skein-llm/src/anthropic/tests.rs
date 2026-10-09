@@ -158,7 +158,10 @@ fn tool_fragments_replace_start_placeholder_and_keep_malformed_json() {
         feed(&mut decoder, wire, &LIMITS, &mut out);
         assert_eq!(out.pop(), Some(Output::ArgumentsDelta { index: 0, delta: bytes::copy_of(fragment) }));
     }
-    feed(&mut decoder, TEXT_STOP, &LIMITS, &mut out);
+    progress(&mut decoder, TEXT_STOP, &LIMITS, &mut out);
+    feed(&mut decoder,
+        br#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call2","name":"Write","input":{"x":1}}}"#,
+        &LIMITS, &mut out);
     assert_eq!(
         out.pop(),
         Some(Output::Part(Part::ToolCall {
@@ -166,15 +169,12 @@ fn tool_fragments_replace_start_placeholder_and_keep_malformed_json() {
             name: bytes::copy_of(b"Read"),
             input: bytes::copy_of(b"{broken}"),
             too_large: false,
+            bytes: 8,
+            cut: false,
         }))
     );
-    progress(
-        &mut decoder,
-        br#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call2","name":"Write","input":{"x":1}}}"#,
-        &LIMITS,
-        &mut out,
-    );
-    feed(&mut decoder, br#"{"type":"content_block_stop","index":1}"#, &LIMITS, &mut out);
+    progress(&mut decoder, br#"{"type":"content_block_stop","index":1}"#, &LIMITS, &mut out);
+    feed(&mut decoder, br#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{}}"#, &LIMITS, &mut out);
     assert_eq!(
         out.pop(),
         Some(Output::Part(Part::ToolCall {
@@ -182,6 +182,8 @@ fn tool_fragments_replace_start_placeholder_and_keep_malformed_json() {
             name: bytes::copy_of(b"Write"),
             input: bytes::copy_of(br#"{"x":1}"#),
             too_large: false,
+            bytes: 7,
+            cut: false,
         }))
     );
 }
@@ -206,7 +208,8 @@ fn oversized_tool_input_is_signaled_without_retaining_fragments() {
         &mut out,
     );
     assert_eq!(out.pop(), Some(Output::ArgumentsDelta { index: 0, delta: bytes::copy_of(b"long") }));
-    feed(&mut decoder, TEXT_STOP, &limits, &mut out);
+    progress(&mut decoder, TEXT_STOP, &limits, &mut out);
+    feed(&mut decoder, br#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{}}"#, &limits, &mut out);
     assert_eq!(
         out.pop(),
         Some(Output::Part(Part::ToolCall {
@@ -214,6 +217,8 @@ fn oversized_tool_input_is_signaled_without_retaining_fragments() {
             name: bytes::copy_of(b"Read"),
             input: bytes::copy_of(b""),
             too_large: true,
+            bytes: 4,
+            cut: false,
         }))
     );
 }
@@ -500,6 +505,64 @@ fn native_array_text_is_exactly_measured_for_system_and_tool_results() {
             let value = Json::from_bytes(wire.as_bytes(), &LIMITS).expect("whole negative array syntax");
             let exact = Limits { string_bytes: 12, ..LIMITS };
             assert!(super::decode_request(&value, &exact).is_err(), "wrong kind/one-over joining bytes rejected");
+        }
+    }
+}
+
+#[test]
+fn output_cap_cuts_the_last_tool_block_with_or_without_block_stop() {
+    for closed in [false, true] {
+        let mut decoder = StreamDecoder::new(&LIMITS);
+        let mut out = Queue::with_capacity(MAX_OUT);
+        progress(&mut decoder, START, &LIMITS, &mut out);
+        progress(&mut decoder, br#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c","name":"read","input":{}}}"#, &LIMITS, &mut out);
+        feed(
+            &mut decoder,
+            br#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{broken"}}"#,
+            &LIMITS,
+            &mut out,
+        );
+        assert_eq!(out.pop(), Some(Output::ArgumentsDelta { index: 0, delta: bytes::copy_of(b"{broken") }));
+        if closed {
+            progress(&mut decoder, TEXT_STOP, &LIMITS, &mut out);
+        }
+        if closed {
+            progress(
+                &mut decoder,
+                br#"{"type":"message_delta","delta":{"stop_reason":null},"usage":{"output_tokens":2}}"#,
+                &LIMITS,
+                &mut out,
+            );
+        }
+        feed(
+            &mut decoder,
+            br#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{}}"#,
+            &LIMITS,
+            &mut out,
+        );
+        assert_eq!(
+            out.pop(),
+            Some(Output::Part(Part::ToolCall {
+                id: bytes::copy_of(b"c"),
+                name: bytes::copy_of(b"read"),
+                input: bytes::copy_of(b"{broken"),
+                too_large: false,
+                bytes: 7,
+                cut: true,
+            }))
+        );
+        feed(&mut decoder, STOP, &LIMITS, &mut out);
+        match out.pop() {
+            Some(Output::Completed { stop, .. }) => assert_eq!(stop, Stop::MaxTokens),
+            Some(
+                Output::Part(_)
+                | Output::TextDelta { .. }
+                | Output::ArgumentsDelta { .. }
+                | Output::ReasoningDelta { .. }
+                | Output::Failed { .. }
+                | Output::Progress,
+            )
+            | None => unreachable!("output-cap terminal"),
         }
     }
 }
