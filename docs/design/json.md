@@ -293,15 +293,24 @@ pub enum Event {                                 // to the side above
 }
 
 pub struct Filter { root: Keep }                 // what is kept; anything not named is scanned
+pub struct Cap(u8);                              // a named cap: an index into the collector's caps
 
 pub enum Keep {
     Value,                                       // the value whole
-    Text(u32),                                   // a string up to this many bytes; a longer one, its length only
+    Text(Cap),                                   // a string up to the cap's bytes; a longer one, its length only
     Into(&'static [Node]),                       // a container, with only the children named
+    Tagged(&'static Tagged),                     // an object kept by its tag's value
 }
 
 pub struct Node { key: Key, keep: Keep }
 pub enum Key { Field(&'static [u8]), Each }      // an object's field, or every element of an array
+
+pub struct Tagged {
+    tag: &'static [u8],                          // the field whose string value selects a variant
+    known: &'static [Variant],                   // the tag values it knows, each with its children
+    unknown: Cap,                                // an unknown tag's object is kept whole, up to this cap
+}
+pub struct Variant { value: &'static [u8], children: &'static [Node] }
 
 pub struct Limits {
     pub tokenizer: tokenizer::Limits,
@@ -318,7 +327,11 @@ pub struct Limits {
   once the document is whole, or `Failed`. `Close` ends it in any state,
   closing the tokenizer, and answers `Closed`.
 - **A filter names what is kept,** as a tree of paths written by hand as
-  static data. At each value it walks to, the collector looks the value's
+  static data. Its caps are named, not numbered: a `Cap` is an index
+  into the caps the collector is built with, which the application
+  derives from its limits at startup (llm.md, 4.4). One filter thus
+  serves every set of derived limits, and a test lowers a cap without
+  writing another filter. At each value it walks to, the collector looks the value's
   key up among the children of the node it is in (`Each` for an array's
   elements):
   - `Value` keeps the value whole, token by token;
@@ -327,6 +340,22 @@ pub struct Limits {
     alone; a value of another kind is kept whole;
   - `Into` keeps a container's start and end and walks into it, keeping
     only the children it names; a value of another kind is kept whole;
+  - `Tagged` keeps an object by the string value of its tag field:
+    - **the tag first:** a known value selects its variant, whose children
+      are kept as `Into` keeps them; an unknown one keeps the object whole,
+      up to the unknown cap;
+    - **the tag later, or never:** until the tag is read, the collector
+      keeps two candidates side by side. One is the object projected
+      through every known variant's children together; the other is the
+      object whole, copied up to the unknown cap and, past it, only
+      marked as over. At the tag, a known value keeps the projection,
+      restricted to its variant's children, and drops the copy. An
+      unknown value, or an object that ends with no tag, keeps the copy,
+      or fails past the unknown cap (`TooMuchText`, naming the cap). So a
+      known object is never failed by the size of a field it does not
+      keep, whatever the order of its fields;
+    - the tag given twice, or not a string, fails (`Duplicate`,
+      `NotTagged`);
   - a key the node does not name is read, compared and dropped, and its
     value skipped through the tokenizer's `Skip`.
 - **The result is itself a document.** What is kept goes up in document
@@ -344,11 +373,13 @@ pub struct Limits {
 - **Duplicates.** A field the filter names, given twice in one object,
   fails the document (`Duplicate`): a decoder must never have to choose.
   Fields it does not name may repeat, uninterpreted.
-- **Errors** are the tokenizer's, and `TooManyTokens`, `TooMuchText`,
-  `SkippedTooLong` and `Duplicate`.
-- **`worst_case(&limits)`** is the tokenizer's, the walk stack, and the
-  buffers the document is kept in, at `tokens` and `text`, allocated with
-  the collector; and the document being handed up, of the same size at
+- **Errors** are the tokenizer's, and `TooManyTokens`, `TooMuchText`
+  (with the cap it passed, if a named one), `SkippedTooLong`, `Duplicate`
+  and `NotTagged`.
+- **`worst_case(&limits, &caps)`** is the tokenizer's, the walk stack,
+  and the buffers the document is kept in, at `tokens` and `text`, plus,
+  for a `Tagged` node, one whole copy at its unknown cap, all allocated
+  with the collector; and the document being handed up, of the same size at
   most, which is the side above's once emitted. A skipped value adds
   nothing to it, whatever its size.
 - **Restarting.** Once its outcome is out, a collector, and its tokenizer,

@@ -410,6 +410,11 @@ refuses the configuration and names the relationship:
 - **Anthropic keeps** each event type's known fields, thinking and its
   signature under the reasoning limit, tool input under the input limit,
   and an unknown native block whole.
+- **Items and blocks are tagged** (json.md, 5.1): a Codex output item by
+  its `type`, an Anthropic content block by its `type`. A known type
+  keeps its fields; an unknown one is kept whole under the reasoning cap,
+  whatever the order of its fields. The input, reasoning and string caps
+  are the filter's named caps, set from the derived limits.
 - **Retained values are bounded** by the retained-token and string limits.
   A value past its limit is `Limit { which }`, except a tool call's
   arguments, which become an oversize block, and a Codex reasoning item
