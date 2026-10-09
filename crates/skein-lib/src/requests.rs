@@ -1,8 +1,8 @@
 //! Bounded keyed requests and their store barrier (lib.md, section 12).
 //!
-//! The table owns requests, opaque scopes and owner tokens, declared byte
-//! counts, seeded keys and attempt tokens. It never reads a request. `ask`
-//! and `restore` admit values; `link` and `confirmed` control eligibility.
+//! The table owns requests, opaque scopes and owner values, declared byte
+//! counts, seeded keys and attempt tokens. It never reads an owner or a
+//! request. `ask` and `restore` admit values; `link` and `confirmed` control eligibility.
 //! `take` lends a bounded cursor: apply every `Save` before handling a
 //! `Send`. Dropping a cursor leaves untaken work in the table.
 //!
@@ -12,7 +12,7 @@
 //! | absent | restore | parked | initial parked progress |
 //! | parked | link up, matching confirmation, retention known if restored | ready | send after first-send save if needed |
 //! | ready | take send | in flight | fresh attempt, in-flight progress |
-//! | in flight | final envelope | retired | owner token, erase |
+//! | in flight | final envelope | retired | owner value, erase |
 //! | in flight | again or lost, eligible | retrying | retry deadline, retrying progress |
 //! | in flight | again or lost, ineligible | parked | parked progress |
 //! | in flight | signed out | parked | clear confirmation, parked progress |
@@ -57,7 +57,7 @@ pub struct RequestLimits {
     pub margin: Duration,
 }
 
-/// A request's complete store record, without its process-local owner token.
+/// A request's complete store record, without its process-local owner value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RequestRecord<R> {
     pub key: RequestKey,
@@ -94,9 +94,9 @@ pub enum RequestEnvelope {
 /// Whether an envelope ends the request, changes its lifecycle or is stale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
-pub enum RequestAnswered {
+pub enum RequestAnswered<O> {
     /// Route the final answer directly to this owner.
-    Final(Token),
+    Final(O),
     /// The request will retry or remain parked.
     Pending,
     /// This attempt has been superseded or retired.
@@ -132,9 +132,9 @@ struct Anchor {
 }
 
 #[derive(Debug)]
-struct Entry<R> {
+struct Entry<O, R> {
     record: RequestRecord<R>,
-    owner: Token,
+    owner: O,
     size: u64,
     restored: bool,
     save: bool,
@@ -145,7 +145,7 @@ struct Entry<R> {
     anchor: Option<Anchor>,
 }
 
-impl<R> Entry<R> {
+impl<O, R> Entry<O, R> {
     fn progress(&mut self, progress: RequestProgress) {
         if self.progress != Some(progress) {
             self.progress = Some(progress);
@@ -168,12 +168,13 @@ impl<R> Entry<R> {
 }
 
 /// Keyed requests whose opaque payloads are kept before sending.
+/// The asker's `Copy` owner value is held and returned without being read.
 #[derive(Debug)]
-pub struct RequestTable<R> {
+pub struct RequestTable<O, R> {
     limits: RequestLimits,
-    entries: Slab<Entry<R>>,
-    order: Map<u64, Id<Entry<R>>>,
-    index: Map<RequestKey, Id<Entry<R>>>,
+    entries: Slab<Entry<O, R>>,
+    order: Map<u64, Id<Entry<O, R>>>,
+    index: Map<RequestKey, Id<Entry<O, R>>>,
     bytes: u64,
     draws: u64,
     namespace: u64,
@@ -187,17 +188,17 @@ pub struct RequestTable<R> {
 
 /// A transient bounded visit, borrowing the table only while outputs are taken.
 #[derive(Debug)]
-pub struct RequestTake<'a, R> {
-    table: &'a mut RequestTable<R>,
+pub struct RequestTake<'a, O, R> {
+    table: &'a mut RequestTable<O, R>,
     remaining: u32,
     now: Time,
     wall: Wall,
 }
 
-impl<R> RequestTable<R> {
+impl<O: Copy, R> RequestTable<O, R> {
     /// Construct fixed-capacity storage; the seed must be fresh at each start.
     #[must_use]
-    pub fn new(limits: &RequestLimits, seed: u64) -> RequestTable<R> {
+    pub fn new(limits: &RequestLimits, seed: u64) -> RequestTable<O, R> {
         RequestTable {
             limits: *limits,
             entries: Slab::with_capacity(limits.requests),
@@ -216,8 +217,8 @@ impl<R> RequestTable<R> {
     }
 
     /// Admit a request, or return ownership without changing anything at a limit.
-    pub fn ask(&mut self, owner: Token, scope: u64, size: u64, request: R) -> Result<RequestKey, R> {
-        if !self.fits(size) || self.serial == u64::MAX || self.fresh_attempt(owner).is_none() {
+    pub fn ask(&mut self, owner: O, scope: u64, size: u64, request: R) -> Result<RequestKey, R> {
+        if !self.fits(size) || self.serial == u64::MAX || self.fresh_attempt().is_none() {
             return Err(request);
         }
         let Some((key, draws)) = self.fresh_key() else {
@@ -229,9 +230,9 @@ impl<R> RequestTable<R> {
         Ok(key)
     }
 
-    /// Restore a saved request with its owner's current token and declared size.
+    /// Restore a saved request with its owner's current value and declared size.
     /// Duplicate keys and capacity overruns return the record unchanged.
-    pub fn restore(&mut self, owner: Token, size: u64, record: RequestRecord<R>) -> Result<(), RequestRecord<R>> {
+    pub fn restore(&mut self, owner: O, size: u64, record: RequestRecord<R>) -> Result<(), RequestRecord<R>> {
         if !self.fits(size) || self.serial == u64::MAX || self.contains(record.key) {
             return Err(record);
         }
@@ -258,13 +259,13 @@ impl<R> RequestTable<R> {
     }
 
     /// Visit at most `out` records and sends, with every record before sends.
-    pub fn take(&mut self, now: Time, wall: Wall) -> RequestTake<'_, R> {
+    pub fn take(&mut self, now: Time, wall: Wall) -> RequestTake<'_, O, R> {
         self.fire(now, wall);
         RequestTake { remaining: self.limits.out, table: self, now, wall }
     }
 
     /// Apply an envelope for the one current attempt; stale tokens change nothing.
-    pub fn answered(&mut self, now: Time, attempt: Token, envelope: RequestEnvelope) -> RequestAnswered {
+    pub fn answered(&mut self, now: Time, attempt: Token, envelope: RequestEnvelope) -> RequestAnswered<O> {
         let mut found = None;
         for (_, id) in &self.order {
             let entry = self.entries.get(*id).expect("order names a held entry");
@@ -369,7 +370,7 @@ impl<R> RequestTable<R> {
     }
 
     /// Take the next owner's latest display change, in admission order.
-    pub fn progress(&mut self) -> Option<(Token, RequestProgress)> {
+    pub fn progress(&mut self) -> Option<(O, RequestProgress)> {
         for (_, id) in &self.order {
             let entry = self.entries.get_mut(*id).expect("order names a held entry");
             if entry.changed {
@@ -451,9 +452,9 @@ impl<R> RequestTable<R> {
         self.bytes
     }
 
-    /// The current owner's opaque token for a held key.
+    /// The current owner's opaque value for a held key.
     #[must_use]
-    pub fn owner(&self, key: RequestKey) -> Option<Token> {
+    pub fn owner(&self, key: RequestKey) -> Option<O> {
         let id = *self.index.get(&key)?;
         Some(self.entries.get(id).expect("index names a held entry").owner)
     }
@@ -465,12 +466,12 @@ impl<R> RequestTable<R> {
         Some(self.entries.get(id).expect("index names a held entry").size)
     }
 
-    /// Container heap at the configured count, excluding owned payload bytes.
+    /// Container heap including each owner value, excluding owned payload bytes.
     #[must_use]
     pub fn worst_case(limits: &RequestLimits) -> Option<u64> {
-        Slab::<Entry<R>>::worst_case(limits.requests)?
-            .checked_add(Map::<u64, Id<Entry<R>>>::worst_case(limits.requests)?)?
-            .checked_add(Map::<RequestKey, Id<Entry<R>>>::worst_case(limits.requests)?)
+        Slab::<Entry<O, R>>::worst_case(limits.requests)?
+            .checked_add(Map::<u64, Id<Entry<O, R>>>::worst_case(limits.requests)?)?
+            .checked_add(Map::<RequestKey, Id<Entry<O, R>>>::worst_case(limits.requests)?)
     }
 
     fn fits(&self, size: u64) -> bool {
@@ -510,7 +511,7 @@ impl<R> RequestTable<R> {
         None
     }
 
-    fn insert(&mut self, owner: Token, size: u64, record: RequestRecord<R>, restored: bool) {
+    fn insert(&mut self, owner: O, size: u64, record: RequestRecord<R>, restored: bool) {
         let key = record.key;
         let eligible = self.up && self.scope == Some(record.scope) && (!restored || self.retention.is_some());
         let entry = Entry {
@@ -558,28 +559,25 @@ impl<R> RequestTable<R> {
         }
     }
 
-    fn fresh_attempt(&self, owner: Token) -> Option<Token> {
-        let mut raw = self.attempt.checked_add(1)?;
-        if raw == owner.raw() {
-            raw = raw.checked_add(1)?;
-        }
+    fn fresh_attempt(&self) -> Option<Token> {
+        let raw = self.attempt.checked_add(1)?;
         Some(Token::new(raw))
     }
 
-    fn eligible(&self, entry: &Entry<R>) -> bool {
+    fn eligible(&self, entry: &Entry<O, R>) -> bool {
         match entry.state {
             State::Ready => {
                 self.up
                     && self.scope == Some(entry.record.scope)
                     && (!entry.restored || self.retention.is_some())
-                    && self.fresh_attempt(entry.owner).is_some()
+                    && self.fresh_attempt().is_some()
             }
             State::Parked | State::InFlight(_) | State::Retrying(_) | State::Retired { .. } => false,
         }
     }
 }
 
-impl<R> RequestTake<'_, R> {
+impl<O: Copy, R> RequestTake<'_, O, R> {
     /// Take the next output; an untaken output stays held when the visit ends.
     pub fn next_out(&mut self) -> Option<RequestOut<'_, R>> {
         if self.remaining == 0 {
@@ -614,8 +612,7 @@ impl<R> RequestTake<'_, R> {
             return Some(RequestOut::Save(&entry.record));
         }
         let id = send?;
-        let owner = self.table.entries.get(id).expect("held entry").owner;
-        let attempt = self.table.fresh_attempt(owner).expect("eligibility checked numbering");
+        let attempt = self.table.fresh_attempt().expect("eligibility checked numbering");
         self.table.attempt = attempt.raw();
         let entry = self.table.entries.get_mut(id).expect("held entry");
         entry.state = State::InFlight(attempt);

@@ -7,7 +7,9 @@
 //! saved, and the peer checks one key always names the same opaque request.
 //! Terminal uniqueness is checked within each ownership episode; restoring
 //! a still-saved record starts another episode. A peer's keyed outcome is
-//! preserved across those restarts.
+//! preserved across those restarts. Live owners are two children whose token
+//! values may coincide; restored records belong to a distinct owner variant.
+//! Every progress and final answer is checked against its supplied owner.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,6 +17,28 @@ use skein_lib::{
     Duration, RequestAnswered, RequestEnvelope, RequestKey, RequestLimits, RequestOut, RequestProgress, RequestRecord,
     RequestTable, Rng, Time, Token, Wall,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Owner {
+    First(Token),
+    Second(Token),
+    Restored(RequestKey),
+}
+
+impl Owner {
+    fn child(request: u64) -> Self {
+        let token = Token::new(request / 2);
+        if request.is_multiple_of(2) { Self::First(token) } else { Self::Second(token) }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::First(_) => 0,
+            Self::Second(_) => 1,
+            Self::Restored(_) => 2,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Terminal {
@@ -25,6 +49,7 @@ enum Terminal {
 #[derive(Debug)]
 struct Obligation {
     record: RequestRecord<u64>,
+    owner: Owner,
     size: u64,
     attempt: Option<Token>,
     earliest_retry: u64,
@@ -56,10 +81,12 @@ struct Coverage {
     restarts: u32,
     restored: u32,
     unknown: u32,
+    progress_owners: [u32; 3],
+    final_owners: [u32; 3],
 }
 
 struct World {
-    table: RequestTable<u64>,
+    table: RequestTable<Owner, u64>,
     limits: RequestLimits,
     held: BTreeMap<RequestKey, Obligation>,
     saved: BTreeMap<RequestKey, RequestRecord<u64>>,
@@ -72,7 +99,7 @@ struct World {
     retention: Option<u64>,
     clock: u64,
     origin: u64,
-    next_owner: u64,
+    next_request: u64,
     seed: u64,
     digest: u64,
 }
@@ -93,7 +120,7 @@ impl World {
             retention: None,
             clock: 0,
             origin: 0,
-            next_owner: 1,
+            next_request: 1,
             seed,
             digest: 0,
         }
@@ -116,18 +143,20 @@ impl World {
     }
 
     fn ask(&mut self, scope: u64, size: u64, coverage: &mut Coverage) {
-        let owner = self.next_owner;
-        self.next_owner += 1;
+        let request = self.next_request;
+        let owner = Owner::child(request);
+        self.next_request += 1;
         let fits = self.held.len() < usize::try_from(self.limits.requests).expect("small count")
             && self.bytes().checked_add(size).is_some_and(|bytes| bytes <= self.limits.bytes);
-        match self.table.ask(Token::new(owner), scope, size, owner) {
+        match self.table.ask(owner, scope, size, request) {
             Ok(key) => {
                 assert!(fits, "accepted past admission limits");
-                assert!(self.issued.insert(key, owner).is_none(), "new asks never reuse keys, even after a restart");
+                assert!(self.issued.insert(key, request).is_none(), "new asks never reuse keys, even after a restart");
                 self.held.insert(
                     key,
                     Obligation {
-                        record: RequestRecord { key, scope, first_sent: None, request: owner },
+                        record: RequestRecord { key, scope, first_sent: None, request },
+                        owner,
                         size,
                         attempt: None,
                         earliest_retry: 0,
@@ -141,9 +170,9 @@ impl World {
                 );
                 coverage.asks += 1;
             }
-            Err(request) => {
+            Err(returned) => {
                 assert!(!fits, "refusal when count and bytes fit");
-                assert_eq!(request, owner, "refusal returns ownership");
+                assert_eq!(returned, request, "refusal returns ownership");
                 coverage.refused += 1;
             }
         }
@@ -226,10 +255,11 @@ impl World {
             match envelope {
                 RequestEnvelope::Final => {
                     entry.terminal = Some(Terminal::Final);
+                    coverage.final_owners[entry.owner.index()] += 1;
                     if let Some(previous) = self.decided.insert(key, entry.record.request) {
                         assert_eq!(previous, entry.record.request, "one key names one effect across restarts");
                     }
-                    RequestAnswered::Final(Token::new(entry.record.request))
+                    RequestAnswered::Final(entry.owner)
                 }
                 RequestEnvelope::Again | RequestEnvelope::Lost => {
                     entry.earliest_retry = self.clock + entry.retry_span / 2;
@@ -332,11 +362,6 @@ impl World {
                         self.clock >= entry.earliest_retry,
                         "retry obeys the first/doubled span's lower jitter bound"
                     );
-                    assert_ne!(
-                        attempt,
-                        Token::new(entry.record.request),
-                        "attempt has its own token, distinct from its owner's"
-                    );
                     assert!(self.seen_attempts.insert(attempt), "attempt tokens never reused in one process");
                     self.history.push(attempt);
                     self.held.get_mut(&key).expect("held").attempt = Some(attempt);
@@ -352,12 +377,8 @@ impl World {
 
     fn progress(&mut self, coverage: &mut Coverage) {
         while let Some((owner, progress)) = self.table.progress() {
-            let key = *self
-                .held
-                .iter()
-                .find(|(_, entry)| entry.record.request == owner.raw())
-                .expect("progress routed to a held owner")
-                .0;
+            let key =
+                *self.held.iter().find(|(_, entry)| entry.owner == owner).expect("progress routed to a held owner").0;
             let entry = self.held.get(&key).expect("held");
             match progress {
                 RequestProgress::InFlight => {
@@ -381,7 +402,9 @@ impl World {
                     coverage.unknown += 1;
                 }
             }
-            self.trace(owner.raw());
+            let request = self.held.get(&key).expect("held").record.request;
+            coverage.progress_owners[owner.index()] += 1;
+            self.trace(request ^ u64::try_from(owner.index()).expect("three owner variants"));
         }
         assert!(!self.table.progress_pending());
     }
@@ -401,7 +424,7 @@ impl World {
         assert!(self.table.len() <= self.limits.requests);
         assert!(self.table.bytes() <= self.limits.bytes);
         for (key, entry) in &self.held {
-            assert_eq!(self.table.owner(*key), Some(Token::new(entry.record.request)));
+            assert_eq!(self.table.owner(*key), Some(entry.owner));
             assert_eq!(self.table.declared_size(*key), Some(entry.size));
             assert_eq!(self.issued.get(key), Some(&entry.record.request));
         }
@@ -420,12 +443,13 @@ impl World {
         for record in self.saved.values() {
             let size = record.request % 4;
             self.table
-                .restore(Token::new(record.request), size, record.clone())
+                .restore(Owner::Restored(record.key), size, record.clone())
                 .expect("saved records fit the same limits");
             self.held.insert(
                 record.key,
                 Obligation {
                     record: record.clone(),
+                    owner: Owner::Restored(record.key),
                     size,
                     attempt: None,
                     earliest_retry: 0,
@@ -507,7 +531,7 @@ pub fn check(seed: u64, rounds: u32) -> u64 {
             match rng.below(11) {
                 0..=3 => {
                     let scope = rng.below(3);
-                    let size = world.next_owner % 4;
+                    let size = world.next_request % 4;
                     world.ask(scope, size, &mut coverage);
                 }
                 4 => {
@@ -564,6 +588,8 @@ pub fn check(seed: u64, rounds: u32) -> u64 {
     if rounds >= 64 {
         assert!(coverage.asks > 0 && coverage.refused > 0 && coverage.saves > 0 && coverage.sends > 0);
         assert!(coverage.envelopes.iter().all(|count| *count > 0), "all envelope transitions covered: {coverage:?}");
+        assert!(coverage.progress_owners.iter().all(|count| *count > 0), "every owner gets progress: {coverage:?}");
+        assert!(coverage.final_owners.iter().all(|count| *count > 0), "every owner gets final answers: {coverage:?}");
         assert!(coverage.stale > 0 && coverage.offline > 0 && coverage.confirmed > 0);
         assert!(
             coverage.restarts > 0 && coverage.restored > 0 && coverage.unknown > 0,
