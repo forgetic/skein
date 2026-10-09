@@ -28,7 +28,7 @@
 #   8  another command failed
 set -euo pipefail
 
-kit=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 root=${DEV_ROOT:-$HOME/src/rust}
 tmp=${DEV_TMP:-$root/tmp}
 start_dir=$PWD
