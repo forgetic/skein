@@ -75,8 +75,8 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
             &dialect,
         )
         .expect("shared peer grammar admits captured request");
-        assert!(!request.messages.is_empty(), "actual historical conversation is preserved");
-        assert!(request.max_output_tokens.is_some(), "historical Messages cap remains explicit");
+        assert!(!request.prompt.messages.is_empty(), "actual historical conversation is preserved");
+        assert!(request.prompt.max_output_tokens.is_some(), "historical Messages cap remains explicit");
         let mut input = call(51);
         input.endpoint = skein_llm::Endpoint::anthropic();
         input.credential = skein_llm::Credential::anthropic(b"fake-archive-token".as_slice().into());

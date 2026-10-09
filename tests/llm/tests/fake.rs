@@ -932,18 +932,24 @@ fn endpoint_affinity_headers_are_reserved_for_both_dialects() {
 // transport grants each send and answers each read; no Client API can forge
 // these reserved fields. Returning the actual domain query distinguishes
 // admission from a refusal before the domain, and the HTTP tape proves it.
-fn peer_affinity_request(wire: &[u8]) -> (Option<skein_fake_llm_domain::api::Query>, Vec<u8>) {
+fn peer_native_request(
+    wire: &[u8],
+    dialect: skein_llm::Provider,
+) -> (Option<skein_fake_llm_domain::api::Query>, Vec<u8>) {
     use skein_fake_llm_protocol::{documents, provider};
     use skein_lib::stream::{Down, Read, Up};
     use skein_lib::{Env, Intake, Queue, Time, Token, Wall};
-    let input = input(skein_llm::Provider::OpenAiCodex, 181);
+    let input = input(dialect, 181);
     let bounds = skein_llm_world::fake::limits(&limits());
     let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: bounds };
     let mut service = provider::Service::new(
         provider::Config {
             echo: skein_llm::openai::Echo::NONE,
             usage_fields: documents::UsageFields::ALL,
-            provider: documents::Provider::OpenAi,
+            provider: match dialect {
+                skein_llm::Provider::OpenAiCodex => documents::Provider::OpenAi,
+                skein_llm::Provider::Anthropic => documents::Provider::Anthropic,
+            },
             path: input.endpoint.target,
             headers: Box::new([]),
         },
@@ -1011,7 +1017,7 @@ fn independent_peer_refuses_mismatched_affinity_and_malformed_thread_before_disp
     world.start();
     world.run();
     let wire = String::from_utf8(world.requests).expect("valid bounded affinity control");
-    let (accepted, response) = peer_affinity_request(wire.as_bytes());
+    let (accepted, response) = peer_native_request(wire.as_bytes(), skein_llm::Provider::OpenAiCodex);
     assert_eq!(accepted.expect("valid bounded affinity control").cache_scope, Some([0x42; 16]));
     assert!(response.is_empty());
     for (from, to) in [
@@ -1022,8 +1028,94 @@ fn independent_peer_refuses_mismatched_affinity_and_malformed_thread_before_disp
     ] {
         let changed = wire.replacen(from, to, 1);
         assert_ne!(changed, wire, "control really mutates actual header bytes");
-        let (query, response) = peer_affinity_request(changed.as_bytes());
+        let (query, response) = peer_native_request(changed.as_bytes(), skein_llm::Provider::OpenAiCodex);
         assert!(query.is_none(), "invalid affinity never enters the neutral domain");
         assert!(response.starts_with(b"HTTP/1.1 400 "), "{:?}", String::from_utf8_lossy(&response));
+    }
+}
+
+#[test]
+fn actual_anthropic_cache_markers_are_validated_before_domain_dispatch() {
+    let mut world = Exchange::new(input(skein_llm::Provider::Anthropic, 191), limits(), scripts());
+    world.start();
+    world.run();
+    let wire = String::from_utf8(world.requests).unwrap();
+    let (head, body) = wire.split_once("\r\n\r\n").unwrap();
+    let marker = r#""cache_control":{"type":"ephemeral"}"#;
+    assert_eq!(body.matches(marker).count(), 2);
+    assert!(peer_native_request(wire.as_bytes(), skein_llm::Provider::Anthropic).0.is_some());
+    let text = r#"{"type":"text","text":"Hello","cache_control":{"type":"ephemeral"}}"#;
+    assert!(body.contains(text));
+    for replacement in [
+        (marker, r#""cache_control":{"type":"persistent"}"#.to_owned()),
+        (text, r#"{"type":"thinking","thinking":"a","signature":"s","cache_control":{"type":"ephemeral"}}"#.to_owned()),
+        (text, r#"{"type":"redacted_thinking","data":"a","cache_control":{"type":"ephemeral"}}"#.to_owned()),
+        (text, [text; 4].join(",")),
+    ] {
+        let body = body.replacen(replacement.0, &replacement.1, 1);
+        let head = head
+            .lines()
+            .map(|line| {
+                if line.to_ascii_lowercase().starts_with("content-length:") {
+                    format!("content-length: {}", body.len())
+                } else {
+                    line.trim_end_matches('\r').to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let changed = format!("{head}\r\n\r\n{body}");
+        let (query, response) = peer_native_request(changed.as_bytes(), skein_llm::Provider::Anthropic);
+        assert!(query.is_none());
+        assert!(response.starts_with(b"HTTP/1.1 400 "), "{}", String::from_utf8_lossy(&response));
+    }
+}
+
+#[test]
+fn growing_conversations_preserve_native_content_and_encode_twice_identically() {
+    let marker = r#","cache_control":{"type":"ephemeral"}"#;
+    for dialect in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        let mut previous_body: Option<String> = None;
+        let mut conversation = input(dialect, 201);
+        conversation.prompt.reasoning_effort = None;
+        for turn in 0..4 {
+            let mut pair = Vec::new();
+            for _ in 0..2 {
+                let mut repeated = input(dialect, 201);
+                repeated.prompt = conversation.prompt.clone();
+                let mut world = Exchange::new(repeated, limits(), scripts());
+                world.start();
+                world.run();
+                assert_eq!(world.queries.len(), 1);
+                pair.push(world.requests);
+            }
+            assert_eq!(pair[0], pair[1], "same conversation encodes identically");
+            let wire = String::from_utf8(pair.remove(0)).unwrap();
+            let body = wire.split_once("\r\n\r\n").unwrap().1.replace(marker, "");
+            if let Some(previous) = previous_body {
+                let anchor = match dialect {
+                    skein_llm::Provider::OpenAiCodex => r#""input":["#,
+                    skein_llm::Provider::Anthropic => r#""messages":["#,
+                };
+                let (prefix, history) = previous.split_once(anchor).unwrap();
+                let (next_prefix, next_history) = body.split_once(anchor).unwrap();
+                assert_eq!(prefix, next_prefix, "fixed instructions/tools/cache key");
+                let history = match dialect {
+                    skein_llm::Provider::OpenAiCodex => history.split_once(r#"],"prompt_cache_key":"#).unwrap().0,
+                    skein_llm::Provider::Anthropic => history.strip_suffix("]}").unwrap(),
+                };
+                assert!(next_history.starts_with(history), "prior native history remains a literal prefix");
+            }
+            previous_body = Some(body);
+            let mut messages = conversation.prompt.messages.into_vec();
+            messages.push(skein_llm::Message {
+                role: skein_llm::Role::User,
+                content: Box::new([skein_llm::Block::Text {
+                    text: format!("addition {turn}").into_bytes().into_boxed_slice(),
+                    replay: None,
+                }]),
+            });
+            conversation.prompt.messages = messages.into_boxed_slice();
+        }
     }
 }

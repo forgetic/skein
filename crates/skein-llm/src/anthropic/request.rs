@@ -1,4 +1,6 @@
-//! Bounded native Messages requests using the provider-neutral vocabulary.
+//! Measured native Messages requests and shape-derived cache markers.
+//! Keeps no state; replay is never modified. Entrances validate, measure and encode.
+//! Contract: llm.md, sections 4.5 and 4.7.
 use super::identity::CLAUDE_CODE_SYSTEM_IDENTITY;
 use crate::{Block, Error, Json, Prompt, Provider, Replay, Role, Tool, openai};
 use alloc::boxed::Box;
@@ -254,6 +256,7 @@ fn write_request(
     declared_output: u32,
     limits: &openai::Limits,
 ) -> Result<(), Error> {
+    let marks = breakpoints(prompt);
     out.object_start();
     out.key(b"model");
     out.string(&prompt.model);
@@ -263,7 +266,7 @@ fn write_request(
     out.boolean(true);
     if !prompt.instructions.is_empty() {
         out.key(b"system");
-        write_system(out, &prompt.instructions);
+        write_system(out, &prompt.instructions, marks.system);
     }
     if !prompt.tools.is_empty() {
         out.key(b"tools");
@@ -281,7 +284,7 @@ fn write_request(
     }
     out.key(b"messages");
     out.array_start();
-    for message in &prompt.messages {
+    for (message_index, message) in prompt.messages.iter().enumerate() {
         if !has_native_block(&message.content) {
             continue;
         }
@@ -293,8 +296,12 @@ fn write_request(
         });
         out.key(b"content");
         out.array_start();
-        for block in &message.content {
-            write_block(out, block, limits)?;
+        for (block_index, block) in message.content.iter().enumerate() {
+            let marked = match &marks.tail {
+                Some(tail) => tail.message == message_index && tail.block == block_index,
+                None => false,
+            };
+            write_block(out, block, marked, limits)?;
         }
         out.array_end();
         out.object_end();
@@ -318,7 +325,35 @@ fn write_request(
     Ok(())
 }
 
-fn write_system(out: &mut writer::Encoder, instructions: &[u8]) {
+struct Breakpoints {
+    system: bool,
+    tail: Option<Tail>,
+}
+
+struct Tail {
+    message: usize,
+    block: usize,
+}
+
+fn breakpoints(prompt: &Prompt) -> Breakpoints {
+    let mut tail = None;
+    if let Some(message) = prompt.messages.last() {
+        for (index, block) in message.content.iter().enumerate() {
+            match block {
+                Block::Text { .. } | Block::Refusal { .. } | Block::ToolCall { .. } | Block::ToolResult { .. } => {
+                    tail = Some(Tail {
+                        message: prompt.messages.len().checked_sub(1).expect("last message"),
+                        block: index,
+                    });
+                }
+                Block::Reasoning { .. } | Block::Dropped { .. } | Block::Oversize { .. } | Block::Cut { .. } => {}
+            }
+        }
+    }
+    Breakpoints { system: !prompt.instructions.is_empty(), tail }
+}
+
+fn write_system(out: &mut writer::Encoder, instructions: &[u8], marked: bool) {
     let extra = if instructions == CLAUDE_CODE_SYSTEM_IDENTITY {
         Some(b"".as_slice())
     } else {
@@ -327,26 +362,37 @@ fn write_system(out: &mut writer::Encoder, instructions: &[u8]) {
             None => None,
         }
     };
+    out.array_start();
     match extra {
         Some(extra) => {
-            out.array_start();
-            write_system_text(out, CLAUDE_CODE_SYSTEM_IDENTITY);
+            write_system_text(out, CLAUDE_CODE_SYSTEM_IDENTITY, marked && extra.is_empty());
             if !extra.is_empty() {
-                write_system_text(out, extra);
+                write_system_text(out, extra, marked);
             }
-            out.array_end();
         }
-        None => out.string(instructions),
+        None => write_system_text(out, instructions, marked),
     }
+    out.array_end();
 }
 
-fn write_system_text(out: &mut writer::Encoder, text: &[u8]) {
+fn write_system_text(out: &mut writer::Encoder, text: &[u8], marked: bool) {
     out.object_start();
     out.key(b"type");
     out.string(b"text");
     out.key(b"text");
     out.string(text);
+    cache_control(out, marked);
     out.object_end();
+}
+
+fn cache_control(out: &mut writer::Encoder, marked: bool) {
+    if marked {
+        out.key(b"cache_control");
+        out.object_start();
+        out.key(b"type");
+        out.string(b"ephemeral");
+        out.object_end();
+    }
 }
 
 fn write_tools(out: &mut writer::Encoder, tools: &[Tool]) {
@@ -364,7 +410,7 @@ fn write_tools(out: &mut writer::Encoder, tools: &[Tool]) {
     out.array_end();
 }
 
-fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits) -> Result<(), Error> {
+fn write_block(out: &mut writer::Encoder, block: &Block, marked: bool, limits: &openai::Limits) -> Result<(), Error> {
     match block {
         Block::Oversize { .. } | Block::Cut { .. } => return Err(Error::Invalid),
         Block::Dropped { .. } => {}
@@ -375,6 +421,7 @@ fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits
             out.string(b"text");
             out.key(b"text");
             out.string(text);
+            cache_control(out, marked);
             out.object_end();
         }
         Block::ToolCall { id, name, arguments, replay: _ } => {
@@ -394,6 +441,7 @@ fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits
             out.string(name);
             out.key(b"input");
             value.write(out);
+            cache_control(out, marked);
             out.object_end();
         }
         Block::ToolResult { id, text, is_error } => {
@@ -406,6 +454,7 @@ fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits
             out.string(text);
             out.key(b"is_error");
             out.boolean(*is_error);
+            cache_control(out, marked);
             out.object_end();
         }
     }

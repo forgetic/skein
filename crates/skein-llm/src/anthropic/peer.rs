@@ -8,25 +8,39 @@ use alloc::boxed::Box;
 use skein_json::{Document, Kind, writer::Encoder};
 use skein_lib::{List, bytes};
 
+/// The byte peer's native request and ordered cache positions (llm.md, section 4.7).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Request {
+    pub prompt: Prompt,
+    /// At most four positions in native request order.
+    pub marks: Box<[Mark]>,
+}
+
+/// One native cache position, read by the peer and passed to its cache adapter.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Mark {
+    /// A block of the system array, after the request's tools.
+    System { block: u32 },
+    /// A block of a conversation message.
+    Message { message: u32, block: u32 },
+}
+
 /// Decodes a native Messages request for an independent peer, preserving every
 /// tool schema and ordered conversation block. Unknown top-level deployment
 /// options are not interpreted. Counts, structure and wire bytes remain bounded.
-pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeError> {
+pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeError> {
     let value = Json::from_view(value.view(), limits)?;
     let encoded = value.to_bytes(limits)?;
     if encoded.len() > usize::try_from(limits.request_bytes).expect("u32 fits usize") {
         return Err(DecodeError::limit(crate::Cap::Request, limits.request_bytes));
     }
     let tokens = value.view();
+    let marks = markers(tokens, limits)?;
     if !json::boolean(required(tokens, b"stream")?)? {
         return Err(DecodeError::WrongType);
     }
     let model = text(tokens, b"model")?;
-    let max = json::unsigned(required(tokens, b"max_tokens")?)?;
-    let max = u32::try_from(max).or(Err(DecodeError::WrongType))?;
-    if max == 0 {
-        return Err(DecodeError::Malformed);
-    }
+    let max = output_cap(tokens)?;
     let instructions = system(tokens, limits)?;
     let mut tools = List::with_capacity(limits.parts);
     if let Some(items) = optional(tokens, b"tools")? {
@@ -108,9 +122,67 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeErr
         max_output_tokens: Some(max),
     };
     match super::request::validate(&prompt, u32::MAX, limits) {
-        Ok(()) => Ok(prompt),
+        Ok(()) => Ok(Request { prompt, marks }),
         Err(crate::Error::Limit { which, bound }) => Err(DecodeError::TooLarge { which, bound }),
         Err(crate::Error::Invalid | crate::Error::Unsupported) => Err(DecodeError::Malformed),
+    }
+}
+
+fn output_cap(tokens: (&Document, json::Span)) -> Result<u32, DecodeError> {
+    let max = json::unsigned(required(tokens, b"max_tokens")?)?;
+    let max = u32::try_from(max).or(Err(DecodeError::WrongType))?;
+    if max == 0 { Err(DecodeError::Malformed) } else { Ok(max) }
+}
+
+fn markers(tokens: (&Document, json::Span), limits: &Limits) -> Result<Box<[Mark]>, DecodeError> {
+    let mut marks = List::with_capacity(4);
+    if let Some(system) = optional(tokens, b"system")?
+        && json::kind(system, 0) == Some(Kind::ArrayStart)
+    {
+        for (index, offset) in json::array(system, limits.parts)?.iter().enumerate() {
+            if marker(json::value_at(system, *offset)?)? {
+                marks
+                    .push(Mark::System { block: u32::try_from(index).expect("bounded system blocks") })
+                    .or(Err(DecodeError::Malformed))?;
+            }
+        }
+    }
+    let messages = required(tokens, b"messages")?;
+    for (message_index, offset) in json::array(messages, limits.parts)?.iter().enumerate() {
+        let content = required(json::value_at(messages, *offset)?, b"content")?;
+        if json::kind(content, 0) == Some(Kind::ArrayStart) {
+            for (block_index, offset) in json::array(content, limits.parts)?.iter().enumerate() {
+                let block = json::value_at(content, *offset)?;
+                if marker(block)? {
+                    match json::text_ref(required(block, b"type")?)? {
+                        b"text" | b"tool_use" | b"tool_result" => {}
+                        _ => return Err(DecodeError::Malformed),
+                    }
+                    marks
+                        .push(Mark::Message {
+                            message: u32::try_from(message_index).expect("bounded messages"),
+                            block: u32::try_from(block_index).expect("bounded blocks"),
+                        })
+                        .or(Err(DecodeError::Malformed))?;
+                }
+            }
+        }
+    }
+    Ok(marks.into_boxed())
+}
+
+fn marker(block: (&Document, json::Span)) -> Result<bool, DecodeError> {
+    match optional(block, b"cache_control")? {
+        Some(value) => {
+            if json::text_ref(required(value, b"type")?)? != b"ephemeral" {
+                return Err(DecodeError::Malformed);
+            }
+            if optional(value, b"ttl")?.is_some() {
+                return Err(DecodeError::Malformed);
+            }
+            Ok(true)
+        }
+        None => Ok(false),
     }
 }
 

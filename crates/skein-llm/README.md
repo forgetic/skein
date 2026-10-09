@@ -156,3 +156,9 @@ Native Anthropic request encoding and measurement take the declaration explicitl
 `reasoning` counts. `None` is unreported; `Some(0)` is a reported zero.
 Inconsistent accounting preserves the completion and leaves derived input absent.
 The fake protocol's `Config.usage_fields` selects the fields it writes.
+
+Anthropic requests encode system instructions as ordered text blocks, marking
+its last block and the final message's last text, tool call or result with
+`cache_control: {"type":"ephemeral"}`. Reasoning replay remains unchanged.
+`anthropic::decode_request` returns `Request { prompt, marks }`; the independent
+peer rejects excessive or invalid markers before dispatching a query.

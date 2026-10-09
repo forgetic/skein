@@ -131,7 +131,7 @@ fn choice(choice: skein_llm::ToolChoice) -> api::ToolChoice {
 
 fn anthropic_request(data: &[u8], limits: &anthropic::Limits) -> Result<api::Query, Error> {
     let json = anthropic::Json::from_bytes(data, limits).or(Err(Error::Malformed))?;
-    let request = anthropic::decode_request(&json, limits).or(Err(Error::Malformed))?;
+    let request = anthropic::decode_request(&json, limits).or(Err(Error::Malformed))?.prompt;
     let mut tools = List::with_capacity(limits.parts);
     for tool in request.tools {
         let parameters = tool.schema.to_bytes(limits).or(Err(Error::Malformed))?;

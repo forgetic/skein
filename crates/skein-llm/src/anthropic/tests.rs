@@ -497,8 +497,8 @@ fn native_array_text_is_exactly_measured_for_system_and_tool_results() {
         let value = Json::from_bytes(wire.as_bytes(), &LIMITS).expect("whole native positive");
         let exact = Limits { string_bytes: 12, ..LIMITS };
         let request = super::decode_request(&value, &exact).expect("tiny/empty/exact-cap arrays admitted");
-        assert_eq!(request.instructions.as_ref(), expected);
-        let [crate::Block::ToolResult { text, .. }] = &*request.messages[0].content else {
+        assert_eq!(request.prompt.instructions.as_ref(), expected);
+        let [crate::Block::ToolResult { text, .. }] = &*request.prompt.messages[0].content else {
             unreachable!("literal result-array test");
         };
         assert_eq!(text.as_ref(), expected);

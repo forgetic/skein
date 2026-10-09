@@ -48,7 +48,7 @@ fn minimal_request_is_native_streaming_messages_with_a_bounded_output_cap() {
     let wire = encode_request(&prompt, 4096, &LIMITS).expect("bounded request");
     assert_eq!(
         wire.as_ref(),
-        br#"{"model":"claude-sonnet-4-6","max_tokens":4096,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hello\n\"Claude\""}]}]}"#
+        br#"{"model":"claude-sonnet-4-6","max_tokens":4096,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hello\n\"Claude\"","cache_control":{"type":"ephemeral"}}]}]}"#
     );
     assert_eq!(
         usize::try_from(measure_request(&prompt, 4096, &LIMITS).expect("measurement")).expect("u32 fits usize"),
@@ -96,7 +96,7 @@ fn signed_and_redacted_reasoning_tool_calls_and_native_error_results_replay_in_o
         },
     ]);
     let wire = encode_request(&prompt, 12000, &LIMITS).expect("replay encodes");
-    assert_eq!(wire.as_ref(), br#"{"model":"claude-sonnet-4-6","max_tokens":9000,"stream":true,"system":"actual client instructions","tools":[{"name":"read","description":"read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}}],"messages":[{"role":"user","content":[{"type":"text","text":"read"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"consider","signature":"opaque-signature"},{"type":"redacted_thinking","data":"opaque-redacted"},{"type":"text","text":"checking"},{"type":"tool_use","id":"toolu_1","name":"read","input":{"path":"file"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"denied","is_error":true}]}]}"#);
+    assert_eq!(wire.as_ref(), br#"{"model":"claude-sonnet-4-6","max_tokens":9000,"stream":true,"system":[{"type":"text","text":"actual client instructions","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"read","description":"read a file","input_schema":{"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}}],"messages":[{"role":"user","content":[{"type":"text","text":"read"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"consider","signature":"opaque-signature"},{"type":"redacted_thinking","data":"opaque-redacted"},{"type":"text","text":"checking"},{"type":"tool_use","id":"toolu_1","name":"read","input":{"path":"file"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"denied","is_error":true,"cache_control":{"type":"ephemeral"}}]}]}"#);
 }
 
 #[test]
@@ -247,7 +247,7 @@ fn assistant_refusal_is_a_native_text_block_and_empty_history_is_invalid() {
     let mut request = prompt(Role::Assistant, Block::Refusal { text: bytes::copy_of(b"no"), replay: None });
     let wire = encode_request(&request, 4096, &LIMITS).expect("refusal can appear in assistant history");
     assert!(
-        bytes::find(&wire, br#"{"type":"text","text":"no"}"#).is_some(),
+        bytes::find(&wire, br#"{"type":"text","text":"no","cache_control":{"type":"ephemeral"}}"#).is_some(),
         "Anthropic refusals have native text content"
     );
     request.messages = Box::new([]);
@@ -267,14 +267,14 @@ fn historical_identity_is_explicit_and_is_the_first_separate_system_block() {
     let mut request = prompt(Role::User, text(b"hello"));
     request.instructions = instructions;
     let wire = encode_request(&request, 4096, &LIMITS).expect("explicit identity request");
-    assert!(bytes::find(&wire, br#""system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"actual\n\"instructions\""}]"#).is_some(), "identity precedes unchanged caller instructions in a separate block");
+    assert!(bytes::find(&wire, br#""system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},{"type":"text","text":"actual\n\"instructions\"","cache_control":{"type":"ephemeral"}}]"#).is_some(), "identity precedes unchanged caller instructions in a separate block");
     request.instructions = super::identity::instructions(b"").expect("identity alone");
     assert_eq!(request.instructions.as_ref(), super::identity::CLAUDE_CODE_SYSTEM_IDENTITY);
     let wire = encode_request(&request, 4096, &LIMITS).expect("identity-only request");
     assert!(
         bytes::find(
             &wire,
-            br#""system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}]"#
+            br#""system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral"}}]"#
         )
         .is_some(),
         "an empty extra prompt has only the identity block"
@@ -282,15 +282,19 @@ fn historical_identity_is_explicit_and_is_the_first_separate_system_block() {
     request.instructions = bytes::copy_of(b"You are Claude Code, Anthropic's official CLI for Claude.\nsimilar prefix");
     let wire = encode_request(&request, 4096, &LIMITS).expect("generic instructions");
     assert!(
-        bytes::find(&wire, br#""system":"You are Claude Code, Anthropic's official CLI for Claude.\nsimilar prefix""#)
+        bytes::find(&wire, br#""system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.\nsimilar prefix","cache_control":{"type":"ephemeral"}}]"#)
             .is_some(),
         "only the exact opt-in separator selects identity blocks"
     );
     request.instructions = bytes::copy_of(extra);
     let wire = encode_request(&request, 4096, &LIMITS).expect("actual client instructions");
     assert!(
-        bytes::find(&wire, br#""system":"actual\n\"instructions\"""#).is_some(),
-        "generic instructions retain their string representation"
+        bytes::find(
+            &wire,
+            br#""system":[{"type":"text","text":"actual\n\"instructions\"","cache_control":{"type":"ephemeral"}}]"#
+        )
+        .is_some(),
+        "generic instructions retain their exact text in one marked block"
     );
     assert_eq!(bytes::find(&wire, super::identity::CLAUDE_CODE_SYSTEM_IDENTITY), None);
 }
@@ -332,9 +336,9 @@ fn peer_request_admits_native_core_before_corrupted_controls() {
     let good = r#"{"model":"model","stream":true,"max_tokens":32,"tools":[{"name":"tool","input_schema":{"type":"object","extension":[null,true]}}],"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"tool","input":{"whole":1}}]}],"unknown_deployment_option":{"untouched":true}}"#;
     let value = Json::from_bytes(good.as_bytes(), &LIMITS).expect("positive native document");
     let decoded = super::decode_request(&value, &LIMITS).expect("native core admitted");
-    assert_eq!(decoded.model.as_ref(), b"model");
-    assert_eq!(decoded.tools.len(), 1);
-    assert!(encode_request(&decoded, 4096, &LIMITS).is_ok(), "peer uses actual native core admission");
+    assert_eq!(decoded.prompt.model.as_ref(), b"model");
+    assert_eq!(decoded.prompt.tools.len(), 1);
+    assert!(encode_request(&decoded.prompt, 4096, &LIMITS).is_ok(), "peer uses actual native core admission");
     for (old, replacement) in [
         ("\"stream\":true,", ""),
         ("\"stream\":true", "\"stream\":false"),
@@ -374,11 +378,11 @@ fn tool_choice_none_is_native_and_auto_and_only_are_omitted() {
         let wire = encode_request(&prompt, 4096, &LIMITS).expect("choice is bounded");
         let value = Json::from_bytes(&wire, &LIMITS).expect("request document");
         let decoded = super::decode_request(&value, &LIMITS).expect("peer decodes choice");
-        assert_eq!(decoded.tools, prompt.tools);
+        assert_eq!(decoded.prompt.tools, prompt.tools);
         match choice {
             crate::ToolChoice::Auto | crate::ToolChoice::Only(_) => {
                 assert_eq!(openai::json::field(value.view(), b"tool_choice").expect("unique field"), None);
-                assert_eq!(decoded.choice, crate::ToolChoice::Auto);
+                assert_eq!(decoded.prompt.choice, crate::ToolChoice::Auto);
             }
             crate::ToolChoice::None => {
                 let tokens = value.view();
@@ -386,7 +390,7 @@ fn tool_choice_none_is_native_and_auto_and_only_are_omitted() {
                 let choice =
                     Json::from_view(openai::json::value_at(tokens, at).expect("choice object"), &LIMITS).unwrap();
                 assert_eq!(choice.to_bytes(&LIMITS).unwrap().as_ref(), br#"{"type":"none"}"#);
-                assert_eq!(decoded.choice, crate::ToolChoice::None);
+                assert_eq!(decoded.prompt.choice, crate::ToolChoice::None);
             }
         }
     }
@@ -409,7 +413,7 @@ fn declared_output_sets_the_default_and_admits_only_caps_at_or_below_it() {
     let mut request = prompt(Role::User, text(b"hello"));
     let wire = encode_request(&request, declared, &LIMITS).unwrap();
     let decoded = super::decode_request(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap();
-    assert_eq!(decoded.max_output_tokens, Some(declared));
+    assert_eq!(decoded.prompt.max_output_tokens, Some(declared));
     request.max_output_tokens = Some(declared);
     assert_eq!(encode_request(&request, declared, &LIMITS).unwrap(), wire);
     request.max_output_tokens = Some(declared + 1);
@@ -417,4 +421,81 @@ fn declared_output_sets_the_default_and_admits_only_caps_at_or_below_it() {
     assert_eq!(encode_request(&request, declared, &LIMITS), Err(Error::limit(crate::Cap::Output, declared)));
     request.max_output_tokens = None;
     assert_eq!(measure_request(&request, 0, &LIMITS), Err(Error::Invalid));
+}
+
+#[test]
+fn cache_markers_follow_shape_and_never_modify_native_reasoning() {
+    use super::Mark;
+    let signed = br#"{"type":"thinking","thinking":"consider","signature":"signed"}"#;
+    let redacted = br#"{"type":"redacted_thinking","data":"secret"}"#;
+    let unknown = br#"{"type":"future","proof":{"whole":true}}"#;
+    let mut request = prompt(Role::Assistant, text(b"eligible"));
+    request.instructions = super::identity::instructions(b"stable instructions").unwrap();
+    for eligible in [
+        text(b"eligible"),
+        Block::Refusal { text: b"no".as_slice().into(), replay: None },
+        Block::ToolCall {
+            id: b"call_1".as_slice().into(),
+            name: b"tool".as_slice().into(),
+            arguments: b"{}".as_slice().into(),
+            replay: None,
+        },
+    ] {
+        request.messages[0].content = Box::new([
+            eligible,
+            reasoning(signed),
+            reasoning(redacted),
+            reasoning(unknown),
+            Block::Dropped { bytes: 7 },
+        ]);
+        let wire = encode_request(&request, 4096, &LIMITS).unwrap();
+        let actual = super::decode_request(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap();
+        assert_eq!(&*actual.marks, &[Mark::System { block: 1 }, Mark::Message { message: 0, block: 0 }]);
+        assert_eq!(bytes::count(&wire, b"cache_control", 5), 2);
+        assert_eq!(bytes::find(&wire, b"ttl"), None);
+        for native in [signed.as_slice(), redacted, unknown] {
+            assert!(bytes::find(&wire, native).is_some());
+        }
+    }
+    request.messages[0].content = Box::new([reasoning(signed)]);
+    let wire = encode_request(&request, 4096, &LIMITS).unwrap();
+    let actual = super::decode_request(&Json::from_bytes(&wire, &LIMITS).unwrap(), &LIMITS).unwrap();
+    assert_eq!(&*actual.marks, &[Mark::System { block: 1 }]);
+    request.instructions = Box::new([]);
+    let wire = encode_request(&request, 4096, &LIMITS).unwrap();
+    assert_eq!(bytes::find(&wire, b"system"), None);
+    assert_eq!(bytes::find(&wire, b"cache_control"), None);
+}
+
+#[test]
+#[expect(clippy::disallowed_methods, reason = "unit fixtures use ordinary Rust (programming-model.md, section 10.2)")]
+fn native_peer_admits_four_cache_marks_and_refuses_invalid_markers() {
+    let marked = r#"{"type":"text","text":"kept","cache_control":{"type":"ephemeral"}}"#;
+    let wire = [
+        r#"{"model":"model","stream":true,"max_tokens":32,"system":["#,
+        marked,
+        r#"],"messages":[{"role":"assistant","content":["#,
+        marked,
+        ",",
+        marked,
+        ",",
+        marked,
+        "]}]}",
+    ]
+    .join("");
+    let value = Json::from_bytes(wire.as_bytes(), &LIMITS).unwrap();
+    assert_eq!(super::decode_request(&value, &LIMITS).unwrap().marks.len(), 4);
+    for changed in [
+        wire.replace(&[marked; 3].join(","), &[marked; 4].join(",")),
+        wire.replace("ephemeral", "persistent"),
+        wire.replace(r#""type":"ephemeral""#, r#""type":"ephemeral","ttl":"5m""#),
+        wire.replace(
+            marked,
+            r#"{"type":"thinking","thinking":"a","signature":"s","cache_control":{"type":"ephemeral"}}"#,
+        ),
+        wire.replace(marked, r#"{"type":"redacted_thinking","data":"s","cache_control":{"type":"ephemeral"}}"#),
+    ] {
+        let value = Json::from_bytes(changed.as_bytes(), &LIMITS).unwrap();
+        let _error = super::decode_request(&value, &LIMITS).expect_err("invalid cache marker");
+    }
 }
