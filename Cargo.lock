@@ -259,6 +259,7 @@ version = "0.0.0"
 dependencies = [
  "skein-echo-client",
  "skein-echo-service",
+ "skein-echo-shell",
  "skein-heap",
  "skein-io",
  "skein-lib",

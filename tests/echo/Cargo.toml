@@ -15,6 +15,7 @@ skein-sim.workspace = true
 skein-heap.workspace = true
 skein-world.workspace = true
 skein-echo-service.workspace = true
+skein-echo-shell = { path = "../../examples/echo/shell" }
 skein-echo-client.workspace = true
 
 # The clock, for tests/real.rs.

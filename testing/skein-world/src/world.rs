@@ -19,8 +19,8 @@ use skein_io::kernel::{Done, Exit, Fd, Op};
 use skein_lib::{Queue, Time};
 use skein_sim::{Answer, Ask, Config, Entry, Handle, Pid, Program, Reply, Sim};
 
+use crate::Host;
 use crate::heap::{Heap, Memory};
-use crate::host::Host;
 use crate::referee::Referee;
 use crate::{HostedProgram, Inherited, Machine, NoMachine, StartupRoots};
 
@@ -329,8 +329,14 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
         }
         let proc = self.procs.get_mut(at).expect("a process at each index");
         match &mut self.heap {
-            Some(heap) => heap.around(at, || proc.iterate(now, wall)),
-            None => proc.iterate(now, wall),
+            Some(heap) => heap.around(at, || {
+                proc.iterate(now, wall);
+                proc.drain();
+            }),
+            None => {
+                proc.iterate(now, wall);
+                proc.drain();
+            }
         }
         self.sim.submit(pid, proc.submissions());
         if self.hosted.get(at).expect("a status per process").is_some()

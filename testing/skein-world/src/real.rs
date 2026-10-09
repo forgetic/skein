@@ -22,8 +22,8 @@ use skein_io::kernel::{Complete, Done, Error, Exit, Fd, Op, ServiceSignal, Signa
 use skein_lib::{Duration, Queue, Time, Token};
 use skein_shell::{Clock, Config, Kernel, Now, Wait};
 
+use crate::Host;
 use crate::heap::Heap;
-use crate::host::Host;
 use crate::referee::Referee;
 use crate::{HostedProgram, Inherited, StartupRoots};
 use std::os::unix::ffi::OsStrExt;
@@ -369,8 +369,14 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                     let proc = self.world.procs.get_mut(at).expect("a process per host");
                     self.ring.deliver(host, proc.completions());
                     match &mut self.world.heap {
-                        Some(heap) => heap.around(at, || proc.iterate(now, wall)),
-                        None => proc.iterate(now, wall),
+                        Some(heap) => heap.around(at, || {
+                            proc.iterate(now, wall);
+                            proc.drain();
+                        }),
+                        None => {
+                            proc.iterate(now, wall);
+                            proc.drain();
+                        }
                     }
                     let mut submits = Queue::with_capacity(proc.submissions().len());
                     while let Some(record) = proc.submissions().pop() {

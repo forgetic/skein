@@ -9,7 +9,7 @@
 //! - [`Clock`]: monotonic and wall time, read together once per iteration.
 //! - [`seed`]: the random seed, from `getrandom`, once at startup.
 //!
-//! skein provides no `run`: the loop belongs to the service.
+//! [`Host`] adapts the service; [`drive`] runs it until settlement (shell.md, 12 and 13).
 //!
 //! This is ordinary Rust (programming-model.md, 10.2), and the only `unsafe`
 //! in skein that a service runs lives here, in one module, the ring adapter:
@@ -17,12 +17,14 @@
 //! test-only, has the other: testing.md, 6.)
 
 mod clock;
+mod drive;
 mod ring;
 mod seed;
 #[cfg(test)]
 mod tests;
 
 pub use clock::{Clock, Now};
+pub use drive::{Host, drive};
 pub use ring::{
     Config, HostedPipes, Kernel, OpenError, Wait, abandon_binary, hosted_pipes, open_root, open_signal_pipe,
     open_termination_signals, signal_current_thread, start_binary, write_service_signal,

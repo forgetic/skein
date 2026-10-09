@@ -64,6 +64,10 @@ impl RecordingParent {
 }
 
 impl Host for RecordingParent {
+    fn drain(&mut self) {
+        self.script.drain();
+    }
+
     fn iterate(&mut self, now: Time, wall: Wall) {
         let mut arrived = Vec::new();
         while let Some(complete) = self.script.completions().pop() {
@@ -169,6 +173,10 @@ impl Proc {
 }
 
 impl Host for Proc {
+    fn drain(&mut self) {
+        self.host_mut().drain();
+    }
+
     fn iterate(&mut self, now: Time, wall: Wall) {
         self.host_mut().iterate(now, wall);
     }

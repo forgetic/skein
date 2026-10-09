@@ -59,6 +59,8 @@ pub struct Script {
     pub held: Box<[u8]>,
     pub leak: bool,
     pub terminal: Option<Exit>,
+    pub iterations: u32,
+    pub drains: u32,
 }
 
 impl Script {
@@ -86,6 +88,8 @@ impl Script {
             held: Box::new([]),
             leak: false,
             terminal: Some(Exit::Code(0)),
+            iterations: 0,
+            drains: 0,
         }
     }
 
@@ -154,7 +158,14 @@ impl Script {
 }
 
 impl Host for Script {
+    fn drain(&mut self) {
+        self.drains += 1;
+        assert_eq!(self.iterations, self.drains, "one drain follows each iteration");
+    }
+
     fn iterate(&mut self, now: Time, _wall: Wall) {
+        assert_eq!(self.iterations, self.drains, "last iteration drained before the next");
+        self.iterations += 1;
         if self.hog > 0 {
             self.held = vec![0; self.hog].into_boxed_slice();
             self.hog = 0;

@@ -207,7 +207,7 @@ impl Referee<Proc> for EchoReferee {
                 }
                 Proc::Echo { svc, .. } => {
                     if shut {
-                        svc.shutdown();
+                        svc.svc.shutdown();
                     }
                 }
             }
@@ -224,7 +224,7 @@ impl Referee<Proc> for EchoReferee {
             match proc {
                 Proc::Echo { svc, .. } => {
                     if self.listening.is_none() {
-                        self.listening = svc.listening();
+                        self.listening = svc.svc.listening();
                     }
                 }
                 Proc::Client { client, .. } => done &= client.done(),

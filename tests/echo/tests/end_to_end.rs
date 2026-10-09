@@ -33,6 +33,10 @@ impl Process {
 }
 
 impl Host for Process {
+    fn drain(&mut self) {
+        self.host_mut().drain();
+    }
+
     fn iterate(&mut self, now: Time, wall: Wall) {
         self.host_mut().iterate(now, wall);
     }

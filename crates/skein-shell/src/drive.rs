@@ -1,4 +1,6 @@
-//! What the harness needs of a process.
+//! A service loop and its adapter (shell.md, sections 12 and 13).
+//! The host keeps every service entity and queue; the loop knows only its
+//! settlement, work and deadlines, never its domain state.
 
 use skein_io::kernel::{Complete, Exit, Submit};
 use skein_lib::{Queue, Time, Wall};
@@ -8,6 +10,9 @@ use skein_lib::{Queue, Time, Wall};
 /// completions into [`Host::completions`], calls [`Host::iterate`], and
 /// submits [`Host::submissions`], as its shell would.
 pub trait Host {
+    /// Drain shell diagnostics once, after iteration and before submission.
+    fn drain(&mut self) {}
+
     /// One turn of its loop, between its reap and its submit: both passes
     /// and the reclaim point, at `now` and `wall`.
     fn iterate(&mut self, now: Time, wall: Wall);
@@ -37,4 +42,30 @@ pub trait Host {
 
     /// The most operations it has in flight at once: the size of its ring.
     fn operations(&self) -> u32;
+}
+
+/// Runs a service until its entities and kernel operations have settled.
+/// Its exit belongs to the host, after its final drain (shell.md, 13).
+pub fn drive(kernel: &mut crate::Kernel, clock: &crate::Clock, host: &mut impl Host) -> Exit {
+    loop {
+        kernel.reap(host.completions());
+        let crate::Now { now, wall } = clock.now();
+        host.iterate(now, wall);
+        host.drain();
+        if host.is_empty() {
+            assert!(host.completions().is_empty(), "an empty host has no completions");
+            assert!(host.submissions().is_empty(), "an empty host has no submissions");
+            assert_eq!(kernel.in_flight(), 0, "an empty host has no kernel operation in flight");
+            return host.exit().expect("an empty host has a terminal exit");
+        }
+        let wait = if host.work_pending(now) {
+            crate::Wait::No
+        } else {
+            match host.next_deadline() {
+                Some(deadline) => crate::Wait::Until(deadline),
+                None => crate::Wait::Forever,
+            }
+        };
+        kernel.submit(host.submissions(), wait);
+    }
 }

@@ -38,16 +38,15 @@ extern crate alloc;
 pub mod domain;
 pub mod end_to_end;
 mod heap;
-mod host;
 mod program;
 pub mod real;
 mod referee;
 mod world;
 
 pub use heap::Memory;
-pub use host::Host;
 pub use program::{HostedProgram, Inherited, Machine, NoMachine, StartupRoot, StartupRoots};
 pub use referee::{Expectation, Expectations, Referee};
+pub use skein_shell::{Host, drive};
 pub use world::{Killed, Outcome, World};
 
 /// Fails the world, loudly, with what it found: a world fails its test as

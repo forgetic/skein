@@ -3,6 +3,7 @@
 
 use skein_echo_client::{self as client, Client, Plan};
 use skein_echo_service::{self as service, Service};
+use skein_echo_shell::Echo;
 use skein_io::kernel::{Addr, Complete, Submit};
 use skein_lib::{Queue, Time, Wall};
 use skein_world::Host;
@@ -10,7 +11,7 @@ use skein_world::Host;
 /// A process of an echo world.
 #[derive(Debug)]
 pub enum Proc {
-    Echo { svc: Box<Service>, limits: service::Limits },
+    Echo { svc: Box<Echo>, limits: service::Limits },
     Client { client: Box<Client>, limits: client::Limits },
 }
 
@@ -18,7 +19,7 @@ impl Proc {
     /// The echo under `limits`, to listen at `addr`.
     #[must_use]
     pub fn echo(limits: service::Limits, addr: Addr, seed: u64) -> Proc {
-        Proc::Echo { svc: Box::new(Service::new(&limits, addr, seed)), limits }
+        Proc::Echo { svc: Box::new(Echo::new(limits, addr, seed)), limits }
     }
 
     /// A fake client under `limits`, its connections following `plans`.
@@ -31,7 +32,7 @@ impl Proc {
     #[must_use]
     pub fn as_echo(&self) -> Option<&Service> {
         match self {
-            Proc::Echo { svc, .. } => Some(svc),
+            Proc::Echo { svc, .. } => Some(&svc.svc),
             Proc::Client { .. } => None,
         }
     }
@@ -47,9 +48,16 @@ impl Proc {
 }
 
 impl Host for Proc {
+    fn drain(&mut self) {
+        match self {
+            Proc::Echo { svc, .. } => svc.drain(),
+            Proc::Client { .. } => {}
+        }
+    }
+
     fn iterate(&mut self, now: Time, wall: Wall) {
         match self {
-            Proc::Echo { svc, .. } => service::iterate(svc, now, wall),
+            Proc::Echo { svc, .. } => svc.iterate(now, wall),
             Proc::Client { client, .. } => client::iterate(client, now, wall),
         }
     }
@@ -93,7 +101,7 @@ impl Host for Proc {
     /// which the harness's choice and not the process's.
     fn worst_case(&self) -> u64 {
         let (worst, boxed) = match self {
-            Proc::Echo { limits, .. } => (service::worst_case(limits), size_of::<Service>()),
+            Proc::Echo { limits, .. } => (service::worst_case(limits), size_of::<Echo>()),
             Proc::Client { client, limits } => (client::worst_case(limits, client.conns()), size_of::<Client>()),
         };
         let boxed = u64::try_from(boxed).expect("a struct's size fits a u64");
