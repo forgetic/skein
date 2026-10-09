@@ -1,0 +1,12 @@
+Reliability04.7 final rebased-tip gate PASS
+Tested hash: aea69d42eaaadee5ba0d7c55c3270b86aa29b1cf
+Parent: df67da2309b745796a18239d10b75d8cc61530de
+Command: /home/free/src/rust/plans/reliability-plan/bin/heavy scripts/check.sh
+Log: /tmp/skein04-7-gate-rebased.log
+Formatting, workspace alltargets clippy-Dwarnings and standalone skein-tls check passed.
+Focused1637/3.211s run727f9d0d-8c1b-44b9-9d6f-349bd68c08b2
+Fuzzy89/8.634s runcef9be66-6948-4857-aada-772f4142771d
+Browser6/3.692s run51a62417-8ec8-47d6-8bca-e8bc7ad1d84e
+Serial usage controls10/0.124s /tmp/skein04-7-lint-measure3.log
+Optional-report protocol controls, native absent/zero/unusable accounting, real archived Codex absent cache write and checked underflow completion preservation passed.
+Probe gap: cache-reuse and smoke-tools await Smith consumers. No credentials/live probe used.
