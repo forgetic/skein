@@ -1,0 +1,19 @@
+Final rebased-tip gate evidence for skein reliability 02.5
+
+Merged tip ec0f408169583cdd38041ef569ec242f34775072 on parent
+7c4d617a84d5a3770fe2cbe22ed96e3805429b78. The commit body records the
+pre-rebase successful gate; the final rebased-tip gate before the ff-only
+merge was heavy task 381, scripts/check.sh:
+- formatting, clippy --workspace --all-targets -D warnings, standalone
+  cargo check -p skein-tls: pass;
+- focused: 1526 tests passed in 3.010 s;
+- fuzzy: 86 tests passed in 8.997 s;
+- browser: 6 tests passed in 3.684 s.
+
+Serial measure: real shipped-time echo shutdown 0.114 s; OAuth large
+memory 0.038 s; OAuth replay 0.027 s. Frozen trace regression proves every
+client Close completion precedes the issuer listener Close submission.
+No smith probe is required for this item. Inherited terminal fixture
+passed in this full gate; the reported ready CRLF failure did not recur.
+Final gate log: /tmp/skein-02-5-final-gate.log. Worktree and primary were
+clean at merge. No design question arose.
