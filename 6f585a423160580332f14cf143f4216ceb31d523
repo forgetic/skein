@@ -1,0 +1,11 @@
+Final rebased-tip gate evidence correction
+
+The commit body records the first passing gate before the message-only
+amend. The final gate on commit 6f585a423160580332f14cf143f4216ceb31d523
+was heavy scripts/check.sh, all checks passing:
+- focused: 1476/1476 in 2.776s, run 35a1e1e5-a4f4-43ed-80bd-ba813068c212;
+- fuzzy: 82/82 in 8.226s, run 3d5609e0-f0f6-49b2-a085-38da1f86a34b;
+- browser: 6/6 in 3.657s, run 61742a77-5063-4b5e-bb59-c9aa923ad283.
+Formatting, workspace clippy with warnings as errors and standalone
+skein-tls check passed. Serial group/usage fuzzy sweep: 1/1 in 0.045s
+(test 0.044s), run 81a80620-06ac-471f-9473-f378398df474.
