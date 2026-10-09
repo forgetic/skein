@@ -82,6 +82,7 @@ pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), E
 fn validate_block(block: &Block, role: Role, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
     match block {
         Block::Oversize { .. } | Block::Cut { .. } => Err(Error::Invalid),
+        Block::Dropped { .. } => Ok(()),
         Block::Text { text: value, replay } => {
             if role == Role::User && replay.is_some() {
                 return Err(Error::Invalid);
@@ -271,6 +272,9 @@ fn write_request(out: &mut writer::Encoder, prompt: &Prompt, limits: &openai::Li
     out.key(b"messages");
     out.array_start();
     for message in &prompt.messages {
+        if !has_native_block(&message.content) {
+            continue;
+        }
         out.object_start();
         out.key(b"role");
         out.string(match message.role {
@@ -353,6 +357,7 @@ fn write_tools(out: &mut writer::Encoder, tools: &[Tool]) {
 fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits) -> Result<(), Error> {
     match block {
         Block::Oversize { .. } | Block::Cut { .. } => return Err(Error::Invalid),
+        Block::Dropped { .. } => {}
         Block::Reasoning { replay } => replay.value.write(out),
         Block::Text { text, replay: _ } | Block::Refusal { text, replay: _ } => {
             out.object_start();
@@ -395,4 +400,20 @@ fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits
         }
     }
     Ok(())
+}
+
+fn has_native_block(content: &[Block]) -> bool {
+    for block in content {
+        match block {
+            Block::Dropped { .. } => {}
+            Block::Text { .. }
+            | Block::Refusal { .. }
+            | Block::ToolCall { .. }
+            | Block::ToolResult { .. }
+            | Block::Reasoning { .. }
+            | Block::Oversize { .. }
+            | Block::Cut { .. } => return true,
+        }
+    }
+    false
 }

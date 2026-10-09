@@ -56,6 +56,8 @@ pub enum Block {
     Oversize { id: Box<[u8]>, name: Box<[u8]>, bytes: u64 },
     /// A call cut at the provider's output cap; the caller replaces it before replay.
     Cut { id: Box<[u8]>, name: Box<[u8]>, arguments: Box<[u8]> },
+    /// Codex reasoning discarded by owner opt-in; history emits no native item for it.
+    Dropped { bytes: u64 },
     /// Provider-owned assistant replay, including encrypted/signed reasoning
     /// and unknown bounded native content-block envelopes.
     /// The payload is opaque; visible reasoning summaries arrive as deltas.

@@ -82,6 +82,10 @@ pub enum Event {
 }
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Part {
+    /// Reasoning beyond the opaque cap, discarded only by owner opt-in.
+    Dropped {
+        bytes: u64,
+    },
     Text {
         id: Box<[u8]>,
         phase: Option<Box<[u8]>>,
@@ -134,8 +138,14 @@ pub struct StreamDecoder {
     tools: bool,
     refusal: bool,
     required_stop: Option<Stop>,
+    reasoning: ReasoningPolicy,
     over: bool,
     terminal: Option<Terminal>,
+}
+#[derive(Clone, Copy, Debug)]
+enum ReasoningPolicy {
+    Keep,
+    Drop,
 }
 #[derive(Debug)]
 enum Opened {
@@ -158,7 +168,13 @@ struct Terminal {
 impl StreamDecoder {
     #[must_use]
     pub fn new(limits: &Limits) -> StreamDecoder {
+        Self::with_reasoning_drop(limits, false)
+    }
+    /// Select whether Codex reasoning past the opaque cap may be discarded.
+    #[must_use]
+    pub fn with_reasoning_drop(limits: &Limits, enabled: bool) -> StreamDecoder {
         StreamDecoder {
+            reasoning: if enabled { ReasoningPolicy::Drop } else { ReasoningPolicy::Keep },
             opened: List::with_capacity(limits.parts),
             next: 0,
             parts: 0,
@@ -358,14 +374,17 @@ impl StreamDecoder {
                 let slot = self.opened.get_mut(index).ok_or(DecodeError::Malformed)?;
                 let state = mem::replace(slot, Opened::Emitted);
                 let prepared = match state {
-                    Opened::Active { id, kind } => prepare(item, &id, &kind, limits)?,
-                    Opened::Tool { id, .. } => prepare(item, &id, b"function_call", limits)?,
+                    Opened::Active { id, kind } => prepare(item, &id, &kind, limits, self.reasoning)?,
+                    Opened::Tool { id, .. } => prepare(item, &id, b"function_call", limits, self.reasoning)?,
                     Opened::Ready(_) | Opened::Emitted => return Err(DecodeError::Malformed),
                 };
                 self.reserve(1, part_size(&prepared.part), limits)?;
                 match &prepared.part {
                     Part::ToolCall { cut: true, .. } => self.required_stop = Some(Stop::MaxTokens),
-                    Part::ToolCall { cut: false, .. } | Part::Text { .. } | Part::Opaque { .. } => {}
+                    Part::ToolCall { cut: false, .. }
+                    | Part::Text { .. }
+                    | Part::Opaque { .. }
+                    | Part::Dropped { .. } => {}
                 }
                 self.tools = self.tools || prepared.tool;
                 self.refusal = self.refusal || prepared.refusal;
@@ -507,6 +526,7 @@ fn part_size(part: &Part) -> usize {
             id.len().saturating_add(phase).saturating_add(text.len())
         }
         Part::Opaque { bytes } => bytes.len(),
+        Part::Dropped { .. } => 0,
         Part::ToolCall { call_id, item_id, name, input, too_large, cut, .. } => {
             if *too_large {
                 return call_id.len().saturating_add(name.len());
@@ -516,7 +536,13 @@ fn part_size(part: &Part) -> usize {
         }
     }
 }
-fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits) -> Result<Prepared, DecodeError> {
+fn prepare(
+    item: Item,
+    expected_id: &[u8],
+    expected_kind: &[u8],
+    limits: &Limits,
+    reasoning: ReasoningPolicy,
+) -> Result<Prepared, DecodeError> {
     match item {
         Item::Message { id, phase, text, refusal } => {
             if expected_id != id.as_ref() || expected_kind != b"message" {
@@ -555,7 +581,18 @@ fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits
             }
             let bytes = value.to_bytes(limits)?;
             if bytes.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
+                match reasoning {
+                    ReasoningPolicy::Drop if expected_kind == b"reasoning" => {
+                        return Ok(Prepared {
+                            part: Part::Dropped { bytes: u64::try_from(bytes.len()).expect("slice length fits u64") },
+                            tool: false,
+                            refusal: false,
+                        });
+                    }
+                    ReasoningPolicy::Keep | ReasoningPolicy::Drop => {
+                        return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
+                    }
+                }
             }
             Ok(Prepared { part: Part::Opaque { bytes }, tool: false, refusal: false })
         }

@@ -1019,7 +1019,7 @@ fn escaped_argument_text_is_counted_at_the_input_edge_and_one_over() {
                 assert_eq!(*bytes, u64::try_from(arguments.len()).unwrap());
                 assert_eq!(input.as_ref(), if below { b"".as_slice() } else { arguments.as_slice() });
             }
-            Part::Text { .. } | Part::Opaque { .. } => unreachable!("one function call outcome"),
+            Part::Text { .. } | Part::Opaque { .. } | Part::Dropped { .. } => unreachable!("one function call outcome"),
         }
         assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::ToolUse, usage: Usage::ZERO }));
     }
@@ -1061,4 +1061,51 @@ fn a_native_done_item_marked_incomplete_is_a_cut_and_requires_the_output_cap() {
         Some(Output::Failed { failure: Failure::Protocol, .. }) => true,
         _ => false,
     });
+}
+
+#[test]
+fn reasoning_drop_is_opt_in_at_one_over_and_never_drops_unknown_items() {
+    for kind in [b"reasoning".as_slice(), b"future_item".as_slice()] {
+        let mut raw = b"{\"type\":\"".to_vec();
+        raw.extend_from_slice(kind);
+        raw.extend_from_slice(br#"","id":"r","encrypted_content":"secret","summary":[]}"#);
+        let opaque = value(&raw);
+        let size = u32::try_from(opaque.to_bytes(&LIMITS).unwrap().len()).unwrap();
+        for (cap, enabled) in [(size, false), (size, true), (size - 1, false), (size - 1, true)] {
+            let mut bounds = LIMITS;
+            bounds.opaque_bytes = cap;
+            let mut decoder = StreamDecoder::with_reasoning_drop(&bounds, enabled);
+            let mut out = Queue::with_capacity(crate::openai::MAX_OUT);
+            let mut trace = Vec::new();
+            for event in [
+                Event::Added { index: 0, id: owned(b"r"), kind: owned(kind) },
+                Event::Done { index: 0, item: Item::Opaque { value: opaque.clone() } },
+                Event::Completed { stop: Stop::EndTurn, usage: Usage::ZERO },
+            ] {
+                decoder.event(event, &bounds, Wall::EPOCH, &mut out);
+                drain(&mut out, &mut trace);
+            }
+            if cap == size {
+                assert!(trace.iter().any(|event| match event {
+                    Output::Part(Part::Opaque { .. }) => true,
+                    _ => false,
+                }));
+            } else if enabled && kind == b"reasoning" {
+                assert!(trace.iter().any(|event| match event {
+                    Output::Part(Part::Dropped { bytes }) => *bytes == u64::from(size),
+                    _ => false,
+                }));
+                assert!(trace.iter().any(|event| match event {
+                    Output::Completed { .. } => true,
+                    _ => false,
+                }));
+            } else {
+                assert!(trace.iter().any(|event| match event {
+                    Output::Failed { failure: Failure::Limit { which: crate::Cap::Opaque, bound }, .. } =>
+                        *bound == u64::from(cap),
+                    _ => false,
+                }));
+            }
+        }
+    }
 }

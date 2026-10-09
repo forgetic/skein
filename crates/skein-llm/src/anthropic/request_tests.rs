@@ -398,3 +398,14 @@ fn tool_choice_none_is_native_and_auto_and_only_are_omitted() {
         }
     }
 }
+
+#[test]
+fn dropped_blocks_and_their_empty_turns_emit_no_anthropic_history() {
+    let expected = prompt(Role::User, text(b"kept"));
+    let mut actual = expected.clone();
+    actual.messages = Box::new([
+        Message { role: Role::Assistant, content: Box::new([Block::Dropped { bytes: 999 }]) },
+        Message { role: Role::User, content: Box::new([Block::Dropped { bytes: 999 }, text(b"kept")]) },
+    ]);
+    assert_eq!(encode_request(&actual, &LIMITS).unwrap(), encode_request(&expected, &LIMITS).unwrap());
+}

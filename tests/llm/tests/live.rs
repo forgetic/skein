@@ -301,7 +301,8 @@ fn assert_text(events: &[client::Event], expected: &str) -> Completion {
             | Block::ToolResult { .. }
             | Block::Reasoning { .. }
             | Block::Oversize { .. }
-            | Block::Cut { .. } => Vec::new(),
+            | Block::Cut { .. }
+            | Block::Dropped { .. } => Vec::new(),
         })
         .collect();
     let deltas: Vec<u8> = events
@@ -367,7 +368,8 @@ fn tool_round_trip(provider: Provider) {
             | Block::ToolResult { .. }
             | Block::Reasoning { .. }
             | Block::Oversize { .. }
-            | Block::Cut { .. } => None,
+            | Block::Cut { .. }
+            | Block::Dropped { .. } => None,
         })
         .collect();
     assert_eq!(calls.len(), 1, "one requested tool call");

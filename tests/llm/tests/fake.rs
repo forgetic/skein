@@ -655,3 +655,34 @@ fn oversized_arguments_charge_only_the_call_id_and_name() {
         assert_eq!(*bytes, 128);
     }
 }
+
+#[test]
+fn scripted_codex_reasoning_drops_only_by_owner_opt_in_and_can_remain_in_history() {
+    let opaque = br#"{"type":"reasoning","id":"opaque_1","encrypted_content":"signed","summary":[]}"#;
+    for enabled in [false, true] {
+        let mut bounds = limits();
+        bounds.dialect.opaque_bytes = u32::try_from(opaque.len() - 1).unwrap();
+        bounds.drop_reasoning = enabled;
+        let mut world = Exchange::new(input(skein_llm::Provider::OpenAiCodex, 1), bounds, opaque_script(opaque));
+        world.start();
+        world.run();
+        if enabled {
+            let answer = completion(&world).clone();
+            assert!(
+                matches!(answer.content.as_ref(), [Block::Dropped { bytes }, Block::Text { .. }] if *bytes == u64::try_from(opaque.len()).unwrap())
+            );
+            let mut next = input(skein_llm::Provider::OpenAiCodex, 2);
+            next.prompt.messages = Box::new([Message { role: Role::Assistant, content: answer.content }]);
+            let next = client::Client::prepare(next, &bounds).unwrap();
+            assert!(world.machine.next_call(next).is_ok());
+            world.start();
+            world.run();
+            assert!(matches!(
+                world.queries[1].messages[0].parts.as_ref(),
+                [skein_fake_llm_domain::api::Part::Text { .. }]
+            ));
+        } else {
+            assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Opaque, bound }, .. } if *bound == u64::from(bounds.dialect.opaque_bytes))));
+        }
+    }
+}

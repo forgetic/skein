@@ -101,7 +101,8 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
                 | Block::ToolResult { .. }
                 | Block::Reasoning { .. }
                 | Block::Oversize { .. }
-                | Block::Cut { .. } => None,
+                | Block::Cut { .. }
+                | Block::Dropped { .. } => None,
             })
             .collect();
         assert_eq!(actual_calls.len(), calls);
@@ -119,7 +120,8 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
                 | Block::ToolResult { .. }
                 | Block::Reasoning { .. }
                 | Block::Oversize { .. }
-                | Block::Cut { .. } => false,
+                | Block::Cut { .. }
+                | Block::Dropped { .. } => false,
             }));
         }
     }

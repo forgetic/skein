@@ -447,3 +447,21 @@ fn oversized_arguments_complete_and_truncated_http_fails_once() {
     world.assert_once();
     assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Protocol, .. })));
 }
+
+#[test]
+fn owner_reasoning_drop_never_discards_anthropic_thinking_past_the_cap() {
+    let block = r#"{"type":"thinking","thinking":"","signature":"signed"}"#;
+    let added = format!(r#"{{"type":"content_block_start","index":0,"content_block":{block}}}"#);
+    for enabled in [false, true] {
+        let mut bounds = limits();
+        bounds.drop_reasoning = enabled;
+        bounds.dialect.opaque_bytes = u32::try_from(block.len() - 1).unwrap();
+        let documents = [START, added.as_str(), BLOCK_STOP, END_TURN, STOP];
+        let mut world = World::new(anthropic_call(1), bounds, stream(&documents, true), 18);
+        world.fragmentation(1, 2);
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Limit { which: skein_llm::Cap::Opaque, bound }, .. } if *bound == u64::from(bounds.dialect.opaque_bytes))));
+    }
+}

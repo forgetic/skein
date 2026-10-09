@@ -105,7 +105,9 @@ fn anthropic_request(data: &[u8], limits: &anthropic::Limits) -> Result<api::Que
                 skein_llm::Block::ToolResult { id, text, is_error } => {
                     api::Part::ToolOutput { id, output: text, is_error }
                 }
-                skein_llm::Block::Oversize { .. } | skein_llm::Block::Cut { .. } => return Err(Error::Malformed),
+                skein_llm::Block::Oversize { .. } | skein_llm::Block::Cut { .. } | skein_llm::Block::Dropped { .. } => {
+                    return Err(Error::Malformed);
+                }
                 skein_llm::Block::Reasoning { replay } => {
                     api::Part::Opaque { bytes: replay.value.to_bytes(limits).or(Err(Error::Malformed))? }
                 }

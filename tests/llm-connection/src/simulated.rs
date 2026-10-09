@@ -398,7 +398,8 @@ impl Referee<Process> for Judge {
                                 | skein_llm::Block::ToolResult { .. }
                                 | skein_llm::Block::Reasoning { .. }
                                 | skein_llm::Block::Oversize { .. }
-                                | skein_llm::Block::Cut { .. }) => {
+                                | skein_llm::Block::Cut { .. }
+                                | skein_llm::Block::Dropped { .. }) => {
                                     panic!("expected scripted text, got {block:?}")
                                 }
                             }

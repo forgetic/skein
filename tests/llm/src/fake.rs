@@ -206,6 +206,7 @@ fn block_bytes(block: &skein_llm::Block) -> Option<u64> {
             bytes(id)?.checked_add(bytes(name)?)?.checked_add(bytes(arguments)?)
         }
         skein_llm::Block::Reasoning { replay } => replay_bytes(Some(replay)),
+        skein_llm::Block::Dropped { .. } => Some(0),
     }
 }
 

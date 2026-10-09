@@ -28,6 +28,8 @@ pub struct Limits {
     pub dialect: crate::DocumentLimits,
     /// A non-success response body. At its cap the connection is closed.
     pub error_bytes: u32,
+    /// Drop Codex reasoning past the opaque cap; Anthropic thinking still fails.
+    pub drop_reasoning: bool,
 }
 
 /// The owner's byte bounds on bearer and account values at one endpoint.
@@ -266,7 +268,7 @@ impl Client {
             outcome: Outcome::Pending,
             http: http::Client::new(&limits.http),
             sse: sse::Reader::new(&limits.sse),
-            decoder: Some(dialect::Decoder::new(provider, &limits.dialect)),
+            decoder: Some(dialect::Decoder::new(provider, &limits.dialect, limits.drop_reasoning)),
             content: Some(List::with_capacity(limits.dialect.parts)),
             content_bytes: 0,
             call: Some(call),
@@ -1319,6 +1321,7 @@ fn block_size(block: &Block) -> u64 {
                 .saturating_add(u64::try_from(text.len()).expect("a slice length fits u64"));
         }
         Block::Reasoning { replay } => Some(replay),
+        Block::Dropped { .. } => return 0,
     };
     if let Some(replay) = replay {
         for token in replay.value.as_tokens() {

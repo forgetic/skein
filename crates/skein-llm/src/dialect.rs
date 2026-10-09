@@ -20,9 +20,9 @@ pub(crate) enum Output {
     Progress,
 }
 impl Decoder {
-    pub(crate) fn new(provider: Provider, limits: &openai::Limits) -> Decoder {
+    pub(crate) fn new(provider: Provider, limits: &openai::Limits, drop_reasoning: bool) -> Decoder {
         match provider {
-            Provider::OpenAiCodex => Decoder::Codex(openai::StreamDecoder::new(limits)),
+            Provider::OpenAiCodex => Decoder::Codex(openai::StreamDecoder::with_reasoning_drop(limits, drop_reasoning)),
             Provider::Anthropic => Decoder::Anthropic(anthropic::StreamDecoder::new(limits)),
         }
     }

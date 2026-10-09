@@ -23,6 +23,7 @@ pub fn limits() -> client::Limits {
             detail_bytes: 256,
         },
         error_bytes: 4096,
+        drop_reasoning: false,
     }
 }
 

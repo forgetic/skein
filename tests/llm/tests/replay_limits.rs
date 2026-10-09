@@ -83,7 +83,11 @@ fn admitted(kind: Kind, owner: u64) {
             assert_eq!(arguments.as_ref(), b"{}");
             replay.as_ref().expect("complete actual item ID")
         }
-        Block::ToolResult { .. } | Block::Reasoning { .. } | Block::Oversize { .. } | Block::Cut { .. } => {
+        Block::ToolResult { .. }
+        | Block::Reasoning { .. }
+        | Block::Oversize { .. }
+        | Block::Cut { .. }
+        | Block::Dropped { .. } => {
             panic!("expected native item metadata")
         }
     };

@@ -25,6 +25,16 @@ pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limit
     let mut input = List::with_capacity(limits.parts);
     for message in &prompt.messages {
         for block in &message.content {
+            match block {
+                Block::Dropped { .. } => continue,
+                Block::Text { .. }
+                | Block::Refusal { .. }
+                | Block::ToolCall { .. }
+                | Block::ToolResult { .. }
+                | Block::Reasoning { .. }
+                | Block::Oversize { .. }
+                | Block::Cut { .. } => {}
+            }
             let item = input_block(block, message.role)?;
             if input.push(item).is_err() {
                 return Err(Error::limit(crate::Cap::Parts, limits.parts));
@@ -90,6 +100,7 @@ fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Res
         for block in &message.content {
             match block {
                 Block::Oversize { .. } | Block::Cut { .. } => return Err(Error::Invalid),
+                Block::Dropped { .. } => {}
                 Block::Text { text, replay } => {
                     charge_text(text, &mut budget, limits)?;
                     charge_replay(replay.as_ref(), provider, &mut budget, limits)?;
@@ -277,7 +288,7 @@ fn metadata(replay: Option<&Replay>, first: &[u8], second: &[u8]) -> Result<(), 
 }
 fn input_block(block: &Block, role: Role) -> Result<openai::Input, Error> {
     match block {
-        Block::Oversize { .. } | Block::Cut { .. } => Err(Error::Invalid),
+        Block::Oversize { .. } | Block::Cut { .. } | Block::Dropped { .. } => Err(Error::Invalid),
         Block::Text { text, replay } | Block::Refusal { text, replay } => {
             let id = replay_text(replay.as_ref(), b"id")?;
             let phase = replay_text(replay.as_ref(), b"phase")?;
@@ -288,7 +299,8 @@ fn input_block(block: &Block, role: Role) -> Result<openai::Input, Error> {
                 | Block::ToolResult { .. }
                 | Block::Reasoning { .. }
                 | Block::Oversize { .. }
-                | Block::Cut { .. } => {
+                | Block::Cut { .. }
+                | Block::Dropped { .. } => {
                     unreachable!("text variants entered this arm")
                 }
             };
@@ -361,6 +373,7 @@ fn replay_text(replay: Option<&Replay>, name: &[u8]) -> Result<Option<Box<[u8]>>
 
 pub(crate) fn part(value: openai::Part, limits: &openai::Limits) -> Result<Block, Error> {
     match value {
+        openai::Part::Dropped { bytes } => Ok(Block::Dropped { bytes }),
         openai::Part::Text { id, phase, text, refusal } => {
             let mut tokens = List::with_capacity(6);
             push(&mut tokens, Token::ObjectStart)?;
@@ -741,7 +754,8 @@ mod tests {
                     | Block::ToolResult { .. }
                     | Block::Reasoning { .. }
                     | Block::Oversize { .. }
-                    | Block::Cut { .. } => unreachable!("complete native call"),
+                    | Block::Cut { .. }
+                    | Block::Dropped { .. } => unreachable!("complete native call"),
                 }
             }
         }
@@ -758,5 +772,20 @@ mod tests {
             part(native, &LIMITS),
             Ok(Block::Oversize { id: bytes::copy_of(b"c"), name: bytes::copy_of(b"read"), bytes: 99 })
         );
+    }
+    #[test]
+    fn dropped_history_is_admitted_and_emits_no_codex_item() {
+        let mut history = prompt(Role::Assistant, Block::Dropped { bytes: u64::MAX });
+        history.messages[0].content =
+            Box::new([Block::Dropped { bytes: u64::MAX }, Block::Text { text: bytes::copy_of(b"kept"), replay: None }]);
+        let actual = request(history, Provider::OpenAiCodex, &LIMITS).unwrap();
+        let expected = request(
+            prompt(Role::Assistant, Block::Text { text: bytes::copy_of(b"kept"), replay: None }),
+            Provider::OpenAiCodex,
+            &LIMITS,
+        )
+        .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(part(openai::Part::Dropped { bytes: 99 }, &LIMITS), Ok(Block::Dropped { bytes: 99 }));
     }
 }

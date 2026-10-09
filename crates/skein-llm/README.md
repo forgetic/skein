@@ -131,3 +131,7 @@ temporary JSON and raw/envelope copies. `Prompt::output_ceiling` handles the
 configured dialect's supported wire option, while local output limits remain
 caller-owned. Shared independent scripts and HTTP/SSE peers are described in
 [fake-llm.md](../../docs/design/fake-llm.md).
+
+Owners may enable `client::Limits.drop_reasoning` to receive `Block::Dropped`
+for Codex reasoning beyond the opaque cap. Dropped blocks emit no history item;
+Anthropic thinking and other opaque Codex items retain typed limit failures.
