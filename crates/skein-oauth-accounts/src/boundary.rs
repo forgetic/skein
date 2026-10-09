@@ -8,6 +8,12 @@ use skein_oauth::SavedToken;
 #[derive(PartialEq, Eq, Hash)]
 #[expect(missing_debug_implementations, reason = "credential values must never occur in traces")]
 pub enum Request {
+    /// Starts this account's sign-in: Visit once, then `SignedIn`, Failed or Refused.
+    SignIn { account: u32 },
+    /// The confidential owner's complete redirect URI; refusal leaves a sign-in waiting.
+    Redirected { account: u32, uri: Box<[u8]> },
+    /// Cancels this account's exchange; its requested or held work hears the terminal.
+    Cancel { account: u32 },
     /// An access-only record; a newer generation replaces it, with only refusals answered.
     HandIn { account: u32, record: SavedToken },
     /// Holds the account's token until Release; answered Granted, Failed or Refused.
@@ -28,6 +34,10 @@ pub enum Request {
 #[derive(PartialEq, Eq, Hash)]
 #[expect(missing_debug_implementations, reason = "credential values must never occur in traces")]
 pub enum Event {
+    /// The authorization URL for the owner to show, once per admitted sign-in.
+    Visit { account: u32, url: Box<[u8]> },
+    /// Ends `SignIn` once its record is durably kept, with a grant ready to ask for.
+    SignedIn { account: u32, generation: u64 },
     /// Answers Grant, then announces each new generation while the owner holds it.
     Granted { account: u32, token: Box<[u8]>, generation: u64, valid: Duration },
     /// An access-only record reached its lead; announced once per record.
@@ -45,6 +55,8 @@ pub enum Event {
 /// The request a failure ends.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Ends {
+    /// The owner's admitted sign-in.
+    SignIn,
     /// The owner's requested or held grant.
     Grant,
 }
@@ -52,6 +64,8 @@ pub enum Ends {
 /// Why the account cannot serve its grant.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Failure {
+    /// A sign-in's candidate could not be durably kept; nothing of it is lent.
+    NotKept,
     /// The issuer exchange failed, as named by the OAuth client.
     Exchange(skein_oauth::Failure),
     /// No valid record, or the provider rejected its token; a newer record is needed.
@@ -61,6 +75,10 @@ pub enum Failure {
 /// The request a refusal answers.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Asked {
+    /// The owner's sign-in request.
+    SignIn,
+    /// The confidential owner's redirect.
+    Redirected,
     /// The owner's access-only record.
     HandIn,
     /// The owner's requested grant.
@@ -70,13 +88,19 @@ pub enum Asked {
 /// Why a request was refused before any work.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Refusal {
+    /// This account already has its one exchange.
+    Busy,
+    /// No sign-in of the account waits for a redirect.
+    NotWaiting,
+    /// The URI differs from the registered redirect or exceeds its admitted syntax.
+    Redirect,
     /// The owner has closed or aborted its component.
     Closed,
     /// The index names no configured account.
     Account,
     /// The requested operation does not belong to this account's source.
     Source,
-    /// All exchange slots are occupied.
+    /// The exchange or public listener bound admits no more work.
     Full { bound: u32 },
     /// A handed-in record carries a refresh token its source alone may rotate.
     NotAccessOnly,

@@ -11,6 +11,9 @@ use skein_oauth::ClientLimits;
 pub struct Limits {
     pub accounts: u32,
     pub exchanges: u32,
+    /// Public redirect listeners admitted at once; zero permits only confidential sign-ins.
+    pub listeners: u32,
+    pub server: skein_http::server::Limits,
     /// How long before expiry a held record refreshes or a handed-in one announces Expiring.
     pub refresh_lead: Duration,
     pub client: ClientLimits,
@@ -23,7 +26,15 @@ pub struct Limits {
 pub(crate) fn usable(limits: &Limits) -> bool {
     limits.accounts > 0
         && limits.exchanges > 0
-        && limits.io.sockets >= limits.exchanges
+        && limits.exchanges <= u32::MAX.checked_div(3).expect("nonzero divisor")
+        && match socket_count(limits) {
+            Some(sockets) => limits.io.sockets >= sockets,
+            None => false,
+        }
+        && (limits.listeners == 0
+            || (skein_http::server::worst_case(&limits.server).is_some()
+                && skein_http::server::largest_read(&limits.server) <= limits.io.intake
+                && skein_http::server::largest_room(&limits.server) <= limits.io.output))
         && limits.client.document.token_bytes > 0
         && limits.client.document.record_bytes > 0
         && limits.http.head >= 2
@@ -57,6 +68,11 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(routes)?
         .checked_add(payload)?
         .checked_add(u64::from(limits.client.document.document_bytes).checked_mul(2)?)?;
+    let listener = if limits.listeners == 0 {
+        0
+    } else {
+        skein_http::server::worst_case(&limits.server)?.checked_add(crate::listener::worst_case(limits)?)?
+    };
     List::<State>::worst_case(limits.accounts)?
         .checked_add(List::<Source>::worst_case(limits.accounts)?)?
         .checked_add(List::<Option<Id<Exchange>>>::worst_case(limits.accounts)?)?
@@ -66,5 +82,10 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         )?
         .checked_add(Slab::<Exchange>::worst_case(limits.exchanges)?)?
         .checked_add(u64::from(limits.exchanges).checked_mul(exchange)?)?
+        .checked_add(u64::from(limits.listeners).checked_mul(listener)?)?
         .checked_add(skein_io::worst_case(&limits.io)?)
+}
+
+fn socket_count(limits: &Limits) -> Option<u32> {
+    limits.listeners.checked_mul(2)?.checked_add(limits.exchanges)
 }

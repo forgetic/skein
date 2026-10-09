@@ -9,9 +9,11 @@
 
 use crate::accounts::{Source, copy_registration};
 use crate::exchange::{Exchange, Stage, Web};
+use crate::route::{self, Socket};
 use crate::{Account, Asked, Ends, Event, Failure, Keeper, Keeping, Limits, Refusal, Request, Transport, worst_case};
 use skein_lib::{Duration, Env, Id, List, Queue, Rng, Slab, Time};
 use skein_oauth::{self as oauth, SavedToken};
+mod sign_in;
 
 /// An io request the owner sends on, translating component tokens to io tokens.
 pub type Lower = skein_io::Request;
@@ -27,10 +29,10 @@ pub struct MaxOut {
 }
 
 /// Room reserved before one owner request.
-pub const MAX_OUT_DOWN: MaxOut = MaxOut { above: 2, io: 2 };
+pub const MAX_OUT_DOWN: MaxOut = MaxOut { above: 3, io: 3 };
 
 /// Room reserved before firing one due account or progressing one exchange.
-pub const MAX_OUT_FIRE: MaxOut = MaxOut { above: 2, io: 2 };
+pub const MAX_OUT_FIRE: MaxOut = MaxOut { above: 3, io: 3 };
 
 /// Room reserved before one routed io event.
 pub const MAX_OUT_UP: MaxOut = MaxOut { above: 1, io: 1 };
@@ -88,10 +90,6 @@ pub struct Component {
     bindings: List<Option<Id<Exchange>>>,
     exchanges: Slab<Exchange>,
     lifecycle: Lifecycle,
-    #[expect(
-        dead_code,
-        reason = "the binding constructor stores its sign-in seed; sign-in enters in reliability 06.5"
-    )]
     random: Rng,
 }
 
@@ -183,6 +181,16 @@ impl Component {
     pub fn down(&mut self, env: &Env<Limits>, request: Request, up: &mut Queue<Event>, io: &mut Queue<Lower>) {
         self.initialize(env);
         match request {
+            Request::SignIn { account } => self.sign_in(env, account, up, io),
+            Request::Redirected { account, uri } => self.redirected(env, account, &uri, up),
+            Request::Cancel { account } => match self.bindings.get(account) {
+                Some(Some(id)) => {
+                    let id = *id;
+                    self.fail_exchange(env, id, Failure::Exchange(oauth::Failure::Cancelled), up, io);
+                    self.collect(id, up);
+                }
+                Some(None) | None => {}
+            },
             Request::HandIn { account, record } => self.hand_in(env, account, record, up),
             Request::Grant { account } => self.grant_request(env, account, up),
             Request::Rejected { account, generation } => {
@@ -264,8 +272,14 @@ impl Component {
         }
         match *self.bindings.get(account).expect("account binding") {
             Some(id) => {
-                set_held(slot, true);
-                self.exchanges.get_mut(id).expect("bound exchange").pending_grant = true;
+                let exchange = self.exchanges.get_mut(id).expect("bound exchange");
+                match exchange.stage {
+                    Stage::Finished => grant(slot, env.now, account, up),
+                    Stage::Running | Stage::Keeping { .. } => {
+                        set_held(slot, true);
+                        exchange.pending_grant = true;
+                    }
+                }
             }
             None => {
                 let needs_refresh = match self.sources.get(account).expect("account source") {
@@ -400,12 +414,18 @@ impl Component {
             | LowerEvent::Usage { owner, .. } => *owner,
             LowerEvent::Shutdown { .. } => return,
         };
-        let id = Id::<Exchange>::from_token(owner);
+        let (id, socket) = route::exchange(owner);
         match self.exchanges.get_mut(id) {
             Some(exchange) => {
-                match &mut exchange.web {
-                    Some(web) => web.up(env, event, io),
-                    None => {}
+                match socket {
+                    Socket::Web => match &mut exchange.web {
+                        Some(web) => web.up(env, event, io),
+                        None => {}
+                    },
+                    Socket::Listener | Socket::Callback => match &mut exchange.listener {
+                        Some(listener) => listener.up(env, id, socket, event, io),
+                        None => {}
+                    },
                 }
                 self.collect(id, up);
             }
@@ -493,33 +513,50 @@ impl Component {
             }
             return;
         }
-        if let Some(request) = exchange.above.pop() {
-            match request {
-                oauth::Request::Http(request) => {
-                    let endpoint = match self.sources.get(account).expect("account source") {
-                        Source::SignIn { endpoint, .. } => endpoint,
-                        Source::HandedIn => unreachable!("exchange source"),
-                    };
-                    let web = match Web::new(request, endpoint, &env.limits) {
-                        Some(web) => web,
-                        None => {
-                            self.fail_exchange(env, id, Failure::Exchange(oauth::Failure::Malformed), up, io);
-                            return;
-                        }
-                    };
-                    assert!(exchange.web.is_none(), "previous socket settled before retry");
-                    exchange.web = Some(web);
-                    io.push(Lower::Connect { owner: id.token(), addr: endpoint.address });
-                }
-                oauth::Request::Tokens { record } => {
-                    let kept = record.clone();
-                    exchange.stage = Stage::Keeping { candidate: record };
-                    up.push(Event::Keep { account, record: kept });
-                }
-                oauth::Request::Failed { failure } => self.fail_exchange(env, id, Failure::Exchange(failure), up, io),
-                oauth::Request::Visit { .. } => unreachable!("refresh emits no visit"),
-            }
+        if exchange.waiting() && exchange.above.is_empty() && due(exchange.client.next_deadline(), env.now) {
+            exchange.client.step(oauth::Event::Tick { now: env.now }, &mut exchange.above);
             return;
+        }
+        let visit_ready = match &exchange.listener {
+            Some(listener) => listener.ready(),
+            None => true,
+        };
+        if visit_ready && let Some(url) = exchange.visit.take() {
+            up.push(Event::Visit { account, url });
+            return;
+        }
+        if let Some(request) = exchange.above.pop() {
+            self.client_request(env, id, request, up, io);
+            return;
+        }
+        let waiting = exchange.waiting();
+        match &mut exchange.listener {
+            Some(listener) => {
+                if let Some(failure) = listener.failure.take() {
+                    self.fail_exchange(env, id, Failure::Exchange(failure), up, io);
+                    return;
+                }
+                if let Some(redirect) = listener.redirect.take() {
+                    if waiting {
+                        match &mut exchange.purpose {
+                            crate::exchange::Purpose::SignIn { waiting } => *waiting = false,
+                            crate::exchange::Purpose::Refresh => {}
+                        }
+                        sign_in::deliver(&mut exchange.client, &mut exchange.above, redirect, env.now);
+                        listener.stop_waiting();
+                    }
+                    return;
+                }
+                if listener.has_work() {
+                    let registered = match self.sources.get(account).expect("account source") {
+                        Source::SignIn { registration, .. } => registration.redirect_uri.as_ref(),
+                        Source::HandedIn => unreachable!("listener source"),
+                    };
+                    listener.progress(env, registered, io);
+                    return;
+                }
+            }
+            None => {}
         }
         match &mut exchange.web {
             Some(web) => {
@@ -558,6 +595,46 @@ impl Component {
         }
     }
 
+    fn client_request(
+        &mut self,
+        env: &Env<Limits>,
+        id: Id<Exchange>,
+        request: oauth::Request,
+        up: &mut Queue<Event>,
+        io: &mut Queue<Lower>,
+    ) {
+        let exchange = self.exchanges.get_mut(id).expect("bound exchange");
+        let account = exchange.account;
+        match request {
+            oauth::Request::Http(request) => {
+                let endpoint = match self.sources.get(account).expect("account source") {
+                    Source::SignIn { endpoint, .. } => endpoint,
+                    Source::HandedIn => unreachable!("exchange source"),
+                };
+                let web = match Web::new(request, endpoint, &env.limits) {
+                    Some(web) => web,
+                    None => {
+                        self.fail_exchange(env, id, Failure::Exchange(oauth::Failure::Malformed), up, io);
+                        return;
+                    }
+                };
+                assert!(exchange.web.is_none(), "previous socket settled before retry");
+                exchange.web = Some(web);
+                io.push(Lower::Connect { owner: route::owner(id, Socket::Web), addr: endpoint.address });
+            }
+            oauth::Request::Tokens { record } => {
+                let kept = record.clone();
+                exchange.stage = Stage::Keeping { candidate: record };
+                up.push(Event::Keep { account, record: kept });
+            }
+            oauth::Request::Failed { failure } => self.fail_exchange(env, id, Failure::Exchange(failure), up, io),
+            oauth::Request::Visit { url } => match &exchange.listener {
+                Some(listener) if !listener.ready() => exchange.visit = Some(url),
+                Some(_) | None => up.push(Event::Visit { account, url }),
+            },
+        }
+    }
+
     fn kept(
         &mut self,
         env: &Env<Limits>,
@@ -581,18 +658,27 @@ impl Component {
             Stage::Keeping { .. } | Stage::Running | Stage::Finished => return,
         }
         let stage = core::mem::replace(&mut exchange.stage, Stage::Finished);
+        exchange.received();
+        exchange.visit = None;
         match stage {
             Stage::Keeping { candidate } => {
                 let slot = self.accounts.get_mut(account).expect("account state");
-                let held = held(slot);
+                let held = held(slot) || exchange.pending_grant;
                 match keeping {
                     Keeping::Kept => {
+                        let generation = candidate.generation;
                         *slot = recorded(candidate, env, held);
+                        if exchange.signing_in() {
+                            up.push(Event::SignedIn { account, generation });
+                        }
                         if held {
                             grant(slot, env.now, account, up);
                         }
                     }
                     Keeping::NotKept => {
+                        if exchange.signing_in() {
+                            up.push(Event::Failed { account, ends: Ends::SignIn, failure: Failure::NotKept });
+                        }
                         if exchange.pending_grant {
                             grant(slot, env.now, account, up);
                         }
@@ -605,6 +691,10 @@ impl Component {
             Some(web) => web.close(env, false, io),
             None => {}
         }
+        match &mut exchange.listener {
+            Some(listener) => listener.close(env, false, io),
+            None => {}
+        }
         self.collect(id, up);
     }
 
@@ -612,6 +702,9 @@ impl Component {
         match self.bindings.get(account) {
             Some(Some(id)) => {
                 let exchange = self.exchanges.get_mut(*id).expect("bound exchange");
+                if exchange.signing_in() {
+                    return;
+                }
                 exchange.aborted = true;
                 exchange.stage = Stage::Finished;
                 for _ in 0..oauth::MAX_OUT {
@@ -641,11 +734,22 @@ impl Component {
         let exchange = self.exchanges.get_mut(id).expect("bound exchange");
         let account = exchange.account;
         let slot = self.accounts.get_mut(account).expect("account state");
-        if held(slot) {
-            set_held(slot, false);
-            failed(account, failure, up);
+        let unfinished = match exchange.stage {
+            Stage::Finished => false,
+            Stage::Running | Stage::Keeping { .. } => true,
+        };
+        if unfinished {
+            if exchange.signing_in() {
+                up.push(Event::Failed { account, ends: Ends::SignIn, failure });
+            }
+            if exchange.pending_grant || (!exchange.signing_in() && held(slot)) {
+                set_held(slot, false);
+                failed(account, failure, up);
+            }
         }
         exchange.stage = Stage::Finished;
+        exchange.received();
+        exchange.visit = None;
         for _ in 0..oauth::MAX_OUT {
             drop(exchange.above.pop());
         }
@@ -655,6 +759,10 @@ impl Component {
         }
         match &mut exchange.web {
             Some(web) => web.close(env, true, io),
+            None => {}
+        }
+        match &mut exchange.listener {
+            Some(listener) => listener.close(env, true, io),
             None => {}
         }
     }

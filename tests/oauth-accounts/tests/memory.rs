@@ -21,6 +21,15 @@ fn every_account_holds_a_maximal_record_within_the_heap_bound() {
     let limits = Limits {
         accounts: 4,
         exchanges: 4,
+        listeners: 0,
+        server: skein_http::server::Limits {
+            head: 2048,
+            headers: 16,
+            body: 1024,
+            read: 256,
+            response: 2048,
+            send: 256,
+        },
         http: skein_http::client::Limits { request: 2048, head: 2048, headers: 16, read: 256, send: 256 },
         tls: skein_tls::client::Limits { read: 2048, send: 2048, records: 131_072 },
         io: skein_io::Limits {
@@ -91,6 +100,7 @@ fn every_refresh_slot_holds_its_maximal_records_and_tls_connection() {
     let mut limits = skein_oauth_accounts_world::world::limits();
     limits.accounts = 4;
     limits.exchanges = 4;
+    limits.io.sockets = 6;
     let trust = skein_tls_world::pki::client(&[]);
     let bound = worst_case(&limits).expect("component heap bound");
     let meter = Meter::new();
@@ -153,4 +163,103 @@ fn every_refresh_slot_holds_its_maximal_records_and_tls_connection() {
     assert_eq!(connects, limits.exchanges, "one TLS connection in every slot");
     let measured = meter.end();
     meter.check(measured, bound, &"all OAuth TLS exchange slots");
+}
+
+#[test]
+fn every_listener_slot_keeps_a_bounded_partial_head_within_the_heap_bound() {
+    use skein_io::{Event as IoEvent, Request as IoRequest};
+    use skein_lib::Token;
+    use skein_oauth_accounts::{Endpoint, Keeper, MAX_OUT_FIRE, MAX_OUT_UP, Transport};
+    use skein_world::stream::Wire;
+    let mut limits = skein_oauth_accounts_world::world::limits();
+    limits.accounts = 4;
+    limits.exchanges = 4;
+    limits.listeners = 4;
+    limits.io.sockets = 12;
+    let bound = worst_case(&limits).expect("all listener bounds");
+    let meter = Meter::new();
+    meter.start();
+    let mut configured = List::with_capacity(4);
+    for account in 0..4 {
+        let uri = format!("http://localhost:{}/callback", 31234 + account).into_bytes().into_boxed_slice();
+        assert!(
+            configured
+                .push(Account::SignIn {
+                    registration: skein_oauth::Registration {
+                        authorization_url: bytes::copy_of(b"http://127.0.0.1:31000/authorize"),
+                        token_endpoint: bytes::copy_of(b"http://127.0.0.1:31000/token"),
+                        client_id: bytes::copy_of(b"client"),
+                        redirect_uri: uri,
+                        scope: bytes::copy_of(b"read"),
+                        wire: skein_oauth::WireFormat::Form,
+                        client_secret: None,
+                        pkce_for_confidential: false,
+                        metadata_claim: None,
+                    },
+                    endpoint: Endpoint {
+                        address: "127.0.0.1:31000".parse().expect("loopback"),
+                        transport: Transport::Plaintext
+                    },
+                    keeper: Keeper::Owner { kept: None }
+                })
+                .is_ok()
+        );
+    }
+    let mut component = Component::new(configured, &limits, 17).expect("component");
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
+    let mut above = Queue::with_capacity(64);
+    let mut below = Queue::with_capacity(64);
+    let mut callbacks = Vec::with_capacity(4);
+    let mut wires = Vec::with_capacity(4);
+    for account in 0..4 {
+        component.down(&env, Request::SignIn { account }, &mut above, &mut below);
+    }
+    for _ in 0..512 {
+        if component.has_work() {
+            assert!(above.room() >= MAX_OUT_FIRE.above && below.room() >= MAX_OUT_FIRE.io);
+            component.fire(&env, &mut above, &mut below);
+        }
+        while let Some(event) = above.pop() {
+            assert!(matches!(event, skein_oauth_accounts::Event::Visit { .. }));
+        }
+        while let Some(request) = below.pop() {
+            match request {
+                IoRequest::Listen { owner, addr } => {
+                    let index = u64::try_from(wires.len()).expect("four listeners");
+                    let listener = Token::new(20 + index);
+                    let socket = Token::new(40 + index);
+                    component.up(&env, IoEvent::Listening { owner, listener, addr }, &mut above, &mut below);
+                    component.up(&env, IoEvent::Accepted { owner, socket, peer: addr }, &mut above, &mut below);
+                    let mut wire = Wire::new(index);
+                    let mut partial = b"GET /callback?state=".to_vec();
+                    partial.resize(usize::try_from(limits.server.head - 64).expect("head size"), b'x');
+                    wire.write(&partial);
+                    wires.push((socket, wire));
+                }
+                IoRequest::Bind { socket, owner } => callbacks.push((socket, owner)),
+                IoRequest::Stream { stream, down } => {
+                    wires.iter_mut().find(|(socket, _)| *socket == stream).expect("callback wire").1.take(down);
+                }
+                other @ (IoRequest::Connect { .. }
+                | IoRequest::Reject { .. }
+                | IoRequest::Output { .. }
+                | IoRequest::Spawn { .. }
+                | IoRequest::Signal { .. }
+                | IoRequest::Usage { .. }
+                | IoRequest::Close { .. }
+                | IoRequest::Abort { .. }) => panic!("partial head remains live: {other:?}"),
+            }
+        }
+        for (socket, wire) in &mut wires {
+            if let Some(up) = wire.answer() {
+                let owner = callbacks.iter().find(|(candidate, _)| candidate == socket).expect("bound callback").1;
+                assert!(above.room() >= MAX_OUT_UP.above && below.room() >= MAX_OUT_UP.io);
+                component.up(&env, IoEvent::Stream { owner, up }, &mut above, &mut below);
+            }
+        }
+    }
+    assert_eq!(callbacks.len(), 4);
+    assert!(component.next_deadline().is_some());
+    let measured = meter.end();
+    meter.check(measured, bound, &"every OAuth listener and partial head");
 }

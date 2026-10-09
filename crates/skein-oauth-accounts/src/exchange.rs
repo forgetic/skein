@@ -23,6 +23,11 @@ pub(crate) enum Stage {
     Finished,
 }
 
+pub(crate) enum Purpose {
+    Refresh,
+    SignIn { waiting: bool },
+}
+
 pub(crate) struct Exchange {
     pub(crate) account: u32,
     pub(crate) client: oauth::Client,
@@ -31,9 +36,31 @@ pub(crate) struct Exchange {
     pub(crate) stage: Stage,
     pub(crate) pending_grant: bool,
     pub(crate) aborted: bool,
+    pub(crate) purpose: Purpose,
+    pub(crate) visit: Option<Box<[u8]>>,
+    pub(crate) listener: Option<crate::listener::Listener>,
 }
 
 impl Exchange {
+    pub(crate) fn signing_in(&self) -> bool {
+        match self.purpose {
+            Purpose::Refresh => false,
+            Purpose::SignIn { .. } => true,
+        }
+    }
+    pub(crate) fn waiting(&self) -> bool {
+        match self.purpose {
+            Purpose::Refresh => false,
+            Purpose::SignIn { waiting } => waiting,
+        }
+    }
+    pub(crate) fn received(&mut self) {
+        match &mut self.purpose {
+            Purpose::SignIn { waiting } => *waiting = false,
+            Purpose::Refresh => {}
+        }
+    }
+
     pub(crate) fn new(account: u32, client: oauth::Client, pending_grant: bool) -> Exchange {
         Exchange {
             account,
@@ -43,11 +70,20 @@ impl Exchange {
             stage: Stage::Running,
             pending_grant,
             aborted: false,
+            purpose: Purpose::Refresh,
+            visit: None,
+            listener: None,
         }
     }
 
     pub(crate) fn has_work(&self) -> bool {
-        if self.settled() || !self.above.is_empty() {
+        if self.settled()
+            || !self.above.is_empty()
+            || match &self.listener {
+                Some(listener) => listener.has_work() || (self.visit.is_some() && listener.ready()),
+                None => self.visit.is_some(),
+            }
+        {
             return true;
         }
         match &self.web {
@@ -58,7 +94,14 @@ impl Exchange {
 
     pub(crate) fn settled(&self) -> bool {
         match self.stage {
-            Stage::Finished => self.web.is_none() && self.above.is_empty(),
+            Stage::Finished => {
+                self.web.is_none()
+                    && match &self.listener {
+                        Some(listener) => listener.settled(),
+                        None => true,
+                    }
+                    && self.above.is_empty()
+            }
             Stage::Running | Stage::Keeping { .. } => false,
         }
     }

@@ -39,3 +39,22 @@ fn an_event_after_closed_fails_the_referee() {
     referee.closed();
     referee.keep(1);
 }
+#[test]
+#[should_panic(expected = "signed in before kept")]
+fn sign_in_success_before_keep_fails_the_referee() {
+    let mut referee = skein_oauth_accounts_world::sign_in::Contracts::new();
+    referee.signed_in(1);
+}
+#[test]
+#[should_panic(expected = "a sign-in and keeper terminals ends once")]
+fn a_duplicate_sign_in_terminal_fails_the_referee() {
+    let mut referee = skein_oauth_accounts_world::sign_in::Contracts::new();
+    referee.failed();
+    referee.failed();
+}
+#[test]
+#[should_panic(expected = "every sign-in and keeper terminals has ended")]
+fn closed_with_a_pending_sign_in_fails_the_referee() {
+    let mut referee = skein_oauth_accounts_world::sign_in::Contracts::new();
+    referee.closed();
+}

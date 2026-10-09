@@ -1,5 +1,5 @@
-//! The owner's OAuth accounts (oauth.md, sections 6.1–6.4 and 6.6–6.7).
-//! Keeps bounded records, held grants, refresh exchanges and monotonic deadlines;
+//! The owner's OAuth accounts (oauth.md, sections 6.1–6.7).
+//! Keeps bounded records, held grants, issuer exchanges, redirect listeners and deadlines;
 //! knows no account names or durable owner-store implementation. `down` accepts
 //! owner requests and keeper terminals, `up` routes socket events, `fire` advances
 //! one child or deadline, and `next_deadline` lets the owner schedule it.
@@ -12,6 +12,9 @@ mod boundary;
 mod component;
 mod exchange;
 mod limits;
+mod listener;
+mod redirect;
+mod route;
 
 pub use accounts::{Account, Endpoint, Keeper, Transport};
 pub use boundary::{Asked, Ends, Event, Failure, Keeping, Refusal, Request};

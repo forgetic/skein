@@ -6,6 +6,15 @@ fn limits() -> Limits {
     Limits {
         accounts: 2,
         exchanges: 2,
+        listeners: 1,
+        server: skein_http::server::Limits {
+            head: 2048,
+            headers: 16,
+            body: 1024,
+            read: 256,
+            response: 2048,
+            send: 256,
+        },
         http: skein_http::client::Limits { request: 2048, head: 2048, headers: 16, read: 256, send: 256 },
         tls: skein_tls::client::Limits { read: 2048, send: 2048, records: 131_072 },
         io: skein_io::Limits {
@@ -206,6 +215,16 @@ fn close_and_abort_settle_once_clear_deadlines_and_refuse_new_work_as_closed() {
         assert!(out.is_empty());
         component.down(&env, Request::Grant { account: 9 }, &mut out, &mut Queue::with_capacity(MAX_OUT_DOWN.io));
         assert_refused(out.pop(), 9, Asked::Grant, Refusal::Closed);
+        component.down(&env, Request::SignIn { account: 9 }, &mut out, &mut Queue::with_capacity(MAX_OUT_DOWN.io));
+        assert_refused(out.pop(), 9, Asked::SignIn, Refusal::Closed);
+        component.down(
+            &env,
+            Request::Redirected { account: 9, uri: bytes::copy_of(b"late") },
+            &mut out,
+            &mut Queue::with_capacity(MAX_OUT_DOWN.io),
+        );
+        assert_refused(out.pop(), 9, Asked::Redirected, Refusal::Closed);
+
         hand_in(&mut component, &env, &mut out, 2);
         assert_refused(out.pop(), 0, Asked::HandIn, Refusal::Closed);
     }
@@ -297,4 +316,70 @@ fn a_plaintext_endpoint_off_loopback_is_refused_at_startup() {
         "account"
     );
     assert_eq!(Component::new(configured, &limits(), 1).err(), Some(Unusable::Plaintext { account: 0 }));
+}
+
+#[test]
+fn handed_in_accounts_refuse_sign_in_and_redirect_without_child_work() {
+    let (mut component, env, mut above) = setup();
+    let mut below = Queue::with_capacity(MAX_OUT_DOWN.io);
+    component.down(&env, Request::SignIn { account: 0 }, &mut above, &mut below);
+    assert_refused(above.pop(), 0, Asked::SignIn, Refusal::Source);
+    component.down(
+        &env,
+        Request::Redirected { account: 0, uri: bytes::copy_of(b"http://localhost:31234/callback?state=a&code=b") },
+        &mut above,
+        &mut below,
+    );
+    assert_refused(above.pop(), 0, Asked::Redirected, Refusal::Source);
+    assert!(below.is_empty());
+}
+
+#[test]
+fn redirect_uri_is_checked_before_bounded_query_decoding() {
+    let limits = limits();
+    let registered = b"http://localhost:31234/callback";
+    assert!(
+        redirect::parse(b"http://localhost:31234/callback?state=a%2Bb&code=c%20d", registered, &limits.client)
+            .is_some()
+    );
+    for uri in [
+        b"http://127.0.0.1:31234/callback?state=a&code=b".as_slice(),
+        b"http://localhost.:31234/callback?state=a&code=b",
+        b"http://localhost:31234/wrong?state=a&code=b",
+        b"http://localhost:31234/callback?state=a&state=b&code=c",
+        b"http://localhost:31234/callback?state=%xx&code=b",
+        b"http://localhost:31234/callback?state=a&code=b#fragment",
+    ] {
+        assert!(redirect::parse(uri, registered, &limits.client).is_none());
+    }
+}
+
+#[test]
+fn public_sign_in_admission_respects_listener_and_account_bounds() {
+    let mut profile = limits();
+    profile.listeners = 0;
+    let address = core::net::SocketAddr::new(core::net::IpAddr::V4(core::net::Ipv4Addr::LOCALHOST), 31000);
+    let mut configured = List::with_capacity(2);
+    assert!(configured.push(refresh_account(0, address)).is_ok());
+    assert!(configured.push(refresh_account(1, address)).is_ok());
+    let mut component = Component::new(configured, &profile, 17).expect("component");
+    let mut env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: profile };
+    let mut above = Queue::with_capacity(MAX_OUT_DOWN.above);
+    let mut below = Queue::with_capacity(MAX_OUT_DOWN.io);
+    component.down(&env, Request::SignIn { account: 0 }, &mut above, &mut below);
+    assert_refused(above.pop(), 0, Asked::SignIn, Refusal::Full { bound: 0 });
+    assert!(below.is_empty());
+    env.limits.listeners = 1;
+    let mut configured = List::with_capacity(2);
+    assert!(configured.push(refresh_account(0, address)).is_ok());
+    assert!(configured.push(refresh_account(1, address)).is_ok());
+    component = Component::new(configured, &env.limits, 17).expect("one listener component");
+    component.down(&env, Request::SignIn { account: 0 }, &mut above, &mut below);
+    assert!(above.is_empty());
+    assert!(below.pop().is_some());
+    component.down(&env, Request::SignIn { account: 0 }, &mut above, &mut below);
+    assert_refused(above.pop(), 0, Asked::SignIn, Refusal::Busy);
+    component.down(&env, Request::SignIn { account: 1 }, &mut above, &mut below);
+    assert_refused(above.pop(), 1, Asked::SignIn, Refusal::Full { bound: 1 });
+    assert!(below.is_empty());
 }

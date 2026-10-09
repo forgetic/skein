@@ -51,6 +51,15 @@ pub fn limits() -> accounts::Limits {
     accounts::Limits {
         accounts: 2,
         exchanges: 2,
+        listeners: 1,
+        server: skein_http::server::Limits {
+            head: 2048,
+            headers: 16,
+            body: 1024,
+            read: 256,
+            response: 2048,
+            send: 256,
+        },
         refresh_lead: Duration::from_secs(10),
         client: oauth::ClientLimits {
             document: oauth::Limits {
@@ -351,7 +360,10 @@ impl Client {
                     self.facts.push(Fact::Closed);
                     self.closed = true;
                 }
-                accounts::Event::Expiring { .. } | accounts::Event::Refused { .. } => {
+                accounts::Event::Expiring { .. }
+                | accounts::Event::Refused { .. }
+                | accounts::Event::Visit { .. }
+                | accounts::Event::SignedIn { .. } => {
                     panic!("positive story has no such event")
                 }
             }
