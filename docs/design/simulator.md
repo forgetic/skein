@@ -137,6 +137,9 @@ would: to show that what a service keeps durably survives (io.md, 5.2).
 - **The cut** is at a chosen point in the process's submissions: the
   process is dropped with what it has in flight, which never completes,
   and its descriptors go with it.
+- **A kill cuts one process; a power loss cuts the machine:** every
+  process on it is dropped at the same point, and each restarts over
+  what the machine kept.
 - **What the machine keeps** depends on the cut. After a kill, every
   operation that completed stands, as the kernel's cache keeps it. After
   a power loss, what a crash keeps: what was synced; unsynced writes

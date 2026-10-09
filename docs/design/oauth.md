@@ -245,16 +245,18 @@ its index. It has:
 | To the owner | What it says |
 |---|---|
 | visit | the authorization URL to show or open, once per sign-in |
+| signed in | a sign-in that completed: its record kept (6.4), its grant ready to ask for; the sign-in's success terminal |
 | granted | an account's access token, its generation and how long it is valid |
 | keep | a record to keep durably, for an account the owner keeps (6.4) |
 | expiring | an access-only token has reached its lead before expiry, once |
-| failed | a sign-in, refresh or grant failed: section 4's class, or expired |
+| failed | a sign-in, refresh or grant failed: section 4's class, or expired; a sign-in whose record could not be kept fails as not kept, and nothing is lent |
 | closed | the component has settled: its one terminal |
 
 - **One exchange per account at a time** (section 2). A grant asked for
   while the account's refresh runs is answered by that refresh.
 - **Kept before lent.** A new record is kept (6.4) before its token is
-  granted. One that cannot be kept is not lent, and the previous generation
+  granted. An owner's `kept` that arrives after an abort, or for a keep
+  no longer pending, is stale and dropped. One that cannot be kept is not lent, and the previous generation
   stays usable while it is valid (section 1).
 - **Refreshed while held.** While a grant is held, the component refreshes
   the account's record its refresh lead before expiry and tells the owner

@@ -543,8 +543,9 @@ run by io.
   directory's `Sync`: the new content then survives a crash. A reader
   sees the old file or the new, never part of either.
 - **The rename is the commit.**
-  - Before it, a failure, a deadline or a cancel removes the temporary
-    before the one terminal, and the old file is as it was. If the
+  - Before it, a failure, a deadline, a cancel or a `Conflict` found at
+    the recheck removes the temporary before the one terminal, and the
+    old file is as it was. If the
     temporary cannot be removed, as on a file system that has turned
     read-only, the terminal says so and names it, and nothing waits on
     it. The old file is still as it was, the next replace of the target
@@ -591,7 +592,9 @@ are the owner's (oauth.md, 6).
 - **A private root.** The directory is made `0o700` if it is absent
   (`MakeDirectory` takes a mode, as `Create` does; kernel.md, 6.1), and
   opened beneath its root as a root of its own, without following a link
-  at its name. io states what it opened and refuses it (`Permission`)
+  at its name. io states what it opened and refuses it, saying what it
+  found unsafe (a link, a non-directory, group or other bits, another
+  owner), so an owner tells a planted file from a failed read
   unless it is a directory with no group or other permission bits.
 - **Private files are made `0o600`,** less the umask, which only takes
   bits away, and are replaced whole with that mode (5.2), never with the
@@ -661,7 +664,8 @@ A service may report what it used, at its end: CPU time and peak
 resident size, its own and its children's. io reads them from the kernel
 for it.
 
-- **One request, one terminal.** `Usage` answers `Usage` with two parts:
+- **One request, one terminal.** `Usage` answers `Usage`, or that the
+  kernel would not read it (`Unread`, with its error), with two parts:
   the process's own, and its reaped children's. Each holds user and
   system CPU time, and the peak resident size in bytes. The children's
   CPU is the sum over the children reaped so far, and their peak is the
@@ -687,7 +691,8 @@ decides what shutting down means.
 A service at a terminal also blocks `SIGWINCH` at startup (shell.md,
 6.3). It is read from the same signalfd and arrives as `Resized`, after
 which the owner asks for the size: `Window { owner, stream }`, naming the
-stream that reads the terminal, answered `Window { owner, size }`, rows
+stream that reads the terminal, answered `Window { owner, size }`, or
+`Gone` if the terminal has hung up, with rows
 and columns, its one terminal (kernel.md, 6.3).
 
 ## 8. Testing
