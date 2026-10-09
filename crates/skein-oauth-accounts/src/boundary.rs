@@ -16,6 +16,8 @@ pub enum Request {
     Rejected { account: u32, generation: u64 },
     /// Ends the owner's hold, with no answer.
     Release { account: u32 },
+    /// Answers the owner-store Keep of this generation, with no event of its own.
+    Kept { account: u32, generation: u64, keeping: Keeping },
     /// Drains the component; Closed is its terminal.
     Close,
     /// Ends the component immediately; Closed is its terminal.
@@ -30,6 +32,8 @@ pub enum Event {
     Granted { account: u32, token: Box<[u8]>, generation: u64, valid: Duration },
     /// An access-only record reached its lead; announced once per record.
     Expiring { account: u32, generation: u64 },
+    /// A candidate for the owner's store; nothing new is lent until its Kept terminal.
+    Keep { account: u32, record: SavedToken },
     /// Ends the request named by ends, or its held grant.
     Failed { account: u32, ends: Ends, failure: Failure },
     /// Refuses a request before work starts; its one terminal.
@@ -48,6 +52,8 @@ pub enum Ends {
 /// Why the account cannot serve its grant.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Failure {
+    /// The issuer exchange failed, as named by the OAuth client.
+    Exchange(skein_oauth::Failure),
     /// No valid record, or the provider rejected its token; a newer record is needed.
     Expired,
 }
@@ -68,10 +74,23 @@ pub enum Refusal {
     Closed,
     /// The index names no configured account.
     Account,
+    /// The requested operation does not belong to this account's source.
+    Source,
+    /// All exchange slots are occupied.
+    Full { bound: u32 },
     /// A handed-in record carries a refresh token its source alone may rotate.
     NotAccessOnly,
     /// The account's grant is already held.
     Held,
     /// The handed-in record violates the client's record bounds or encoding.
     Record(skein_oauth::DecodeError),
+}
+
+/// The owner's answer to a candidate Keep; its durable-store terminal.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Keeping {
+    /// The record was stored durably and can be lent.
+    Kept,
+    /// The record was not stored; no part of it may be lent.
+    NotKept,
 }

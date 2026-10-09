@@ -41,6 +41,7 @@ mod heap;
 mod program;
 pub mod real;
 mod referee;
+pub mod stream;
 mod tree;
 mod world;
 mod writer_pipe;

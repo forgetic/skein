@@ -1,23 +1,70 @@
-//! Account storage and lending bounds (oauth.md, section 6.7).
+//! Account storage, exchange and transport bounds (oauth.md, section 6.7).
 
+use crate::accounts::Source;
 use crate::component::State;
-use skein_lib::{Duration, List};
+use crate::exchange::{Exchange, ROUTES};
+use skein_lib::{Duration, Id, List, Queue, Slab};
 use skein_oauth::ClientLimits;
 
 /// The component's limits supplied by its owner before the loop.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Limits {
     pub accounts: u32,
-    /// How long before expiry a handed-in record is announced Expiring.
+    pub exchanges: u32,
+    /// How long before expiry a held record refreshes or a handed-in one announces Expiring.
     pub refresh_lead: Duration,
     pub client: ClientLimits,
+    pub http: skein_http::client::Limits,
+    pub tls: skein_tls::client::Limits,
+    /// The owner's socket bounds, included conservatively once in this footprint.
+    pub io: skein_io::Limits,
 }
 
-/// Each account's records and one entrance's bounded record validation scratch.
+pub(crate) fn usable(limits: &Limits) -> bool {
+    limits.accounts > 0
+        && limits.exchanges > 0
+        && limits.io.sockets >= limits.exchanges
+        && limits.client.document.token_bytes > 0
+        && limits.client.document.record_bytes > 0
+        && limits.http.head >= 2
+        && limits.http.headers >= 2
+        && limits.http.read > 0
+        && limits.http.send > 0
+        && limits.http.request > 0
+        && limits.tls.read >= skein_http::client::largest_read(&limits.http)
+        && limits.tls.send >= skein_http::client::largest_room(&limits.http)
+        && limits.io.intake >= skein_tls::client::LARGEST_READ
+        && limits.io.output >= skein_tls::client::largest_room(&limits.tls)
+        && skein_oauth::Client::new(limits.client).is_ok()
+}
+
+/// Account generations and registration, each exchange's queues and child machines, and socket buffers.
+/// The owner's shared trust roots are counted once by the owner (tls.md, section 3.4).
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
     let record = u64::from(limits.client.document.record_bytes);
+    let routes = Queue::<skein_oauth::Request>::worst_case(skein_oauth::MAX_OUT)?
+        .checked_add(Queue::<skein_http::client::Event>::worst_case(ROUTES)?)?
+        .checked_add(Queue::<skein_http::client::Request>::worst_case(ROUTES)?)?
+        .checked_add(Queue::<skein_lib::stream::Down>::worst_case(ROUTES)?.checked_mul(2)?)?
+        .checked_add(Queue::<skein_tls::client::Event>::worst_case(ROUTES)?)?;
+    let payload = u64::from(limits.http.head.max(limits.http.request).max(limits.http.send))
+        .checked_mul(u64::from(ROUTES))?
+        .checked_add(u64::from(skein_tls::client::largest_room(&limits.tls)).checked_mul(u64::from(ROUTES))?)?;
+    let exchange = skein_oauth::client_worst_case(&limits.client)?
+        .checked_add(skein_http::client::worst_case(&limits.http)?)?
+        .checked_add(skein_tls::client::worst_case(&limits.tls)?)?
+        .checked_add(routes)?
+        .checked_add(payload)?
+        .checked_add(u64::from(limits.client.document.document_bytes).checked_mul(2)?)?;
     List::<State>::worst_case(limits.accounts)?
-        .checked_add(u64::from(limits.accounts).checked_mul(record.checked_mul(2)?)?)?
-        .checked_add(skein_oauth::worst_case(&limits.client.document)?)
+        .checked_add(List::<Source>::worst_case(limits.accounts)?)?
+        .checked_add(List::<Option<Id<Exchange>>>::worst_case(limits.accounts)?)?
+        .checked_add(
+            u64::from(limits.accounts)
+                .checked_mul(record.checked_mul(2)?.checked_add(skein_oauth::client_worst_case(&limits.client)?)?)?,
+        )?
+        .checked_add(Slab::<Exchange>::worst_case(limits.exchanges)?)?
+        .checked_add(u64::from(limits.exchanges).checked_mul(exchange)?)?
+        .checked_add(skein_io::worst_case(&limits.io)?)
 }

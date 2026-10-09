@@ -532,7 +532,8 @@ fn admit(error: DecodeError) -> Failure {
     }
 }
 
-fn validate_registration(registration: &Registration, limits: &ClientLimits, sign_in: bool) -> Result<(), Failure> {
+/// Validates an owner's registration before an exchange or component starts.
+pub fn validate_registration(registration: &Registration, limits: &ClientLimits, sign_in: bool) -> Result<(), Failure> {
     for value in [&registration.authorization_url, &registration.token_endpoint, &registration.redirect_uri] {
         if value.is_empty()
             || value.len() > usize::try_from(limits.uri_bytes).expect("u32 fits")

@@ -501,18 +501,30 @@ dependencies = [
 name = "skein-oauth-accounts"
 version = "0.0.0"
 dependencies = [
+ "skein-http",
+ "skein-io",
  "skein-lib",
  "skein-oauth",
+ "skein-tls",
 ]
 
 [[package]]
 name = "skein-oauth-accounts-world"
 version = "0.0.0"
 dependencies = [
+ "skein-fake-oauth",
+ "skein-fake-peers",
  "skein-heap",
+ "skein-http",
+ "skein-io",
  "skein-lib",
  "skein-oauth",
  "skein-oauth-accounts",
+ "skein-shell",
+ "skein-sim",
+ "skein-tls",
+ "skein-tls-world",
+ "skein-world",
 ]
 
 [[package]]
