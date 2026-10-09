@@ -111,7 +111,7 @@ fn workload(seed: u64) -> World {
         }
         let rename = Op::Rename { from_dir: root, from: name(b'f', n), to_dir: root, to: name(b'g', n) };
         let _ = settle(&mut world, pid, rename);
-        let _ = settle(&mut world, pid, Op::MakeDirectory { dir: root, name: name(b'd', n) });
+        let _ = settle(&mut world, pid, Op::MakeDirectory { dir: root, name: name(b'd', n), mode: 0o777 });
     }
     let mut listed = BTreeSet::new();
     loop {

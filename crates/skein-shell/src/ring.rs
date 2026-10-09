@@ -415,7 +415,6 @@ const EMPTY: &CStr = c"";
 /// `MakeDirectory`'s, both less the umask (`skein_io::kernel`, backend
 /// defaults).
 const FILE_MODE: u64 = 0o666;
-const DIRECTORY_MODE: libc::mode_t = 0o777;
 
 impl Kernel {
     /// Sets up the ring for this thread alone: one issuer, and completions
@@ -548,6 +547,7 @@ impl Kernel {
     fn start(&mut self, record: Submit) {
         let Submit { op, kind } = record;
         assert!(kind.is_valid(), "io submits only valid records (skein_io::kernel, broken invariants)");
+        check_path_access(&kind);
         assert!(!self.table.tokens.contains_key(&op), "io never reuses a token in flight (skein_io::kernel)");
         let index = self.table.free.pop().expect("a record is taken only while a slot is free");
         let Table { slots, tokens, cancelled, ready, listing, .. } = &mut self.table;
@@ -823,9 +823,9 @@ fn prepare(
             let flags = if *directory { libc::AT_REMOVEDIR } else { 0 };
             opcode::UnlinkAt::new(types::Fd(dir.raw()), path.as_ptr().cast()).flags(flags).build()
         }
-        Op::MakeDirectory { dir, name } => {
+        Op::MakeDirectory { dir, name, mode } => {
             *path = c_path(name);
-            opcode::MkDirAt::new(types::Fd(dir.raw()), path.as_ptr().cast()).mode(DIRECTORY_MODE).build()
+            opcode::MkDirAt::new(types::Fd(dir.raw()), path.as_ptr().cast()).mode(*mode).build()
         }
         Op::List { fd, entries, names } => {
             let listed = list(fd.raw(), entries, names, listing);
@@ -915,6 +915,7 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
         | Op::Append { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. } => Ok(Done::Count(u32::try_from(res).expect("a non-negative i32 fits in a u32"))),
+        Op::Open { how: OpenHow::PathNoFollow, .. } => Ok(Done::Fd(Fd::new(res))),
         Op::Open { .. } => opened(res),
         Op::Stat { .. } => Ok(Done::Stat(stat(statx.get_mut()))),
         Op::Wait { .. } => {
@@ -1191,6 +1192,38 @@ fn c_path(bytes: &[u8]) -> Box<[u8]> {
     path.into_boxed_slice()
 }
 
+/// Path-only descriptors never enter an operation other than Stat or Close (kernel.md, 6.1).
+fn check_path_access(operation: &Op) {
+    let descriptors = match operation {
+        Op::Stat { .. } | Op::Close { .. } | Op::Socket { .. } | Op::Usage | Op::Cancel { .. } => return,
+        Op::Bind { fd, .. }
+        | Op::Listen { fd, .. }
+        | Op::Accept { fd }
+        | Op::Connect { fd, .. }
+        | Op::Recv { fd, .. }
+        | Op::Send { fd, .. }
+        | Op::Shutdown { fd }
+        | Op::Read { fd, .. }
+        | Op::Write { fd, .. }
+        | Op::Append { fd, .. }
+        | Op::Sync { fd }
+        | Op::List { fd, .. }
+        | Op::ReadSignal { fd }
+        | Op::PipeRead { fd, .. }
+        | Op::PipeWrite { fd, .. } => [Some(*fd), None],
+        Op::Open { root, .. } => [Some(*root), None],
+        Op::Rename { from_dir, to_dir, .. } => [Some(*from_dir), Some(*to_dir)],
+        Op::Remove { dir, .. } | Op::MakeDirectory { dir, .. } => [Some(*dir), None],
+        Op::Spawn { spawn } => [Some(spawn.root), None],
+        Op::Wait { pidfd, .. } | Op::Signal { pidfd, .. } => [Some(*pidfd), None],
+    };
+    for descriptor in descriptors.into_iter().flatten() {
+        if let Ok(flags) = status_flags(descriptor.raw()) {
+            assert_eq!(flags & libc::O_PATH, 0, "only Stat and Close may use a path-only descriptor");
+        }
+    }
+}
+
 /// What an `Open` that the kernel answered with the descriptor `fd` comes
 /// to: a file or a directory, or `NotAFile`, the descriptor closed. A file
 /// blocks again, so that io_uring sends a read it cannot do at once to its
@@ -1244,8 +1277,12 @@ fn blocking(fd: i32) -> Result<(), Error> {
 /// without blocking or taking a controlling terminal, and resolved beneath
 /// the root, without magic links (kernel.md, 6.1).
 fn open(how: OpenHow) -> types::OpenHow {
-    let no_follow = matches!(how, OpenHow::ReadNoFollow | OpenHow::DirectoryNoFollow | OpenHow::CreateNoFollow { .. });
+    let no_follow = matches!(
+        how,
+        OpenHow::PathNoFollow | OpenHow::ReadNoFollow | OpenHow::DirectoryNoFollow | OpenHow::CreateNoFollow { .. }
+    );
     let (flags, mode) = match how {
+        OpenHow::PathNoFollow => (libc::O_PATH | libc::O_NOFOLLOW, 0),
         OpenHow::Read | OpenHow::ReadNoFollow => (libc::O_RDONLY, 0),
         OpenHow::Directory | OpenHow::DirectoryNoFollow => (libc::O_RDONLY | libc::O_DIRECTORY, 0),
         OpenHow::Create { mode } | OpenHow::CreateNoFollow { mode } => {
@@ -1256,7 +1293,11 @@ fn open(how: OpenHow) -> types::OpenHow {
             (libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode)
         }
     };
-    let flags = flags | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
+    let flags = if matches!(how, OpenHow::PathNoFollow) {
+        flags | libc::O_CLOEXEC
+    } else {
+        flags | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY
+    };
     let flags = u64::try_from(flags).expect("open's flags are positive");
     let resolve = if no_follow {
         libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS
@@ -1619,6 +1660,13 @@ pub(crate) fn random() -> Result<u64, i32> {
         Ok(_) => Err(libc::EIO),
         Err(_) => Err(last_errno()),
     }
+}
+
+/// The process effective user, read once by startup for io's private files (shell.md, section 6).
+#[must_use]
+pub fn effective_user() -> u32 {
+    // SAFETY: geteuid takes no pointers and has no preconditions.
+    unsafe { libc::geteuid() }
 }
 
 #[cfg(test)]

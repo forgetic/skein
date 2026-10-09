@@ -445,10 +445,11 @@ pub enum Op {
         name: Box<[u8]>,
         directory: bool,
     },
-    /// Makes a directory, `name`, in the one open on `dir`.
+    /// Makes a directory, `name`, in the one open on `dir`, with `mode` less the umask.
     MakeDirectory {
         dir: Fd,
         name: Box<[u8]>,
+        mode: u32,
     },
     /// The next entries of the directory open on `fd`, into `entries`,
     /// never empty, with their names in `names`, which holds at least
@@ -588,6 +589,8 @@ pub enum Exit {
 /// How an [`Op::Open`] opens what its path names.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum OpenHow {
+    /// An entry itself, links refused in its parents, for Stat and Close only (kernel.md, 6.1).
+    PathNoFollow,
     /// An existing file or directory, to `Read` or `Stat` (`O_RDONLY`).
     Read,
     /// An existing file to read, refusing a symbolic link in any path part.
@@ -611,10 +614,9 @@ pub enum OpenHow {
 pub enum Kind {
     File,
     Directory,
-    /// Seen by `List` only: an `Open` follows a symbolic link.
+    /// A directory entry or a path-only descriptor naming a symbolic link.
     Symlink,
-    /// Anything else: a FIFO, a socket, a device. Seen by `List` only: an
-    /// `Open` of one fails with `NotAFile`.
+    /// A FIFO, socket or device, from List or path-only Stat; ordinary Open refuses it.
     Other,
 }
 
@@ -937,6 +939,7 @@ impl Op {
                     OpenHow::Create { mode: None }
                     | OpenHow::CreateNoFollow { mode: None }
                     | OpenHow::Read
+                    | OpenHow::PathNoFollow
                     | OpenHow::ReadNoFollow
                     | OpenHow::Directory
                     | OpenHow::DirectoryNoFollow => true,
@@ -946,7 +949,8 @@ impl Op {
             Op::Read { buf, at, .. } => reads(buf, *at),
             Op::Write { bytes, from, at, .. } => writes(bytes, *from, *at),
             Op::Rename { from, to, .. } => is_name(from) && is_name(to),
-            Op::Remove { name, .. } | Op::MakeDirectory { name, .. } => is_name(name),
+            Op::Remove { name, .. } => is_name(name),
+            Op::MakeDirectory { name, mode, .. } => is_name(name) && *mode & !PERMISSIONS == 0,
             Op::List { entries, names, .. } => {
                 !entries.is_empty()
                     && u32::try_from(entries.len()).is_ok()

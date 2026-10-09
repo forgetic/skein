@@ -142,3 +142,88 @@ fn a_childs_cpu_and_peak_join_the_reaped_childrens_usage_at_close() {
     let outcome = world.run(&Clock::new(), Duration::from_secs(1));
     outcome.procs[0].check(false);
 }
+
+#[test]
+fn private_files_created_and_replaced_over_the_ring_have_private_modes() {
+    use skein_io_world::private::{Judge, Owner as PrivateOwner, Story};
+    use std::os::unix::fs::PermissionsExt;
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let capabilities = status.lines().find_map(|line| line.strip_prefix("CapEff:")).unwrap().trim();
+    let bypasses_modes = u64::from_str_radix(capabilities, 16).unwrap() & (1_u64 << 1_u32) != 0;
+    for story in [
+        Story::Create,
+        Story::Replace,
+        Story::RootMode,
+        Story::FileMode,
+        Story::FileLink,
+        Story::FileKind,
+        Story::FileLinks,
+        Story::RootDeniedSafe,
+        Story::FileDeniedSafe,
+    ] {
+        if bypasses_modes && matches!(story, Story::RootDeniedSafe | Story::FileDeniedSafe) {
+            eprintln!(
+                "CAP_DAC_OVERRIDE bypasses the own-mode-000 denial; path-only fallback is tested in simulator and steps"
+            );
+            continue;
+        }
+        let scratch = skein_scratch::Scratch::new("io-private");
+        let path = scratch.path();
+        if !matches!(story, Story::Create) {
+            std::fs::create_dir(path.join("secret")).unwrap();
+            std::fs::set_permissions(
+                path.join("secret"),
+                std::fs::Permissions::from_mode(if matches!(story, Story::RootMode) {
+                    0o755
+                } else if matches!(story, Story::RootDeniedSafe) {
+                    0o000
+                } else {
+                    0o700
+                }),
+            )
+            .unwrap();
+            match story {
+                Story::FileDeniedSafe => {
+                    std::fs::write(path.join("secret/record"), b"old").unwrap();
+                    std::fs::set_permissions(path.join("secret/record"), std::fs::Permissions::from_mode(0o000))
+                        .unwrap();
+                }
+                Story::Replace | Story::FileMode => {
+                    std::fs::write(path.join("secret/record"), b"old").unwrap();
+                    std::fs::set_permissions(path.join("secret/record"), std::fs::Permissions::from_mode(0o644))
+                        .unwrap();
+                }
+                Story::FileLink => std::os::unix::fs::symlink("missing", path.join("secret/record")).unwrap(),
+                Story::FileKind => {
+                    std::fs::create_dir(path.join("secret/record")).unwrap();
+                    std::fs::set_permissions(path.join("secret/record"), std::fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                }
+                Story::FileLinks => {
+                    std::fs::write(path.join("secret/record"), b"old").unwrap();
+                    std::fs::set_permissions(path.join("secret/record"), std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                    std::fs::hard_link(path.join("secret/record"), path.join("secret/other")).unwrap();
+                }
+                Story::Create
+                | Story::RootMode
+                | Story::RootOwner
+                | Story::RootLink
+                | Story::RootKind
+                | Story::FileOwner
+                | Story::RootDeniedSafe => {}
+            }
+        }
+        let root = skein_shell::open_root(path).unwrap();
+        let user = skein_shell::effective_user();
+        let mut world = skein_world::real::World::new(Judge);
+        world.spawn_with_fds(vec![root], || PrivateOwner::new(root, story, user));
+        let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+        outcome.procs[0].check(user);
+        if matches!(story, Story::Create | Story::Replace) {
+            assert_eq!(std::fs::metadata(path.join("secret")).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(std::fs::metadata(path.join("secret/record")).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        drop(scratch);
+    }
+}

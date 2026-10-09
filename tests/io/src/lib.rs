@@ -23,6 +23,7 @@ pub mod files;
 pub mod ledger;
 pub mod output;
 pub mod owner;
+pub mod private;
 pub mod processes;
 pub mod referee;
 pub mod scenarios;

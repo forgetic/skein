@@ -770,7 +770,8 @@ pub fn escapes<B: Backend>(backend: &mut B) -> Escapes {
             }
             (
                 Ok(fd),
-                OpenHow::Directory
+                OpenHow::PathNoFollow
+                | OpenHow::Directory
                 | OpenHow::DirectoryNoFollow
                 | OpenHow::Create { .. }
                 | OpenHow::CreateNoFollow { .. },
@@ -1167,5 +1168,67 @@ impl Check for FileMetadata {
         assert_eq!(self.after_last_removal.links, 0, "a descriptor keeps an unlinked file open");
         assert_eq!(self.after_last_removal.owner, self.root.owner, "unlink preserves owner");
         assert_eq!(self.retained_bytes, Ok(b"shared".to_vec()), "unlinked open files retain their bytes");
+    }
+}
+
+/// Path-only metadata from unreadable entries, a final link, and a special file (kernel.md, 6.1).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PathMetadata {
+    pub denied: [Result<Fd, Error>; 2],
+    pub denial_expected: bool,
+    pub root_owner: u32,
+    pub stats: [Stat; 4],
+    pub parent_link: Result<Fd, Error>,
+}
+
+/// A path-only descriptor needs parent search permission and no permission on its entry.
+#[must_use]
+pub fn path_metadata<B: Backend>(backend: &mut B, denial_expected: bool) -> PathMetadata {
+    let tree = [
+        Item::file(b"file", b"x").mode(0),
+        Item::directory(b"dir").mode(0),
+        Item::link(b"link", b"file"),
+        Item::fifo(b"fifo"),
+        Item::directory(b"parent"),
+        Item::file(b"parent/child", b"x"),
+        Item::link(b"parent-link", b"parent"),
+    ];
+    let mut run = Run::new(backend);
+    let process = run.process();
+    let root = run.root(process, &tree);
+    let root_owner = run.stat(process, root).expect("scenario owner").owner;
+    let denied = [b"file".as_slice(), b"dir".as_slice()].map(|path| {
+        let result = run.open(process, root, path, OpenHow::ReadNoFollow);
+        if let Ok(fd) = result {
+            run.close(process, fd);
+        }
+        result
+    });
+    let stats = [b"file".as_slice(), b"dir".as_slice(), b"link".as_slice(), b"fifo".as_slice()].map(|path| {
+        let fd = run.open(process, root, path, OpenHow::PathNoFollow).expect("path-only metadata is readable");
+        let stat = run.stat(process, fd).expect("stat a path-only descriptor");
+        run.close(process, fd);
+        stat
+    });
+    let parent_link = run.open(process, root, b"parent-link/child", OpenHow::PathNoFollow);
+    run.close(process, root);
+    run.finish();
+    PathMetadata { denied, denial_expected, root_owner, stats, parent_link }
+}
+
+impl Check for PathMetadata {
+    fn check(&self) {
+        if self.denial_expected {
+            assert_eq!(self.denied, [Err(Error::Permission); 2], "mode 000 refuses a readable open");
+        }
+        for (stat, kind) in self.stats.iter().zip([Kind::File, Kind::Directory, Kind::Symlink, Kind::Other]) {
+            assert_eq!(stat.kind, kind, "path-only Stat reports the entry itself");
+            assert_eq!(stat.owner, self.root_owner, "laid entries belong to the scenario user");
+        }
+        assert_eq!(self.stats[0].mode, 0, "the unreadable file keeps mode 000");
+        assert_eq!(self.stats[1].mode, 0, "the unreadable directory keeps mode 000");
+        assert_eq!(self.stats[0].size, 1, "stat needs no content read");
+        assert_eq!(self.stats[2].size, 4, "stat reports the link's target length");
+        assert_eq!(self.parent_link, Err(Error::TooManyLinks), "parent links are never followed");
     }
 }

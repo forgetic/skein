@@ -295,3 +295,8 @@ fn a_cancel_of_an_append_stops_it_or_comes_too_late() {
 fn stat_keeps_the_owner_and_counts_hard_links_through_removal() {
     calm_and_chaos(file_metadata);
 }
+
+#[test]
+fn path_only_metadata_needs_no_permission_on_its_entry() {
+    each_seed(Config::calm(), CALM, |world| skein_conformance::path_metadata(world, true));
+}

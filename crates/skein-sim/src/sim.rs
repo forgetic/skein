@@ -630,6 +630,14 @@ impl Sim {
     /// sockets, and nothing in flight beside it.
     fn check_file(&self, pid: Pid, kind: Summary) {
         let process = self.process(pid);
+        for fd in kind.fds().into_iter().flatten() {
+            if let Some(file) = process.files.get(&fd)
+                && file.access == files::Access::Record(OpenHow::PathNoFollow)
+                && !matches!(kind, Summary::Stat { .. } | Summary::Close { .. })
+            {
+                self.fail(pid, "only Stat and Close may use a path-only descriptor");
+            }
+        }
         if let Summary::Close { fd } = kind {
             for flight in process.flights.values() {
                 if flight.kind.fds().contains(&Some(fd)) {

@@ -67,6 +67,7 @@ pub(super) struct Store {
     expected: Expect,
     produced: Digest,
     no_follow: bool,
+    private_owner: Option<u32>,
     mode: u32,
     attempts: u8,
     seen_bytes: u64,
@@ -131,7 +132,7 @@ impl Store {
     }
 }
 
-fn split_path(path: &[u8]) -> Option<SplitPath> {
+pub(super) fn split_path(path: &[u8]) -> Option<SplitPath> {
     let mut slash = None;
     for index in 0..path.len() {
         if path.get(index) == Some(&b'/') {
@@ -183,6 +184,9 @@ pub(super) fn start(
         events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
         return;
     };
+    let private_owner = io.private_owner(root);
+    let private = private_owner.is_some();
+    let no_follow = no_follow || private;
     let produced = digest(&bytes);
     let store = Store {
         owner,
@@ -200,7 +204,8 @@ pub(super) fn start(
         expected,
         produced,
         no_follow,
-        mode: 0o666,
+        private_owner,
+        mode: if private { 0o600 } else { 0o666 },
         attempts: 0,
         seen_bytes: 0,
         seen_digest: DigestState::new(),
@@ -589,7 +594,7 @@ pub(super) fn stopped(
     fail(io, store, Failure::Kernel(reason), events, subs);
 }
 
-fn done_fd(done: Done) -> Fd {
+pub(super) fn done_fd(done: Done) -> Fd {
     match done {
         Done::Fd(fd) => fd,
         Done::Nothing
@@ -604,7 +609,7 @@ fn done_fd(done: Done) -> Fd {
     }
 }
 
-fn done_stat(done: Done) -> crate::kernel::Stat {
+pub(super) fn done_stat(done: Done) -> crate::kernel::Stat {
     match done {
         Done::Stat(stat) => stat,
         Done::Nothing
@@ -634,7 +639,7 @@ fn done_count(done: Done) -> u32 {
     }
 }
 
-fn done_nothing(done: Done) {
+pub(super) fn done_nothing(done: Done) {
     match done {
         Done::Nothing => {}
         Done::Count(_)
@@ -748,7 +753,9 @@ fn success(
                 fail(io, store, failure, events, subs);
                 return;
             }
-            store.mode = stat.mode;
+            if store.private_owner.is_none() {
+                store.mode = stat.mode;
+            }
             store.phase = Phase::OldClosing;
             let fd = store.old.expect("old file opened");
             issue(io, store, Op::Close { fd }, subs);

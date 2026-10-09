@@ -623,7 +623,7 @@ impl<B: Backend> Run<'_, B> {
     }
 
     pub(crate) fn make_directory(&mut self, process: B::Process, dir: Fd, name: &[u8]) -> Result<Done, Error> {
-        self.call(process, Op::MakeDirectory { dir, name: Box::from(name) }).result
+        self.call(process, Op::MakeDirectory { dir, name: Box::from(name), mode: 0o777 }).result
     }
 
     /// One `List` of `fd` with room for `entries`, and `names` bytes: each
@@ -757,7 +757,7 @@ impl Summary {
             Op::Remove { dir, name, directory } => {
                 Summary::Remove { dir: *dir, name: name.len(), directory: *directory }
             }
-            Op::MakeDirectory { dir, name } => Summary::MakeDirectory { dir: *dir, name: name.len() },
+            Op::MakeDirectory { dir, name, .. } => Summary::MakeDirectory { dir: *dir, name: name.len() },
             Op::List { fd, entries, names } => Summary::List { fd: *fd, entries: entries.len(), names: names.len() },
             Op::Spawn { spawn } => Summary::Spawn {
                 root: spawn.root,

@@ -149,7 +149,7 @@ impl Backend for Simulated {
                 Made::HardLink(target) => skein_fake_machine::Made::HardLink(target.clone()),
                 Made::Fifo => skein_fake_machine::Made::Fifo,
             };
-            items.push(skein_fake_machine::Item { path: item.path.clone(), made, mode: item.mode });
+            items.push(skein_fake_machine::Item { owner: None, path: item.path.clone(), made, mode: item.mode });
         }
         let opened = self.machine.lay(&items);
         let fd = self.sim.root(process, Handle::new(opened.raw()));

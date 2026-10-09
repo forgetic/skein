@@ -56,7 +56,7 @@ fn every_op() -> [Op; 26] {
         Op::Stat { fd: FD },
         Op::Rename { from_dir: FD, from: name(b"a"), to_dir: NEW, to: name(b"b") },
         Op::Remove { dir: FD, name: name(b"a"), directory: false },
-        Op::MakeDirectory { dir: FD, name: name(b"a") },
+        Op::MakeDirectory { dir: FD, name: name(b"a"), mode: 0o777 },
         list(2),
         Op::Wait { pidfd: FD, reap: false },
         Op::Wait { pidfd: FD, reap: true },
@@ -471,7 +471,7 @@ fn a_name_is_one_entry_of_a_directory_and_nothing_more() {
     for bad in [&b""[..], b".", b"..", b"a/b", b"/", b"a/", b"nul\0"] {
         assert!(!is_name(bad), "{bad:?}");
     }
-    let op = |name: &[u8]| Op::MakeDirectory { dir: FD, name: Box::from(name) };
+    let op = |name: &[u8]| Op::MakeDirectory { dir: FD, name: Box::from(name), mode: 0o777 };
     assert!(op(b"fine").is_valid());
     assert!(!op(b"../out").is_valid(), "no lookup beyond the entry");
     assert!(!Op::Remove { dir: FD, name: name(b".."), directory: true }.is_valid());

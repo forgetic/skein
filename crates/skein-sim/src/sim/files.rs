@@ -155,7 +155,12 @@ impl Sim {
             | Op::Rename { .. }
             | Op::MakeDirectory { .. } => (true, true, false),
             Op::Open {
-                how: OpenHow::Read | OpenHow::ReadNoFollow | OpenHow::Directory | OpenHow::DirectoryNoFollow,
+                how:
+                    OpenHow::PathNoFollow
+                    | OpenHow::Read
+                    | OpenHow::ReadNoFollow
+                    | OpenHow::Directory
+                    | OpenHow::DirectoryNoFollow,
                 ..
             }
             | Op::Stat { .. }
@@ -243,8 +248,8 @@ impl Sim {
             Op::Remove { dir, name, directory } => {
                 (Ask::Remove { dir: self.handle(pid, *dir), name: name.clone(), directory: *directory }, 0)
             }
-            Op::MakeDirectory { dir, name } => {
-                (Ask::MakeDirectory { dir: self.handle(pid, *dir), name: name.clone() }, 0)
+            Op::MakeDirectory { dir, name, mode } => {
+                (Ask::MakeDirectory { dir: self.handle(pid, *dir), name: name.clone(), mode: *mode }, 0)
             }
             Op::List { fd, entries, names } => {
                 let most = u32::try_from(entries.len()).expect("a valid List's entries are a count");

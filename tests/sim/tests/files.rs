@@ -117,7 +117,7 @@ fn each_failure_falls_on_the_operations_that_may_answer_it() {
     let (mut world, pid, root) = faulty(every);
     assert_eq!(world.open(pid, root, b"new", OpenHow::Create { mode: None }), Err(Error::NoSpace));
     assert_eq!(world.open(pid, root, b"a.txt", OpenHow::Read).map(|_| ()).err(), None, "not on a read");
-    let make = Op::MakeDirectory { dir: root, name: Box::from(&b"m"[..]) };
+    let make = Op::MakeDirectory { dir: root, name: Box::from(&b"m"[..]), mode: 0o777 };
     assert_eq!(world.call(pid, make).result, Err(Error::NoSpace));
     let fds = world.sim.open_fds(pid);
     assert_eq!(fds, 2, "the root and the file read");
@@ -353,7 +353,7 @@ fn a_close_of_either_directory_of_a_rename_in_flight() {
 #[should_panic(expected = "an invalid record")]
 fn a_name_that_could_leave_its_directory() {
     let (mut world, pid, root) = rooted();
-    world.submit(pid, Op::MakeDirectory { dir: root, name: Box::from(&b"../out"[..]) });
+    world.submit(pid, Op::MakeDirectory { dir: root, name: Box::from(&b"../out"[..]), mode: 0o777 });
 }
 
 #[test]
@@ -493,4 +493,28 @@ fn an_append_on_a_read_descriptor_breaks_the_contract() {
     let (mut world, pid, root) = rooted();
     let file = world.open(pid, root, b"a.txt", OpenHow::Read).unwrap();
     world.submit(pid, Op::append(file, Box::from(&b"a"[..]), 0).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "only Stat and Close may use a path-only descriptor")]
+fn path_only_descriptors_cannot_read() {
+    let (mut world, pid, root) = rooted();
+    let path = world.open(pid, root, b"a.txt", OpenHow::PathNoFollow).unwrap();
+    world.submit(pid, Op::Read { fd: path, buf: Box::from([0; 1]), at: 0 });
+}
+
+#[test]
+#[should_panic(expected = "only Stat and Close may use a path-only descriptor")]
+fn path_only_descriptors_cannot_sync() {
+    let (mut world, pid, root) = rooted();
+    let path = world.open(pid, root, b"a.txt", OpenHow::PathNoFollow).unwrap();
+    world.submit(pid, Op::Sync { fd: path });
+}
+
+#[test]
+#[should_panic(expected = "only Stat and Close may use a path-only descriptor")]
+fn path_only_descriptors_cannot_be_roots() {
+    let (mut world, pid, root) = rooted();
+    let path = world.open(pid, root, b"d", OpenHow::PathNoFollow).unwrap();
+    world.submit(pid, Op::Open { root: path, path: Box::from(&b"inner"[..]), how: OpenHow::Read });
 }

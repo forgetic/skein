@@ -161,3 +161,38 @@ fn refused_cleanup_names_its_residue_and_the_next_replace_is_independent() {
     assert_eq!(second.machine.names(), vec![b"record".to_vec(), residue]);
     second.machine.finish();
 }
+
+#[test]
+fn private_roots_and_files_refuse_planted_metadata_unread_and_make_secret_modes() {
+    use skein_io_world::private::{Story as Private, USER, world as private_world};
+    for config in [Config::calm(), Config::chaos()] {
+        for seed in [7, 11, 19] {
+            for story in [
+                Private::Create,
+                Private::Replace,
+                Private::RootMode,
+                Private::RootOwner,
+                Private::RootLink,
+                Private::RootKind,
+                Private::FileMode,
+                Private::FileOwner,
+                Private::FileLink,
+                Private::FileKind,
+                Private::FileLinks,
+                Private::RootDeniedSafe,
+                Private::FileDeniedSafe,
+            ] {
+                let mut outcome = private_world(seed, config, story).run();
+                outcome.procs[0].check(USER);
+                if matches!(story, Private::Create | Private::Replace) {
+                    assert_eq!(outcome.machine.mode(b"secret"), 0o700);
+                    assert_eq!(outcome.machine.mode(b"secret/record"), 0o600);
+                } else {
+                    assert_eq!(outcome.machine.reads, 0, "unsafe metadata is refused before any content read");
+                }
+                assert!(outcome.heap.as_ref().unwrap().iter().all(|(peak, bound)| peak <= bound));
+                outcome.machine.finish();
+            }
+        }
+    }
+}

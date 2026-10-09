@@ -53,7 +53,7 @@ pub fn step(machine: &mut Machine, call: Call, answers: &mut Queue<Answer>) {
             done(machine.rename(opened(from_dir), &from, opened(to_dir), &to))
         }
         Ask::Remove { dir, name, directory } => done(machine.remove(opened(dir), &name, directory)),
-        Ask::MakeDirectory { dir, name } => done(machine.make_directory(opened(dir), &name)),
+        Ask::MakeDirectory { dir, name, mode } => done(machine.make_directory(opened(dir), &name, mode)),
         Ask::List { dir, most, room } => match machine.list(opened(dir), most, room) {
             Ok(listed) => {
                 let mut entries = Vec::with_capacity(listed.len());
@@ -136,6 +136,7 @@ fn done(result: Result<(), Refusal>) -> Result<Reply, Error> {
 /// one the kernel's contract gives when none is.
 const fn how_of(how: OpenHow) -> How {
     match how {
+        OpenHow::PathNoFollow => How::PathNoFollow,
         OpenHow::Read => How::Read,
         OpenHow::ReadNoFollow => How::ReadNoFollow,
         OpenHow::Directory => How::Directory,

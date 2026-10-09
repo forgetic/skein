@@ -12,6 +12,7 @@ mod kernel;
 mod layer;
 mod listener;
 mod output;
+mod private;
 mod process;
 mod signals;
 mod store;

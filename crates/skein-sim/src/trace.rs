@@ -127,6 +127,7 @@ pub enum Summary {
     MakeDirectory {
         dir: Fd,
         name: Text,
+        mode: u32,
     },
     List {
         fd: Fd,
@@ -224,7 +225,9 @@ impl Summary {
             Op::Remove { dir, name, directory } => {
                 Summary::Remove { dir: *dir, name: Text::of(name), directory: *directory }
             }
-            Op::MakeDirectory { dir, name } => Summary::MakeDirectory { dir: *dir, name: Text::of(name) },
+            Op::MakeDirectory { dir, name, mode } => {
+                Summary::MakeDirectory { dir: *dir, name: Text::of(name), mode: *mode }
+            }
             Op::List { fd, entries, names } => Summary::List { fd: *fd, entries: entries.len(), names: names.len() },
             Op::Spawn { spawn } => {
                 Summary::Spawn { root: spawn.root, program: Text::of(&spawn.program), pipes: spawn.pipes.len() }

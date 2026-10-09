@@ -29,6 +29,19 @@ pub struct Residue {
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum Request {
+    /// Makes a directory beneath the owner's root: `Made` or `Failed`.
+    MakeDirectory {
+        owner: Token,
+        root: Token,
+        path: Box<[u8]>,
+        mode: u32,
+    },
+    /// Opens or makes a private root: `Opened`, `Refused` or `Failed` (io.md, 5.3).
+    OpenPrivate {
+        owner: Token,
+        root: Token,
+        path: Box<[u8]>,
+    },
     Create {
         owner: Token,
         root: Fd,
@@ -139,8 +152,32 @@ pub struct Entry {
     pub kind: crate::kernel::Kind,
 }
 
+/// The unsafe metadata io found before reading a private root or file (io.md, 5.3).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unsafe {
+    /// The requested name or a parent is a symbolic link.
+    Link,
+    /// The opened root is not a directory or its file is not regular.
+    Kind(crate::kernel::Kind),
+    /// The opened node has these group or other permission bits.
+    Mode(u32),
+    /// The opened file has this link count, rather than one.
+    Links(u32),
+    /// The opened node belongs to someone other than the configured effective user.
+    Owner { found: u32, expected: u32 },
+}
+
 #[derive(PartialEq, Eq, Debug)]
 pub enum Event {
+    /// The owner's directory request made its directory.
+    Made {
+        owner: Token,
+    },
+    /// The private root or load was refused unread with this unsafe metadata.
+    Refused {
+        owner: Token,
+        found: Unsafe,
+    },
     Opened {
         owner: Token,
         file: Token,
@@ -220,7 +257,9 @@ impl Event {
     #[must_use]
     pub const fn owner(&self) -> Token {
         match self {
-            Event::Opened { owner, .. }
+            Event::Made { owner }
+            | Event::Refused { owner, .. }
+            | Event::Opened { owner, .. }
             | Event::Loaded { owner, .. }
             | Event::Scanned { owner, .. }
             | Event::Stored { owner, .. }

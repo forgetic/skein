@@ -22,8 +22,8 @@ const MOST_LINKS: u32 = 40;
 /// heap; no test writes a file near this.
 const LARGEST_FILE: usize = 64 << 20;
 
-/// The owner's permission bits, which are all the machine checks: the
-/// process is the owner of everything beneath its roots.
+/// Permission bits checked for the configured user: owner bits for its nodes,
+/// other bits otherwise. This minimal machine does not model groups.
 const READ: u32 = 0o4;
 const WRITE: u32 = 0o2;
 const SEARCH: u32 = 0o1;
@@ -58,6 +58,8 @@ impl Opened {
 /// How something is opened.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum How {
+    /// The entry itself, without reading it; links are refused only in its parents.
+    PathNoFollow,
     /// An existing file or directory, to read: a final symbolic link is
     /// followed.
     Read,
@@ -97,7 +99,7 @@ pub struct Facts {
     pub size: u64,
     /// Its permission bits.
     pub mode: u32,
-    /// The minimal machine uses user ID 1000 for every node.
+    /// The node user ID, independent of the configured effective user.
     pub owner: u32,
     pub links: u32,
 }
@@ -125,10 +127,11 @@ pub enum Refusal {
 }
 
 /// What a scenario lays beneath a new root: a path relative to it, whose
-/// directories come earlier in the list, what it is, and its mode, of which
-/// the owner's bits count.
+/// directories come earlier in the list, its kind, owner and permission bits.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Item {
+    /// A planted inode owner; absent means the effective user. Hard links keep their target's owner.
+    pub owner: Option<u32>,
     pub path: Vec<u8>,
     pub made: Made,
     pub mode: u32,
@@ -153,37 +156,43 @@ impl Item {
     /// A file holding `bytes`, mode `0o644`.
     #[must_use]
     pub fn file(path: &[u8], bytes: &[u8]) -> Item {
-        Item { path: path.to_vec(), made: Made::File(bytes.to_vec()), mode: 0o644 }
+        Item { owner: None, path: path.to_vec(), made: Made::File(bytes.to_vec()), mode: 0o644 }
     }
 
     /// A directory, mode `0o755`.
     #[must_use]
     pub fn directory(path: &[u8]) -> Item {
-        Item { path: path.to_vec(), made: Made::Directory, mode: 0o755 }
+        Item { owner: None, path: path.to_vec(), made: Made::Directory, mode: 0o755 }
     }
 
     /// A symbolic link to `target`.
     #[must_use]
     pub fn link(path: &[u8], target: &[u8]) -> Item {
-        Item { path: path.to_vec(), made: Made::Link(target.to_vec()), mode: 0o777 }
+        Item { owner: None, path: path.to_vec(), made: Made::Link(target.to_vec()), mode: 0o777 }
     }
 
     /// A second name for the file already laid at `target`, relative to the root.
     #[must_use]
     pub fn hard_link(path: &[u8], target: &[u8]) -> Item {
-        Item { path: path.to_vec(), made: Made::HardLink(target.to_vec()), mode: 0 }
+        Item { owner: None, path: path.to_vec(), made: Made::HardLink(target.to_vec()), mode: 0 }
     }
 
     /// A FIFO, mode `0o644`.
     #[must_use]
     pub fn fifo(path: &[u8]) -> Item {
-        Item { path: path.to_vec(), made: Made::Fifo, mode: 0o644 }
+        Item { owner: None, path: path.to_vec(), made: Made::Fifo, mode: 0o644 }
     }
 
     /// A device, mode `0o666`.
     #[must_use]
     pub fn device(path: &[u8]) -> Item {
-        Item { path: path.to_vec(), made: Made::Device, mode: 0o666 }
+        Item { owner: None, path: path.to_vec(), made: Made::Device, mode: 0o666 }
+    }
+
+    /// The same, planted as another user's node.
+    #[must_use]
+    pub fn owner(self, owner: u32) -> Item {
+        Item { owner: Some(owner), ..self }
     }
 
     /// The same, with `mode`.
@@ -197,8 +206,9 @@ type NodeId = u64;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Node {
+    owner: u32,
     body: Body,
-    /// Its permission bits, of which the machine checks the owner's.
+    /// Owner or other bits are checked against the configured effective user.
     mode: u32,
     /// The directory holding a directory: what `..` leads to.
     parent: Option<NodeId>,
@@ -266,7 +276,14 @@ impl Default for Machine {
 impl Machine {
     #[must_use]
     pub fn new() -> Machine {
+        Self::for_user(1000)
+    }
+
+    /// A filesystem whose newly created nodes belong to this effective user.
+    #[must_use]
+    pub fn for_user(effective_user: u32) -> Machine {
         let top = Node {
+            owner: effective_user,
             body: Body::Directory { entries: BTreeMap::new(), removed: false },
             mode: NEW_DIRECTORY,
             parent: None,
@@ -282,7 +299,7 @@ impl Machine {
             handles: BTreeMap::new(),
             next_handle: 1,
             top: 0,
-            owner: 1000,
+            owner: effective_user,
             roots: 0,
         }
     }
@@ -318,7 +335,11 @@ impl Machine {
                 Made::Fifo => Body::Special(Is::Fifo),
                 Made::Device => Body::Special(Is::Device),
             };
-            self.make(parent, Box::from(last), body, item.mode);
+            let laid = self.make(parent, Box::from(last), body, item.mode);
+            if let Some(owner) = item.owner {
+                self.node_mut(laid).owner = owner;
+                self.durable_nodes.get_mut(&laid).expect("laid durable node").owner = owner;
+            }
         }
         // The laid scenario is the disk's initial durable state.
         self.durable_nodes = self.nodes.clone();
@@ -338,18 +359,19 @@ impl Machine {
     pub fn open(&mut self, root: Opened, path: &[u8], how: How) -> Result<Opened, Refusal> {
         let root = self.handle(root).node;
         let node = match how {
-            How::Read | How::ReadNoFollow | How::Directory | How::DirectoryNoFollow => {
-                let no_follow = matches!(how, How::ReadNoFollow | How::DirectoryNoFollow);
-                let found = self.resolve(root, path, false, no_follow)?;
+            How::PathNoFollow | How::Read | How::ReadNoFollow | How::Directory | How::DirectoryNoFollow => {
+                let path_only = matches!(how, How::PathNoFollow);
+                let no_follow = path_only || matches!(how, How::ReadNoFollow | How::DirectoryNoFollow);
+                let found = self.resolve_path(root, path, false, no_follow, path_only)?;
                 let node = found.node.ok_or(Refusal::NotFound)?;
                 if (found.slash || matches!(how, How::Directory | How::DirectoryNoFollow)) && !self.is_directory(node) {
                     return Err(Refusal::NotADirectory);
                 }
-                if !self.may(node, READ) {
+                if !path_only && !self.may(node, READ) {
                     return Err(Refusal::Permission);
                 }
                 // Opened without blocking, then refused for what it is.
-                if let Body::Special(_) = self.node(node).body {
+                if !path_only && let Body::Special(_) = self.node(node).body {
                     return Err(Refusal::NotAFile);
                 }
                 node
@@ -524,7 +546,7 @@ impl Machine {
     pub fn stat(&self, file: Opened) -> Facts {
         let node = self.node(self.handle(file).node);
         let mode = node.mode;
-        let owner = self.owner;
+        let owner = node.owner;
         let links = node.links;
         match &node.body {
             Body::File(bytes) => Facts {
@@ -535,7 +557,10 @@ impl Machine {
                 links,
             },
             Body::Directory { .. } => Facts { is: Is::Directory, size: 0, mode, owner, links },
-            Body::Link(_) | Body::Special(_) => fail("a handle is never to a link, a FIFO or a device"),
+            Body::Link(target) => {
+                Facts { is: Is::Link, size: u64::try_from(target.len()).expect("bounded target"), mode, owner, links }
+            }
+            Body::Special(is) => Facts { is: *is, size: 0, mode, owner, links },
         }
     }
 
@@ -619,7 +644,8 @@ impl Machine {
     }
 
     /// Makes the directory `name` in the one `dir` has open (`mkdirat`).
-    pub fn make_directory(&mut self, dir: Opened, name: &[u8]) -> Result<(), Refusal> {
+    pub fn make_directory(&mut self, dir: Opened, name: &[u8], mode: u32) -> Result<(), Refusal> {
+        assert_eq!(mode & !PERMISSIONS, 0, "only permission bits in a directory mode");
         let dir = self.handle(dir).node;
         self.searchable(dir)?;
         if self.look_up(dir, name)?.is_some() {
@@ -629,7 +655,7 @@ impl Machine {
             return Err(Refusal::Permission);
         }
         let body = Body::Directory { entries: BTreeMap::new(), removed: false };
-        self.make(dir, Box::from(name), body, NEW_DIRECTORY & !UMASK);
+        self.make(dir, Box::from(name), body, mode & !UMASK);
         Ok(())
     }
 
@@ -692,6 +718,17 @@ impl Machine {
     /// `create` follows no final link, and refuses a final `/` before it
     /// looks the last name up, as `O_CREAT` does.
     fn resolve(&self, root: NodeId, path: &[u8], create: bool, no_follow: bool) -> Result<Found, Refusal> {
+        self.resolve_path(root, path, create, no_follow, false)
+    }
+
+    fn resolve_path(
+        &self,
+        root: NodeId,
+        path: &[u8],
+        create: bool,
+        no_follow: bool,
+        path_only: bool,
+    ) -> Result<Found, Refusal> {
         if path.is_empty() {
             return Err(Refusal::NotFound);
         }
@@ -741,6 +778,9 @@ impl Machine {
                 };
             };
             match &self.node(node).body {
+                Body::Link(_) if no_follow && path_only && last && !slash => {
+                    return Ok(Found { parent: dir, name: Some(name), node: Some(node), slash });
+                }
                 Body::Link(_) if no_follow => return Err(Refusal::Loop),
                 Body::Link(target) if !last || !create => {
                     links = links.checked_add(1).expect("fewer than 2^32 links");
@@ -827,9 +867,21 @@ impl Machine {
             let parent = self.node_mut(parent);
             parent.links = parent.links.checked_add(1).expect("bounded directory links");
         }
-        self.durable_nodes
-            .insert(id, Node { body: durable_body, mode: mode & PERMISSIONS, parent: parent_of, named: true, links });
-        self.nodes.insert(id, Node { body, mode: mode & PERMISSIONS, parent: parent_of, named: true, links });
+        self.durable_nodes.insert(
+            id,
+            Node {
+                owner: self.owner,
+                body: durable_body,
+                mode: mode & PERMISSIONS,
+                parent: parent_of,
+                named: true,
+                links,
+            },
+        );
+        self.nodes.insert(
+            id,
+            Node { owner: self.owner, body, mode: mode & PERMISSIONS, parent: parent_of, named: true, links },
+        );
         let previous = self.entries_mut(parent).insert(name, id);
         assert!(previous.is_none(), "a name is made only where none is");
         id
@@ -933,7 +985,9 @@ impl Machine {
 
     /// Whether the owner may do all of `bits` to `node`.
     fn may(&self, node: NodeId, bits: u32) -> bool {
-        (self.node(node).mode >> 6_u32) & bits == bits
+        let node = self.node(node);
+        let shift = if node.owner == self.owner { 6_u32 } else { 0_u32 };
+        (node.mode >> shift) & bits == bits
     }
 }
 

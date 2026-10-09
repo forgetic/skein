@@ -7,7 +7,9 @@
 //! `takes` is true; `up` handles one completion; `expire` settles a deadline.
 //! Each admitted request produces one terminal event after owned descriptors
 //! are closed. Loads refuse excess bytes; scans retain a name-order prefix
-//! within their entry and byte caps and count all omitted entries.
+//! within their entry and byte caps and count all omitted entries. Private
+//! roots keep their verified effective user beside the descriptor; loads
+//! check metadata before reading and stores make temporaries mode 0600 (5.3).
 
 #![expect(clippy::disallowed_types, reason = "read and directory buffers are bounded by FileIo's limits")]
 #![expect(clippy::disallowed_macros, reason = "fixed and limit-sized kernel buffers need initialized storage")]
@@ -20,6 +22,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use skein_lib::{Duration, Map, Queue, Time, Token};
 
+mod private;
 mod store;
 
 #[derive(Debug)]
@@ -122,6 +125,7 @@ enum Pending {
         more: u64,
     },
     Store(store::Store),
+    Private(private::Opening),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -157,6 +161,7 @@ impl Pending {
             | Pending::ScanListing { owner, .. }
             | Pending::ScanClosing { owner, .. } => *owner,
             Pending::Store(store) => store.owner(),
+            Pending::Private(opening) => opening.owner(),
         }
     }
 
@@ -186,15 +191,31 @@ impl Pending {
             | Pending::ScanListing { .. }
             | Pending::ScanClosing { .. } => false,
             Pending::Store(store) => store.can_cancel(),
+            Pending::Private(opening) => opening.can_cancel(),
         }
     }
 }
 
-/// A bounded file driver. It takes one request at a time. A request has one
-/// terminal event, including when a short transfer takes several kernel ops.
+#[derive(Debug)]
+struct Loading {
+    user: u32,
+    root: Fd,
+    path: Box<[u8]>,
+}
+
+/// An owned descriptor and, for verified private roots, its effective user.
+#[derive(Debug)]
+struct Opened {
+    fd: Fd,
+    private_owner: Option<u32>,
+}
+
+/// A bounded file driver with one terminal per owner request (io.md, section 5).
 #[derive(Debug)]
 pub struct FileIo {
-    files: Map<Token, Fd>,
+    files: Map<Token, Opened>,
+    effective_user: Option<u32>,
+    loading: Option<Loading>,
     next_file: u64,
     next_op: u64,
     pending: Option<Pending>,
@@ -227,7 +248,7 @@ impl FileIo {
             return None;
         }
 
-        let file_map = Map::<Token, Fd>::worst_case(files)?;
+        let file_map = Map::<Token, Opened>::worst_case(files)?;
 
         // A list can append a full kernel batch before rejecting excess
         // entries. A scan can insert one transient entry into a vector
@@ -281,6 +302,8 @@ impl FileIo {
         );
         FileIo {
             files: Map::with_capacity(files),
+            effective_user: None,
+            loading: None,
             next_file: 1,
             next_op: 1,
             pending: None,
@@ -295,6 +318,14 @@ impl FileIo {
             stop: None,
             random: None,
         }
+    }
+
+    /// Configures the shell's effective user read once at startup (io.md, section 5.3).
+    #[must_use]
+    pub fn with_effective_user(mut self, effective_user: u32) -> FileIo {
+        assert!(self.takes() && self.files.is_empty(), "configure the user before adopting roots");
+        self.effective_user = Some(effective_user);
+        self
     }
 
     #[must_use]
@@ -348,13 +379,25 @@ impl FileIo {
     }
 
     fn file(&self, token: Token) -> Option<Fd> {
-        self.files.get(&token).copied()
+        Some(self.files.get(&token)?.fd)
+    }
+
+    fn private_owner(&self, token: Token) -> Option<u32> {
+        self.files.get(&token)?.private_owner
     }
 
     fn insert(&mut self, fd: Fd) -> Option<Token> {
+        self.insert_opened(Opened { fd, private_owner: None })
+    }
+
+    fn insert_private(&mut self, fd: Fd, user: u32) -> Option<Token> {
+        self.insert_opened(Opened { fd, private_owner: Some(user) })
+    }
+
+    fn insert_opened(&mut self, opened: Opened) -> Option<Token> {
         let token = Token::new(self.next_file);
         self.next_file = self.next_file.checked_add(1).expect("file tokens do not wrap");
-        self.files.insert(token, fd).ok()?;
+        self.files.insert(token, opened).ok()?;
         Some(token)
     }
 
@@ -384,9 +427,11 @@ pub fn down_until(
     subs: &mut Queue<Submit>,
 ) {
     assert!(io.takes(), "a file request completes before the next begins");
+    io.loading = None;
     io.deadline = Some(deadline);
     down_inner(io, request, events, subs);
     if io.pending.is_none() {
+        io.loading = None;
         io.deadline = None;
     }
 }
@@ -394,6 +439,13 @@ pub fn down_until(
 #[expect(clippy::too_many_lines, reason = "one exhaustive request match keeps file admission in one place")]
 fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
     match request {
+        Request::MakeDirectory { owner, root, path, mode } => {
+            private::start(io, owner, root, path, private::Action::Make { mode }, events, subs);
+        }
+        Request::OpenPrivate { owner, root, path } => match io.effective_user {
+            Some(user) => private::start(io, owner, root, path, private::Action::Private { user }, events, subs),
+            None => terminal_failure(events, owner, Error::InvalidArgument),
+        },
         Request::Create { owner, root, name, mode } => create(io, owner, root, name, mode, false, events, subs),
         Request::CreateNoFollow { owner, root, name, mode } => {
             create(io, owner, root, name, mode, true, events, subs);
@@ -424,8 +476,11 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
                 events.push(Event::Failed { owner, error: Error::InvalidArgument, committed: false, residue: None });
                 return;
             }
+            if let Some(user) = io.private_owner(root) {
+                io.loading = Some(Loading { user, root: fd, path: path.clone() });
+            }
             io.pending = Some(Pending::LoadOpening { owner, max });
-            let how = if no_follow { OpenHow::ReadNoFollow } else { OpenHow::Read };
+            let how = if no_follow || io.loading.is_some() { OpenHow::ReadNoFollow } else { OpenHow::Read };
             io.issue(Op::Open { root: fd, path, how }, subs);
         }
         Request::Scan { owner, root, path, max, max_bytes, no_follow } => {
@@ -494,12 +549,12 @@ fn down_inner(io: &mut FileIo, request: Request, events: &mut Queue<Event>, subs
             io.issue(Op::Sync { fd }, subs);
         }
         Request::Close { owner, file } => {
-            let Some(fd) = io.files.remove(&file) else {
+            let Some(opened) = io.files.remove(&file) else {
                 events.push(Event::Failed { owner, error: Error::NotFound, committed: false, residue: None });
                 return;
             };
             io.pending = Some(Pending::Close { owner });
-            io.issue(Op::Close { fd }, subs);
+            io.issue(Op::Close { fd: opened.fd }, subs);
         }
         Request::SyncDirectory { owner, root } => {
             io.pending = Some(Pending::Sync { owner });
@@ -612,6 +667,11 @@ pub fn cancel(io: &mut FileIo, owner: Token, subs: &mut Queue<Submit>) {
                 return;
             }
         }
+        Pending::Private(opening) => {
+            if !opening.can_abandon() {
+                return;
+            }
+        }
         Pending::Cleanup { .. } => return,
         Pending::Create { .. }
         | Pending::OpenRead { .. }
@@ -674,6 +734,7 @@ pub fn up(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs: 
         None => up_inner(io, complete, events, subs),
     }
     if io.pending.is_none() {
+        io.loading = None;
         io.deadline = None;
     }
 }
@@ -682,6 +743,7 @@ fn cancelled(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, sub
     let pending = io.pending.as_ref().expect("a cancelled completion has a request");
     let can_abandon = match pending {
         Pending::Store(store) => store.can_abandon(),
+        Pending::Private(opening) => opening.can_abandon(),
         Pending::OpenRead { .. }
         | Pending::Stat { .. }
         | Pending::ListOpening { .. }
@@ -708,7 +770,7 @@ fn cancelled(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, sub
     };
     let stop_won = match &complete.result {
         Err(Error::Cancelled) => match pending {
-            Pending::Store(_) => can_abandon,
+            Pending::Store(_) | Pending::Private(_) => can_abandon,
             Pending::Create { .. }
             | Pending::OpenRead { .. }
             | Pending::OpenDirectory { .. }
@@ -793,6 +855,10 @@ fn read_finished(complete: &Complete, max: u32, prior: usize) -> bool {
 fn stopped(io: &mut FileIo, complete: Complete, reason: Error, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
     let pending = io.pending.take().expect("a timed out completion has a request");
     let pending = match pending {
+        Pending::Private(opening) => {
+            private::stopped(io, opening, complete, reason, events, subs);
+            return;
+        }
         Pending::Store(store) => {
             store::stopped(io, store, complete, reason, events, subs);
             return;
@@ -845,7 +911,7 @@ fn stopped(io: &mut FileIo, complete: Complete, reason: Error, events: &mut Queu
         | Pending::ScanOpening { owner, .. }
         | Pending::ScanListing { owner, .. }
         | Pending::ScanClosing { owner, .. } => *owner,
-        Pending::Store(_) => unreachable!("store completion is handled separately"),
+        Pending::Store(_) | Pending::Private(_) => unreachable!("dedicated file completion is handled separately"),
     };
     let fd = match (pending, complete.result) {
         (
@@ -929,6 +995,10 @@ fn retain_scan_entry(
 fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs: &mut Queue<Submit>) {
     let pending = io.pending.take().expect("a completion has a request");
     let pending = match pending {
+        Pending::Private(opening) => {
+            private::up(io, opening, complete, events, subs);
+            return;
+        }
         Pending::Store(store) => {
             store::up(io, store, complete, events, subs);
             return;
@@ -968,6 +1038,19 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
                 io.issue(Op::Close { fd }, subs);
                 return;
             }
+            Pending::LoadOpening { owner, .. } => {
+                if error == Error::Permission
+                    && let Some(loading) = io.loading.take()
+                {
+                    private::denied_load(io, owner, loading, subs);
+                    return;
+                }
+                match private::unsafe_open(error, io.loading.is_some()) {
+                    Some(found) => events.push(Event::Refused { owner, found }),
+                    None => terminal_failure(events, owner, error),
+                }
+                return;
+            }
             Pending::Cleanup { owner, error } => {
                 terminal_failure(events, owner, error);
                 return;
@@ -984,12 +1067,11 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             | Pending::Remove { owner }
             | Pending::ListOpening { owner }
             | Pending::ListClosing { owner, .. }
-            | Pending::LoadOpening { owner, .. }
             | Pending::LoadClosing { owner, .. }
             | Pending::LoadTooLargeClosing { owner, .. }
             | Pending::ScanOpening { owner, .. }
             | Pending::ScanClosing { owner, .. } => owner,
-            Pending::Store(_) => unreachable!("store completion is handled separately"),
+            Pending::Store(_) | Pending::Private(_) => unreachable!("dedicated file completion is handled separately"),
         };
         events.push(Event::Failed { owner, error, committed: false, residue: None });
         return;
@@ -1034,7 +1116,13 @@ fn up_inner(io: &mut FileIo, complete: Complete, events: &mut Queue<Event>, subs
             io.issue(Op::Stat { fd }, subs);
         }
         (Pending::LoadStating { owner, fd, max }, Op::Stat { .. }, Done::Stat(stat)) => {
-            if stat.kind != crate::kernel::Kind::File {
+            let unsafe_found = match io.loading.as_ref() {
+                Some(loading) => private::unsafe_file(stat, loading.user),
+                None => None,
+            };
+            if let Some(found) = unsafe_found {
+                private::refuse_file(io, owner, fd, found, events, subs);
+            } else if stat.kind != crate::kernel::Kind::File {
                 io.pending = Some(Pending::Cleanup { owner, error: Error::IsADirectory });
                 io.issue(Op::Close { fd }, subs);
             } else if stat.size > u64::from(max) {

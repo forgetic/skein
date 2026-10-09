@@ -85,7 +85,7 @@ pub enum Ask {
     /// [`Reply::Done`].
     Remove { dir: Handle, name: Box<[u8]>, directory: bool },
     /// [`Reply::Done`].
-    MakeDirectory { dir: Handle, name: Box<[u8]> },
+    MakeDirectory { dir: Handle, name: Box<[u8]>, mode: u32 },
     /// The next entries of the directory, from where the last `List` of
     /// this handle stopped: at most `most`, their names `room` bytes
     /// together at most, and at least one while any is left. `room` is at

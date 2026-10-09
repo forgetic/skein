@@ -244,3 +244,18 @@ fn stat_keeps_the_owner_and_counts_hard_links_through_removal() {
     let process = std::fs::metadata("/proc/self").expect("the running user's process directory");
     assert_eq!(seen.root.owner, process.uid(), "statx retains the actual user ID");
 }
+
+#[test]
+fn path_only_metadata_needs_no_permission_on_its_entry() {
+    let status = std::fs::read_to_string("/proc/self/status").expect("Linux capability status");
+    let capabilities =
+        status.lines().find_map(|line| line.strip_prefix("CapEff:")).expect("effective capabilities").trim();
+    let capabilities = u64::from_str_radix(capabilities, 16).expect("hexadecimal effective capabilities");
+    let denial_expected = capabilities & (1_u64 << 1_u32) == 0;
+    if !denial_expected {
+        eprintln!(
+            "CAP_DAC_OVERRIDE bypasses mode 000: skipping only the Read-denial assertions; path-only Stat and Close are checked"
+        );
+    }
+    skein_conformance::path_metadata(&mut Ring::new(), denial_expected).check();
+}

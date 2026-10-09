@@ -266,3 +266,14 @@ fn an_open_through_dot_dot_racing_renames_is_submitted_again() {
     world.close(dir);
     world.settle();
 }
+
+#[test]
+#[should_panic(expected = "only Stat and Close may use a path-only descriptor")]
+fn path_only_descriptors_cannot_read() {
+    let scratch = Scratch::new("ring-path-only");
+    fs::write(scratch.path().join("file"), b"x").unwrap();
+    let mut world = World::new(4);
+    let root = root(scratch.path());
+    let path = open(&mut world, root, b"file", OpenHow::PathNoFollow);
+    world.run(Op::Read { fd: path, buf: Box::from([0; 1]), at: 0 });
+}
