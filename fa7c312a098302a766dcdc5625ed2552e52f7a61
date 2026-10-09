@@ -1,0 +1,9 @@
+Shared prerequisite04.per-call-reasoning final rebased-tip gate PASS
+Tested hash fa7c312a098302a766dcdc5625ed2552e52f7a61 parentfd094d71335fd60875cb887f649ad814e9a60c02
+Heavy scripts/check.sh /tmp/skein04-call-policy-gate.log; fmt, workspace alltargets clippy-Dwarnings, standalone skein-tls passed.
+Focused1644/3.446s run915e25f9-0107-4d77-83ad-715cdc364df0
+Fuzzy89/9.276s runec8334c5-c815-47ea-96d3-a30c141847b3
+Browser6/3.551s run488e7dbf-7045-41cf-a3b4-8daf4ba747e5
+Serial3/0.053s /tmp/skein04-call-policy-measure2.log
+Actual connectionStart/shared endpoint: models0/1 optin Dropped completions thenmodel2 nonoptin typed Opaque failure, one physical socket; both configured defaults. Explicit Codex byte-peer request bytes identical; Anthropic keeps typed overflow failure.
+No probe specified for this prerequisite. Clean main and isolated worktree at guarded ff merge.
