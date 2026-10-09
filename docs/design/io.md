@@ -544,7 +544,11 @@ run by io.
   sees the old file or the new, never part of either.
 - **The rename is the commit.**
   - Before it, a failure, a deadline or a cancel removes the temporary
-    before the one terminal, and the old file is as it was.
+    before the one terminal, and the old file is as it was. If the
+    temporary cannot be removed, as on a file system that has turned
+    read-only, the terminal says so and names it, and nothing waits on
+    it. The old file is still as it was, the next replace of the target
+    does not depend on the temporary, and a scan may remove it.
   - After it, the new file is in place. A failure of the directory's
     `Sync`, or its deadline, answers `Failed` saying that the replace
     committed: the new content is what a reader sees, and its durability
@@ -557,11 +561,18 @@ run by io.
 - **What a crash leaves:** the old file or the new, whole, and at most a
   temporary beside the target, named from it. The next replace of the
   target does not depend on it, and a scan may remove it.
-- **A version check, if asked.** The request may carry a digest of the
-  content it expects to replace. io checks it once more, just before the
-  rename, and a target that changed is answered `Conflict`, with nothing
-  replaced, so two writers of one file do not lose each other's updates
-  in silence.
+- **What the request expects of the target,** one of three, always
+  stated:
+  - `Any`: replace whatever is there, or nothing. No read of the old file
+    is needed, so a target io cannot read is replaced all the same;
+  - `Absent`: there must be no target. One that exists, readable or not,
+    is answered `Conflict`;
+  - `Digest`: the target must hold exactly the content with this digest.
+
+  io checks it once more, just before the rename. A target that changed,
+  or one io cannot read for `Digest`, is answered with nothing replaced:
+  `Conflict` or the read's fault. So two writers of one file do not lose
+  each other's updates in silence.
 - **The mode** is the old file's, or `0o600` for a private file (5.3).
 - **Its deadline** is the owner's, as for every whole-file operation. A
   replace that fails or times out before its rename removes its
