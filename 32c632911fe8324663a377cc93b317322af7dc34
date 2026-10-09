@@ -1,0 +1,14 @@
+01.tree-termination final committed/rebased-tip gate
+Commit: 32c632911fe8324663a377cc93b317322af7dc34
+Parent: e1536139ecd04ee68f54976adb973e4b8052fd45
+Heavy task473 scripts/check.sh PASS: fmt, workspace/all-targets clippy -Dwarnings,
+standalone skein-tls check; focused1550/1550 in2.955s
+(run358b4ff7-cbd3-48a6-ae87-5abfe32c0280); fuzzy86/86 in8.312s
+(run638ad76c-aca1-4c24-9d76-492fe13880c1); browser6/6 in3.728s
+(runc36bf483-959d-428c-8638-42d9438a927b).
+Serial --profile measure heavy459 end_to_end26/26 in0.823s
+(run954657e9-b44b-4cd8-86b9-3290d0634a17); leader-only TERM negative seam
+heavy457 fails expected Cleanup::Kill vs Terminate in0.032s
+(run2ad7a280-7e48-4dc6-97e7-3c5f031a4dd9), source restored afterward.
+The final compact Binary boxes TreeStatus, preserving existing consumer enum
+sizes without lint suppression or consumer source changes.
