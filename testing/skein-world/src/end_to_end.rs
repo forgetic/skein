@@ -77,8 +77,7 @@ pub struct Binary {
     pidfd: Option<Fd>,
     stderr: Option<Fd>,
     streams: Option<Streams>,
-    error_bytes: Vec<u8>,
-    error_limit: usize,
+    capture: Capture,
     status: Option<Exit>,
     wait_started: bool,
     reading: bool,
@@ -97,6 +96,34 @@ pub struct Binary {
     submissions: Queue<Submit>,
 }
 
+/// A bounded prefix and sticky overflow evidence, independent of pipe drainage.
+#[derive(Debug)]
+struct Capture {
+    bytes: Vec<u8>,
+    limit: usize,
+    overflowed: bool,
+}
+
+impl Capture {
+    fn new(limit: usize) -> Self {
+        Self { bytes: Vec::with_capacity(limit), limit, overflowed: false }
+    }
+
+    fn push(&mut self, bytes: &[u8], expectation: Expectation) {
+        let room = self.limit.checked_sub(self.bytes.len()).expect("capture stays within its cap");
+        if bytes.len() > room {
+            match expectation {
+                Expectation::Supervise => self.overflowed = true,
+                Expectation::EndsWithBinary | Expectation::Measure => {
+                    assert!(bytes.len() <= room, "binary stderr exceeds its scenario limit of {} bytes", self.limit);
+                }
+            }
+        }
+        let kept = bytes.len().min(room);
+        self.bytes.extend_from_slice(bytes.get(..kept).expect("capture fits within the completed read"));
+    }
+}
+
 impl Binary {
     /// Starts a binary after probing `io_uring`; temporary startup resources
     /// close before returning. `stderr_limit` bounds captured bytes, and an
@@ -108,6 +135,8 @@ impl Binary {
     /// Starts a binary with an explicit tree expectation; `force_walk` exercises
     /// the subreaper path even on a machine with delegated cgroups. The walk
     /// requires one observer per test process, since its counts are process-wide.
+    /// In `Supervise`, stderr overflow retains its bounded prefix and is reported
+    /// by `stderr_overflowed`; the referee owns termination while capture drains.
     pub fn start_with_tree(
         command: Command,
         mode: Mode,
@@ -175,8 +204,7 @@ impl Binary {
             pidfd: Some(pidfd),
             stderr: Some(stderr),
             streams: Some(streams),
-            error_bytes: Vec::new(),
-            error_limit: stderr_limit,
+            capture: Capture::new(stderr_limit),
             status: None,
             wait_started: false,
             reading: false,
@@ -256,7 +284,15 @@ impl Binary {
     /// What the child wrote to stderr; it is outside observation, not service state.
     #[must_use]
     pub fn stderr(&self) -> &[u8] {
-        &self.error_bytes
+        &self.capture.bytes
+    }
+
+    /// Whether supervised stderr exceeded its capture limit. The captured prefix
+    /// remains bounded and subsequent bytes drain without retention. This flag
+    /// stays set after settlement; the referee chooses the failure and tree ladder.
+    #[must_use]
+    pub const fn stderr_overflowed(&self) -> bool {
+        self.capture.overflowed
     }
 
     /// The ring's child-exit event, available before final descriptor closure.
@@ -291,14 +327,8 @@ impl Binary {
                 self.close(fd);
             } else {
                 let count = usize::try_from(count).expect("a read count fits memory");
-                let total = self.error_bytes.len().checked_add(count).expect("stderr length fits memory");
-                assert!(
-                    total <= self.error_limit,
-                    "binary stderr exceeds its scenario limit of {} bytes",
-                    self.error_limit
-                );
-                self.error_bytes
-                    .extend_from_slice(buf.get(..count).expect("the kernel returned no more than requested"));
+                let bytes = buf.get(..count).expect("the kernel returned no more than requested");
+                self.capture.push(bytes, self.expectation);
             }
         } else if let Op::Signal { .. } = complete.kind {
             self.signalling = false;
@@ -448,7 +478,7 @@ impl Host for Binary {
     }
 
     fn worst_case(&self) -> u64 {
-        u64::try_from(self.error_limit)
+        u64::try_from(self.capture.limit)
             .expect("stderr cap fits u64")
             .checked_add(32 * 1024)
             .expect("observer memory fits u64")
@@ -456,5 +486,41 @@ impl Host for Binary {
 
     fn operations(&self) -> u32 {
         8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Capture, Expectation};
+
+    #[test]
+    fn supervised_capture_keeps_an_exact_prefix_and_overflow_stays_set() {
+        let mut capture = Capture::new(5);
+        capture.push(b"ab", Expectation::Supervise);
+        capture.push(b"cde", Expectation::Supervise);
+        assert!(!capture.overflowed, "exactly the cap is not overflow");
+        capture.push(b"fg", Expectation::Supervise);
+        capture.push(b"later", Expectation::Supervise);
+        capture.push(b"", Expectation::Supervise);
+        assert_eq!(capture.bytes, b"abcde");
+        assert_eq!(capture.bytes.capacity(), 5, "overflow never grows the capture allocation");
+        assert!(capture.overflowed, "overflow remains visible after subsequent reads and EOF");
+    }
+
+    #[test]
+    fn a_zero_capture_distinguishes_no_bytes_from_discarded_bytes() {
+        let mut capture = Capture::new(0);
+        capture.push(b"", Expectation::Supervise);
+        assert!(!capture.overflowed);
+        capture.push(b"x", Expectation::Supervise);
+        assert!(capture.overflowed);
+        assert!(capture.bytes.is_empty());
+        assert_eq!(capture.bytes.capacity(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "binary stderr exceeds its scenario limit of 2 bytes")]
+    fn measured_capture_keeps_the_legacy_scenario_assertion() {
+        Capture::new(2).push(b"abc", Expectation::Measure);
     }
 }

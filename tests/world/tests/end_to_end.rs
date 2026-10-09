@@ -506,6 +506,7 @@ fn a_failed_binary_start_restores_the_original_subreaper_setting() {
 #[derive(Clone, Copy)]
 enum SupervisedTrigger {
     Ready,
+    StderrOverflow,
     LeaderExit,
     Bound,
     Never,
@@ -526,6 +527,7 @@ impl Referee<Process> for SupervisedJudge {
         if self.term_at.is_none() {
             let ready = match self.trigger {
                 SupervisedTrigger::Ready => ready_descendant(child.stderr()).is_some(),
+                SupervisedTrigger::StderrOverflow => child.stderr_overflowed(),
                 SupervisedTrigger::LeaderExit => child.exit_status().is_some(),
                 SupervisedTrigger::Bound => now >= Time::ZERO.saturating_add(Duration::from_millis(10)),
                 SupervisedTrigger::Never => false,
@@ -563,6 +565,7 @@ impl Referee<Process> for SupervisedJudge {
         } else {
             match self.trigger {
                 SupervisedTrigger::Ready => ready_descendant(child.stderr()).is_some().then_some(now),
+                SupervisedTrigger::StderrOverflow => child.stderr_overflowed().then_some(now),
                 SupervisedTrigger::LeaderExit => child.exit_status().is_some().then_some(now),
                 SupervisedTrigger::Bound => Some(Time::ZERO.saturating_add(Duration::from_millis(10))),
                 SupervisedTrigger::Never => None,
@@ -582,7 +585,10 @@ impl Referee<Process> for SupervisedJudge {
         } else {
             match self.trigger {
                 SupervisedTrigger::LeaderExit => self.saw_retained_exit,
-                SupervisedTrigger::Ready | SupervisedTrigger::Bound | SupervisedTrigger::Never => true,
+                SupervisedTrigger::Ready
+                | SupervisedTrigger::StderrOverflow
+                | SupervisedTrigger::Bound
+                | SupervisedTrigger::Never => true,
             }
         }
     }
@@ -756,4 +762,83 @@ fn a_supervised_natural_stream_drains_before_terminal_counts() {
     assert_eq!(child.stderr(), b"diagnostic");
     assert_eq!(child.tree_status().cleanup(), Cleanup::None);
     assert_tree_counted(child, false);
+}
+
+fn capture_run(command: Command, limit: usize, trigger: SupervisedTrigger, force_walk: bool) -> real::Outcome<Process> {
+    use skein_world::end_to_end::Expectation;
+
+    let binary = Binary::start_with_tree(command, Mode::Pipes, limit, Expectation::Supervise, force_walk)
+        .expect("a supervised capture starts");
+    let mut world = real::World::new(SupervisedJudge {
+        trigger,
+        term_at: None,
+        kill_at: None,
+        next: None,
+        saw_retained_exit: false,
+        saw_grace: false,
+    });
+    world.spawn_with_fds(binary.descriptors(), || Process::Child(binary));
+    world.run(&Clock::new(), Duration::from_secs(1))
+}
+
+#[test]
+fn supervised_stderr_overflow_keeps_a_bounded_prefix_and_drains_a_natural_tree() {
+    use skein_world::end_to_end::Cleanup;
+
+    for force_walk in [true, false] {
+        let outcome = capture_run(
+            command("printf 'prefix:' >&2; head -c 262144 /dev/zero >&2; exit 17"),
+            8,
+            SupervisedTrigger::Never,
+            force_walk,
+        );
+        let child = tree_child(&outcome);
+        assert_eq!(child.stderr(), b"prefix:\0");
+        assert!(child.stderr_overflowed());
+        assert_eq!(child.exit_status(), Some(Exit::Code(17)));
+        assert_eq!(child.tree_status().cleanup(), Cleanup::None);
+        assert!(child.counts().is_some(), "draining never leaves the writer blocked at its pipe cap");
+        assert!(child.is_empty());
+    }
+}
+
+#[test]
+fn supervised_stderr_limits_distinguish_exact_capture_empty_capture_and_overflow() {
+    for (bytes, limit, prefix, overflow) in
+        [("", 0, "", false), ("12345678", 8, "12345678", false), ("123456789", 8, "12345678", true), ("x", 0, "", true)]
+    {
+        let outcome = capture_run(command(&format!("printf '{bytes}' >&2")), limit, SupervisedTrigger::Never, true);
+        let child = tree_child(&outcome);
+        assert_eq!(child.stderr(), prefix.as_bytes());
+        assert_eq!(child.stderr_overflowed(), overflow);
+        assert!(child.counts().is_some());
+    }
+}
+
+#[test]
+fn supervised_stderr_overflow_is_observed_before_the_referees_term_grace_and_whole_tree_kill() {
+    use skein_world::end_to_end::Cleanup;
+
+    for force_walk in [true, false] {
+        let outcome = capture_run(fixture("supervise-ignore"), 8, SupervisedTrigger::StderrOverflow, force_walk);
+        let child = tree_child(&outcome);
+        assert_eq!(child.stderr().len(), 8);
+        assert!(child.stderr_overflowed());
+        assert_eq!(child.exit_status(), Some(Exit::Signal(15)));
+        assert_eq!(child.tree_status().cleanup(), Cleanup::Kill);
+        assert!(child.tree_status().forced_cleanup);
+        assert!(!child.tree_status().killed_pids.is_empty());
+        assert!(child.counts().is_some(), "the keeper and all descendants genuinely settled");
+        assert!(child.is_empty());
+    }
+}
+
+#[test]
+#[should_panic(expected = "binary stderr exceeds its scenario limit of 8 bytes")]
+fn legacy_stderr_capture_still_fails_the_scenario_at_overflow() {
+    let binary = Binary::start(command("printf '123456789' >&2"), Mode::Pipes, 8).expect("a legacy capture starts");
+    let mut world = real::World::new(Judge { signal: false, sent: false, act_at: None });
+    world.spawn_with_fds(binary.descriptors(), || Process::Child(binary));
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    assert!(outcome.procs.iter().all(Host::is_empty));
 }
