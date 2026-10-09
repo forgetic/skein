@@ -134,6 +134,7 @@ impl World {
         world.component.down(
             &env,
             Request::Start {
+                drop_reasoning: false,
                 call: Token::new(7),
                 endpoint: 0,
                 prompt: call.prompt,

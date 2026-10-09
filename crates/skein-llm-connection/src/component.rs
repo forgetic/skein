@@ -157,6 +157,29 @@ impl Component {
         prompt: Prompt,
         credential: Credential,
     ) -> Result<llm::client::Client, Refusal> {
+        self.admit_policy(call, endpoint, prompt, credential, None)
+    }
+
+    /// Checks one call with its owner's explicit model policy before any IO.
+    pub fn admit_with_reasoning_drop(
+        &self,
+        call: Token,
+        endpoint: u32,
+        prompt: Prompt,
+        credential: Credential,
+        enabled: bool,
+    ) -> Result<llm::client::Client, Refusal> {
+        self.admit_policy(call, endpoint, prompt, credential, Some(enabled))
+    }
+
+    fn admit_policy(
+        &self,
+        call: Token,
+        endpoint: u32,
+        prompt: Prompt,
+        credential: Credential,
+        drop_reasoning: Option<bool>,
+    ) -> Result<llm::client::Client, Refusal> {
         assert!(self.lifecycle != Lifecycle::Closed, "an owner must not request work after Closed");
         match self.lifecycle {
             Lifecycle::Live => {}
@@ -174,7 +197,11 @@ impl Component {
             Err(error) => return Err(Refusal::Client(error)),
         }
         let input = Call { owner: call, prompt, credential, endpoint: destination.llm.clone() };
-        match llm::client::Client::prepare(input, &destination.limits) {
+        let enabled = match drop_reasoning {
+            Some(enabled) => enabled,
+            None => destination.limits.drop_reasoning,
+        };
+        match llm::client::Client::prepare_with_reasoning_drop(input, &destination.limits, enabled) {
             Ok(client) => Ok(client),
             Err(error) => Err(Refusal::Client(error)),
         }
@@ -203,8 +230,8 @@ impl Component {
                 self.request_close(true);
                 self.fire(env, up, io);
             }
-            Request::Start { call, endpoint, prompt, credential, deadlines } => {
-                self.start(env, call, endpoint, prompt, credential, deadlines, up, io);
+            Request::Start { call, endpoint, prompt, credential, deadlines, drop_reasoning } => {
+                self.start(env, call, endpoint, prompt, credential, deadlines, drop_reasoning, up, io);
             }
             Request::Next { call } => {
                 for index in 0..self.waiting.len() {
@@ -489,10 +516,11 @@ impl Component {
         prompt: Prompt,
         credential: Credential,
         deadlines: crate::Deadlines,
+        drop_reasoning: bool,
         up: &mut Queue<Event>,
         io: &mut Queue<IoRequest>,
     ) {
-        let prepared = match self.admit(call, endpoint, prompt, credential) {
+        let prepared = match self.admit_with_reasoning_drop(call, endpoint, prompt, credential, drop_reasoning) {
             Ok(client) => client,
             Err(why) => {
                 up.push(Event::Refused { call, why });

@@ -59,6 +59,7 @@ fn full_pool_stays_within_its_checked_bound() {
     component.down(
         &env,
         Request::Start {
+            drop_reasoning: false,
             call: Token::new(7),
             endpoint: 0,
             prompt: first.prompt,
@@ -71,6 +72,7 @@ fn full_pool_stays_within_its_checked_bound() {
     component.down(
         &env,
         Request::Start {
+            drop_reasoning: false,
             call: Token::new(8),
             endpoint: 0,
             prompt: second.prompt,
@@ -84,6 +86,7 @@ fn full_pool_stays_within_its_checked_bound() {
     component.down(
         &env,
         Request::Start {
+            drop_reasoning: false,
             call: Token::new(9),
             endpoint: 0,
             prompt: third.prompt,

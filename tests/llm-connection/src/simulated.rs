@@ -132,6 +132,7 @@ impl Client {
             component.down(
                 &env,
                 Request::Start {
+                    drop_reasoning: false,
                     call: token,
                     endpoint: 0,
                     prompt,

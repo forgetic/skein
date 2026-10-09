@@ -128,6 +128,7 @@ fn start(component: &mut Component, up: &mut Queue<Event>, io: &mut Queue<Lower>
     component.down(
         &env,
         Request::Start {
+            drop_reasoning: false,
             call: Token::new(7),
             endpoint: 0,
             prompt: prompt(),
@@ -213,6 +214,7 @@ fn connect_and_whole_deadlines_fail_unsent_calls_once() {
         component.down(
             &start,
             Request::Start {
+                drop_reasoning: false,
                 call: Token::new(7),
                 endpoint: 0,
                 prompt: prompt(),
@@ -285,6 +287,7 @@ fn a_start_past_calls_is_refused_by_name() {
     component.down(
         &env,
         Request::Start {
+            drop_reasoning: false,
             call: Token::new(8),
             endpoint: 0,
             prompt: prompt(),
@@ -359,6 +362,7 @@ fn plaintext_connect_starts_http_and_never_arms_a_handshake_deadline() {
     component.down(
         &env,
         Request::Start {
+            drop_reasoning: false,
             call: Token::new(7),
             endpoint: 0,
             prompt: prompt(),
@@ -423,6 +427,7 @@ fn a_start_after_closed_is_an_asserted_owner_bug() {
     component.down(
         &env,
         Request::Start {
+            drop_reasoning: false,
             call: Token::new(7),
             endpoint: 0,
             prompt: prompt(),
@@ -452,6 +457,7 @@ fn abort_starts_one_binding_per_entrance_and_waits_for_physical_settlement() {
         component.down(
             &env,
             Request::Start {
+                drop_reasoning: false,
                 call: Token::new(call),
                 endpoint: 0,
                 prompt: prompt(),
@@ -637,6 +643,7 @@ fn two_endpoints_drive_uploads_with_their_own_client_limits() {
         component.down(
             &env,
             Request::Start {
+                drop_reasoning: false,
                 call: Token::new(u64::from(index) + 7),
                 endpoint: index,
                 prompt: prompt(),

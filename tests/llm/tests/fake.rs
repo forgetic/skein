@@ -810,3 +810,39 @@ fn actual_request_heads_match_the_independent_http_reader_on_both_dialects() {
         assert_eq!(completion(&world).stop, skein_llm::Stop::ToolUse);
     }
 }
+
+#[test]
+fn explicit_call_reasoning_policy_overrides_the_default_without_changing_wire_bytes() {
+    let provider = skein_llm::Provider::OpenAiCodex;
+    let opaque = br#"{"type":"reasoning","id":"r","encrypted_content":"signed","summary":[]}"#;
+    let mut request_bytes = None;
+    for enabled in [false, true] {
+        let mut bounds = limits();
+        bounds.drop_reasoning = !enabled;
+        bounds.dialect.opaque_bytes = u32::try_from(opaque.len() - 1).expect("bounded fixture");
+        let input = input(provider, 71);
+        let endpoint = input.endpoint.clone();
+        let credential = skein_llm::Credential {
+            access_token: input.credential.access_token.clone(),
+            account_id: input.credential.account_id.clone(),
+        };
+        let machine =
+            client::Client::prepare_with_reasoning_drop(input, &bounds, enabled).expect("explicit policy admission");
+        let mut world = Exchange::prepared(machine, endpoint, credential, bounds, opaque_script(opaque));
+        world.start();
+        world.run();
+        match &request_bytes {
+            Some(expected) => assert_eq!(&world.requests, expected, "policy never changes provider request bytes"),
+            None => request_bytes = Some(world.requests.clone()),
+        }
+        if enabled {
+            assert!(matches!(completion(&world).content.as_ref(), [Block::Dropped { .. }, Block::Text { .. }]));
+        } else {
+            assert!(world.seen.iter().any(|event| matches!(
+                event,
+                client::Event::Failed { failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Opaque, .. }, .. }
+            )));
+            assert!(!world.seen.iter().any(|event| matches!(event, client::Event::Completed { .. })));
+        }
+    }
+}

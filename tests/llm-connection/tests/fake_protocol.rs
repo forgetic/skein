@@ -113,6 +113,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
     component.down(
         &env,
         Request::Start {
+            drop_reasoning: false,
             call: Token::new(7),
             endpoint: 0,
             prompt: call.prompt,

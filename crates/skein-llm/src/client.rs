@@ -29,6 +29,7 @@ pub struct Limits {
     /// A non-success response body. At its cap the connection is closed.
     pub error_bytes: u32,
     /// Drop Codex reasoning past the opaque cap; Anthropic thinking still fails.
+    /// Default for direct prepare; explicit per-call preparation overrides it.
     pub drop_reasoning: bool,
     /// The endpoint model's declared completion ceiling, in tokens.
     pub declared_output_tokens: u32,
@@ -217,6 +218,13 @@ impl Client {
     /// Validates and measures before touching a connection or holding the
     /// final encoded body. The caller binds its transport to this endpoint.
     pub fn prepare(input: Call, limits: &Limits) -> Result<Client, Error> {
+        Self::prepare_with_reasoning_drop(input, limits, limits.drop_reasoning)
+    }
+
+    /// Prepares one call with an explicit Codex reasoning policy. False keeps
+    /// the typed limit failure even when the endpoint default permits dropping.
+    /// Stored endpoint bounds remain unchanged for connection reuse.
+    pub fn prepare_with_reasoning_drop(input: Call, limits: &Limits, enabled: bool) -> Result<Client, Error> {
         if limits.http.headers < 6 {
             return Err(Error::limit(crate::Cap::Headers, limits.http.headers));
         }
@@ -271,7 +279,7 @@ impl Client {
             outcome: Outcome::Pending,
             http: http::Client::new(&limits.http),
             sse: sse::Reader::new(&limits.sse),
-            decoder: Some(dialect::Decoder::new(provider, &limits.dialect, limits.drop_reasoning)),
+            decoder: Some(dialect::Decoder::new(provider, &limits.dialect, enabled)),
             content: Some(List::with_capacity(limits.dialect.parts)),
             content_bytes: 0,
             call: Some(call),

@@ -355,6 +355,7 @@ impl World {
         self.component.down(
             &self.env,
             Request::Start {
+                drop_reasoning: false,
                 call: Token::new(token),
                 endpoint,
                 prompt: call.prompt,

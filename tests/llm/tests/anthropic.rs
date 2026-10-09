@@ -495,3 +495,42 @@ fn actual_anthropic_peer_reads_the_declared_output_default_and_the_admission_edg
         Err(Error::Limit { which: skein_llm::Cap::Output, bound: 37 })
     ));
 }
+
+#[test]
+fn explicit_call_reasoning_policy_never_drops_anthropic_thinking() {
+    let docs = [
+        r#"{"type":"message_start","message":{"type":"message","role":"assistant","content":[],"usage":{}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"visible","signature":"signed"}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{}}"#,
+        r#"{"type":"message_stop"}"#,
+    ];
+    for enabled in [false, true] {
+        let mut bounds = skein_llm_world::limits();
+        bounds.drop_reasoning = !enabled;
+        bounds.dialect.opaque_bytes = 24;
+        let mut input = skein_llm_world::call(78);
+        input.endpoint = skein_llm::Endpoint::anthropic();
+        input.credential = skein_llm::Credential::anthropic(b"fake-token".as_slice().into());
+        input.prompt.cache_key = None;
+        input.prompt.output_ceiling(skein_llm::Provider::Anthropic, 4096).expect("configured output");
+        let machine = client::Client::prepare_with_reasoning_drop(input, &bounds, enabled).expect("explicit policy");
+        let source = skein_llm_world::response(
+            200,
+            "Content-Type: text/event-stream\r\n",
+            &skein_llm_world::events(&docs),
+            false,
+        );
+        let mut world = skein_llm_world::World::prepared(machine, bounds, source, 43);
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        assert!(world.seen.iter().any(|event| matches!(
+            event,
+            client::Event::Failed {
+                failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Opaque, bound: 24 },
+                ..
+            }
+        )));
+    }
+}

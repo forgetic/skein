@@ -30,7 +30,15 @@ impl Deadlines {
 #[expect(clippy::large_enum_variant, reason = "the owning protocol layer moves each Start directly into the component")]
 pub enum Request {
     /// Admit a call or refuse it at once; accepted calls have one terminal.
-    Start { call: Token, endpoint: u32, prompt: Prompt, credential: Credential, deadlines: Deadlines },
+    /// The caller explicitly selects reasoning dropping for this model/call.
+    Start {
+        call: Token,
+        endpoint: u32,
+        prompt: Prompt,
+        credential: Credential,
+        deadlines: Deadlines,
+        drop_reasoning: bool,
+    },
     /// Demand one more answer event from an accepted call.
     Next { call: Token },
     /// End an accepted call at the owner's request.
