@@ -1,14 +1,23 @@
 # JSON
 
-Provisional, 2026-10-03. The design of `skein-json`: a bounded JSON
-tokenizer, pulled by demand, and a sized writer. It is a step machine of
-a connection's stack (programming-model.md, 4), and depends on lib only.
+Provisional, 2026-10-03; revised 2026-10-09. The design of `skein-json`:
+a bounded JSON tokenizer, pulled by demand, a selective collector over it,
+and a sized writer. The tokenizer and the collector are step machines of
+a connection's stack (programming-model.md, 4), and the crate depends on
+lib only.
 
 ## 1. In one page
 
 - **Tokens, not documents.** The tokenizer turns bytes into a stream of
   tokens, by demand. An application decodes its own documents from the
   tokens, with small state machines, into its domain's types.
+- **Keep what is read, scan the rest.** The selective collector keeps the
+  values an application names by path and scans every other one: checked
+  as JSON and counted, never stored. Its nesting is a bounded stack and
+  its counts run as it reads, so what a peer adds that the application
+  does not read costs a scan, not memory.
+- **Compact documents.** What is kept is one buffer of text and a list
+  of fixed-size tokens that point into it, not a box per token.
 - **Bounded everywhere.** Nesting is held in a `lib::Stack` of configured
   depth, never in recursion; strings, numbers and the whole document are
   under maximum lengths.
@@ -31,12 +40,19 @@ pub fn up(tokenizer: &mut Tokenizer, env: &Env<Limits>, ev: stream::Up,
 pub fn down(tokenizer: &mut Tokenizer, env: &Env<Limits>, rq: Request,
             above: &mut Queue<Event>, below: &mut Queue<stream::Down>)
 
+// skein_json::collector, the machine: the tokenizer's shape, over the same stream
+pub fn up(collector: &mut Collector, env: &Env<collector::Limits>, ev: stream::Up,
+          above: &mut Queue<collector::Event>, below: &mut Queue<stream::Down>)
+pub fn down(collector: &mut Collector, env: &Env<collector::Limits>, rq: collector::Request,
+            above: &mut Queue<collector::Event>, below: &mut Queue<stream::Down>)
+
 // skein_json::writer, not a machine: a pass over the caller's own calls
 Encoder::measure(&limits) -> Encoder      Encoder::write(len, &limits) -> Encoder
 ```
 
-Both speak `skein_json::Token`: what the tokenizer reads, the writer
-writes back.
+Both machines and the writer speak `skein_json::Token`: what the tokenizer
+reads, the writer writes back. The collector hands up a `Document`
+(section 5.2), which the writer writes back too.
 
 ## 3. The tokenizer
 
@@ -55,12 +71,19 @@ The vocabulary is the tokenizer's own; the service's decoder translates
 it into its domain's.
 
 ```rust
-pub enum Request { Next, Close }                 // from the side above
+pub enum Request {                               // from the side above
+    Next,                                        // one token, a string's text kept under Limits::string
+    Text(u32),                                   // one token, a string's text kept only up to this many bytes
+    Skip,                                        // the next value whole, read and checked, kept nowhere
+    Close,
+}
 
 pub enum Event {                                 // to the side above
-    Token(Token),                                // for a Next
-    Done,                                        // for a Next: the document is whole
-    Failed(Error),                               // for a Next: it is not, or the stream failed
+    Token(Token),                                // for a Next or a Text
+    Long(u64),                                   // for a Text: a longer string, read to its end; its length unescaped
+    Skipped(u64),                                // for a Skip: the value's bytes as delivered
+    Done,                                        // for a Next, a Text or a Skip: the document is whole
+    Failed(Error),                               // for the same: it is not, or the stream failed
     Closed,                                      // for a Close: terminal
 }
 
@@ -79,7 +102,21 @@ pub enum Token {
   nothing while no `Next` is pending, so a decoder that stops asking stops
   the reading, and the backpressure chain runs on below it
   (programming-model.md, 7). One `Next` at a time, and none after the
-  outcome or the close: the side above's bug otherwise, asserted.
+  outcome or the close: the side above's bug otherwise, asserted. `Text`
+  and `Skip` are demands too, and the same rules hold for them.
+- **`Text(max)` caps one string.** It is a `Next` whose string, if the
+  next token is one, is kept only when its text fits `max` bytes, at most
+  `Limits::string`. A longer string is read to its closing quote, still
+  checked, and answered `Long` with its length once unescaped; nothing of
+  it is kept. Any other token answers as for a `Next`.
+- **`Skip` passes over one value.** Asked where a value may come (the
+  document's start, after a key, or at an array's next element), it reads
+  the value through, nested containers and all, checking its grammar, its
+  escapes, its UTF-8 and its depth, and answers `Skipped` with the bytes
+  delivered for it. No text of it is kept, so its strings are bounded by
+  `Limits::length` alone, never by `Limits::string`. At an array's end it
+  answers the `ArrayEnd` token instead, as there is no value to skip.
+  Asked where a key comes, it is the side above's bug, asserted.
 - **`Done` waits for the end of the stream.** A stream carries one
   document (RFC 8259's `ws value ws`), so after the document's last token
   the tokenizer reads to the end: whitespace, then `End`, is `Done`;
@@ -95,14 +132,17 @@ pub enum Token {
   `Surrogate` (half a pair), `Utf8`, `Control` (an unescaped control
   character), `Truncated` (the stream ended first), and `Stream(Fault)`.
 - **What it waits for** is a function of its state, `waiting()`: for a
-  `Next`, for bytes from below, for a `Close` after its outcome, or for
-  nothing once closed. Machines keep no timers (programming-model.md, 4):
-  the connection arms its progress deadline while it waits for bytes.
+  `Next` (or a `Text` or a `Skip`), for bytes from below, for a `Close`
+  after its outcome, or for nothing once closed. Machines keep no timers
+  (programming-model.md, 4): the connection arms its progress deadline
+  while it waits for bytes.
 - **Progress is counted in tokens,** not in demands met. Between tokens
   and within a number the tokenizer demands one byte at a time, and
   single bytes are not progress (programming-model.md, 7): the connection
   counts a token sent up, or the chunks received below it, and
-  `Limits::length` bounds the bytes a peer can send for any one token.
+  `Limits::length` bounds the bytes a peer can send for any one token. A
+  `Skip` over a long value sends nothing up until its end, so there only
+  the chunks received count.
 
 ### 3.2 The side below
 
@@ -131,7 +171,7 @@ a string cut short is `Truncated`, whatever its last bytes hold.
 ```rust
 pub struct Limits {
     pub depth: u32,    // objects and arrays nested: past it, TooDeep
-    pub string: u32,   // a string or key, in bytes once unescaped: past it, StringTooLong
+    pub string: u32,   // a string or key kept, in bytes once unescaped: past it, StringTooLong
     pub number: u32,   // a number's text: past it, NumberTooLong
     pub chunk: u32,    // the most of a string's text demanded at once: a scan's max, at least 1
     pub length: u32,   // the document, in bytes delivered, whitespace included: past it, TooLong
@@ -140,7 +180,10 @@ pub struct Limits {
 
 - **`length`** is counted a delivery at a time, before the delivery is
   read: a delivery that would pass it fails the document. Without it, a
-  peer could hold one `Next` unanswered for ever with whitespace.
+  peer could hold one `Next` unanswered for ever with whitespace, or one
+  `Skip` with a value that never ends.
+- **`string`** bounds only what is kept. A string skipped, or read past
+  its `Text` cap, holds none of the text buffer.
 - **`worst_case(&limits)`** is the stack of open containers and one
   buffer for the text being read, the longer of `string` and `number`,
   both allocated with the tokenizer, and the delivery it reads, at most
@@ -210,8 +253,10 @@ let body = write.finish();               // exactly len bytes
 
 - **Calls:** `object_start`, `object_end`, `array_start`, `array_end`,
   `key`, `string`, `number` (validated text, a `Token::Number`'s),
-  `unsigned`, `signed` (through `lib::Decimal`), `boolean`, `null`, and
-  `token`, which writes any `Token`.
+  `unsigned`, `signed` (through `lib::Decimal`), `boolean`, `null`,
+  `token`, which writes any `Token`, and `document`, which writes a
+  compact document's tokens in order (section 5.2). A `Long` has no text
+  to write: writing one is a bug of the caller's code, asserted.
 - **What the caller's data gets wrong is a `Refusal`** of the measuring
   pass: `Text` (not UTF-8), `Number`, `TooDeep`, `TooLong`; the first one
   met, and the length last. What only its code gets wrong (a key outside
@@ -232,6 +277,120 @@ Structure the domain acts on is decoded on the way in, all of it: a tool
 call inside an LLM's answer reaches the domain as a typed call, not as
 JSON to be sent back down for decoding later (programming-model.md, 4).
 
+The collector does not change that: it decides what reaches the
+application's decoder, which still decodes it. It is generic: an LLM
+dialect, a forge client or a webhook uses it the same way.
+
+### 5.1 The selective collector
+
+```rust
+pub enum Request { Collect, Close }              // from the side above
+
+pub enum Event {                                 // to the side above
+    Collected(Document),                         // for a Collect: what was kept, the document whole
+    Failed(Error),                               // for a Collect: not whole, or past a count
+    Closed,                                      // for a Close: terminal
+}
+
+pub struct Filter { root: Keep }                 // what is kept; anything not named is scanned
+
+pub enum Keep {
+    Value,                                       // the value whole
+    Text(u32),                                   // a string up to this many bytes; a longer one, its length only
+    Into(&'static [Node]),                       // a container, with only the children named
+}
+
+pub struct Node { key: Key, keep: Keep }
+pub enum Key { Field(&'static [u8]), Each }      // an object's field, or every element of an array
+
+pub struct Limits {
+    pub tokenizer: tokenizer::Limits,
+    pub tokens: u32,   // tokens kept: past it, TooManyTokens
+    pub text: u32,     // bytes of text kept, unescaped: past it, TooMuchText
+    pub skip: u64,     // bytes scanned and not kept: past it, SkippedTooLong
+}
+```
+
+- **One machine over one stream.** The collector owns a tokenizer and is
+  its side above, so it meets the stream below through it: the
+  tokenizer's demands, waits and progress are its own. `Collect` asks for
+  the stream's one document; exactly one event answers it: `Collected`
+  once the document is whole, or `Failed`. `Close` ends it in any state,
+  closing the tokenizer, and answers `Closed`.
+- **A filter names what is kept,** as a tree of paths written by hand as
+  static data. At each value it walks to, the collector looks the value's
+  key up among the children of the node it is in (`Each` for an array's
+  elements):
+  - `Value` keeps the value whole, token by token;
+  - `Text(n)` keeps a string up to `n` bytes, through the tokenizer's
+    `Text`; a longer one is kept as a `Long` token holding its length
+    alone; a value of another kind is kept whole;
+  - `Into` keeps a container's start and end and walks into it, keeping
+    only the children it names; a value of another kind is kept whole;
+  - a key the node does not name is read, compared and dropped, and its
+    value skipped through the tokenizer's `Skip`.
+- **The result is itself a document.** What is kept goes up in document
+  order with the keys and containers on its path, so the application's
+  decoder walks it as it would walk the whole: the same small state
+  machines, over less.
+- **Bounded by a stack and running counts.** Where the collector is in the
+  filter is a `lib::Stack` no deeper than the filter, and a skipped
+  value's nesting is the tokenizer's own bounded stack. Three counts run
+  as it reads, each checked as it grows: tokens kept, text kept and bytes
+  skipped. The first past its limit fails the document, naming itself.
+- **Skipped values are still checked.** A value the collector does not
+  keep is read as JSON, so a document that is not one fails wherever the
+  fault lies; skipping changes what is kept, never what is accepted.
+- **Duplicates.** A field the filter names, given twice in one object,
+  fails the document (`Duplicate`): a decoder must never have to choose.
+  Fields it does not name may repeat, uninterpreted.
+- **Errors** are the tokenizer's, and `TooManyTokens`, `TooMuchText`,
+  `SkippedTooLong` and `Duplicate`.
+- **`worst_case(&limits)`** is the tokenizer's, the walk stack, and the
+  buffers the document is kept in, at `tokens` and `text`, allocated with
+  the collector; and the document being handed up, of the same size at
+  most, which is the side above's once emitted. A skipped value adds
+  nothing to it, whatever its size.
+- **Restarting.** Once its outcome is out, a collector, and its tokenizer,
+  may be restarted on the next stream, keeping their buffers, so a stream
+  of small documents (one per server-sent event) costs one allocation of
+  each, not one per document.
+- **`UP_MAX_OUT` and `DOWN_MAX_OUT`** are the tokenizer's: one event
+  above and one request below each.
+
+### 5.2 Compact documents
+
+```rust
+pub struct Document { text: Box<[u8]>, tokens: Box<[Compact]> }
+
+pub struct Compact { kind: Kind, start: u32, len: u32 }  // its text: text[start..start + len]
+
+pub enum Kind {
+    ObjectStart, ObjectEnd, ArrayStart, ArrayEnd,
+    Key, String, Number,                         // their text in the buffer, unescaped; numbers as validated text
+    True, False, Null,
+    Long,                                        // a string past its Text cap: len is its length, no text
+}
+```
+
+- **One buffer, fixed-size tokens.** Every kept key's, string's and
+  number's text is written once into one buffer, and each token is a
+  small fixed-size record pointing into it. A document costs its text and
+  a few bytes a token, in two allocations, instead of a box and a tagged
+  value for every token.
+- **Read by index.** `Document::token(i)` gives a borrowed view, its kind
+  and its text, so a decoder walks a document as it walks the tokenizer's
+  tokens, and copies out only what it keeps.
+- **Written back whole.** The writer's `document` call writes a document's
+  tokens in order (section 4), so a value kept for replay goes back as it
+  came, escaped afresh.
+- **Any bounded value.** A document need not come from the collector: a
+  filter of `Value` at the root keeps a whole document compact, which is
+  how an application keeps an opaque value, such as an LLM provider's
+  replay metadata or a tool's schema (llm.md).
+- **Offsets are `u32`**, as a document's text is under the collector's
+  `text` limit.
+
 ## 6. Testing
 
 - **Step tests** (`crates/skein-json/src/tests.rs`): each demand, each
@@ -241,7 +400,13 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   every two-byte sequence and the edges of longer ones, a number's
   grammar against a plain reading of it over every short text of its
   bytes, the writer's escapes, refusals and assertions, and its output
-  read back.
+  read back. The tokenizer's `Skip` over every kind of value at every
+  place one may come, its count, and where it may not be asked; `Text`
+  at, below and one past its cap, and the `Long` it answers. The
+  collector: each disposition, a key named and one not, a duplicate named
+  and unnamed, each count at its limit and one past it, a `Long` kept, a
+  close in each state, and a restart that keeps its buffers. A compact
+  document read by index and written back.
 - **Machine worlds** (testing-strategy.md, 2.4) in `tests/json`
   (`skein-json-world`): one tokenizer from a seed, in one loop with both
   its neighbours.
@@ -262,6 +427,12 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
     below, none of a stream that ended, one withdrawn only by a close;
     nothing sent down; and `waiting()` matching what the neighbours see.
     A seed replays to the same run.
+  - **The collector's world** runs the same neighbours around one
+    collector, with a filter drawn from each seed out of the document's
+    own paths and some it lacks, `Text` caps among them, either side of
+    their strings' lengths. What it collects is held to the reference's
+    reading pruned by the filter, by a plain recursive function of the
+    test's own, and its skipped count to the bytes of what was pruned.
 - **A reference parser** in the world crate, recursive descent over a
   whole document, sharing no code with the tokenizer: the standard
   library judges UTF-8 and surrogate pairs, and a plain reading of the
@@ -306,7 +477,10 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   nesting at its depth and past it, the longest literal, escapes, failures,
   each closed and failed after every step; generated documents under tiny
   limits; and the writer's two passes for documents at their own depth and
-  length.
+  length. The collector under tiny limits (a handful of tokens, a few
+  hundred bytes of text) over documents that skip megabytes: its high
+  water is the same whatever it skipped, and a document kept at exactly
+  its `tokens` and `text` reaches its worst case.
 - **The fuzzy suite** (`tests/json/tests/fuzzy_*.rs`): 20,000 generated
   documents, most of them mutated, and 5,000 transcripts cut and mutated,
   under limits and neighbours drawn from each seed, each against the
@@ -318,6 +492,11 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   in every state. Then 5,000 generated documents written and read back;
   and texts and numbers drawn at random, 20,000 of each, which the writer
   writes exactly when the standard library and the grammar accept them.
+  The collector's: 10,000 generated and mutated documents under drawn
+  filters, each against the pruned reference, asserting that every
+  disposition, every count's failure, a duplicate, a `Long` and a skip of
+  each kind of value fell; and documents with unnamed fields added at
+  random, which never change what is collected, only what is skipped.
   It stands in for the fuzz target until a nightly toolchain is
   installed.
 
@@ -333,7 +512,28 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
   closing quote, and its pieces must be joined. A tokenizer then costs the
   whole limit from the start; the capped buffer that grows by doubling,
   proposed in temper's performance.md, would make a string cost only its
-  length, and only while it is read.
+  length, and only while it is read. A string skipped, or past its `Text`
+  cap, uses none of it, so the limit is the longest string an application
+  keeps, not the longest a peer sends.
+- **Selection by path, declared before reading.** What an application
+  reads of a peer's document is known when it is written, so the filter
+  is static data, and the collector decides each value as it reaches it,
+  holding nothing to decide later. Collecting everything and discarding
+  afterwards would size memory and token counts by what the peer chose to
+  echo; skipping by a callback would need closures or traits, which step
+  code does without (programming-model.md, 10.3).
+- **A skip is read, not trusted.** A skipped value is checked as JSON, so
+  a filter never widens what is accepted. Counting brackets alone would be
+  cheaper, but would pass documents the reference refuses.
+- **Compact tokens.** A box per string and a tagged value per token cost
+  several times the text they hold. One text buffer with fixed-size
+  records pointing into it costs the text once and a few bytes a token,
+  and is written back without a copy of each token.
+- **A string past its cap is a length, not a failure.** An application
+  may want to know that a value was too large, and by how much, without
+  holding it: the LLM client turns such a tool call into a per-call
+  outcome (llm.md, section 2.4). A failure would lose the rest of the
+  document.
 - **UTF-8 is checked by the tokenizer's own code,** not by
   `core::str::from_utf8` under a scoped `#[expect]`. A string arrives in
   scans cut anywhere, so a character may span two of them; the check
@@ -350,13 +550,19 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
 - **Decoding by hand** into an application's types is verbose without
   serde or traits. If that hurts, the candidate is codec.md's generator,
   writing JSON codecs from schemas the way it writes binary ones, its
-  output checked in and reviewed. Procedural macros stay out.
+  output checked in and reviewed. Procedural macros stay out. The
+  collector shortens what a decoder walks, not how it is written; the same
+  generator could write a decoder's filter from the same schema.
 - **Text that is not UTF-8,** such as a command's output going to an LLM,
   is refused by the writer. A caller that must send it replaces what is
   not UTF-8 first; whether the writer should offer that is open.
 
 ## 9. Not built yet
 
+- **The selective collector, the tokenizer's `Text` and `Skip`, and
+  compact documents** (sections 3.1, 5.1 and 5.2). Their first user is
+  skein's LLM client, whose events they decode as they stream (llm.md,
+  section 4.4).
 - **The fuzz target** (`fuzz/`, fed `Bytes` under every demand), which
   waits for a nightly toolchain; the fuzzy suite stands in for it.
 - **Writing in pieces:** temper's performance.md asks for a body measured
@@ -365,4 +571,6 @@ JSON to be sent back down for decoding later (programming-model.md, 4).
 - **Several documents in one stream,** concatenated or as JSON lines.
 
 The protocol worlds stack the tokenizer over HTTP and server-sent events,
-and the writer under them, at both ends of an LLM exchange (http.md, 6).
+and the writer under them, at both ends of an LLM exchange (http.md, 6);
+once built, the collector takes the tokenizer's place on each event's
+data stream.

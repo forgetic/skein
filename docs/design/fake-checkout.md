@@ -6,8 +6,8 @@
 (programming-model.md, section 10.2; testing-strategy.md, section 4.3).
 Its initial implementation was extracted without behavioral changes from
 `temper` commit `246164f`, `tests/fake-checkout/src/{lib,git}.rs`, when
-smith became its second user. The source's historical `.git/temper-*`
-bookkeeping names remain part of this compatibility extraction.
+smith became its second user. Its bookkeeping files keep the source's
+`.git/temper-*` names.
 
 It keeps byte-path files, directories, links and special nodes, registered
 roots, fresh file versions, command scripts and local git metadata. It
@@ -122,7 +122,7 @@ creating an object or changing that metadata.
 Local markers are `.git/objects/COMMIT` with decimal IDs, checked-out head
 is `.git/temper-head` with eight little-endian bytes, second parent is
 `.git/MERGE_HEAD`, and conflict paths are values beneath
-`.git/temper-conflicts/INDEX`. Preserve these bytes across legacy adoption.
+`.git/temper-conflicts/INDEX`.
 
 Push asserts local object presence, then delegates with `None` for the
 old-head condition. `push_expected` forwards `Some(expected)` unchanged.

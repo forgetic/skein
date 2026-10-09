@@ -1,8 +1,8 @@
 # Testing strategy
 
-Provisional, 2026-10-03. How code in skein and in every service built on
-it is tested. Read it with programming-model.md, whose terms it uses,
-before writing or reviewing tests.
+Provisional, 2026-10-03, revised 2026-10-09. How code in skein and in
+every service built on it is tested. Read it with programming-model.md,
+whose terms it uses, before writing or reviewing tests.
 
 **How to read this.** Section 1 is the whole strategy in one page. The
 sections after it take each part in turn: the tiers, faults, the fakes
@@ -42,8 +42,9 @@ failure is fixed.
   bytes. The kernel sits under io; its fake is skein's simulator, which a
   conformance suite holds to the real kernel.
 - **Every world checks the same things:** contracts as it goes,
-  invariants once it settles, memory against the worst case, replay, and
-  transition coverage. A scenario's own expectations go in a referee.
+  invariants once it settles, a teardown that waits on nothing but io,
+  memory against the worst case, replay, and transition coverage. A
+  scenario's own expectations go in a referee.
 - **Focused tests for quick feedback, both suites at the gate.** Focused
   tests are fast, and serve as quick feedback during development as the
   agent sees fit. The fuzzy suite is slow, so it is usually left alone
@@ -345,6 +346,40 @@ The harness checks, in every world and in the simulator:
   nothing in flight, every record handed back, every child gone and its
   pipes read to the end, every answer taken once; and ownership is a
   tree, with no orphans.
+- **The teardown invariant:** a world that ends by itself ends with no
+  deadline firing after the last word other than io's own: its close and
+  retry deadlines, and the stall deadlines owners state for files (io.md,
+  5 and 5.1; programming-model.md, 5.2).
+  - **The last word** is the point the scenario names: by default, its
+    referee's last expectation met. A scenario about a keep or idle time
+    names its last word after the time it is about.
+  - **A world that ends by itself** is one whose processes settle with
+    nothing injected after the last word. One that ends on a shutdown the
+    referee injects has its last word after the shutdown has arrived.
+  - **How it is checked.** Each process tells the harness its earliest
+    deadline outside io's own (shell.md, 12). After
+    the last word, the harness fails the world, naming the process and
+    its deadline, when time has to reach that deadline before the world
+    settles: when the replaying tiers move the clock to it, or when the
+    real loop wakes for it.
+  - A fault that stalls an operation meets io's close deadline while it
+    closes, or its stall deadline while it is open, which the invariant
+    allows: both fire only on a stall, and bound it.
+
+  The harness checks it once, for every world of every service: no
+  service writes its own.
+- **Times as they ship.** A time that ends something by passing (a keep,
+  an idle time, a linger) runs at its shipped value, or beyond the
+  world's horizon, the referee's last deadline, unless the scenario is
+  about it. It is never shortened so that a world settles sooner: a short
+  one hides the very wait the teardown invariant looks for. Simulated
+  time is free, so a shipped value costs nothing below the real loop, and
+  nothing in it once owners close what they keep. The tiny limits of
+  section 3 are capacities, not these times.
+- **Fakes do not end their clients.** A fake peer never hangs up, resets
+  or goes quiet to help its client settle, unless the scenario is about
+  that hang-up: a client must end what it owns by itself, as it must
+  against a real peer that keeps its connections open.
 - **Memory:** a counting allocator measures the most each part held,
   against its worst case (programming-model.md, 6.3). The simulator
   checks it at every iteration.

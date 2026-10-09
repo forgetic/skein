@@ -1,12 +1,12 @@
 # The examples
 
-Provisional, 2026-10-04. The design of skein's example services
-(testing.md, 3): what each one is, the steps README.md asks for before
-code (the wire protocol, the limits, the entities, the state machines),
-its fakes, the harness its worlds run on, and how it is tested. The
-examples exist to be tested and to be copied: a service starts from
-them. The echo server is built; the HTTP server and its client come with
-`skein-http`.
+Provisional, 2026-10-04, revised 2026-10-09. The design of skein's
+example services (testing.md, 3): what each one is, the steps README.md
+asks for before code (the wire protocol, the limits, the entities, the
+state machines), its fakes, the harness its worlds run on, and how it is
+tested. The examples exist to be tested and to be copied: a service
+starts from them. The echo server is built; the HTTP server and its
+client come with `skein-http`.
 
 ## 1. In one page
 
@@ -115,10 +115,16 @@ request `Stop`: admit no one more. The text of a line is its bytes without
 the `\n`: framing stays in the protocol layer, which copies the text out
 when it decodes and writes the answer at its length when it encodes.
 
-`Shutdown` stands in for io's `Shutdown` event, which is not built: the
-service's `shutdown` asks the protocol layer to tell it, from its ready
-list. The domain decides what it means: it admits no one more, and asks
-for the listener to stop. The connections it has run to their end.
+The protocol layer tells the domain `Shutdown`, from its ready list,
+when io's `Shutdown` event arrives (io.md, 7), or when the service's
+`shutdown` asks it to, which worlds below the binary call. The domain
+decides what it means: it admits no one more, and asks for the listener
+to stop. The connections it has drain (programming-model.md, 5.2): one
+waiting for the peer's next line, or for its greeting's room, is idle and
+closes at once; one with a line out answers it, then closes. None waits
+for its idle deadline, so the echo ends without one firing
+(testing-strategy.md, 6). Today the connections run to their end, each
+until its peer ends or its idle deadline passes (section 8).
 
 ### 3.4 State machines
 
@@ -222,10 +228,21 @@ every `Open` with `Busy` and asks once for `Stop`.
 `main` reads its configuration from its arguments (the address to listen
 on, and the memory it may take), runs startup (shell.md, 6): the worst
 case against the memory, io's caps against the protocol's largest demand,
-then the seed and the kernel; and then the loop of programming-model.md,
-section 2, over the shell's `Kernel` and `Clock`. Signals to the service
-are not built, so it runs until it is killed, and says so; it stops by
-itself only when its listener fails, as when the address is in use.
+the termination signals blocked and their signalfd opened
+(`open_termination_signals`) for io to adopt, then the seed and the
+kernel; and then the loop of programming-model.md, section 2, over the
+shell's `Kernel` and `Clock`.
+
+- **It ends by itself.** `SIGINT` or `SIGTERM` arrives as io's `Shutdown`:
+  the echo admits no one more, its connections end (section 3.3), and the
+  loop exits once the service holds nothing, with a success (shell.md,
+  13). A listener that fails, as when the address is in use, ends it too,
+  with the failure on standard error.
+- **Its loop is `drive`** (shell.md, 12), over the echo's `Host`, once
+  `drive` is in the kit. Its hook says once that the echo listens, and at
+  what address, and once that a listen refused for want of resources is
+  being retried: what `main`'s loop says today between `iterate` and the
+  submit.
 
 ## 5. The fake echo client
 
@@ -286,17 +303,26 @@ processes, each a host of an `iterate` (a service, or a fake client):
 - **Settled:** once the referee passed and nothing is busy, every process
   holds nothing, the simulator has nothing in flight, and every
   descriptor is closed.
+- **The shell's own `Host`** (shell.md, 12), which `skein-world`
+  re-exports: the harness calls each process's hook where `drive` does,
+  after its `iterate`, and checks the teardown invariant
+  (testing-strategy.md, 6): after the scenario's last word, no deadline
+  but io's own may fire before the world settles. The echo's idle
+  deadline runs at its shipped value or beyond the world's horizon,
+  unless the scenario is about it.
 - **The referee** holds a scenario's expectations, each with a deadline:
   safety on every observation, liveness as the deadline; it may also
   inject what belongs to no fake. The echo's tells the fake clients the
   echo's address once it listens, as a directory would, and shuts the
   echo down once the clients are done, or at a given time, so that the
   world settles. Both reach into the service where the referee should
-  only watch from outside (testing-strategy.md, 7), and stand in for what
-  is not built: its reading of `svc.listening()` for the fact `main`
-  prints, "listening at", which the service will emit as a fact; and its
-  call of `svc.shutdown()` for the termination signal, which will come as
-  io's `Shutdown` event (io.md, 7). Each moves out once those are built.
+  only watch from outside (testing-strategy.md, 7): its reading of
+  `svc.listening()` stands in for the fact `main` prints, "listening at",
+  which the service will emit as a fact; and its call of `svc.shutdown()`
+  stands in for the termination signal, which io's `Shutdown` event
+  already carries to the shipped echo (io.md, 7), and which the simulator
+  can deliver to a process's signal source. Each moves out of the
+  referee.
 - **The real loop** runs the same processes and referee over one ring, in
   one thread on loopback, with deadlines on the real clock. An idle loop
   blocks on the ring until the next completion or deadline.
@@ -324,6 +350,46 @@ processes, each a host of an `iterate` (a service, or a fake client):
   child's exit arrives in the loop as an event, and the referee may send
   the child a signal. Nothing of the child is hosted: it runs its own
   loop.
+  - **Its tree is the kit's to settle and to count.** A binary may start
+    processes of its own, which may leave its group or its session. None
+    may outlive the test, and a test that measures what the binary used,
+    a benchmark's harness among them, wants all of it: CPU time and peak
+    memory. The kit settles and counts the binary's whole tree, one of two
+    ways, and the test's result says which ran.
+  - **A cgroup, where the machine delegates one.** When the test's user
+    holds a delegated cgroup v2 subtree (a systemd user scope, a
+    container's), the kit makes a cgroup per binary and starts the binary
+    in it (`CLONE_INTO_CGROUP`), so every descendant is in it, whatever
+    group or session it makes. The tree has settled once the cgroup is
+    empty: `cgroup.events` says it is not populated, and the kit is told
+    when that file changes. Its counts are the cgroup's: user and
+    system CPU from `cpu.stat`, and the tree's peak memory, all its
+    processes at once, from `memory.peak`.
+  - **A walk of pidfds, otherwise.** The test process is made a
+    subreaper (`PR_SET_CHILD_SUBREAPER`), so a descendant whose parent
+    exits is reparented to it rather than to init. The kit holds a pidfd
+    for the binary from its spawn, and opens one (`pidfd_open`) for each
+    process it finds among its own children (`/proc/self/task/*/children`):
+    when the binary exits, whenever one it holds exits, and at a short
+    period while any runs. It waits on each pidfd, never on any child, so
+    it takes no other part's children. The tree has settled once it has
+    reaped every one. Its counts are the kernel's count of reaped
+    children (`Usage`, kernel.md, 6.3), taken before the binary starts and
+    after the tree settles: CPU summed over the tree, and a peak that is
+    the largest one process reached, not the tree's at once, which only a
+    cgroup gives. The kernel's peak is the largest over every child the
+    test process ever reaped, so it is this tree's only where nothing
+    larger was reaped before: a test that measures by the walk starts one
+    binary per process. A process orphaned below a parent the kit does not
+    hold is reparented to the test process all the same, and the next
+    listing finds it.
+  - **The end.** Once the binary has exited and the test is done with
+    it, or at the test's deadline, the kit kills what is left of the tree
+    (`cgroup.kill`, or each pidfd it holds and the binary's group), waits
+    for it to settle, then reads the counts and removes the cgroup. A
+    test that expects the tree to end with its binary fails on a process
+    still running at its exit, naming it; one that measures a binary it
+    does not own only kills and counts.
 
 ## 7. Testing
 
@@ -362,5 +428,9 @@ processes, each a host of an `iterate` (a service, or a fake client):
 ## 8. Not built yet
 
 - **The HTTP server and its client,** with `skein-http`.
+- **The echo's `main` over `drive`,** with its hook (section 4), and its
+  worlds under the teardown check (section 6), once `skein-shell` has
+  both (shell.md, 11); with them, its connections draining at a shutdown
+  rather than running to their end (section 3.3).
 - **Domain worlds** for the echo's domain: it is one slab and a counter,
   and its step tests cover it.

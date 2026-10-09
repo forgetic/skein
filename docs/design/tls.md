@@ -1,11 +1,11 @@
 # TLS
 
-Provisional, 2026-10-04. The design of `skein-tls`: a TLS stream machine
-over rustls, ciphertext below and plaintext above. It is the one
-exception of programming-model.md, section 3: the only step code that
-depends on a crate from outside skein and the service, and the only step
-code that is not deterministic. The client is built; the server side is
-not (section 8).
+Provisional, 2026-10-04, revised 2026-10-09. The design of
+`skein-tls`: a TLS stream machine over rustls, ciphertext below and
+plaintext above. It is the one exception of programming-model.md,
+section 3: the only step code that depends on a crate from outside skein
+and the service, and the only step code that is not deterministic. The
+client is built; the server side is not (section 8).
 
 ## 1. In one page
 
@@ -38,6 +38,7 @@ pub fn down(client: &mut Client, env: &Env<Limits>, rq: Request,
             above: &mut Queue<Event>, below: &mut Queue<stream::Down>)
 
 // made at startup, from configuration (shell.md, 6)
+Config::from_der(roots: &[Box<[u8]>], alpn: &[&[u8]]) -> Result<(Config, Parsed), Refusal>
 Config::new(roots: RootCertStore, alpn: &[&[u8]]) -> Result<Config, Refusal>
 Name::new(text: &str) -> Option<Name>
 Client::new(&config, name, &limits) -> Client
@@ -177,13 +178,30 @@ pub enum Event {
 ### 3.4 Configuration
 
 Configuration is data (shell.md, 6). The shell reads the roots a service
-trusts, and hands them to `Config::new` with the protocols it offers by
-ALPN, in order of preference: a configuration every connection shares,
-rustls's, with both versions of TLS, no client certificate, and no
-session resumed, as a session cache would be state shared between
-connections. It refuses roots of none, and protocols empty, longer than
-255 bytes, or of more than `ALPN` (256) bytes in all. Each connection
-gets the server's `Name`: a DNS name, sent by SNI, or an IP address.
+trusts, and hands them over with the protocols it offers by ALPN, in
+order of preference: a configuration every connection shares, rustls's,
+with both versions of TLS, no client certificate, and no session
+resumed, as a session cache would be state shared between connections.
+It refuses roots of none, and protocols empty, longer than 255 bytes, or
+of more than `ALPN` (256) bytes in all. Each connection gets the server's
+`Name`: a DNS name, sent by SNI, or an IP address.
+
+- **From DER bytes.** The shell reads the roots as bytes and needs no TLS
+  crate (shell.md, 6.2): the certificates of the machine's bundle, each
+  taken out of its PEM as DER, or the one of a DER file. `Config::from_der`
+  takes them as they came, and builds rustls's root store from them with
+  its own parser. A certificate it cannot parse, or whose key it does not
+  support, is skipped and counted, never a failure: a distribution's
+  bundle may hold one, and the rest still serve. It answers `Parsed`, how
+  many it took and how many it skipped, for the shell to say once on
+  standard error, and refuses with `Refusal::Roots` when it took none.
+- **`Config::new`** takes a root store already built, for tests that make
+  their own.
+- **The roots are counted once.** Every connection shares the
+  configuration, so its root store is in no connection's worst case. The
+  service counts it once, from the bounds the shell read the roots within
+  (shell.md, 6.2): their count and each one's bytes, at a factor measured
+  as rustls's other parts are (section 5).
 
 ### 3.5 Limits and the worst case
 
@@ -452,6 +470,15 @@ a wall time each test chooses.
   one `Send` a grant, as io grants one; what arose while the side above
   held its grant goes in front of the side above's `Send`, within
   `room_for`'s slack.
+- **No coalescing.** Each `Send` of the side above is sealed into records
+  in the step that takes it and goes below in one `Send`; a small `Send`
+  costs a record of its own. The client never holds plaintext back to
+  fill a record: holding it would need a moment to flush, a timer the
+  machine does not keep (programming-model.md, 4), or a flush the side
+  above would have to ask for, and rustls would hold plaintext between
+  steps (3.2). A side above that wants full records sends pieces of a
+  record's plaintext, as skein-llm-connection's owner does
+  (llm-connection.md, 7).
 - **A read that crosses the end stays outstanding,** both ways, as
   lib.md, 7 says and io does, until `Room` answers it or it is withdrawn:
   the client withdraws its own, as it reads no more after the end, unless
@@ -493,7 +520,8 @@ a wall time each test chooses.
 - **Client certificates,** with it.
 - **The real loop:** a loopback exchange through the shell, against a
   local rustls server; and the shell reading root stores at startup
-  (shell.md, 6).
+  (shell.md, 6.2) into `Config::from_der`, with its count of what it
+  skipped.
 - **Kernel TLS:** after the handshake, the record layer could move into
   the kernel, and the plaintext stream become the socket's own (shell.md,
   8).

@@ -1,11 +1,11 @@
 # Codecs from schemas
 
-Provisional, 2026-10-06. How an application protocol built on skein
-encodes its records. A schema says each record's fields and their bounds.
-skein's generator turns it into plain Rust codecs, limits, worst cases and
-golden bytes, and `skein-codec` holds the little the generated code shares.
-Codecs carry the bodies of a framed channel (channel.md), and records kept
-in files or stores.
+Provisional, 2026-10-06, revised 2026-10-09. How an application protocol
+built on skein encodes its records. A schema says each record's fields
+and their bounds. skein's generator turns it into plain Rust codecs,
+limits, worst cases and golden bytes, and `skein-codec` holds the little
+the generated code shares. Codecs carry the bodies of a framed channel
+(channel.md), and records kept in files or stores.
 
 ## 1. In one page
 
@@ -31,9 +31,10 @@ in files or stores.
   never recurses on a peer's choice.
 - **Canonical.** One value has one encoding, and decoding refuses any
   other, so what decodes encodes back to the same bytes.
-- **Versioned.** A schema is one version of a family. A record kept beyond
-  a channel carries its version. A reader keeps a range of versions by
-  decoding each with that version's code, then translating.
+- **Versioned.** A schema is one version of a family, and a family has
+  one current version. A record kept beyond a channel carries its
+  version. A reader reads the current version and refuses another;
+  nothing is translated.
 
 ## 2. In skein
 
@@ -151,17 +152,18 @@ For each record and enumeration:
 
 ## 5. Versions
 
-- **A new version is a new schema,** with new generated code beside the
-  old. The old stays as long as a reader reads it.
-- **A reader keeps a range.** It reads a versioned record's version first,
-  with `skein-codec`, and decodes with that version's code. It translates
-  an older value into the current one with total functions written by
-  hand.
+- **Any change a reader would notice is a new version:** a new schema,
+  whose generated code replaces the old. There is one version at a time,
+  and no promise of stability to anyone outside the family's owner.
+- **A reader reads one version.** It reads a versioned record's version
+  first, with `skein-codec`, and refuses another with the problem
+  *another version*. Nothing is translated: what an owner does with a
+  record of another version, such as starting afresh, is its own policy.
 - **A writer writes its current version only.**
 - **On a channel,** the agreed version picks the code for its bodies
   (channel.md, section 5.2). Bodies carry no version of their own.
-- **A published version's golden bytes are frozen.** Changing them means a
-  new version.
+- **A version's golden bytes stand for it.** A change that moves them is
+  a new version.
 
 ## 6. Golden bytes and tests
 
@@ -203,5 +205,3 @@ For each record and enumeration:
   `skein-json` (json.md, section 8).
 - **Other languages:** a generator for a peer not built on skein, if one
   appears. The schema is plain enough for it.
-- **Fields added within a version:** not allowed today, since every change
-  is a new version. To be revisited if versions turn over often.

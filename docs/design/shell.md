@@ -1,17 +1,27 @@
 # The shell kit
 
-Provisional, 2026-10-03. The design of `skein-shell`: what a service's
-`main` runs its loop on. The kernel (the io_uring backend of the kernel
-boundary, kernel.md), the clock and the seed; later, the readiness
-backend. It is ordinary Rust, and the only `unsafe` in skein that a
-service runs lives here, in one module, the ring adapter. (The counting
-allocator, test-only, has the other: testing.md, 6.)
+Provisional, 2026-10-03, revised 2026-10-09. The design of
+`skein-shell`: what a service's `main` runs its loop on. The kernel (the
+io_uring backend of the kernel boundary, kernel.md), the clock and the
+seed; the loop itself, over a service's `Host`, and how it ends; what
+startup reads, trust roots among it, and a terminal's modes; later, the
+readiness backend. It is
+ordinary Rust, and the only `unsafe` in skein that a service runs lives
+here, in one module, the ring adapter. (The counting allocator,
+test-only, has the other: testing.md, 6.)
 
 ## 1. In one page
 
-- **The loop belongs to the service.** skein provides the kernel (open,
-  submit, reap), the clock and the seed, and no `run`. A service's loop is
-  about ten lines over them (programming-model.md, section 2).
+- **One loop, written once.** skein provides the kernel (open, submit,
+  reap), the clock, the seed, and `drive`: the loop of
+  programming-model.md, section 2, over a service's `Host` (section 12).
+  The service brings its `iterate`, its startup and a per-iteration hook.
+  skein's world harness hosts the same `Host`, so a world runs the shell
+  as it ships.
+- **The end is settlement.** The loop exits once the service holds
+  nothing: everything it owns has reported closed and io is empty. Only
+  io's deadlines bound that; no timer, grace or thread decides it
+  (section 13).
 - **The ring adapter makes no decisions.** It maps each record onto one
   submission entry, keeps the record in its in-flight table, and when the
   entry completes decodes the result and hands the record back.
@@ -28,6 +38,12 @@ allocator, test-only, has the other: testing.md, 6.)
 `skein-shell` depends on lib, io (for the records), and the only crates
 from outside: `io-uring` and `libc`. A service's `main` depends on it and
 on the service's own `iterate`.
+
+- **`Host` and `drive` are here** (section 12), moved from `skein-world`,
+  which re-exports both. A service's shell then links no testing crate,
+  and its worlds host the shell's own `Host`.
+- **It reads trust roots as bytes** (6.2). `skein-tls` turns them into its
+  configuration, so the shell needs no TLS crate.
 
 ## 3. The kernel
 
@@ -55,12 +71,14 @@ on the service's own `iterate`.
   freed with the slot, beside the `open_how` an `Open` hands over and the
   `statx` buffer a `Stat` reads back.
 - **Synchronous operations run at submit.** A record that is not a ring
-  operation (listing a directory: `getdents64` has none) is performed when
-  it is submitted, and its completion waits in the table's ready list for
+  operation (listing a directory: `getdents64` has none; spawning;
+  signalling; reading the process's resource usage) is performed when it
+  is submitted, and its completion waits in the table's ready list for
   the next reap, so io cannot tell it from a ring operation (kernel.md,
   6). A `List` reads with `getdents64` into one buffer of the table's,
   copies out what fits the record, and sets the directory's position back
-  to just past the last entry it took.
+  to just past the last entry it took. A `Usage` reads `getrusage` twice,
+  for the process and for its reaped children (kernel.md, 6.3).
 - **The `unsafe`, and why it is sound,** is stated in the ring adapter's
   module documentation, case by case: the pointers handed to the kernel,
   entering the ring, the socket address casts, the synchronous calls, and
@@ -109,13 +127,81 @@ Before its loop, a service's `main`, with the kit:
 4. opens the first roots for io's files, from configuration, with
    `open_root` (io.md, 5; kernel.md, 6.1). A root, a workspace, belongs
    on a filesystem mounted `nodev`: the ring refuses to open a device
-   beneath it, but only after the device's own `open` has run;
+   beneath it, but only after the device's own `open` has run. It opens
+   the files it appends to beneath them, a trace among them, which io
+   adopts as streams once the service is made (io.md, 5.1);
 5. resolves the configured peer names into addresses (io.md);
-6. reads certificates, keys and root stores for TLS (tls.md);
+6. reads certificates, keys and root stores for TLS: the machine's trust
+   roots, or a DER file (6.2; tls.md);
 7. reads the seed and opens the kernel.
+
+What startup reads, its configuration and certificates, it reads with
+the kit (6.1). Then `main` makes the service and calls `drive`
+(section 12).
 
 `panic = "abort"` in every profile: a panic is fail-stop, and a
 supervisor restarts the process.
+
+### 6.1 Reading files at startup
+
+Startup runs before io, so what it reads it reads with the kit, never
+through a `File` (programming-model.md, 2.1). `read_file` reads one whole
+file, up to a stated maximum, through the ring adapter's own calls: it
+opens without blocking and never as a controlling terminal, checks that
+what it opened is a regular file, reads it, and closes it. It answers the
+bytes, or why not: absent, not a regular file, past its maximum, or the
+kernel's error. Once the loop runs, files are io's (io.md, 5).
+
+### 6.2 Trust roots
+
+A TLS client trusts the roots its configuration names, one of two:
+
+- **The machine's.** The bundle that the `SSL_CERT_FILE` environment
+  variable names, or else the first that exists of the distributions'
+  bundle files (`/etc/ssl/certs/ca-certificates.crt` and its kin, in an
+  order the module documentation fixes). A bundle is PEM: the kit takes
+  each certificate out of it as DER, and skips what is not a certificate.
+  A directory of hashed certificates (`SSL_CERT_DIR`) is not read
+  (section 10).
+- **A DER file:** one certificate, for an issuer or a provider on a
+  private network, or a test's fake.
+
+Each is read with `read_file` within bounds that are configuration: the
+bundle's bytes, the number of certificates and each one's bytes. The kit
+hands the certificates to `skein-tls`, which builds its configuration
+from them (tls.md, 3.4), skips and counts one it cannot parse, and
+refuses roots of none. Every connection shares the roots, so they count
+once in the worst case. A machine with neither a bundle nor
+`SSL_CERT_FILE` refuses to start when its configuration asks for the
+machine's roots.
+
+### 6.3 Terminal modes
+
+A service with a person at a terminal (an interactive front end) may
+want its input a key at a time, without the terminal's echo or line
+editing, and the window's size. These are shell effects, made with the
+kit, since step code makes no syscall and the shell's rules allow only
+the ring adapter's:
+
+- **Raw input at startup.** If standard input is a terminal and the
+  configuration asks for it, startup reads the terminal's modes, keeps
+  them, and sets the ones asked for: no echo, no line editing, and the
+  terminal's own signals kept or not, as the service says. Standard input
+  is then adopted as a read stream, as an inherited pipe is (io.md, 3).
+  Standard input that is not a terminal is left as it is, and the service
+  hears that it has none.
+- **Restored at the end.** `main` restores the kept modes once `drive`
+  returns, on every path out of it, before it writes its last line to
+  standard error. A process that aborts, or is killed, cannot: the
+  terminal stays as it was set, as with any program that sets it.
+- **The window's size** is read at startup, and again when `SIGWINCH`
+  arrives: startup blocks it with the termination signals, so it reaches
+  io through the same signalfd, as an event that the window changed
+  (io.md, 7), and the service asks for the new size with a synchronous
+  record (kernel.md, 6.3).
+
+A service without a terminal never asks for any of this, and a line
+pipe needs none of it.
 
 ## 7. The readiness backend (later)
 
@@ -179,6 +265,17 @@ and changes no code above io:
 - **The real loop** exercises the rest: the probe at startup, the signal
   path, and the ring adapter's `unsafe` under a sanitizer
   (testing-strategy.md, 2.8).
+- **`drive`'s own tests,** in the real loop, over scripted hosts: one that
+  ends by itself returns its exit at once; one that waits on a keep time
+  after its last word fails the teardown check (testing-strategy.md, 6);
+  a termination signal while it closes aborts what is still closing; the
+  hook runs once per iteration, after `iterate`.
+- **Startup reads** (`tests/ring`): a whole file within its maximum, one
+  past it, a FIFO and a directory refused; a PEM bundle with certificates,
+  other blocks and a certificate that does not parse; a DER file.
+- **Terminal modes,** end to end under a pseudo-terminal
+  (testing-strategy.md, 2.9): input read a key at a time, the modes found
+  again once the binary exits, and a size change heard.
 
 ## 10. Open questions
 
@@ -188,18 +285,112 @@ and changes no code above io:
   the address and leak sanitizers the real loop runs under.
 - **Processes in the readiness backend on macOS,** which has no pidfd and
   no `clone3`, if that backend is ever built.
+- **A hashed certificate directory** (`SSL_CERT_DIR`) as the machine's
+  trust roots, on a machine with no bundle file: read it, or refuse to
+  start as today (6.2).
+- **A terminal suspended and resumed** (`SIGTSTP`, `SIGCONT`): whether
+  the shell restores the modes before the process stops and sets them
+  again when it continues, which takes a signal the shell handles while
+  the loop runs (6.3).
 
 ## 11. Not built yet
 
-- **Startup** (section 6): blocking the termination signals, names, and
-  TLS's configuration. The ring's probe is built, and so is `open_root`
-  for roots; the echo's `main` runs the rest of startup as a service's
-  would (examples.md, 4):
+- **Startup** (section 6): names, TLS's configuration, and the files a
+  service appends to. The ring's probe is built, and so are `open_root`
+  for roots and `open_termination_signals`, which blocks `SIGINT` and
+  `SIGTERM` and opens the signalfd io adopts; the echo's `main` runs the
+  rest of startup as a service's would (examples.md, 4):
   its limits checked, each machine's largest demand within io's caps, and
   the sum of the worst cases within the memory configured, before the
   seed and the kernel. Startup is each service's `main`, with the kit, so
   the kit holds no startup function of its own.
-- **The operations for processes,** and the synchronous ones (spawning,
-  signalling, making a pipe), when io pulls them. Sockets and files are
-  built, listing a directory, the first synchronous one, among them.
+- **The records io's next parts pull** (kernel.md, 10): a signal to a
+  child's group, a wait that does not reap and the reap at close, an
+  append, a `Stat` that answers owner and links, and reading resource
+  usage. Sockets, files and processes are built: spawning, waiting,
+  signalling a child, its pipes, and reading termination signals, with
+  listing a directory, spawning and signalling the synchronous ones.
+- **`Host` and `drive` in skein-shell,** with the hook (section 12).
+  Today `Host` is `skein-world`'s, and each `main` writes its loop out;
+  the echo's already ends once the service holds nothing (section 13).
+- **Startup reads and trust roots** (6.1, 6.2), and **terminal modes**
+  (6.3).
 - **The readiness backend** and the deferred optimisations.
+
+## 12. The loop: `Host` and `drive`
+
+The loop of programming-model.md, section 2 is written once, here, not in
+every service's `main`.
+
+- **`Host`** is what the loop needs of a service, and what skein's world
+  harness needs of a process it hosts: one trait, so a world runs a
+  service's shell as it ships. A service's shell implements it over its
+  `iterate`:
+  - `iterate(now, wall)`: one turn, both passes and the reclaim point;
+  - its completion and submission queues;
+  - `work_pending(now)`, and `next_deadline()`, its earliest over every
+    layer;
+  - `next_policy_deadline()`, its earliest deadline other than io's own,
+    the mechanics' (io.md, 2): its close and retry deadlines, and the
+    stall deadlines owners state for files. It is the one the teardown
+    invariant watches (testing-strategy.md, 6);
+  - `is_empty()`, when it holds nothing, and `exit()`, its exit status
+    once it does;
+  - `worst_case()`, and `operations()`, the size of its ring;
+  - `drain()`, the hook below, which does nothing unless the service
+    gives it something to do.
+- **`drive(kernel, clock, host)`** is the loop: reap, read the clock,
+  iterate, drain; then return the host's exit once it holds nothing
+  (section 13), or else submit, waiting not at all while work is pending,
+  until the earliest deadline, or until a completion. A service's `main`
+  is its startup, then `drive`.
+- **The hook** runs once per iteration, after `iterate` and before the
+  submit, while the service is a frozen snapshot. It is for drains that
+  belong to the shell: reading what the service holds for its operator
+  and saying it once, such as the address it listens at. It is shell code
+  under the shell's rules (programming-model.md, 2.1): a short line to
+  standard error is the most it writes, and it writes no file and starts
+  no thread. Output that is large, or must be complete, such as a trace,
+  is an io stream instead (io.md, 5.1). The world harness calls the hook
+  at the same point, so the drains a world runs are the ones that ship
+  (testing.md, 5).
+
+## 13. The end
+
+- **The loop exits when the service holds nothing:** every slab empty,
+  nothing in flight, every queue empty, and io holding no entity. `drive`
+  then returns the service's exit, and `main` returns it. It does not
+  exit at a signal, at an answer or at a timer: after its last word, a
+  service closes everything it owns (programming-model.md, 5.2), and the
+  loop ends when that has settled.
+- **Only io's deadlines bound it.** A service's teardown bound is io's
+  close timeout, the write deadline of a stream it still writes after its
+  last word (io.md, 5.1), and the moment its cancels take to settle;
+  nothing else in it waits on time once its last word is out. A
+  supervisor derives its grace from that bound, and its grace exceeds
+  it.
+- **A signal while closing aborts.** A termination signal arrives as io's
+  `Shutdown` at any time (io.md, 7). Before the last word, the service
+  decides what it means; after it, the remaining graceful closes become
+  aborts, and the loop ends as soon as those settle. A second signal
+  means the same as the first.
+- **Nothing outlives the loop.** There is no thread to join, no buffer to
+  flush and no grace timer: what the service wrote went through io, which
+  has settled it, and the kernel is dropped with nothing in flight. A
+  service never ends with `std::process::exit` while it holds anything.
+  After `drive` returns, `main` only undoes what startup set with the
+  kit, such as a terminal's modes (6.3), and writes nothing to the
+  service's files.
+- **What the process used,** for a service that reports it at its end:
+  the kernel's count of CPU time and peak resident size, for the process
+  and for the children it has reaped. The service reads it through io
+  (io.md, 6.1), a `Usage` the kernel answers at submit, after its last
+  child has closed, since io reaps a child only at its close, and before
+  the stream it reports on closes. After `drive` returns no stream is
+  open to report on.
+- **A supervisor's kill is a backstop** for a process that does not end:
+  a bug, or an operation the kernel will not interrupt (notes.md). It is
+  never how a healthy process ends.
+- **Checked** in every world, by the teardown invariant
+  (testing-strategy.md, 6), and in the real loop by `drive`'s own tests
+  (section 9).
