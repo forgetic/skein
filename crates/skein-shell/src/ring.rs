@@ -99,7 +99,55 @@ pub fn hosted_pipes(command: &mut skein_io::kernel::Spawn) -> Result<HostedPipes
 /// Starts a shipped binary on pipes or a controlling pseudo-terminal for
 /// an end-to-end world; stderr is always separate (examples.md, section 6).
 pub fn start_binary(command: &mut skein_io::kernel::Spawn, terminal: bool) -> Result<(Fd, Option<Fd>), Error> {
-    process::start_binary(command, terminal)
+    process::start_binary(command, terminal, None)
+}
+
+/// Starts the binary in an already-open delegated cgroup, before its exec.
+pub fn start_binary_in_cgroup(
+    command: &mut skein_io::kernel::Spawn,
+    terminal: bool,
+    cgroup: Fd,
+) -> Result<(Fd, Option<Fd>), Error> {
+    process::start_binary(command, terminal, Some(cgroup))
+}
+
+/// Makes the test process a subreaper for its binary's descendants.
+pub fn make_subreaper() -> Result<(), Error> {
+    process::make_subreaper()
+}
+
+/// Opens a discovered process's pidfd for the test keeper.
+pub fn open_pidfd(pid: u32) -> Result<Fd, Error> {
+    process::open_pidfd(pid)
+}
+
+/// Opens a cgroup directory for the binary's atomic placement at spawn.
+pub fn open_cgroup(path: &Path) -> Result<Fd, Error> {
+    process::open_cgroup(path)
+}
+
+/// Polls a pidfd during observer cleanup, observing or reaping only that child.
+pub fn poll_child(pidfd: Fd, reap: bool) -> Result<Option<Exit>, Error> {
+    process::poll_child(pidfd, reap)
+}
+
+/// Sends a keeper's signal through the owned pidfd, including its group.
+pub fn signal_kept_child(
+    pidfd: Fd,
+    signal: skein_io::kernel::Signal,
+    to: skein_io::kernel::Target,
+) -> Result<(), Error> {
+    signal_child(pidfd, signal, to).map(|_| ())
+}
+
+/// Closes an exclusively owned test keeper descriptor during cleanup.
+pub fn close_keeper_fd(descriptor: Fd) {
+    process::close_keeper_fd(descriptor);
+}
+
+/// Waits for a keeper's cgroup event file to change, within the given milliseconds.
+pub fn wait_cgroup_change(descriptor: Fd, millis: u32) -> Result<(), Error> {
+    process::wait_cgroup_change(descriptor, millis)
 }
 
 /// Reaps and releases an external child abandoned by a failing test. Normal
@@ -734,7 +782,8 @@ fn prepare(
             });
         }
         Op::Spawn { spawn: command } => return Prepared::Done(spawn(command)),
-        Op::Signal { pidfd, signal } => return Prepared::Done(signal_child(*pidfd, *signal)),
+        Op::Signal { pidfd, signal, to } => return Prepared::Done(signal_child(*pidfd, *signal, *to)),
+        Op::Usage => return Prepared::Done(process::usage().map(Done::Usage)),
         Op::ReadSignal { fd } => opcode::Read::new(
             types::Fd(fd.raw()),
             signal_info.get().cast(),
@@ -742,11 +791,13 @@ fn prepare(
         )
         .offset(u64::MAX)
         .build(),
-        Op::Wait { pidfd } => {
-            opcode::WaitId::new(libc::P_PIDFD, u32::try_from(pidfd.raw()).expect("a pidfd is positive"), libc::WEXITED)
-                .infop(siginfo.get().cast_const())
-                .build()
-        }
+        Op::Wait { pidfd, reap } => opcode::WaitId::new(
+            libc::P_PIDFD,
+            u32::try_from(pidfd.raw()).expect("a pidfd is positive"),
+            libc::WEXITED | if *reap { 0 } else { libc::WNOWAIT },
+        )
+        .infop(siginfo.get().cast_const())
+        .build(),
         Op::Cancel { target } => {
             let Some(target_data) = tokens.get(target) else {
                 return Prepared::Done(Err(Error::TooLate));
@@ -847,7 +898,7 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
         | Op::Remove { .. }
         | Op::MakeDirectory { .. }
         | Op::Cancel { .. } => Ok(Done::Nothing),
-        Op::List { .. } | Op::Spawn { .. } | Op::Signal { .. } => {
+        Op::Usage | Op::List { .. } | Op::Spawn { .. } | Op::Signal { .. } => {
             unreachable!("a synchronous operation completes at its submit")
         }
     }
@@ -879,7 +930,7 @@ fn error(kind: &Op, errno: i32, cancelled: bool) -> Error {
             libc::EINVAL => Error::InvalidArgument,
             other => file_error(kind, other),
         },
-        Op::Spawn { .. } | Op::Signal { .. } => Error::Other(errno),
+        Op::Usage | Op::Spawn { .. } | Op::Signal { .. } => Error::Other(errno),
         Op::ReadSignal { .. } => match errno {
             libc::ECANCELED => Error::Cancelled,
             libc::EINTR if cancelled => Error::Cancelled,
@@ -967,6 +1018,7 @@ fn operation_error(kind: &Op, errno: i32) -> Error {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::Cancel { .. } => unreachable!("an operation on files' errors, and a Cancel's, are mapped apart"),
     };
@@ -1062,6 +1114,7 @@ fn file_error(kind: &Op, errno: i32) -> Error {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::Cancel { .. } => unreachable!("only an operation on files' errors are mapped here"),
     };

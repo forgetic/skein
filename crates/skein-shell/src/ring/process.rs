@@ -10,9 +10,10 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::ptr;
 
-use skein_io::kernel::{Done, Error, Fd, Signal, Spawn, Way};
+use skein_io::kernel::{Done, Error, Fd, Resources, Signal, Spawn, Target, Usage, Way};
 
 unsafe extern "C" {
+    fn posix_spawnattr_setcgroup_np(attributes: *mut libc::posix_spawnattr_t, cgroup: libc::c_int) -> libc::c_int;
     fn pidfd_spawn(
         pidfd: *mut libc::c_int,
         path: *const libc::c_char,
@@ -155,10 +156,10 @@ pub(super) fn spawn(command: &mut Spawn) -> Result<Done, Error> {
 }
 
 fn spawn_inner(command: &mut Spawn) -> Result<Done, i32> {
-    spawn_prepared(command, None)
+    spawn_prepared(command, None, None)
 }
 
-fn spawn_prepared(command: &mut Spawn, terminal: Option<&CString>) -> Result<Done, i32> {
+fn spawn_prepared(command: &mut Spawn, terminal: Option<&CString>, cgroup: Option<Fd>) -> Result<Done, i32> {
     let path = cstring(&command.program)?;
     let (dir, parents, children, nulls) = prepare(command)?;
     let argv = std::iter::once(&command.program)
@@ -226,7 +227,7 @@ fn spawn_prepared(command: &mut Spawn, terminal: Option<&CString>) -> Result<Don
             action(unsafe { libc::sigemptyset(ptr::from_mut(&mut empty)) })?;
             // SAFETY: the initialized attributes receive a copy of the mask.
             action(unsafe { libc::posix_spawnattr_setsigmask(ptr::from_mut(&mut attributes), ptr::from_ref(&empty)) })?;
-            let group_flag = if terminal.is_some() {
+            let mut group_flag = if terminal.is_some() {
                 i32::from(libc::POSIX_SPAWN_SETSID)
             } else {
                 // SAFETY: the initialized attributes receive zero, requesting
@@ -234,6 +235,12 @@ fn spawn_prepared(command: &mut Spawn, terminal: Option<&CString>) -> Result<Don
                 action(unsafe { libc::posix_spawnattr_setpgroup(ptr::from_mut(&mut attributes), 0) })?;
                 libc::POSIX_SPAWN_SETPGROUP
             };
+            if let Some(cgroup) = cgroup {
+                // SAFETY: the initialized spawn attributes receive an open cgroup descriptor;
+                // glibc starts the child with CLONE_INTO_CGROUP before its exec.
+                action(unsafe { posix_spawnattr_setcgroup_np(ptr::from_mut(&mut attributes), cgroup.raw()) })?;
+                group_flag |= 0x100; // POSIX_SPAWN_SETCGROUP, from glibc's spawn.h.
+            }
             // SAFETY: the initialized attributes accept the flags.
             action(unsafe {
                 libc::posix_spawnattr_setflags(
@@ -270,14 +277,24 @@ fn spawn_prepared(command: &mut Spawn, terminal: Option<&CString>) -> Result<Don
     result
 }
 
-pub(super) fn signal_child(pidfd: Fd, signal: Signal) -> Result<Done, Error> {
+pub(super) fn signal_child(pidfd: Fd, signal: Signal, to: Target) -> Result<Done, Error> {
     let number = match signal {
         Signal::Terminate => libc::SIGTERM,
         Signal::Kill => libc::SIGKILL,
     };
     // SAFETY: pidfd_send_signal takes no borrowed memory when siginfo is null.
-    let sent =
-        unsafe { libc::syscall(libc::SYS_pidfd_send_signal, pidfd.raw(), number, ptr::null::<libc::siginfo_t>(), 0) };
+    let sent = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.raw(),
+            number,
+            ptr::null::<libc::siginfo_t>(),
+            match to {
+                Target::Child => 0,
+                Target::Group => libc::PIDFD_SIGNAL_PROCESS_GROUP,
+            },
+        )
+    };
     if sent == 0 { Ok(Done::Nothing) } else { Err(map_error(super::last_errno())) }
 }
 
@@ -387,12 +404,12 @@ pub(super) fn signal_current_thread(signal: skein_io::kernel::ServiceSignal) -> 
 
 /// Starts an external binary for the end-to-end harness. A terminal owns
 /// stdin/stdout; stderr remains a separate requested pipe (examples.md, 6).
-pub(super) fn start_binary(command: &mut Spawn, terminal: bool) -> Result<(Fd, Option<Fd>), Error> {
+pub(super) fn start_binary(command: &mut Spawn, terminal: bool, cgroup: Option<Fd>) -> Result<(Fd, Option<Fd>), Error> {
     let terminal = if terminal { Some(open_terminal().map_err(map_error)?) } else { None };
     if terminal.is_some() && command.pipes.iter().any(|pipe| pipe.child < 2) {
         return Err(Error::InvalidArgument);
     }
-    let done = spawn_prepared(command, terminal.as_ref().map(|(_, name)| name)).map_err(map_error)?;
+    let done = spawn_prepared(command, terminal.as_ref().map(|(_, name)| name), cgroup).map_err(map_error)?;
     let Done::Spawned { pidfd } = done else { unreachable!("a spawn returns a pidfd") };
     Ok((pidfd, terminal.map(|(master, _)| Fd::new(master.into_raw_fd()))))
 }
@@ -419,7 +436,7 @@ fn open_terminal() -> Result<(OwnedFd, CString), i32> {
 /// exit, waits and descriptor closure still go through the shared ring.
 pub(super) fn abandon_binary(pidfd: Option<Fd>, descriptors: &[Fd]) {
     if let Some(pidfd) = pidfd {
-        let _signalled = signal_child(pidfd, Signal::Kill);
+        let _signalled = signal_child(pidfd, Signal::Kill, Target::Group);
         // SAFETY: siginfo_t is an integer C record initialized for waitid.
         let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
         // SAFETY: the uniquely owned pidfd identifies this observer's child,
@@ -439,4 +456,114 @@ pub(super) fn abandon_binary(pidfd: Option<Fd>, descriptors: &[Fd]) {
         // taken out of normal use by its failure-path destructor.
         let _closed = unsafe { libc::close(descriptor.raw()) };
     }
+}
+
+/// Reads the process and its reaped children at one submission (kernel.md, section 6.3).
+pub(super) fn usage() -> Result<Usage, Error> {
+    Ok(Usage { own: resources(libc::RUSAGE_SELF)?, children: resources(libc::RUSAGE_CHILDREN)? })
+}
+
+fn resources(who: i32) -> Result<Resources, Error> {
+    // SAFETY: rusage is a C output record initialized before its fields are read.
+    let mut value: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: value is writable for the duration of this synchronous call.
+    if unsafe { libc::getrusage(who, ptr::from_mut(&mut value)) } != 0 {
+        return Err(Error::Other(super::last_errno()));
+    }
+    Ok(Resources {
+        user: cpu(value.ru_utime)?,
+        system: cpu(value.ru_stime)?,
+        peak_rss_bytes: u64::try_from(value.ru_maxrss)
+            .ok()
+            .and_then(|kib| kib.checked_mul(1024))
+            .ok_or(Error::Other(libc::EOVERFLOW))?,
+    })
+}
+
+fn cpu(value: libc::timeval) -> Result<skein_lib::Duration, Error> {
+    let seconds = u64::try_from(value.tv_sec).map_err(|_| Error::Other(libc::EOVERFLOW))?;
+    let micros = u64::try_from(value.tv_usec).map_err(|_| Error::Other(libc::EOVERFLOW))?;
+    let nanos = seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|base| micros.checked_mul(1000).and_then(|tail| base.checked_add(tail)))
+        .ok_or(Error::Other(libc::EOVERFLOW))?;
+    Ok(skein_lib::Duration::from_nanos(nanos))
+}
+
+/// Makes orphaned descendants children of the end-to-end observer (examples.md, section 6).
+pub(super) fn make_subreaper() -> Result<(), Error> {
+    // SAFETY: prctl changes this process's subreaper setting, with no borrowed pointer.
+    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } == 0 {
+        Ok(())
+    } else {
+        Err(Error::Other(super::last_errno()))
+    }
+}
+
+/// Opens one discovered child's stable identity; no wait on any child is used.
+pub(super) fn open_pidfd(pid: u32) -> Result<Fd, Error> {
+    // SAFETY: pidfd_open accepts a numeric PID and returns a uniquely owned descriptor.
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if raw < 0 {
+        Err(Error::Other(super::last_errno()))
+    } else {
+        Ok(Fd::new(i32::try_from(raw).expect("a descriptor fits i32")))
+    }
+}
+
+/// Opens a cgroup directory for `CLONE_INTO_CGROUP` at binary startup.
+pub(super) fn open_cgroup(path: &std::path::Path) -> Result<Fd, Error> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = cstring(path.as_os_str().as_bytes()).map_err(map_error)?;
+    // SAFETY: name is NUL-terminated and stays live throughout open.
+    let raw = unsafe { libc::open(name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+    if raw < 0 { Err(map_error(super::last_errno())) } else { Ok(Fd::new(raw)) }
+}
+
+/// Polls a known pidfd during failed-observer cleanup, without taking another owner's child.
+pub(super) fn poll_child(pidfd: Fd, reap: bool) -> Result<Option<skein_io::kernel::Exit>, Error> {
+    // SAFETY: siginfo_t is initialized for waitid to fill.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: the caller owns pidfd and info is writable for the whole call.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PIDFD,
+            u32::try_from(pidfd.raw()).expect("a descriptor is positive"),
+            ptr::from_mut(&mut info),
+            libc::WEXITED | libc::WNOHANG | if reap { 0 } else { libc::WNOWAIT },
+        )
+    };
+    if result < 0 {
+        return Err(Error::Other(super::last_errno()));
+    }
+    // SAFETY: waitid filled the child-status union, or cleared the PID when no exit is ready.
+    let pid = unsafe { info.si_pid() };
+    if pid == 0 {
+        return Ok(None);
+    }
+    // SAFETY: a nonzero PID means waitid filled the status union.
+    let status = unsafe { info.si_status() };
+    Ok(Some(match info.si_code {
+        libc::CLD_EXITED => skein_io::kernel::Exit::Code(u8::try_from(status).expect("exit code fits")),
+        libc::CLD_KILLED | libc::CLD_DUMPED => {
+            skein_io::kernel::Exit::Signal(u32::try_from(status).expect("signal is positive"))
+        }
+        _ => return Err(Error::Other(libc::ECHILD)),
+    }))
+}
+
+/// Closes a test keeper's descriptor on startup or abandonment, outside normal ring settlement.
+pub(super) fn close_keeper_fd(descriptor: Fd) {
+    // SAFETY: the keeper relinquishes its exclusively owned descriptor here.
+    let _closed = unsafe { libc::close(descriptor.raw()) };
+}
+
+/// Waits for a cgroup event file's change notification during tree settlement.
+pub(super) fn wait_cgroup_change(descriptor: Fd, millis: u32) -> Result<(), Error> {
+    let mut watched = libc::pollfd { fd: descriptor.raw(), events: libc::POLLPRI | libc::POLLERR, revents: 0 };
+    // SAFETY: watched names one live event descriptor and is writable throughout poll.
+    let result = unsafe {
+        libc::poll(ptr::from_mut(&mut watched), 1, i32::try_from(millis).map_err(|_| Error::InvalidArgument)?)
+    };
+    if result < 0 { Err(Error::Other(super::last_errno())) } else { Ok(()) }
 }

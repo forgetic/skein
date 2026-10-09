@@ -23,7 +23,7 @@ use crate::net::{
 };
 use crate::trace::{self, Entry, Event, Fault, Summary};
 use files::{Asked, File};
-use processes::{Child, InheritedPipe, PipeEnd};
+use processes::{Child, InheritedPipe, PipeEnd, WaitState};
 
 /// A simulated process: a plain handle, from [`Sim::spawn_process`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -56,6 +56,7 @@ const UNSUBMITTED: i32 = 11;
 struct Process {
     /// The parent spawn represented by this process, when it hosts a child service.
     parent: Option<(Pid, u64)>,
+    usage: skein_io::kernel::Usage,
     /// The next descriptor number: numbers are never reused.
     next_fd: i32,
     /// The open descriptors of sockets, and the socket each names.
@@ -201,6 +202,7 @@ impl Sim {
         let pid = Pid(u32::try_from(self.processes.len()).expect("fewer than 2^32 processes"));
         self.processes.push(Process {
             parent: None,
+            usage: skein_io::kernel::Usage::ZERO,
             next_fd: FIRST_FD,
             fds: BTreeMap::new(),
             files: BTreeMap::new(),
@@ -287,6 +289,11 @@ impl Sim {
             }
             let event = Event::Complete { op: complete.op, kind: flight.kind, result: complete.result.clone() };
             self.record(pid, event);
+            if let (Op::Wait { pidfd, reap: false }, Ok(Done::Exit(_))) = (&complete.kind, &complete.result) {
+                let child_id = *self.process(pid).pidfds.get(pidfd).expect("an observed child has its pidfd");
+                self.process_mut(pid).children.get_mut(&child_id).expect("the observed child").wait_state =
+                    WaitState::Observed;
+            }
             completions.push(complete);
         }
     }
@@ -462,6 +469,10 @@ impl Sim {
             On::Nothing => None,
         };
         match kind {
+            Op::Usage => {
+                let usage = self.process(pid).usage;
+                self.complete(pid, token, kind, Ok(Done::Usage(usage)));
+            }
             Op::Socket { family } => self.socket(pid, token, kind, family),
             Op::Bind { addr, .. } => self.bind(pid, token, kind, on(socket), addr),
             Op::Listen { backlog, .. } => self.listen(pid, token, kind, on(socket), backlog),
@@ -600,6 +611,7 @@ impl Sim {
             Summary::Spawn { .. }
             | Summary::Wait { .. }
             | Summary::Signal { .. }
+            | Summary::Usage
             | Summary::ReadSignal { .. }
             | Summary::PipeRead { .. }
             | Summary::PipeWrite { .. } => self.bug("a process operation passed socket checks"),
@@ -668,6 +680,7 @@ impl Sim {
             Summary::Spawn { .. }
             | Summary::Wait { .. }
             | Summary::Signal { .. }
+            | Summary::Usage
             | Summary::ReadSignal { .. }
             | Summary::PipeRead { .. }
             | Summary::PipeWrite { .. } => self.bug("a process operation passed file checks"),
@@ -986,7 +999,7 @@ impl Sim {
             }
             return;
         }
-        if let Op::Wait { pidfd } = op {
+        if let Op::Wait { pidfd, .. } = op {
             let child_id = *self.process(pid).pidfds.get(pidfd).expect("a Wait keeps its pidfd open");
             self.process_mut(pid).children.get_mut(&child_id).expect("pidfd names a child").wait = None;
             return;
@@ -1032,6 +1045,7 @@ impl Sim {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }

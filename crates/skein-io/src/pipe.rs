@@ -195,6 +195,7 @@ pub(crate) fn landed(
                         | Done::Stat(_)
                         | Done::Spawned { .. }
                         | Done::Exit(_)
+                        | Done::Usage(_)
                         | Done::ServiceSignal(_),
                     ) => unreachable!("a pipe read answers with a count"),
                 }
@@ -230,6 +231,7 @@ pub(crate) fn landed(
                     | Done::Stat(_)
                     | Done::Spawned { .. }
                     | Done::Exit(_)
+                    | Done::Usage(_)
                     | Done::ServiceSignal(_)
                     | Done::Count(_),
                 ) => unreachable!("a pipe write counts positive bytes"),

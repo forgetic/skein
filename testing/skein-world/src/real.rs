@@ -299,6 +299,7 @@ impl Process {
                 | Done::Bound(_)
                 | Done::Stat(_)
                 | Done::Exit(_)
+                | Done::Usage(_)
                 | Done::ServiceSignal(_),
             )
             | Err(_) => {}
@@ -505,7 +506,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                     return;
                 }
             }
-            Op::Wait { pidfd } => {
+            Op::Wait { pidfd, .. } => {
                 if let Some(child) = self.placeholders.get(pidfd).copied().and_then(|host| self.children.get_mut(&host))
                 {
                     match child.exit {
@@ -515,7 +516,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                     return;
                 }
             }
-            Op::Signal { pidfd, signal } => {
+            Op::Signal { pidfd, signal, .. } => {
                 if let Some(child) = self.placeholders.get(pidfd).and_then(|host| self.children.get(host)) {
                     let child_host = child.host;
                     let writer = child.signal_writer;
@@ -576,6 +577,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
             | Op::Remove { .. }
             | Op::MakeDirectory { .. }
             | Op::List { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. } => {}

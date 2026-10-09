@@ -145,8 +145,10 @@ impl Script {
             Act::WriteFile(index, bytes) => Op::Write { fd: self.fds[index], bytes: Box::from(bytes), at: 0, from: 0 },
             Act::ReadFile(index) => Op::Read { fd: self.fds[index], buf: Box::new([0; 32]), at: 0 },
             Act::CloseLaunch => Op::Close { fd: self.root.take().expect("launch root") },
-            Act::Wait => Op::Wait { pidfd: self.pidfd.expect("spawned child") },
-            Act::Signal(signal) => Op::Signal { pidfd: self.pidfd.expect("spawned child"), signal },
+            Act::Wait => Op::Wait { pidfd: self.pidfd.expect("spawned child"), reap: false },
+            Act::Signal(signal) => {
+                Op::Signal { pidfd: self.pidfd.expect("spawned child"), signal, to: skein_io::kernel::Target::Child }
+            }
             Act::ReadSignal => Op::ReadSignal { fd: self.signal.expect("child signal source") },
             Act::Pause(until) => {
                 self.pause = Some(until);
@@ -186,7 +188,8 @@ impl Host for Script {
                 Ok(Done::ServiceSignal(signal)) => self.signals.push(signal),
                 Ok(Done::Exit(exit)) => self.child_exit = Some(exit),
                 Ok(Done::Fd(fd)) => self.fds.push(fd),
-                Ok(Done::Nothing | Done::Bound(_) | Done::Accepted { .. } | Done::Stat(_)) | Err(_) => {}
+                Ok(Done::Usage(_) | Done::Nothing | Done::Bound(_) | Done::Accepted { .. } | Done::Stat(_))
+                | Err(_) => {}
             }
             self.results.push(complete.result);
         }

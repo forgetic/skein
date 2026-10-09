@@ -214,3 +214,13 @@ fn a_cancel_of_a_read_of_a_file_stops_it_or_is_too_late() {
     let drawn = [Pairing::Stopped, Pairing::Interrupted, Pairing::Completed];
     assert!(drawn.contains(&seen.pairing()), "a pairing the simulator draws: {seen:?}");
 }
+
+#[test]
+fn the_group_is_signalled_after_its_leader_exits() {
+    skein_conformance::groups(&mut Ring::new(), env!("CARGO_BIN_EXE_process_fixture").as_bytes()).check();
+}
+
+#[test]
+fn usage_counts_the_child_only_after_reaping() {
+    skein_conformance::usage(&mut Ring::new(), env!("CARGO_BIN_EXE_process_fixture").as_bytes()).check();
+}

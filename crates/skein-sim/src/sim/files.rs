@@ -109,6 +109,7 @@ impl Sim {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
@@ -156,6 +157,7 @@ impl Sim {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
@@ -231,6 +233,7 @@ impl Sim {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }

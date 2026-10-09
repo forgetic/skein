@@ -95,6 +95,8 @@ fn program_of(program: &[u8], args: &[Box<[u8]>], pipes: &[Pipe]) -> Result<Prog
             };
             Ok(Program::Exit(code))
         }
+        b"fork-exit" => Ok(Program::Fork { exit_leader: true }),
+        b"fork-live" => Ok(Program::Fork { exit_leader: false }),
         b"never" | b"skein-never" => Ok(Program::Never),
         _ => Err(Error::NotFound),
     }

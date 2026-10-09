@@ -182,8 +182,11 @@
 //!   child reads; `Way::Out` means it writes.
 //! - `PipeRead` and `PipeWrite` have the same count rules as `Recv` and
 //!   `Send`, with EOF at a zero read count. A pipe is closed by `Close`.
-//! - `Wait` reaps a child through its pidfd and answers with `Exit`; `Signal`
-//!   targets the pidfd so a reused numeric PID cannot be signalled.
+//! - `Wait` observes an exit without reaping, or reaps after that observation;
+//!   both answer `Exit`. The zombie retains the group's leader until its reap.
+//! - `Signal` names the child or its group through the pidfd, never a numeric PID.
+//! - `Usage` is synchronous: own and reaped children's CPU and resident peaks
+//!   (kernel.md, sections 6.2 and 6.3). It cannot be cancelled.
 //!
 //! The errors each operation names, beyond `NoBufferSpace`,
 //! `InvalidArgument` and `Other`, which any operation but `Cancel` may
@@ -203,6 +206,7 @@
 //! | `Remove` | `NotFound`, `NotADirectory`, `IsADirectory`, `NotEmpty`, `Permission`, `ReadOnly`, `NameTooLong` |
 //! | `MakeDirectory` | `NotFound`, `Exists`, `NotADirectory`, `Permission`, `NoSpace`, `ReadOnly`, `TooManyLinks`, `NameTooLong` |
 //! | `List` | `NotFound`, `NotADirectory`, `NameTooLong` |
+//! | `Usage` | only `Other` |
 //! | `Cancel` | only `TooLate`, `InvalidArgument` or `Other` |
 //!
 //! Broken invariants, which io never commits and backends may assume never
@@ -212,7 +216,9 @@
 //! - a record that is not [`Op::is_valid`];
 //! - a token already in flight;
 //! - a `Cancel` whose target is a `Cancel`, a `Stat`, a `Rename`, a
-//!   `Remove`, a `MakeDirectory` or a `List`;
+//!   `Remove`, a `MakeDirectory`, a `List`, a `Spawn`, a `Signal` or a `Usage`;
+//! - a `Wait` beside another on its pidfd, or a reap before a reported exit;
+//! - any operation on a pidfd after its reap, except its `Close`;
 //! - an operation on files ([`Op::is_file`]) on a socket's descriptor, or
 //!   an operation on sockets on a file's;
 //! - a `Read` on a descriptor not opened with [`OpenHow::Read`], a `Write`
@@ -250,7 +256,7 @@
 use alloc::boxed::Box;
 use core::net::SocketAddr;
 
-use skein_lib::Token;
+use skein_lib::{Duration, Token};
 
 /// A descriptor, in whatever backend issued it: a file descriptor on the
 /// ring, a table slot in the simulator. Only io and its backend ever see one,
@@ -332,7 +338,8 @@ pub struct Complete {
 /// | `List` | `Done::Count`, entries listed into `entries[..n]`, 0 at the end |
 /// | `Spawn` | `Done::Spawned`, pidfd; parent ends written into the returned `Spawn` pipe slots |
 /// | `Wait` | `Done::Exit`, exit code or signal |
-/// | `Signal` | `Done::Nothing` |
+/// | `Signal` | `Done::Nothing`, child or group through its pidfd |
+/// | `Usage` | `Done::Usage`, own and reaped children resources |
 /// | `ReadSignal` | `Done::ServiceSignal`, one blocked termination signal |
 /// | `PipeRead`, `PipeWrite` | `Done::Count`, bytes read or written |
 /// | `Cancel` | `Done::Nothing`, the target was found in flight |
@@ -445,15 +452,19 @@ pub enum Op {
     Spawn {
         spawn: Box<Spawn>,
     },
-    /// Reaps the child named by its pidfd. A pidfd remains open until Close.
+    /// Observes a child exit, or reaps it after observation (kernel.md, section 6.2).
     Wait {
         pidfd: Fd,
+        reap: bool,
     },
     /// Sends a signal to a child by pidfd, so a reused PID cannot be hit.
     Signal {
         pidfd: Fd,
         signal: Signal,
+        to: Target,
     },
+    /// Reads the process and reaped children resource usage (kernel.md, section 6.3).
+    Usage,
     /// Reads one termination signal from the signalfd opened at startup
     /// (io.md, section 7; shell.md, section 6).
     ReadSignal {
@@ -505,9 +516,44 @@ pub enum Way {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// A termination signal requested by a child owner.
 pub enum Signal {
+    /// Ask the recipient to terminate.
     Terminate,
+    /// End the recipient without allowing it to handle the signal.
     Kill,
+}
+
+/// A signal's recipient, selected by the pidfd's owner (kernel.md, section 6.2).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Target {
+    /// The child alone.
+    Child,
+    /// Every member of the group the child leads.
+    Group,
+}
+
+/// The process's own and reaped children's resources, returned by the backend.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Usage {
+    pub own: Resources,
+    pub children: Resources,
+}
+
+impl Usage {
+    pub const ZERO: Usage = Usage { own: Resources::ZERO, children: Resources::ZERO };
+}
+
+/// CPU time and the largest resident size, returned in one usage part.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Resources {
+    pub user: Duration,
+    pub system: Duration,
+    pub peak_rss_bytes: u64,
+}
+
+impl Resources {
+    pub const ZERO: Resources = Resources { user: Duration::ZERO, system: Duration::ZERO, peak_rss_bytes: 0 };
 }
 
 /// A termination signal delivered to the service by its signalfd.
@@ -520,8 +566,11 @@ pub enum ServiceSignal {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// A child exit, reported by both observing and reaping waits.
 pub enum Exit {
+    /// The program's ordinary exit status.
     Code(u8),
+    /// The signal that ended the program.
     Signal(u32),
 }
 
@@ -644,6 +693,8 @@ pub enum Done {
     Exit(Exit),
     /// One service termination signal read from a signalfd.
     ServiceSignal(ServiceSignal),
+    /// The process and its reaped children, at submission.
+    Usage(Usage),
 }
 
 /// The kinds of [`Done`], by which an operation's success value is checked
@@ -659,6 +710,8 @@ pub enum Shape {
     Spawned,
     Exit,
     ServiceSignal,
+    /// Resource usage.
+    Usage,
 }
 
 /// The errors io handles by name. Each backend maps its kernel's error numbers
@@ -890,6 +943,7 @@ impl Op {
             | Op::Stat { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::Cancel { .. } => true,
         }
@@ -920,6 +974,7 @@ impl Op {
             Op::Spawn { .. } => Shape::Spawned,
             Op::Wait { .. } => Shape::Exit,
             Op::ReadSignal { .. } => Shape::ServiceSignal,
+            Op::Usage => Shape::Usage,
             Op::Listen { .. }
             | Op::Connect { .. }
             | Op::Shutdown { .. }
@@ -957,6 +1012,7 @@ impl Op {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
@@ -1008,6 +1064,7 @@ impl Done {
             Done::Spawned { .. } => Shape::Spawned,
             Done::Exit(_) => Shape::Exit,
             Done::ServiceSignal(_) => Shape::ServiceSignal,
+            Done::Usage(_) => Shape::Usage,
         }
     }
 }
@@ -1030,6 +1087,9 @@ impl Complete {
 
 /// Whether `error` may answer `op`.
 fn may_fail(op: &Op, error: Error) -> bool {
+    if op.shape() == Shape::Usage {
+        return only_other(error);
+    }
     if let Op::Cancel { .. } = op {
         return fails_a_cancel(error);
     }
@@ -1251,10 +1311,16 @@ fn fits(op: &Op, done: &Done) -> bool {
             | Op::Signal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::Cancel { .. } => false,
         },
-        Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Exit(_) | Done::ServiceSignal(_) => true,
+        Done::Nothing
+        | Done::Fd(_)
+        | Done::Accepted { .. }
+        | Done::Exit(_)
+        | Done::ServiceSignal(_)
+        | Done::Usage(_) => true,
     }
 }
 
@@ -1289,6 +1355,7 @@ fn binds(op: &Op, bound: &Addr) -> bool {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
@@ -1327,6 +1394,7 @@ fn counts(op: &Op, n: usize) -> bool {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::Cancel { .. } => false,
     }
@@ -1352,4 +1420,35 @@ fn lists(listed: &[Entry], names: &[u8]) -> bool {
         end = next;
     }
     true
+}
+
+fn only_other(error: Error) -> bool {
+    match error {
+        Error::Other(_) => true,
+        Error::Refused
+        | Error::Reset
+        | Error::BrokenPipe
+        | Error::NotConnected
+        | Error::AddressInUse
+        | Error::AddressNotAvailable
+        | Error::Unreachable
+        | Error::TimedOut
+        | Error::TooManyOpenFiles
+        | Error::NoBufferSpace
+        | Error::Cancelled
+        | Error::TooLate
+        | Error::NotFound
+        | Error::Exists
+        | Error::NotADirectory
+        | Error::IsADirectory
+        | Error::NotEmpty
+        | Error::Permission
+        | Error::NoSpace
+        | Error::ReadOnly
+        | Error::TooManyLinks
+        | Error::NameTooLong
+        | Error::Escape
+        | Error::NotAFile
+        | Error::InvalidArgument => false,
+    }
 }

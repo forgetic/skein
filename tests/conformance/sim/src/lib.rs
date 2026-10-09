@@ -71,6 +71,19 @@ impl Backend for Simulated {
 
     fn reap(&mut self, process: Pid, completions: &mut Queue<Complete>) {
         self.sim.reap(process, completions);
+        for complete in completions.iter() {
+            if let Ok(skein_io::kernel::Done::Spawned { pidfd }) = complete.result {
+                self.sim.set_child_usage(
+                    process,
+                    pidfd,
+                    skein_io::kernel::Resources {
+                        user: Duration::from_millis(1),
+                        system: Duration::from_millis(1),
+                        peak_rss_bytes: 4096,
+                    },
+                );
+            }
+        }
     }
 
     fn now(&self) -> Time {

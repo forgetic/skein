@@ -268,7 +268,18 @@ fn native_pipe_output_and_staged_close_terminals_fit_the_same_checked_bound_unti
             .expect("each actual maximal pipe write");
         driver.complete(write, Done::Count(limits.output));
     }
-    for _ in 0..PIPES.checked_add(1).expect("pipes and child descriptor") {
+    for _ in 0..PIPES {
+        let close =
+            driver.flights.iter().position(|submit| matches!(submit.kind, Op::Close { .. })).expect("a pipe close");
+        driver.complete(close, Done::Nothing);
+    }
+    let reap = driver
+        .flights
+        .iter()
+        .position(|submit| matches!(submit.kind, Op::Wait { reap: true, .. }))
+        .expect("the final child reap");
+    driver.complete(reap, Done::Exit(Exit::Code(0)));
+    for _ in 0..1 {
         let close = driver
             .flights
             .iter()

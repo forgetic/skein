@@ -234,6 +234,7 @@ fn succeed(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. } => panic!("this memory world exercises only socket operations"),
@@ -261,6 +262,7 @@ fn stopped(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }

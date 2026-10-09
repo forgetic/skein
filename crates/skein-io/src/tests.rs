@@ -75,6 +75,7 @@ pub(crate) fn buffer(op: &Op) -> (&[u8], u32) {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
@@ -98,6 +99,7 @@ pub(crate) enum Kind {
     Spawn,
     Wait,
     Signal,
+    Usage,
     ReadSignal,
     PipeRead,
     PipeWrite,
@@ -118,6 +120,7 @@ pub(crate) const fn kind(op: &Op) -> Kind {
         Op::Spawn { .. } => Kind::Spawn,
         Op::Wait { .. } => Kind::Wait,
         Op::Signal { .. } => Kind::Signal,
+        Op::Usage => Kind::Usage,
         Op::ReadSignal { .. } => Kind::ReadSignal,
         Op::PipeRead { .. } => Kind::PipeRead,
         Op::PipeWrite { .. } => Kind::PipeWrite,

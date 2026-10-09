@@ -26,7 +26,8 @@ mod tests;
 pub use clock::{Clock, Now};
 pub use drive::{Host, drive};
 pub use ring::{
-    Config, HostedPipes, Kernel, OpenError, Wait, abandon_binary, hosted_pipes, open_root, open_signal_pipe,
-    open_termination_signals, signal_current_thread, start_binary, write_service_signal,
+    Config, HostedPipes, Kernel, OpenError, Wait, abandon_binary, close_keeper_fd, hosted_pipes, make_subreaper,
+    open_cgroup, open_pidfd, open_root, open_signal_pipe, open_termination_signals, poll_child, signal_current_thread,
+    signal_kept_child, start_binary, start_binary_in_cgroup, wait_cgroup_change, write_service_signal,
 };
 pub use seed::seed;

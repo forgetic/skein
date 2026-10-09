@@ -12,6 +12,7 @@ enum Phase {
     Spawning,
     Running,
     Exited,
+    Reaping,
     Releasing,
     Closed,
 }
@@ -32,7 +33,7 @@ impl Child {
     pub(crate) const fn is_closed(&self) -> bool {
         match self.phase {
             Phase::Closed => true,
-            Phase::Spawning | Phase::Running | Phase::Exited | Phase::Releasing => false,
+            Phase::Spawning | Phase::Running | Phase::Exited | Phase::Reaping | Phase::Releasing => false,
         }
     }
 }
@@ -93,7 +94,7 @@ pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &
                         io.tables.ready.mark(pipe_id);
                         tokens.push(pipe_id.token()).expect("one token per pipe");
                     }
-                    io.tables.submit(subs, id, Purpose::Wait, Op::Wait { pidfd });
+                    io.tables.submit(subs, id, Purpose::Wait, Op::Wait { pidfd, reap: false });
                     up.push(Event::Spawned { owner, child: id.token(), pipes: tokens.into_boxed() });
                 }
                 Err(error) => {
@@ -117,6 +118,7 @@ pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &
                     | Done::Bound(_)
                     | Done::Stat(_)
                     | Done::Exit(_)
+                    | Done::Usage(_)
                     | Done::ServiceSignal(_),
                 ) => {
                     unreachable!("a spawn answers with a pidfd and pipes")
@@ -124,6 +126,26 @@ pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &
             }
         }
         Purpose::Wait => {
+            let reaping = match io.entities.get(id) {
+                Some(Entity::Child(child)) => child.phase == Phase::Reaping,
+                Some(Entity::Pipe(_) | Entity::Listener(_) | Entity::Stream(_) | Entity::Signals(_)) | None => {
+                    unreachable!("a child owns wait")
+                }
+            };
+            if reaping {
+                assert!(result.is_ok(), "a reaping wait follows an observed exit");
+                let fd = match io.entities.get_mut(id) {
+                    Some(Entity::Child(child)) => {
+                        child.phase = Phase::Releasing;
+                        child.pidfd.expect("a child has its pidfd until close")
+                    }
+                    Some(Entity::Pipe(_) | Entity::Listener(_) | Entity::Stream(_) | Entity::Signals(_)) | None => {
+                        unreachable!("a child owns wait")
+                    }
+                };
+                io.tables.submit(subs, id, Purpose::Close, Op::Close { fd });
+                return;
+            }
             let Some(Entity::Child(child)) = io.entities.get_mut(id) else { unreachable!("a child owns wait") };
             match result {
                 Ok(Done::Exit(exit)) => up.push(Event::Exited { owner: child.owner, exit }),
@@ -136,6 +158,7 @@ pub(crate) fn landed(io: &mut Io, landed: Landed, up: &mut Queue<Event>, subs: &
                     | Done::Bound(_)
                     | Done::Stat(_)
                     | Done::Spawned { .. }
+                    | Done::Usage(_)
                     | Done::ServiceSignal(_),
                 ) => {
                     unreachable!("a wait answers with an exit")
@@ -179,7 +202,7 @@ pub(crate) fn signal(io: &mut Io, token: Token, signal: Signal, subs: &mut Queue
     let Some(pidfd) = child.pidfd else { return };
     let Some(Entity::Child(child)) = io.entities.get_mut(id) else { unreachable!("a live child remains") };
     child.signalling = true;
-    io.tables.submit(subs, id, Purpose::Signal, Op::Signal { pidfd, signal });
+    io.tables.submit(subs, id, Purpose::Signal, Op::Signal { pidfd, signal, to: kernel::Target::Child });
 }
 
 pub(crate) fn close(io: &mut Io, id: Id<Entity>, subs: &mut Queue<Submit>) {
@@ -187,7 +210,7 @@ pub(crate) fn close(io: &mut Io, id: Id<Entity>, subs: &mut Queue<Submit>) {
     match child.phase {
         Phase::Running => signal(io, id.token(), Signal::Kill, subs),
         Phase::Exited => release(io, id, subs),
-        Phase::Spawning | Phase::Releasing | Phase::Closed => {}
+        Phase::Spawning | Phase::Reaping | Phase::Releasing | Phase::Closed => {}
     }
 }
 
@@ -207,8 +230,8 @@ pub(crate) fn release(io: &mut Io, id: Id<Entity>, subs: &mut Queue<Submit>) {
         return;
     };
     let Some(Entity::Child(child)) = io.entities.get_mut(id) else { unreachable!("a live child remains") };
-    child.phase = Phase::Releasing;
-    io.tables.submit(subs, id, Purpose::Close, Op::Close { fd });
+    child.phase = Phase::Reaping;
+    io.tables.submit(subs, id, Purpose::Wait, Op::Wait { pidfd: fd, reap: true });
 }
 
 fn spawn_error(error: kernel::Error) -> Error {

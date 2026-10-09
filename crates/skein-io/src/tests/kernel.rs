@@ -37,7 +37,7 @@ fn complete(kind: Op, result: Result<Done, Error>) -> Complete {
 
 /// One of every operation, valid. A new operation makes the match in
 /// `documented` fail to build until it is added there, and here.
-fn every_op() -> [Op; 20] {
+fn every_op() -> [Op; 25] {
     [
         Op::Socket { family: Family::Ipv4 },
         Op::Bind { fd: FD, addr: v4() },
@@ -57,6 +57,11 @@ fn every_op() -> [Op; 20] {
         Op::Remove { dir: FD, name: name(b"a"), directory: false },
         Op::MakeDirectory { dir: FD, name: name(b"a") },
         list(2),
+        Op::Wait { pidfd: FD, reap: false },
+        Op::Wait { pidfd: FD, reap: true },
+        Op::Signal { pidfd: FD, signal: crate::kernel::Signal::Kill, to: crate::kernel::Target::Child },
+        Op::Signal { pidfd: FD, signal: crate::kernel::Signal::Kill, to: crate::kernel::Target::Group },
+        Op::Usage,
         Op::ReadSignal { fd: FD },
         Op::Cancel { target: Token::new(2) },
     ]
@@ -79,6 +84,7 @@ fn documented(op: &Op) -> Done {
         Op::Stat { .. } => Done::Stat(STAT),
         Op::Spawn { .. } => Done::Spawned { pidfd: NEW },
         Op::Wait { .. } => Done::Exit(crate::kernel::Exit::Code(0)),
+        Op::Usage => Done::Usage(crate::kernel::Usage::ZERO),
         Op::ReadSignal { .. } => Done::ServiceSignal(crate::kernel::ServiceSignal::Terminate),
         Op::Listen { .. }
         | Op::Connect { .. }
@@ -102,6 +108,8 @@ fn every_operation_succeeds_with_its_documented_shape_and_no_other() {
         Done::Accepted { fd: NEW, peer: v4() },
         Done::Bound(v4()),
         Done::Stat(STAT),
+        Done::Usage(crate::kernel::Usage::ZERO),
+        Done::Exit(crate::kernel::Exit::Code(0)),
         Done::ServiceSignal(crate::kernel::ServiceSignal::Terminate),
     ];
     for op in every_op() {
@@ -142,6 +150,11 @@ fn the_shapes_are_as_the_table_on_op_says() {
         remove,
         make_directory,
         list,
+        observing,
+        reaping,
+        child_signal,
+        group_signal,
+        usage,
         read_signal,
         cancel,
     ] = every_op();
@@ -150,6 +163,11 @@ fn the_shapes_are_as_the_table_on_op_says() {
     assert_eq!(bind.shape(), Shape::Bound);
     assert_eq!(stat.shape(), Shape::Stat);
     assert_eq!(read_signal.shape(), Shape::ServiceSignal);
+    assert_eq!(observing.shape(), Shape::Exit);
+    assert_eq!(reaping.shape(), Shape::Exit);
+    assert_eq!(usage.shape(), Shape::Usage);
+    assert_eq!(child_signal.shape(), Shape::Nothing);
+    assert_eq!(group_signal.shape(), Shape::Nothing);
     for op in [recv, send, read, write, list] {
         assert_eq!(op.shape(), Shape::Count);
     }
@@ -319,6 +337,7 @@ fn named(op: &Op) -> &'static [Error] {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
@@ -347,6 +366,7 @@ fn cancellable(op: &Op) -> bool {
         | Op::List { .. }
         | Op::Spawn { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::Cancel { .. } => false,
         Op::Open { .. }

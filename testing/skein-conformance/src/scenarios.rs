@@ -94,6 +94,7 @@ fn sent(answer: Result<Done, Error>) -> bool {
             | Done::Stat(_)
             | Done::Spawned { .. }
             | Done::Exit(_)
+            | Done::Usage(_)
             | Done::ServiceSignal(_),
         )
         | Err(_) => false,

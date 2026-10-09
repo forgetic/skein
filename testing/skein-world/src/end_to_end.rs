@@ -10,11 +10,13 @@ use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use skein_io::kernel::{Complete, Done, Error, Exit, Fd, Op, Pipe, Signal, Spawn, Submit, Way};
-use skein_lib::{Queue, Time, Token, Wall, bytes};
+use skein_io::kernel::{Complete, Done, Error, Exit, Fd, Op, Pipe, Signal, Spawn, Submit, Target, Way};
+use skein_lib::{Duration, Queue, Time, Token, Wall, bytes};
 use skein_shell::{Config, Kernel, OpenError, Wait};
 
 use crate::Host;
+use crate::tree::{self, Tree};
+pub use crate::tree::{Counts, Expectation, Method, PeakScope};
 
 /// A scenario's binary command, with an exact environment and working directory.
 #[derive(Debug)]
@@ -41,6 +43,8 @@ pub enum StartError {
     Ring(OpenError),
     /// Opening the command's working directory failed with this errno.
     Directory(i32),
+    /// Preparing tree containment failed before spawn.
+    Tree(Error),
     /// Making pipes, the terminal or executing the child failed.
     Child(Error),
 }
@@ -76,7 +80,11 @@ pub struct Binary {
     status: Option<Exit>,
     wait_started: bool,
     reading: bool,
-    signal: Option<Signal>,
+    signal: Option<(Signal, Target)>,
+    tree: Option<Box<Tree>>,
+    counts: Option<Counts>,
+    expectation: Expectation,
+    poll_at: Option<Time>,
     signalling: bool,
     closing: u32,
     next: u64,
@@ -89,7 +97,24 @@ impl Binary {
     /// close before returning. `stderr_limit` bounds captured bytes, and an
     /// overflow fails the scenario. Environment entries are not inherited.
     pub fn start(command: Command, mode: Mode, stderr_limit: usize) -> Result<Self, StartError> {
+        Self::start_with_tree(command, mode, stderr_limit, Expectation::EndsWithBinary, false)
+    }
+
+    /// Starts a binary with an explicit tree expectation; `force_walk` exercises
+    /// the subreaper path even on a machine with delegated cgroups. The walk
+    /// requires one observer per test process, since its counts are process-wide.
+    pub fn start_with_tree(
+        command: Command,
+        mode: Mode,
+        stderr_limit: usize,
+        expectation: Expectation,
+        force_walk: bool,
+    ) -> Result<Self, StartError> {
         let mut startup = Kernel::open(Config { operations: 1 }).map_err(StartError::Ring)?;
+        let until = skein_shell::Clock::new().now().now.saturating_add(Duration::from_secs(2));
+        let baseline = tree::call(&mut startup, Op::Usage, until).expect("startup usage succeeds");
+        let Done::Usage(baseline) = baseline else { unreachable!("Usage returns usage") };
+        let mut tree = Tree::prepare(force_walk, baseline).map_err(StartError::Tree)?;
         let root = skein_shell::open_root(&command.directory).map_err(StartError::Directory)?;
         let terminal = matches!(mode, Mode::Terminal);
         let mut pipes = Vec::new();
@@ -115,7 +140,10 @@ impl Binary {
                 .collect(),
             pipes: pipes.into_boxed_slice(),
         };
-        let child = skein_shell::start_binary(&mut spawn, terminal);
+        let child = match tree.cgroup() {
+            Some(cgroup) => skein_shell::start_binary_in_cgroup(&mut spawn, terminal, cgroup),
+            None => skein_shell::start_binary(&mut spawn, terminal),
+        };
         let mut submits = Queue::with_capacity(1);
         let mut completes = Queue::with_capacity(1);
         submits.push(Submit { op: Token::new(1), kind: Op::Close { fd: root } });
@@ -129,6 +157,7 @@ impl Binary {
         let closed = completes.pop().expect("startup root close completed");
         assert!(matches!(closed.kind, Op::Close { .. }), "startup closes only its root");
         let (pidfd, master) = child.map_err(StartError::Child)?;
+        tree.started(pidfd);
         let stderr = spawn.pipes.last().and_then(|pipe| pipe.parent).expect("stderr was requested");
         let streams = match master {
             Some(stream) => Streams::Terminal { stream },
@@ -147,6 +176,10 @@ impl Binary {
             wait_started: false,
             reading: false,
             signal: None,
+            tree: Some(Box::new(tree)),
+            counts: None,
+            expectation,
+            poll_at: Some(Time::ZERO),
             signalling: false,
             closing: 0,
             next: 0,
@@ -171,7 +204,25 @@ impl Binary {
     pub fn signal(&mut self, signal: Signal) {
         assert!(self.status.is_none(), "the referee signals a child before its exit");
         assert!(self.signal.is_none(), "one pending referee signal at a time");
-        self.signal = Some(signal);
+        self.signal = Some((signal, Target::Child));
+    }
+
+    /// Queues a group signal while the binary's leader is retained.
+    pub fn signal_group(&mut self, signal: Signal) {
+        assert!(self.pidfd.is_some(), "the leader remains owned until tree settlement");
+        assert!(self.signal.is_none(), "one pending referee signal at a time");
+        self.signal = Some((signal, Target::Group));
+    }
+
+    /// Ends a measured command; final counts arrive after its tree settles.
+    pub fn end(&mut self) {
+        self.signal_group(Signal::Kill);
+    }
+
+    /// The terminal counts, present only once the binary and every descendant settled.
+    #[must_use]
+    pub const fn counts(&self) -> Option<Counts> {
+        self.counts
     }
 
     /// What the child wrote to stderr; it is outside observation, not service state.
@@ -240,6 +291,11 @@ impl Binary {
 // observer is discarded; a normally settled observer owns no descriptors.
 impl Drop for Binary {
     fn drop(&mut self) {
+        if let Some(tree) = &mut self.tree
+            && let Some(pidfd) = self.pidfd
+        {
+            tree.abandon(pidfd);
+        }
         let descriptors = self.descriptors();
         if !descriptors.is_empty() {
             skein_shell::abandon_binary(self.pidfd.take(), &descriptors);
@@ -248,7 +304,13 @@ impl Drop for Binary {
 }
 
 impl Host for Binary {
-    fn iterate(&mut self, _now: Time, _wall: Wall) {
+    fn iterate(&mut self, now: Time, _wall: Wall) {
+        if self.poll_at.is_some_and(|at| at <= now) {
+            if let Some(tree) = &mut self.tree {
+                tree.refresh();
+            }
+            self.poll_at = Some(now.saturating_add(Duration::from_millis(10)));
+        }
         while let Some(complete) = self.completions.pop() {
             self.completed(complete);
         }
@@ -259,7 +321,7 @@ impl Host for Binary {
         }
         if !self.wait_started {
             self.wait_started = true;
-            self.submit(Op::Wait { pidfd: self.pidfd.expect("a child has its pidfd") });
+            self.submit(Op::Wait { pidfd: self.pidfd.expect("a child has its pidfd"), reap: false });
         }
         if !self.reading
             && let Some(fd) = self.stderr
@@ -268,15 +330,21 @@ impl Host for Binary {
             self.submit(Op::PipeRead { fd, buf: bytes::zeroed(4096) });
         }
         if !self.signalling
-            && let Some(signal) = self.signal.take()
+            && let Some((signal, to)) = self.signal.take()
         {
             self.signalling = true;
-            self.submit(Op::Signal { pidfd: self.pidfd.expect("a running child has its pidfd"), signal });
+            self.submit(Op::Signal { pidfd: self.pidfd.expect("a running child has its pidfd"), signal, to });
         }
         if self.status.is_some()
             && !self.signalling
-            && let Some(pidfd) = self.pidfd.take()
+            && let Some(pidfd) = self.pidfd
         {
+            if let Some(tree) = &mut self.tree {
+                self.counts = Some(tree.finish(pidfd, self.expectation, true).unwrap_or_else(|why| crate::fail(&why)));
+            }
+            self.tree = None;
+            self.pidfd = None;
+            self.poll_at = None;
             self.close(pidfd);
         }
     }
@@ -289,8 +357,9 @@ impl Host for Binary {
         &mut self.submissions
     }
 
-    fn work_pending(&self, _now: Time) -> bool {
-        !self.completions.is_empty()
+    fn work_pending(&self, now: Time) -> bool {
+        self.poll_at.is_some_and(|at| at <= now)
+            || !self.completions.is_empty()
             || !self.wait_started
             || self.streams.is_some()
             || (self.signal.is_some() && !self.signalling)
@@ -299,7 +368,7 @@ impl Host for Binary {
     }
 
     fn next_deadline(&self) -> Option<Time> {
-        None
+        self.poll_at
     }
 
     fn is_empty(&self) -> bool {

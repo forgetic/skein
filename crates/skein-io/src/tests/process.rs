@@ -93,6 +93,7 @@ fn a_childs_output_is_a_stream_and_the_child_closes_after_its_pipe() {
     parent_ends(&mut spawn, &[Fd::new(12)]);
     let mut out = rig.complete(spawn, Ok(Done::Spawned { pidfd: Fd::new(11) }));
     let wait = out.take(Kind::Wait);
+    assert_eq!(wait.kind, Op::Wait { pidfd: Fd::new(11), reap: false });
     let (child, pipe) = match out.events.as_slice() {
         [Event::Spawned { owner: got, child, pipes }] if *got == owner(1) && pipes.len() == 1 => (*child, pipes[0]),
         other => panic!("spawned child and pipe: {other:?}"),
@@ -117,6 +118,10 @@ fn a_childs_output_is_a_stream_and_the_child_closes_after_its_pipe() {
     let close = rig.down(Request::Close { entity: pipe }).take(Kind::Close);
     let mut out = rig.complete(close, Ok(Done::Nothing));
     assert_eq!(out.events, [Event::Closed { owner: pipe }]);
+    let reaping = out.take(Kind::Wait);
+    assert_eq!(reaping.kind, Op::Wait { pidfd: Fd::new(11), reap: true });
+    let mut out = rig.complete(reaping, Ok(Done::Exit(Exit::Code(7))));
+    assert!(out.events.is_empty(), "the reaping wait does not repeat Exited");
     let pidfd_close = out.take(Kind::Close);
     assert_eq!(pidfd_close.kind, Op::Close { fd: Fd::new(11) });
     assert_eq!(rig.complete(pidfd_close, Ok(Done::Nothing)).events, [Event::Closed { owner: owner(1) }]);
@@ -132,6 +137,7 @@ fn a_childs_input_grants_room_continues_short_writes_and_finishes() {
     parent_ends(&mut spawn, &[Fd::new(22)]);
     let mut out = rig.complete(spawn, Ok(Done::Spawned { pidfd: Fd::new(21) }));
     let wait = out.take(Kind::Wait);
+    assert_eq!(wait.kind, Op::Wait { pidfd: Fd::new(21), reap: false });
     let pipe = match out.events.as_slice() {
         [Event::Spawned { pipes, .. }] => pipes[0],
         other => panic!("spawned pipe: {other:?}"),
@@ -151,7 +157,9 @@ fn a_childs_input_grants_room_continues_short_writes_and_finishes() {
     assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner: pipe }]);
     let mut out = rig.complete(wait, Ok(Done::Exit(Exit::Code(0))));
     assert_eq!(out.events, [Event::Exited { owner: owner(2), exit: Exit::Code(0) }]);
-    let close = out.take(Kind::Close);
+    let reaping = out.take(Kind::Wait);
+    assert_eq!(reaping.kind, Op::Wait { pidfd: Fd::new(21), reap: true });
+    let close = rig.complete(reaping, Ok(Done::Exit(Exit::Code(0)))).take(Kind::Close);
     assert_eq!(rig.complete(close, Ok(Done::Nothing)).events, [Event::Closed { owner: owner(2) }]);
     rig.next().nothing();
     rig.empty();

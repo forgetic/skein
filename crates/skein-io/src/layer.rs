@@ -556,6 +556,7 @@ pub(crate) fn unsubmitted(result: Result<Done, kernel::Error>) -> bool {
             | Done::Stat(_)
             | Done::Spawned { .. }
             | Done::Exit(_)
+            | Done::Usage(_)
             | Done::ServiceSignal(_),
         ) => {
             unreachable!("a cancel answers with nothing")

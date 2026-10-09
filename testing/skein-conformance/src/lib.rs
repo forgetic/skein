@@ -43,7 +43,7 @@ pub use files::{
     Shortness, cancel_read, escapes, file_lifecycle, list, make_directory, nested_roots,
     open_past_the_descriptor_limit, permissions, remove, rename,
 };
-pub use processes::{Processes, processes};
+pub use processes::{Groups, Processes, ResourcesCheck, groups, processes, usage};
 
 pub use scenarios::{
     AddressInUse, Backpressure, Cancelling, ClosedBeforeAccept, DescriptorLimit, FullQueue, GracefulClose, Ipv6Only,

@@ -336,6 +336,7 @@ fn decode(io: &mut Io, landed: Landed) -> Happened {
                 | Done::Stat(_)
                 | Done::Spawned { .. }
                 | Done::Exit(_)
+                | Done::Usage(_)
                 | Done::ServiceSignal(_),
             ) => {
                 unreachable!("a socket answers with its descriptor")
@@ -352,6 +353,7 @@ fn decode(io: &mut Io, landed: Landed) -> Happened {
                 | Done::Stat(_)
                 | Done::Spawned { .. }
                 | Done::Exit(_)
+                | Done::Usage(_)
                 | Done::ServiceSignal(_),
             ) => {
                 unreachable!("a bind answers with the address bound")
@@ -368,6 +370,7 @@ fn decode(io: &mut Io, landed: Landed) -> Happened {
                 | Done::Stat(_)
                 | Done::Spawned { .. }
                 | Done::Exit(_)
+                | Done::Usage(_)
                 | Done::ServiceSignal(_),
             ) => {
                 unreachable!("a listen answers with nothing")
@@ -421,6 +424,7 @@ fn outcome(io: &mut Io, listener: Id<Entity>, result: Result<Done, kernel::Error
             | Done::Stat(_)
             | Done::Spawned { .. }
             | Done::Exit(_)
+            | Done::Usage(_)
             | Done::ServiceSignal(_),
         ) => {
             unreachable!("an accept answers with a socket and its peer")

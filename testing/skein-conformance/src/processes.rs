@@ -53,9 +53,11 @@ pub fn processes<B: Backend>(backend: &mut B, executable: &[u8]) -> Processes {
     pipe_write_all(&mut run, process, *input, MESSAGE);
     let echoed = pipe_read_exact(&mut run, process, *output, MESSAGE.len());
     run.close(process, *input);
-    let echo_exit = run.call(process, Op::Wait { pidfd: echo_pidfd }).result;
+    let echo_exit = run.call(process, Op::Wait { pidfd: echo_pidfd, reap: false }).result;
     let eof = pipe_read(&mut run, process, *output);
     run.close(process, *output);
+    let reaped = run.call(process, Op::Wait { pidfd: echo_pidfd, reap: true });
+    assert!(matches!(reaped.result, Ok(Done::Exit(_))), "an observed child reaps at once");
     run.close(process, echo_pidfd);
 
     let mut missing = command(executable, root, &[b"exit", b"42"], &[Pipe { child: 1, way: Way::Out, parent: None }]);
@@ -70,17 +72,23 @@ pub fn processes<B: Backend>(backend: &mut B, executable: &[u8]) -> Processes {
     let status = command(executable, root, &[b"exit", b"42"], &[]);
     let (status_pidfd, status_pipes) = spawned(run.call(process, Op::Spawn { spawn: Box::new(status) }));
     assert!(status_pipes.is_empty(), "no pipes were requested of the exit fixture");
-    let status_exit = run.call(process, Op::Wait { pidfd: status_pidfd }).result;
+    let status_exit = run.call(process, Op::Wait { pidfd: status_pidfd, reap: false }).result;
+    let reaped = run.call(process, Op::Wait { pidfd: status_pidfd, reap: true });
+    assert!(matches!(reaped.result, Ok(Done::Exit(_))), "an observed child reaps at once");
     run.close(process, status_pidfd);
 
     let never = command(executable, root, &[b"never"], &[]);
     let (never_pidfd, never_pipes) = spawned(run.call(process, Op::Spawn { spawn: Box::new(never) }));
     assert!(never_pipes.is_empty(), "no pipes were requested of the never fixture");
-    let waiting = run.start(process, Op::Wait { pidfd: never_pidfd });
+    let waiting = run.start(process, Op::Wait { pidfd: never_pidfd, reap: false });
     let never_waited = run.within(process, waiting, BRIEFLY).is_none();
     assert!(never_waited, "the never fixture stays alive until signalled");
-    let signalled = run.call(process, Op::Signal { pidfd: never_pidfd, signal: Signal::Kill }).result;
+    let signalled = run
+        .call(process, Op::Signal { pidfd: never_pidfd, signal: Signal::Kill, to: skein_io::kernel::Target::Child })
+        .result;
     let killed_exit = run.wait(process, waiting).result;
+    let reaped = run.call(process, Op::Wait { pidfd: never_pidfd, reap: true });
+    assert!(matches!(reaped.result, Ok(Done::Exit(_))), "an observed child reaps at once");
     run.close(process, never_pidfd);
     run.close(process, root);
     run.finish();
@@ -136,4 +144,87 @@ fn pipe_read_exact<B: Backend>(run: &mut Run<'_, B>, process: B::Process, fd: Fd
         bytes.extend(next);
     }
     bytes
+}
+
+/// Observes the exited group leader, then ends the descendant's hold on stdout.
+pub fn groups<B: Backend>(backend: &mut B, executable: &[u8]) -> Groups {
+    let mut run = Run::new(backend);
+    let process = run.process();
+    let root = run.root(process, &[]);
+    let command = command(executable, root, &[b"fork-exit"], &[Pipe { child: 1, way: Way::Out, parent: None }]);
+    let (pidfd, pipes) = spawned(run.call(process, Op::Spawn { spawn: Box::new(command) }));
+    let observed = run.call(process, Op::Wait { pidfd, reap: false });
+    assert_eq!(observed.result, Ok(Done::Exit(Exit::Code(0))), "the group leader exited");
+    let output = *pipes.first().expect("the requested output pipe");
+    let read = run.start(process, Op::PipeRead { fd: output, buf: Box::from([0_u8; 1]) });
+    assert!(run.within(process, read, BRIEFLY).is_none(), "the descendant holds its leader's pipe after exit");
+    let signalled = run.call(process, Op::Signal { pidfd, signal: Signal::Kill, to: skein_io::kernel::Target::Group });
+    assert_eq!(signalled.result, Ok(Done::Nothing), "the retained leader names its group");
+    assert_eq!(run.wait(process, read).result, Ok(Done::Count(0)), "group kill ends every writer");
+    assert_eq!(
+        run.call(process, Op::Wait { pidfd, reap: true }).result,
+        observed.result,
+        "reaping preserves the observed exit"
+    );
+    run.close(process, output);
+    run.close(process, pidfd);
+    run.close(process, root);
+    run.finish();
+    Groups { observed: observed.result, signalled: signalled.result }
+}
+
+/// Checks usage before observation, after observation and after reaping one child.
+pub fn usage<B: Backend>(backend: &mut B, executable: &[u8]) -> ResourcesCheck {
+    let mut run = Run::new(backend);
+    let process = run.process();
+    let root = run.root(process, &[]);
+    let Done::Usage(before) = run.call(process, Op::Usage).result.expect("usage succeeds") else {
+        unexpected("a Usage result", &"wrong shape")
+    };
+    assert_eq!(before.children, skein_io::kernel::Resources::ZERO, "no child was reaped in this process");
+    let command = command(executable, root, &[b"exit", b"0"], &[]);
+    let (pidfd, _) = spawned(run.call(process, Op::Spawn { spawn: Box::new(command) }));
+    run.call(process, Op::Wait { pidfd, reap: false });
+    let Done::Usage(observed) = run.call(process, Op::Usage).result.expect("usage succeeds") else {
+        unexpected("a Usage result", &"wrong shape")
+    };
+    assert_eq!(observed.children, before.children, "a zombie has not joined the children's usage");
+    run.call(process, Op::Wait { pidfd, reap: true });
+    let Done::Usage(after) = run.call(process, Op::Usage).result.expect("usage succeeds") else {
+        unexpected("a Usage result", &"wrong shape")
+    };
+    run.close(process, pidfd);
+    run.close(process, root);
+    run.finish();
+    ResourcesCheck { before, after }
+}
+
+/// The process and its one reaped child, checked identically on both backends.
+#[derive(Debug)]
+pub struct ResourcesCheck {
+    before: skein_io::kernel::Usage,
+    after: skein_io::kernel::Usage,
+}
+
+impl Check for ResourcesCheck {
+    fn check(&self) {
+        assert!(self.after.children.peak_rss_bytes > 0, "the reaped child's peak is counted");
+        assert!(self.after.own.user >= self.before.own.user, "own user CPU never falls");
+        assert!(self.after.own.system >= self.before.own.system, "own system CPU never falls");
+        assert!(self.after.own.peak_rss_bytes >= self.before.own.peak_rss_bytes, "own resident peak never falls");
+    }
+}
+
+/// The retained leader's observed exit and its group signal result.
+#[derive(Debug)]
+pub struct Groups {
+    observed: Result<Done, Error>,
+    signalled: Result<Done, Error>,
+}
+
+impl Check for Groups {
+    fn check(&self) {
+        assert_eq!(self.observed, Ok(Done::Exit(Exit::Code(0))), "the group leader exits normally");
+        assert_eq!(self.signalled, Ok(Done::Nothing), "the signal still reaches the retained leader's group");
+    }
 }

@@ -177,7 +177,10 @@ fn child_pipes_echo_at_chosen_descriptors_and_exit() {
     let Op::PipeRead { buf, .. } = read.kind else { panic!("pipe read") };
     assert_eq!(&buf[..5], b"hello");
     assert_eq!(run(&mut machine, &mut sim, pid, 4, Op::Close { fd: pipes[0] }).result, Ok(Done::Nothing));
-    assert_eq!(run(&mut machine, &mut sim, pid, 5, Op::Wait { pidfd }).result, Ok(Done::Exit(Exit::Code(0))));
+    assert_eq!(
+        run(&mut machine, &mut sim, pid, 5, Op::Wait { pidfd, reap: false }).result,
+        Ok(Done::Exit(Exit::Code(0)))
+    );
     assert_eq!(
         run(&mut machine, &mut sim, pid, 6, Op::PipeRead { fd: pipes[1], buf: Box::new([0; 8]) }).result,
         Ok(Done::Count(0))
@@ -219,10 +222,13 @@ fn never_child_waits_until_killed() {
     let mut out = Queue::with_capacity(1);
     sim.reap(pid, &mut out);
     let Done::Spawned { pidfd, .. } = out.pop().unwrap().result.unwrap() else { panic!("spawn") };
-    q.push(Submit { op: Token::new(2), kind: Op::Wait { pidfd } });
+    q.push(Submit { op: Token::new(2), kind: Op::Wait { pidfd, reap: false } });
     sim.submit(pid, &mut q);
     assert_eq!(sim.ready(pid), 0);
-    q.push(Submit { op: Token::new(3), kind: Op::Signal { pidfd, signal: Signal::Kill } });
+    q.push(Submit {
+        op: Token::new(3),
+        kind: Op::Signal { pidfd, signal: Signal::Kill, to: skein_io::kernel::Target::Child },
+    });
     sim.submit(pid, &mut q);
     let mut out = Queue::with_capacity(2);
     sim.reap(pid, &mut out);

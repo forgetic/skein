@@ -489,6 +489,7 @@ pub(super) fn stopped(
             | Done::Bound(_)
             | Done::Spawned { .. }
             | Done::Exit(_)
+            | Done::Usage(_)
             | Done::ServiceSignal(_),
         )
         | Err(_) => {}
@@ -532,6 +533,7 @@ fn done_fd(done: Done) -> Fd {
         | Done::Stat(_)
         | Done::Spawned { .. }
         | Done::Exit(_)
+        | Done::Usage(_)
         | Done::ServiceSignal(_) => unreachable!("an open returns a descriptor"),
     }
 }
@@ -546,6 +548,7 @@ fn done_stat(done: Done) -> crate::kernel::Stat {
         | Done::Bound(_)
         | Done::Spawned { .. }
         | Done::Exit(_)
+        | Done::Usage(_)
         | Done::ServiceSignal(_) => unreachable!("a stat returns metadata"),
     }
 }
@@ -560,6 +563,7 @@ fn done_count(done: Done) -> u32 {
         | Done::Stat(_)
         | Done::Spawned { .. }
         | Done::Exit(_)
+        | Done::Usage(_)
         | Done::ServiceSignal(_) => unreachable!("a transfer returns a count"),
     }
 }
@@ -574,6 +578,7 @@ fn done_nothing(done: Done) {
         | Done::Stat(_)
         | Done::Spawned { .. }
         | Done::Exit(_)
+        | Done::Usage(_)
         | Done::ServiceSignal(_) => unreachable!("this operation returns nothing"),
     }
 }
@@ -601,6 +606,7 @@ fn write_parts(kind: Op) -> (Fd, Box<[u8]>, u32, u64) {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
@@ -631,6 +637,7 @@ fn read_buffer(kind: Op) -> Box<[u8]> {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }

@@ -138,6 +138,7 @@ impl Script {
                 | Done::Stat(_)
                 | Done::Spawned { .. }
                 | Done::Exit(_)
+                | Done::Usage(_)
                 | Done::ServiceSignal(_),
             ) => {}
             Err(_) => self.closing = true,

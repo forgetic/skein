@@ -267,3 +267,13 @@ fn a_cancel_of_a_read_of_a_file() {
     each_seed(loopback_chaos(), SMOKE, cancel_read);
     each_seed(file_cancel_chaos(), SMOKE, cancel_read);
 }
+
+#[test]
+fn the_group_is_signalled_after_its_leader_exits() {
+    calm_and_chaos(|world| skein_conformance::groups(world, b"process_fixture"));
+}
+
+#[test]
+fn usage_counts_the_child_only_after_reaping() {
+    calm_and_chaos(|world| skein_conformance::usage(world, b"process_fixture"));
+}

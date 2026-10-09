@@ -41,6 +41,7 @@ mod heap;
 mod program;
 pub mod real;
 mod referee;
+mod tree;
 mod world;
 
 pub use heap::Memory;

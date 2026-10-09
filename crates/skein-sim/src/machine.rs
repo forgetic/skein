@@ -121,6 +121,8 @@ pub enum Program {
     Exit(u8),
     /// Stay alive until signalled.
     Never,
+    /// Start a child that holds the output pipes in the leader's group; optionally exit the leader.
+    Fork { exit_leader: bool },
     /// Run a service hosted by the world in a process bound to these pipes.
     Service,
 }

@@ -121,6 +121,7 @@ impl<'b, B: Backend> Run<'b, B> {
             | Op::List { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
@@ -307,6 +308,7 @@ impl<'b, B: Backend> Run<'b, B> {
                     | Done::Bound(_)
                     | Done::Stat(_)
                     | Done::Exit(_)
+                    | Done::Usage(_)
                     | Done::ServiceSignal(_)
                     | Done::Spawned { .. },
                 )
@@ -697,8 +699,9 @@ enum Summary {
     MakeDirectory { dir: Fd, name: usize },
     List { fd: Fd, entries: usize, names: usize },
     Spawn { root: Fd, program: usize, args: usize, env: usize, dir: usize, pipes: usize },
-    Wait { pidfd: Fd },
-    Signal { pidfd: Fd, signal: skein_io::kernel::Signal },
+    Wait { pidfd: Fd, reap: bool },
+    Signal { pidfd: Fd, signal: skein_io::kernel::Signal, to: skein_io::kernel::Target },
+    Usage,
     ReadSignal { fd: Fd },
     PipeRead { fd: Fd, len: usize },
     PipeWrite { fd: Fd, len: usize, from: u32 },
@@ -738,11 +741,12 @@ impl Summary {
                 dir: spawn.dir.len(),
                 pipes: spawn.pipes.len(),
             },
-            Op::Wait { pidfd } => Summary::Wait { pidfd: *pidfd },
-            Op::Signal { pidfd, signal } => Summary::Signal { pidfd: *pidfd, signal: *signal },
+            Op::Wait { pidfd, reap } => Summary::Wait { pidfd: *pidfd, reap: *reap },
+            Op::Signal { pidfd, signal, to } => Summary::Signal { pidfd: *pidfd, signal: *signal, to: *to },
             Op::ReadSignal { fd } => Summary::ReadSignal { fd: *fd },
             Op::PipeRead { fd, buf } => Summary::PipeRead { fd: *fd, len: buf.len() },
             Op::PipeWrite { fd, bytes, from } => Summary::PipeWrite { fd: *fd, len: bytes.len(), from: *from },
+            Op::Usage => Summary::Usage,
             Op::Cancel { target } => Summary::Cancel { target: *target },
         }
     }
@@ -785,6 +789,7 @@ fn boxes_of(op: &Op) -> Vec<&[u8]> {
         | Op::Stat { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::Cancel { .. } => Vec::new(),
     }
@@ -814,6 +819,7 @@ fn entries_of(op: &Op) -> Option<&[Entry]> {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
@@ -836,6 +842,7 @@ fn handed_back<P>(flight: &Flight<P>, complete: &Complete) {
             | Done::Stat(_)
             | Done::Spawned { .. }
             | Done::Exit(_)
+            | Done::Usage(_)
             | Done::ServiceSignal(_),
         )
         | Err(_) => None,

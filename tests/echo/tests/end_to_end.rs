@@ -175,6 +175,7 @@ fn the_shipped_echo_answers_two_loopback_clients_and_terminates_successfully() {
     .unwrap_or_else(|error| match error {
         StartError::Ring(why) => panic!("io_uring is not usable here, so the echo end to end cannot run: {why}"),
         StartError::Directory(errno) => panic!("echo working directory failed: errno {errno}"),
+        StartError::Tree(error) => panic!("tree startup failed: {error:?}"),
         StartError::Child(error) => panic!("starting the shipped echo failed: {error:?}"),
     });
     let mut world = real::World::new(Judge {

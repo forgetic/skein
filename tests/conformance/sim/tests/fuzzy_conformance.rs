@@ -269,3 +269,9 @@ fn a_cancel_of_a_read_of_a_file_meets_each_pairing_over_the_seeds() {
     let expected = BTreeSet::from([Pairing::Stopped, Pairing::Interrupted, Pairing::Completed, Pairing::RanOn]);
     assert_eq!(seen, expected, "the pairings of a cancelled Read of a file");
 }
+
+#[test]
+fn groups_and_usage_under_chaos() {
+    chaos(|world| skein_conformance::groups(world, b"process_fixture"));
+    chaos(|world| skein_conformance::usage(world, b"process_fixture"));
+}
