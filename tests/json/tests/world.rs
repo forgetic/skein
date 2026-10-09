@@ -166,3 +166,14 @@ fn the_reference_parser_reads_what_the_writer_of_the_generator_meant() {
         assert_eq!(decoded.tokens, tokens, "seed {seed}");
     }
 }
+
+#[test]
+fn drawn_text_and_skip_demands_are_judged_by_the_reference() {
+    let document = br#"{"key": [true, false, null, 1.25, "longer string with \uD83D\uDE00", {"inner": [1, 2, 3]}]}"#;
+    for seed in 0..128 {
+        let mut rng = Rng::new(seed);
+        let settings = Settings::calm(&mut rng, LIMITS);
+        let run = world::check_demands(document, &settings, seed);
+        assert_eq!(run, world::check_demands(document, &settings, seed));
+    }
+}

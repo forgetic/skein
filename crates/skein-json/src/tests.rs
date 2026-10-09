@@ -113,7 +113,7 @@ fn read(document: &[u8], limits: Limits) -> Vec<Event> {
         let Some(event) = event else { continue };
         assert!(demanded.is_none(), "an answer leaves nothing demanded");
         let over = match &event {
-            Event::Token(_) => false,
+            Event::Token(_) | Event::Long(_) | Event::Skipped(_) => false,
             Event::Done | Event::Failed(_) => true,
             Event::Closed => panic!("closed unasked"),
         };

@@ -70,6 +70,7 @@ impl Json {
                     tokenizer::Event::Token(token) => collector.push(token)?,
                     tokenizer::Event::Done => return collector.finish(limits),
                     tokenizer::Event::Failed(error) => return Err(tokenizer_error(error)),
+                    tokenizer::Event::Long(_) | tokenizer::Event::Skipped(_) => unreachable!("only Next is demanded"),
                     tokenizer::Event::Closed => return Err(DecodeError::Malformed),
                 }
             }

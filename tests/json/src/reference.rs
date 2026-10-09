@@ -23,7 +23,15 @@ use crate::{Decoded, Outcome};
 /// What `document`, the whole of a stream, decodes to under `limits`.
 #[must_use]
 pub fn parse(document: &[u8], limits: &Limits) -> Decoded {
-    let mut parser = Parser { input: document, at: 0, limits: *limits, depth: 0, visible: 0, tokens: Vec::new() };
+    let mut parser = Parser {
+        input: document,
+        at: 0,
+        limits: *limits,
+        depth: 0,
+        visible: 0,
+        tokens: Vec::new(),
+        values: Vec::new(),
+    };
     let outcome = match parser.document() {
         Ok(()) => Outcome::Done,
         Err(error) => Outcome::Failed(error),
@@ -41,6 +49,7 @@ struct Parser<'a> {
     /// How far the scans of the string being read have reached.
     visible: usize,
     tokens: Vec<Token>,
+    values: Vec<ValueSpan>,
 }
 
 impl Parser<'_> {
@@ -79,7 +88,9 @@ impl Parser<'_> {
 
     /// A value, its first byte read.
     fn value(&mut self, first: u8) -> Result<(), Error> {
-        match first {
+        let token = self.tokens.len();
+        let start = self.at - 1;
+        let result = match first {
             b'{' => self.object(),
             b'[' => self.array(),
             b'"' => {
@@ -92,7 +103,11 @@ impl Parser<'_> {
             b'n' => self.literal(b"ull", Token::Null),
             b'-' | b'0'..=b'9' => self.number(),
             _ => Err(Error::Unexpected),
+        };
+        if result.is_ok() {
+            self.values.push(ValueSpan { token, end_token: self.tokens.len(), bytes: self.at - start });
         }
+        result
     }
 
     fn object(&mut self) -> Result<(), Error> {
@@ -363,4 +378,85 @@ pub fn is_number(text: &[u8]) -> bool {
         rest = &exponent[count..];
     }
     rest.is_empty()
+}
+
+/// A complete value's token interval and wire length, recorded by the recursive reference.
+struct ValueSpan {
+    token: usize,
+    end_token: usize,
+    bytes: usize,
+}
+
+/// Draws legal demands from a complete document's own value positions and independently
+/// computes their answers. The reference retains the original text; the tokenizer need not.
+#[must_use]
+pub fn demands(
+    document: &[u8],
+    limits: &Limits,
+    seed: u64,
+) -> (Vec<skein_json::tokenizer::Request>, Vec<skein_json::tokenizer::Event>) {
+    use skein_json::tokenizer::{Event, Request};
+    let mut parser = Parser {
+        input: document,
+        at: 0,
+        limits: *limits,
+        depth: 0,
+        visible: 0,
+        tokens: Vec::new(),
+        values: Vec::new(),
+    };
+    parser.document().expect("a complete bounded generated document");
+    let mut rng = skein_lib::Rng::new(seed);
+    let mut requests = Vec::new();
+    let mut events = Vec::new();
+    let mut at = 0;
+    while at < parser.tokens.len() {
+        if rng.chance(300)
+            && let Some(value) = parser.values.iter().find(|value| value.token == at)
+        {
+            requests.push(Request::Skip);
+            events.push(Event::Skipped(value.bytes as u64));
+            at = value.end_token;
+        } else {
+            let token = parser.tokens[at].clone();
+            if rng.chance(500) {
+                let cap = u32::try_from(rng.below(32)).expect("below 32");
+                requests.push(Request::Text(cap));
+                let long = match &token {
+                    Token::String(text) | Token::Key(text) => text.len() > cap as usize,
+                    Token::ObjectStart
+                    | Token::ObjectEnd
+                    | Token::ArrayStart
+                    | Token::ArrayEnd
+                    | Token::Number(_)
+                    | Token::True
+                    | Token::False
+                    | Token::Null => false,
+                };
+                if long {
+                    let length = match &token {
+                        Token::String(text) | Token::Key(text) => text.len(),
+                        Token::ObjectStart
+                        | Token::ObjectEnd
+                        | Token::ArrayStart
+                        | Token::ArrayEnd
+                        | Token::Number(_)
+                        | Token::True
+                        | Token::False
+                        | Token::Null => unreachable!("only text is long"),
+                    };
+                    events.push(Event::Long(length as u64));
+                } else {
+                    events.push(Event::Token(token));
+                }
+            } else {
+                requests.push(Request::Next);
+                events.push(Event::Token(token));
+            }
+            at += 1;
+        }
+    }
+    requests.push(Request::Next);
+    events.push(Event::Done);
+    (requests, events)
 }

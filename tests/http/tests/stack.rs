@@ -306,11 +306,16 @@ impl Stack {
             json::Event::Done | json::Event::Failed(_) => {
                 let outcome = match event {
                     json::Event::Failed(error) => Outcome::Failed(error),
-                    json::Event::Done | json::Event::Token(_) | json::Event::Closed => Outcome::Done,
+                    json::Event::Done
+                    | json::Event::Token(_)
+                    | json::Event::Long(_)
+                    | json::Event::Skipped(_)
+                    | json::Event::Closed => Outcome::Done,
                 };
                 out.documents.push(Decoded { tokens: std::mem::take(&mut self.tokens), outcome });
                 self.json_call(json::Request::Close);
             }
+            json::Event::Long(_) | json::Event::Skipped(_) => unreachable!("only Next is demanded"),
             json::Event::Closed => {
                 let (_, data) = self.tokenizer.take().expect("a tokenizer");
                 if data.is_some() {

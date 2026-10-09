@@ -45,6 +45,10 @@ struct Ran {
 /// holds all of it and meets each demand from it, each call a step of the
 /// meter checked against `worst_case`, and closes it.
 fn read(document: &[u8], limits: Limits, interrupt: Interrupt) -> Ran {
+    read_demand(document, limits, interrupt, Request::Next)
+}
+
+fn read_demand(document: &[u8], limits: Limits, interrupt: Interrupt, first: Request) -> Ran {
     let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
     let mut above = Queue::with_capacity(json::UP_MAX_OUT.above.max(json::DOWN_MAX_OUT.above));
     let mut below = Queue::with_capacity(json::UP_MAX_OUT.below.max(json::DOWN_MAX_OUT.below));
@@ -71,7 +75,7 @@ fn read(document: &[u8], limits: Limits, interrupt: Interrupt) -> Ran {
                 None => (Some(Up::End), Request::Next),
             },
             (_, None) if run.outcome.is_some() => (None, Request::Close),
-            (_, None) => (None, Request::Next),
+            (_, None) => (None, if steps == 0 { first } else { Request::Next }),
         };
         let closing = ev.is_none() && rq == Request::Close;
         meter.start();
@@ -90,7 +94,7 @@ fn read(document: &[u8], limits: Limits, interrupt: Interrupt) -> Ran {
                 drop(token);
             }
             Some(outcome @ (Event::Done | Event::Failed(_))) => run.outcome = Some(outcome),
-            Some(Event::Closed) | None => {}
+            Some(Event::Long(_) | Event::Skipped(_) | Event::Closed) | None => {}
         }
         match request {
             Some(Down::Demand { read: Read::Nothing, .. }) => assert!(closing, "only a close withdraws"),
@@ -224,5 +228,23 @@ fn the_writer_holds_no_more_than_its_worst_case_at_its_limits() {
         let limits = writer::Limits { depth: deepest, length: u32::try_from(len).unwrap() };
         let most = write(&tokens, limits);
         assert_eq!(most, writer::worst_case(&limits).unwrap(), "seed {seed}: the writing pass holds all of it");
+    }
+}
+
+#[test]
+fn skipped_megabytes_and_long_text_keep_the_same_bounded_buffer() {
+    let limits = Limits { depth: 4, string: 8, number: 8, chunk: 32, length: 2 << 20 };
+    let mut large = vec![b'a'; 1 << 20];
+    large.insert(0, b'"');
+    large.push(b'"');
+    for request in [Request::Skip, Request::Text(4)] {
+        let small_document = format!("\"{}\"", "a".repeat(64));
+        let small = read_demand(small_document.as_bytes(), limits, Interrupt::Nothing, request);
+        let large = read_demand(&large, limits, Interrupt::Nothing, request);
+        assert_eq!(small.outcome, Some(Event::Done));
+        assert_eq!(large.outcome, Some(Event::Done));
+        assert_eq!(small.tokens, 0);
+        assert_eq!(large.tokens, 0);
+        assert_eq!(large.most, small.most, "discarded text adds no retained memory");
     }
 }

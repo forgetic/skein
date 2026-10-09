@@ -29,6 +29,8 @@ use crate::{Decoded, Outcome, reference};
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub limits: Limits,
+    /// Optional legal demand script from the independent reference.
+    pub demands: Option<Vec<Request>>,
     /// The side below's cap: its intake holds this many bytes, at least the
     /// tokenizer's largest demand.
     pub cap: u32,
@@ -65,6 +67,7 @@ impl Settings {
         let largest = json::largest_demand(&limits);
         Settings {
             limits,
+            demands: None,
             cap: largest + draw(rng, 0, 64),
             piece: draw(rng, 1, 96),
             arrival: draw(rng, 100, 1000),
@@ -143,6 +146,8 @@ fn draw(rng: &mut Rng, low: u32, high: u32) -> u32 {
 /// What a run came to.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Run {
+    /// Demand answers in order, including lengths for text and skipped values.
+    pub answers: Vec<Event>,
     /// The tokens the side above received, in order.
     pub tokens: Vec<Token>,
     /// The outcome it received, unless it closed first.
@@ -212,7 +217,14 @@ pub fn run(document: &[u8], settings: &Settings, seed: u64) -> Run {
             fell: Fell::default(),
             withdrawn: None,
         },
-        above: Above { pending: false, tokens: Vec::new(), outcome: None, closing: None, closed: false },
+        above: Above {
+            answers: Vec::new(),
+            pending: false,
+            tokens: Vec::new(),
+            outcome: None,
+            closing: None,
+            closed: false,
+        },
         iteration: 0,
         held_back: 0,
         held_byte: false,
@@ -237,6 +249,7 @@ pub fn run(document: &[u8], settings: &Settings, seed: u64) -> Run {
         if world.above.closed {
             world.late();
             return Run {
+                answers: world.above.answers,
                 tokens: world.above.tokens,
                 outcome: world.above.outcome,
                 closed_while: world.above.closing.expect("closed after a close"),
@@ -328,6 +341,7 @@ enum Life {
 
 /// The side above.
 struct Above {
+    answers: Vec<Event>,
     /// A `Next` not yet answered.
     pending: bool,
     tokens: Vec<Token>,
@@ -457,7 +471,9 @@ impl World<'_> {
         }
         if above.outcome.is_none() && !above.pending && self.rng.chance(self.settings.eagerness) {
             above.pending = true;
-            self.down(Request::Next);
+            let request =
+                self.settings.demands.as_ref().map_or(Request::Next, |demands| demands[self.above.answers.len()]);
+            self.down(request);
         }
     }
 
@@ -476,7 +492,7 @@ impl World<'_> {
     }
 
     fn down(&mut self, rq: Request) {
-        if rq == Request::Next {
+        if rq != Request::Close {
             self.held_byte = false;
         }
         json::down(&mut self.tokenizer, &self.env, rq, &mut self.events, &mut self.requests);
@@ -516,6 +532,9 @@ impl World<'_> {
 impl Above {
     fn receive(&mut self, event: Event) {
         assert!(!self.closed, "nothing follows Closed: {event:?}");
+        if event != Event::Closed {
+            self.answers.push(event.clone());
+        }
         match event {
             Event::Token(token) => {
                 assert!(self.pending, "a token answers a Next: {token:?}");
@@ -528,8 +547,12 @@ impl Above {
                 self.pending = false;
                 self.outcome = Some(match event {
                     Event::Failed(error) => Outcome::Failed(error),
-                    Event::Done | Event::Token(_) | Event::Closed => Outcome::Done,
+                    Event::Done | Event::Token(_) | Event::Long(_) | Event::Skipped(_) | Event::Closed => Outcome::Done,
                 });
+            }
+            Event::Long(_) | Event::Skipped(_) => {
+                assert!(self.pending, "one answer per demand");
+                self.pending = false;
             }
             Event::Closed => {
                 assert!(self.closing.is_some(), "Closed answers a Close");
@@ -582,4 +605,15 @@ fn read_len(read: Read, bytes: &[u8]) -> usize {
             bytes.len()
         }
     }
+}
+
+/// Runs drawn `Next`, `Text` and `Skip` demands through both delayed neighbours,
+/// judging each answer against independently recorded reference value spans.
+#[must_use]
+pub fn check_demands(document: &[u8], settings: &Settings, seed: u64) -> Run {
+    let (demands, expected) = reference::demands(document, &settings.limits, seed);
+    let settings = Settings { demands: Some(demands), ..settings.clone() };
+    let run = run(document, &settings, seed);
+    assert_eq!(run.answers, expected, "seed {seed}: {}", document.escape_ascii());
+    run
 }
