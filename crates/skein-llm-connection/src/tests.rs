@@ -182,7 +182,8 @@ fn failed_connect_has_one_unsent_terminal_and_settles() {
             assert_eq!(failure, skein_llm::Failure::Unavailable);
             assert_eq!(evidence, skein_llm::client::Evidence::Unsent);
         }
-        other @ (Event::Refused { .. }
+        other @ (Event::Closed
+        | Event::Refused { .. }
         | Event::Delta { .. }
         | Event::Block { .. }
         | Event::Completed { .. }
@@ -409,4 +410,148 @@ fn plaintext_connect_starts_http_and_never_arms_a_handshake_deadline() {
     let fire = Env { now: Time::from_nanos(3_000_000_000), ..env };
     component.fire(&fire, &mut up, &mut io);
     assert!(up.is_empty(), "the configured TLS deadline never fires on plaintext");
+}
+
+#[test]
+fn close_on_an_empty_component_says_closed_without_touching_io() {
+    let mut component = component();
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits() };
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    component.down(&env, Request::Close, &mut up, &mut io);
+    assert!(is_closed(up.pop()));
+    assert!(up.is_empty() && io.is_empty());
+    assert!(!component.has_work());
+    assert_eq!(component.next_deadline(), None);
+}
+
+#[test]
+#[should_panic(expected = "after Closed")]
+fn a_start_after_closed_is_an_asserted_owner_bug() {
+    let mut component = component();
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits() };
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    component.down(&env, Request::Close, &mut up, &mut io);
+    component.down(
+        &env,
+        Request::Start {
+            call: Token::new(7),
+            endpoint: 0,
+            prompt: prompt(),
+            credential: credential(),
+            deadlines: Deadlines::none(),
+        },
+        &mut up,
+        &mut io,
+    );
+}
+
+#[test]
+fn abort_starts_one_binding_per_entrance_and_waits_for_physical_settlement() {
+    let mut config = limits();
+    config.connections = 2;
+    config.per_endpoint = 2;
+    config.io.sockets = 2;
+    let mut endpoints = List::with_capacity(1);
+    endpoints.push(endpoint()).expect("endpoint");
+    let mut component = Component::new(endpoints, &config).expect("component");
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: config };
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    let mut owners = List::with_capacity(2);
+    for call in 7..=8 {
+        component.down(
+            &env,
+            Request::Start {
+                call: Token::new(call),
+                endpoint: 0,
+                prompt: prompt(),
+                credential: credential(),
+                deadlines: Deadlines::none(),
+            },
+            &mut up,
+            &mut io,
+        );
+        let owner = match io.pop().expect("connect") {
+            Lower::Connect { owner, .. } => owner,
+            other @ (Lower::Listen { .. }
+            | Lower::Bind { .. }
+            | Lower::Reject { .. }
+            | Lower::Stream { .. }
+            | Lower::Output { .. }
+            | Lower::Spawn { .. }
+            | Lower::Signal { .. }
+            | Lower::Close { .. }
+            | Lower::Abort { .. }) => panic!("{other:?}"),
+        };
+        component.up(&env, LowerEvent::Connecting { owner, socket: owner }, &mut up, &mut io);
+        owners.push(owner).expect("two owners");
+    }
+    component.down(&env, Request::Abort, &mut up, &mut io);
+    assert_eq!(io.len(), 1);
+    assert!(is_abort(io.pop()));
+    assert!(up.is_empty());
+    assert!(component.has_work(), "the second binding still needs its abort");
+    component.fire(&env, &mut up, &mut io);
+    assert_eq!(io.len(), 1);
+    assert!(is_abort(io.pop()));
+    assert!(!component.has_work(), "physical settlement itself is not work");
+    assert_eq!(component.next_deadline(), None);
+    for owner in &owners {
+        component.up(&env, LowerEvent::Closed { owner: *owner }, &mut up, &mut io);
+        component.reclaim();
+    }
+    assert!(is_cancelled(up.pop()));
+    assert!(is_cancelled(up.pop()));
+    assert!(is_closed(up.pop()));
+    assert!(up.is_empty() && io.is_empty());
+}
+
+fn is_closed(event: Option<Event>) -> bool {
+    match event {
+        Some(Event::Closed) => true,
+        Some(
+            Event::Refused { .. }
+            | Event::Delta { .. }
+            | Event::Block { .. }
+            | Event::Completed { .. }
+            | Event::Failed { .. }
+            | Event::Cancelled { .. },
+        )
+        | None => false,
+    }
+}
+
+fn is_cancelled(event: Option<Event>) -> bool {
+    match event {
+        Some(Event::Cancelled { .. }) => true,
+        Some(
+            Event::Closed
+            | Event::Refused { .. }
+            | Event::Delta { .. }
+            | Event::Block { .. }
+            | Event::Completed { .. }
+            | Event::Failed { .. },
+        )
+        | None => false,
+    }
+}
+
+fn is_abort(request: Option<Lower>) -> bool {
+    match request {
+        Some(Lower::Abort { .. }) => true,
+        Some(
+            Lower::Listen { .. }
+            | Lower::Connect { .. }
+            | Lower::Bind { .. }
+            | Lower::Reject { .. }
+            | Lower::Stream { .. }
+            | Lower::Output { .. }
+            | Lower::Spawn { .. }
+            | Lower::Signal { .. }
+            | Lower::Close { .. },
+        )
+        | None => false,
+    }
 }

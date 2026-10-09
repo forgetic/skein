@@ -23,7 +23,7 @@ fn limits(calls: u32) -> Limits {
         endpoints: 1,
         connections: calls,
         per_endpoint: calls,
-        idle_keep: Duration::from_secs(1),
+        idle_keep: Duration::from_secs(300),
         io: io::Limits {
             sockets: calls,
             refusals: 1,
@@ -56,6 +56,8 @@ pub struct Client {
     received: Vec<Event>,
     calls: u32,
     input_bytes: usize,
+    completed: u32,
+    closed: bool,
 }
 
 impl Client {
@@ -75,6 +77,8 @@ impl Client {
             received: Vec::with_capacity(32),
             calls,
             input_bytes,
+            completed: 0,
+            closed: false,
         }
     }
 
@@ -184,7 +188,22 @@ impl Host for Client {
                         &mut self.requests,
                     );
                 }
-                Event::Completed { .. } => {}
+                Event::Completed { .. } => {
+                    self.completed += 1;
+                    if self.completed == self.calls {
+                        self.component.as_mut().expect("started").down(
+                            &env,
+                            Request::Close,
+                            &mut self.events,
+                            &mut self.requests,
+                        );
+                    }
+                }
+                Event::Closed => {
+                    assert!(!self.closed, "one component Closed");
+                    assert_eq!(self.completed, self.calls);
+                    self.closed = true;
+                }
                 Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
                     panic!("positive call failed: {event:?}")
                 }
@@ -234,6 +253,7 @@ impl Host for Client {
             && self.requests.is_empty()
             && self.submissions.is_empty()
             && self.completions.is_empty()
+            && self.closed
             && !self.component.as_ref().is_some_and(Component::has_work)
     }
     fn worst_case(&self) -> u64 {
@@ -315,6 +335,7 @@ struct Judge {
     calls: u32,
     answer: Vec<u8>,
     passed: bool,
+    teardown_started: bool,
     query_times: std::collections::BTreeMap<Token, Time>,
     input_bytes: usize,
 }
@@ -334,6 +355,7 @@ impl Referee<Process> for Judge {
                 Process::Peer(peer) => {
                     if self.passed {
                         peer.shutdown();
+                        self.teardown_started = true;
                     }
                 }
             }
@@ -341,11 +363,13 @@ impl Referee<Process> for Judge {
     }
     fn observe(&mut self, now: Time, processes: &[Process]) {
         let mut completed = 0;
+        let mut client_closed = false;
         let mut queries = 0;
         let mut answers = 0;
         for process in processes {
             match process {
                 Process::Client(client) => {
+                    client_closed = client.closed;
                     for event in &client.received {
                         if let Event::Completed { completion, .. } = event {
                             assert_eq!(completion.content.len(), 1, "one literal scripted block");
@@ -408,10 +432,10 @@ impl Referee<Process> for Judge {
             completed <= self.calls && queries <= self.calls && answers <= self.calls,
             "unique calls and terminals"
         );
-        self.passed = completed == self.calls && queries == self.calls && answers == self.calls;
+        self.passed = client_closed && completed == self.calls && queries == self.calls && answers == self.calls;
     }
     fn next_deadline(&self) -> Option<Time> {
-        if !self.activated {
+        if !self.activated || (self.passed && !self.teardown_started) {
             Some(Time::ZERO)
         } else if self.passed {
             None
@@ -444,6 +468,20 @@ pub fn run_with_input(
     memory: Memory,
     input_bytes: usize,
 ) -> Outcome<Process> {
+    run_with_shutdown(seed, faulted, transport, large, memory, input_bytes, false)
+}
+
+/// A live peer that ignores half-close waits for io to settle the client.
+#[must_use]
+pub fn run_with_shutdown(
+    seed: u64,
+    faulted: bool,
+    transport: Transport,
+    large: bool,
+    memory: Memory,
+    input_bytes: usize,
+    ignore_half_close: bool,
+) -> Outcome<Process> {
     let calls = if large { 2 } else { 1 };
     let answer = if large { vec![b'x'; 2048] } else { b"simulated answer".to_vec() };
     let judge = Judge {
@@ -451,6 +489,7 @@ pub fn run_with_input(
         calls,
         answer: answer.clone(),
         passed: false,
+        teardown_started: false,
         query_times: std::collections::BTreeMap::new(),
         input_bytes,
     };
@@ -499,7 +538,7 @@ pub fn run_with_input(
             observations: calls * 4,
             observation_bytes: calls * 32_768,
         };
-        let peer = llm::Peer::new(
+        let mut peer = llm::Peer::new(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             transport,
             limits,
@@ -514,6 +553,9 @@ pub fn run_with_input(
             domain_limits,
         )
         .expect("bounded independent process");
+        if ignore_half_close {
+            peer.ignore_half_close();
+        }
         Process::Peer(Box::new(peer))
     });
     world.spawn(|| Process::Client(Box::new(Client::new(transport, calls, input_bytes))));

@@ -35,6 +35,15 @@ pub(crate) enum Phase {
     Closing,
 }
 
+/// The owner's close policy and whether its physical abort has started.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Control {
+    Live,
+    Draining,
+    AbortPending,
+    Aborting,
+}
+
 /// One socket, TLS session and LLM client, named to io by its slab token.
 pub(crate) struct Connection {
     pub(crate) endpoint: u32,
@@ -48,6 +57,7 @@ pub(crate) struct Connection {
     pub(crate) socket_close_sent: bool,
     pub(crate) deadlines: Table,
     activity: u64,
+    control: Control,
     llm_events: Queue<llm::Event>,
     plain_down: Queue<Down>,
     tls_events: Queue<tls::Event>,
@@ -61,6 +71,8 @@ impl Connection {
             || !self.tls_events.is_empty()
             || !self.cipher_down.is_empty()
             || (self.calling() && self.llm.has_work())
+            || (self.abort_pending())
+            || (self.closing() && self.call.is_none() && self.phase != Phase::Closing)
     }
 
     pub(crate) fn new(
@@ -83,10 +95,46 @@ impl Connection {
             socket_close_sent: false,
             deadlines: Table::new(deadlines, now),
             activity: 0,
+            control: Control::Live,
             llm_events: Queue::with_capacity(64),
             plain_down: Queue::with_capacity(256),
             tls_events: Queue::with_capacity(64),
             cipher_down: Queue::with_capacity(256),
+        }
+    }
+
+    pub(crate) fn request_close(&mut self, abort: bool) {
+        self.control = match self.control {
+            Control::Live | Control::Draining => {
+                if abort {
+                    Control::AbortPending
+                } else {
+                    Control::Draining
+                }
+            }
+            Control::AbortPending => Control::AbortPending,
+            Control::Aborting => Control::Aborting,
+        };
+    }
+
+    pub(crate) fn aborting(&self) -> bool {
+        match self.control {
+            Control::Live | Control::Draining => false,
+            Control::AbortPending | Control::Aborting => true,
+        }
+    }
+
+    fn closing(&self) -> bool {
+        match self.control {
+            Control::Live => false,
+            Control::Draining | Control::AbortPending | Control::Aborting => true,
+        }
+    }
+
+    fn abort_pending(&self) -> bool {
+        match self.control {
+            Control::AbortPending => true,
+            Control::Live | Control::Draining | Control::Aborting => false,
         }
     }
 
@@ -124,6 +172,10 @@ impl Connection {
         up: &mut Queue<Event>,
         io: &mut Queue<IoRequest>,
     ) {
+        if self.aborting() {
+            self.route(env, owner, up, io);
+            return;
+        }
         match &mut self.tls {
             Some(client) => {
                 self.phase = Phase::Handshaking;
@@ -152,6 +204,10 @@ impl Connection {
     }
 
     pub(crate) fn next(&mut self, env: &Env<Limits>, owner: Token, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
+        if self.aborting() {
+            self.route(env, owner, up, io);
+            return;
+        }
         let llm_env = Env { now: env.now, wall: env.wall, limits: env.limits.llm };
         llm::down(&mut self.llm, &llm_env, llm::Request::Next, &mut self.llm_events, &mut self.plain_down);
         self.route(env, owner, up, io);
@@ -167,6 +223,10 @@ impl Connection {
     }
 
     pub(crate) fn failed(&mut self, env: &Env<Limits>, owner: Token, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
+        if self.aborting() {
+            self.route(env, owner, up, io);
+            return;
+        }
         let llm_env = Env { now: env.now, wall: env.wall, limits: env.limits.llm };
         llm::abort(
             &mut self.llm,
@@ -186,6 +246,10 @@ impl Connection {
         up: &mut Queue<Event>,
         io: &mut Queue<IoRequest>,
     ) {
+        if self.aborting() {
+            self.route(env, owner, up, io);
+            return;
+        }
         let tls_env = Env { now: env.now, wall: env.wall, limits: env.limits.tls };
         match &mut self.tls {
             Some(client) => tls::up(client, &tls_env, event, &mut self.tls_events, &mut self.cipher_down),
@@ -199,6 +263,12 @@ impl Connection {
 
     pub(crate) fn closed(&mut self, env: &Env<Limits>, owner: Token, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
         let llm_env = Env { now: env.now, wall: env.wall, limits: env.limits.llm };
+        self.socket_close_sent = true;
+        if self.abort_pending() {
+            self.control = Control::Aborting;
+            self.phase = Phase::Closing;
+            llm::down(&mut self.llm, &llm_env, llm::Request::Cancel, &mut self.llm_events, &mut self.plain_down);
+        }
         llm::closed(&mut self.llm, &llm_env, &mut self.llm_events, &mut self.plain_down);
         self.route(env, owner, up, io);
         self.deadlines.arm(DeadlinePhase::Closed, env.now, env.limits.idle_keep);
@@ -208,7 +278,7 @@ impl Connection {
         if !self.socket_close_sent {
             match self.socket {
                 Some(socket) => {
-                    if self.tls_closed {
+                    if self.tls_closed && !self.aborting() {
                         io.push(IoRequest::Close { entity: socket });
                     } else {
                         io.push(IoRequest::Abort { entity: socket });
@@ -259,6 +329,15 @@ impl Connection {
     pub(crate) fn route(&mut self, env: &Env<Limits>, _owner: Token, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
         let llm_env = Env { now: env.now, wall: env.wall, limits: env.limits.llm };
         let tls_env = Env { now: env.now, wall: env.wall, limits: env.limits.tls };
+        if self.abort_pending() {
+            self.control = Control::Aborting;
+            llm::down(&mut self.llm, &llm_env, llm::Request::Cancel, &mut self.llm_events, &mut self.plain_down);
+            self.phase = Phase::Closing;
+            self.socket_close_sent = false;
+            self.close_socket(io);
+        } else if self.closing() && self.call.is_none() && self.phase != Phase::Closing {
+            llm::down(&mut self.llm, &llm_env, llm::Request::Close, &mut self.llm_events, &mut self.plain_down);
+        }
         for _ in 0_u32..64_u32 {
             if let Some(event) = self.llm_events.pop() {
                 match event {
@@ -268,16 +347,43 @@ impl Connection {
                         up.push(Event::Completed { call, completion });
                         self.call = None;
                         self.terminal();
+                        if self.closing() {
+                            llm::down(
+                                &mut self.llm,
+                                &llm_env,
+                                llm::Request::Close,
+                                &mut self.llm_events,
+                                &mut self.plain_down,
+                            );
+                        }
                     }
                     llm::Event::Failed { owner: call, failure, evidence, detail } => {
                         up.push(Event::Failed { call, failure, evidence, detail });
                         self.call = None;
                         self.terminal();
+                        if self.closing() {
+                            llm::down(
+                                &mut self.llm,
+                                &llm_env,
+                                llm::Request::Close,
+                                &mut self.llm_events,
+                                &mut self.plain_down,
+                            );
+                        }
                     }
                     llm::Event::Cancelled { owner: call } => {
                         up.push(Event::Cancelled { call });
                         self.call = None;
                         self.terminal();
+                        if self.closing() {
+                            llm::down(
+                                &mut self.llm,
+                                &llm_env,
+                                llm::Request::Close,
+                                &mut self.llm_events,
+                                &mut self.plain_down,
+                            );
+                        }
                     }
                     llm::Event::Reusable => {
                         self.phase = Phase::Idle;
@@ -314,6 +420,9 @@ impl Connection {
             } else if let Some(event) = self.tls_events.pop() {
                 match event {
                     tls::Event::Ready(_) => {
+                        if self.aborting() {
+                            continue;
+                        }
                         self.phase = Phase::Head;
                         self.sync_deadlines(env);
                         llm::down(
@@ -325,6 +434,9 @@ impl Connection {
                         );
                     }
                     tls::Event::Stream(plain) => {
+                        if self.aborting() {
+                            continue;
+                        }
                         llm::up(&mut self.llm, &llm_env, plain, &mut self.llm_events, &mut self.plain_down);
                     }
                     tls::Event::Failed(_) => {

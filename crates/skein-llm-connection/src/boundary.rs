@@ -35,11 +35,17 @@ pub enum Request {
     Next { call: Token },
     /// End an accepted call at the owner's request.
     Cancel { call: Token },
+    /// Drain admitted calls and close every socket; Closed is its terminal.
+    Close,
+    /// Cancel admitted calls and abort every socket; Closed is its terminal.
+    Abort,
 }
 
 /// Why a Start was refused before an accepted call existed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Refusal {
+    /// The owner has requested close or abort and settlement is still pending.
+    Closed,
     /// The endpoint index does not name configured endpoint.
     Endpoint,
     /// Neither a free nor reusable connection is available.
@@ -51,6 +57,8 @@ pub enum Refusal {
 /// An answer to the owning protocol layer.
 #[derive(Debug)]
 pub enum Event {
+    /// The owner close or abort settled every call and physical socket, last.
+    Closed,
     /// Admission failed; no terminal follows.
     Refused { call: Token, why: Refusal },
     /// A fragment of the provider's output for an outstanding demand.

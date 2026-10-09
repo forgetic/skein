@@ -142,3 +142,28 @@ fn bounded_request_batches_preserve_exact_upload_latency_replay_and_separate_hea
     let heap = first.heap.as_ref().unwrap();
     assert!(heap.iter().all(|(peak, bound)| *peak > 0 && peak <= bound));
 }
+
+#[test]
+fn an_owner_close_in_each_phase_fits_the_checked_pool_bound() {
+    use skein_llm_connection_world::world::{Point, World};
+    for point in [Point::Connecting, Point::Head, Point::Streaming, Point::Draining, Point::Idle, Point::Closing] {
+        let bound = worst_case(&skein_llm_connection_world::world::limits(1)).expect("pool bound");
+        let meter = Meter::new();
+        meter.start();
+        let mut world = World::new(53, 1);
+        if point == Point::Closing {
+            world.until(Point::Idle);
+            world.delay_close = true;
+            world.request(Request::Close);
+            world.until(Point::Closing);
+        } else {
+            world.until(point);
+            world.request(Request::Close);
+        }
+        world.finish();
+        let sample = meter.end();
+        assert!(sample.peak() <= bound, "{point:?} peak {} exceeds {bound}", sample.peak());
+        drop(world);
+        assert_eq!(meter.held(), 0);
+    }
+}

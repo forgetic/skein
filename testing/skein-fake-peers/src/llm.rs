@@ -56,6 +56,7 @@ pub struct Peer {
     observations: Vec<Observation>,
     observed_bytes: u64,
     bound: u64,
+    ignore_half_close: bool,
 }
 
 impl Peer {
@@ -92,6 +93,7 @@ impl Peer {
             observations: Vec::with_capacity(usize::try_from(limits.observations).expect("u32 fits")),
             observed_bytes: 0,
             bound,
+            ignore_half_close: false,
         })
     }
 
@@ -110,6 +112,11 @@ impl Peer {
     /// Stops admitting and closes every connection, keeping delayed terminals until due.
     pub fn shutdown(&mut self) {
         self.face.shutdown();
+    }
+
+    /// Keep the byte peer live when the client finishes its write side.
+    pub fn ignore_half_close(&mut self) {
+        self.ignore_half_close = true;
     }
 
     fn reserve_observation(&self, bytes: u64) {
@@ -237,6 +244,9 @@ impl Peer {
             }
             if connection.above.room() >= provider::MAX_UP && connection.below.room() >= provider::MAX_DOWN {
                 if let Some(up) = connection.plain.pop() {
+                    if self.ignore_half_close && up == Up::End {
+                        continue;
+                    }
                     provider::up(
                         &mut connection.server,
                         &mut self.service,

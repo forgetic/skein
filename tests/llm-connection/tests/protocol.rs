@@ -108,7 +108,7 @@ fn run(seed: u64) -> (Vec<String>, (u32, u32, bool)) {
                     assert!(!completion.content.is_empty());
                     completed += 1;
                 }
-                Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
+                Event::Closed | Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
                     panic!("unexpected terminal: {event:?}");
                 }
             }

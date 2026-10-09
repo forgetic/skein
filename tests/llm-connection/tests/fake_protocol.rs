@@ -128,7 +128,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
                     assert!(!completion.content.is_empty());
                     completed += 1;
                 }
-                Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
+                Event::Closed | Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
                     panic!("unexpected component event: {event:?}");
                 }
             }
@@ -231,8 +231,8 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
     assert_eq!(service.count(), 1, "the independent fake decoded the call");
     assert_eq!(completed, 1);
     assert!(fragments > 0);
-    let later = Env { now: Time::from_nanos(11_000_000_000), ..env };
-    component.fire(&later, &mut up, &mut io);
+    let later = env;
+    component.down(&later, Request::Close, &mut up, &mut io);
     match io.pop() {
         Some(IoRequest::Close { entity }) => {
             assert_eq!(entity, Token::new(100));
@@ -244,6 +244,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
     provider::closed(&mut peer, &mut service, &peer_env, &mut peer_up, &mut peer_down);
     service.reclaim();
     domain.reclaim();
+    assert!(matches!(up.pop(), Some(Event::Closed)));
     assert!(up.is_empty() && io.is_empty() && !component.has_work());
     (wire.trace, (completed, fragments))
 }

@@ -92,6 +92,7 @@ struct World {
     now: Time,
     terminals: Vec<Event>,
     closed: bool,
+    owner_closed: bool,
 }
 
 impl World {
@@ -125,6 +126,7 @@ impl World {
             now: Time::ZERO,
             terminals: Vec::new(),
             closed: false,
+            owner_closed: false,
         };
         let env = world.env();
         world.component.down(
@@ -171,6 +173,7 @@ impl World {
                 Event::Delta { call, .. } | Event::Block { call, .. } => {
                     self.component.down(&env, Request::Next { call }, &mut self.up, &mut self.io);
                 }
+                Event::Closed => self.owner_closed = true,
                 Event::Refused { .. } | Event::Completed { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
                     self.terminals.push(event);
                 }
@@ -276,7 +279,8 @@ fn assert_failure(world: &World, failure: Failure, evidence: Evidence) {
             assert_eq!(*got, failure);
             assert_eq!(*seen, evidence);
         }
-        other @ (Event::Refused { .. }
+        other @ (Event::Closed
+        | Event::Refused { .. }
         | Event::Delta { .. }
         | Event::Block { .. }
         | Event::Completed { .. }
@@ -323,7 +327,8 @@ fn run_cancel_before_a_provider_terminal_waits_for_socket_close(seed: u64) -> Wo
     assert_eq!(world.terminals.len(), 1);
     match &world.terminals[0] {
         Event::Cancelled { call } => assert_eq!(*call, Token::new(7)),
-        other @ (Event::Refused { .. }
+        other @ (Event::Closed
+        | Event::Refused { .. }
         | Event::Delta { .. }
         | Event::Block { .. }
         | Event::Completed { .. }
@@ -384,7 +389,8 @@ fn run_truncated_response_has_one_failed_terminal(seed: u64) -> World {
     assert_eq!(world.terminals.len(), 1);
     match &world.terminals[0] {
         Event::Failed { evidence, .. } => assert_eq!(*evidence, Evidence::Response),
-        other @ (Event::Refused { .. }
+        other @ (Event::Closed
+        | Event::Refused { .. }
         | Event::Delta { .. }
         | Event::Block { .. }
         | Event::Completed { .. }
@@ -531,4 +537,24 @@ fn a_steady_stream_outlasts_any_fixed_bound_and_completes() {
 #[test]
 fn a_stalled_drain_is_closed_by_idleness_without_a_second_terminal() {
     assert_replays(7, 8, |seed| run_a_stalled_drain_is_closed_by_idleness_without_a_second_terminal(seed).report());
+}
+
+#[test]
+fn a_close_while_handshaking_lets_the_tls_call_complete_and_says_closed_last() {
+    let mut world = World::new(Deadlines::none(), 47, true);
+    world.tick();
+    let env = world.env();
+    world.component.down(&env, Request::Close, &mut world.up, &mut world.io);
+    world.run_until_request();
+    world.wire.write(&skein_llm_world::text_response(true));
+    for _ in 0..20_000 {
+        world.tick();
+        if world.owner_closed {
+            break;
+        }
+    }
+    assert!(world.owner_closed && world.closed);
+    assert!(matches!(world.terminals.as_slice(), [Event::Completed { .. }]));
+    assert!(!world.component.has_work());
+    assert_eq!(world.component.next_deadline(), None);
 }

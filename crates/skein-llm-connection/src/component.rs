@@ -1,6 +1,8 @@
 //! Endpoint configuration and admission (llm-connection.md, sections 3, 4
-//! and 7). An admitted client owns its credential and is handed to the pool
-//! when the connection machine starts it. No network traffic occurs here.
+//! and 7). The component keeps configured endpoints, physical bindings and
+//! an owner lifecycle. It knows no retry or termination policy. `down` admits
+//! calls and the owner close; `up` routes io settlement; `fire` advances one
+//! binding. Closed is last, after every physical binding has settled.
 
 #![expect(
     clippy::single_match,
@@ -19,7 +21,16 @@ use crate::call::{Connection, Phase};
 use crate::endpoint::{Endpoint, EndpointError, Transport};
 use crate::limits::{Limits, worst_case};
 
-/// Configured endpoints and bounds, with no live calls or retry policy.
+/// The owner's call pool, ending with Closed after physical socket settlement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Lifecycle {
+    Live,
+    Closing,
+    Aborting,
+    Closed,
+}
+
+/// The owner's bounded call pool; Close or Abort ends it with one Closed.
 #[expect(missing_debug_implementations, reason = "live calls retain bearer credentials")]
 pub struct Component {
     endpoints: List<Endpoint>,
@@ -27,6 +38,7 @@ pub struct Component {
     connections: Slab<Connection>,
     slots: List<Option<Id<Connection>>>,
     cursor: u32,
+    lifecycle: Lifecycle,
 }
 
 /// The most owner events and io requests from one component entrance.
@@ -79,6 +91,7 @@ impl Component {
             connections: Slab::with_capacity(limits.connections),
             slots: List::with_capacity(limits.connections),
             cursor: 0,
+            lifecycle: Lifecycle::Live,
         })
     }
 
@@ -93,6 +106,12 @@ impl Component {
         prompt: Prompt,
         credential: Credential,
     ) -> Result<llm::client::Client, Refusal> {
+        assert!(self.lifecycle != Lifecycle::Closed, "an owner must not request work after Closed");
+        match self.lifecycle {
+            Lifecycle::Live => {}
+            Lifecycle::Closing | Lifecycle::Aborting => return Err(Refusal::Closed),
+            Lifecycle::Closed => unreachable!("an owner must not request work after Closed"),
+        }
         let Some(destination) = self.endpoints.get(endpoint) else {
             return Err(Refusal::Endpoint);
         };
@@ -108,7 +127,27 @@ impl Component {
 
     /// Takes an owner's call or demand. Reserve [`MAX_OUT`] first.
     pub fn down(&mut self, env: &Env<Limits>, request: Request, up: &mut Queue<Event>, io: &mut Queue<IoRequest>) {
+        assert!(self.lifecycle != Lifecycle::Closed, "an owner must not send requests after Closed");
         match request {
+            Request::Close => {
+                match self.lifecycle {
+                    Lifecycle::Live => self.lifecycle = Lifecycle::Closing,
+                    Lifecycle::Closing | Lifecycle::Aborting => return,
+                    Lifecycle::Closed => unreachable!("checked at the entrance"),
+                }
+                self.request_close(false);
+                self.fire(env, up, io);
+            }
+            Request::Abort => {
+                match self.lifecycle {
+                    Lifecycle::Live | Lifecycle::Closing => {}
+                    Lifecycle::Aborting => return,
+                    Lifecycle::Closed => unreachable!("checked at the entrance"),
+                }
+                self.lifecycle = Lifecycle::Aborting;
+                self.request_close(true);
+                self.fire(env, up, io);
+            }
             Request::Start { call, endpoint, prompt, credential, deadlines } => {
                 self.start(env, call, endpoint, prompt, credential, deadlines, up, io);
             }
@@ -166,6 +205,7 @@ impl Component {
                     if connection.phase == Phase::Closing {
                         connection.close_socket(io);
                     }
+                    connection.route(env, owner, up, io);
                 }
                 None => {}
             },
@@ -200,6 +240,7 @@ impl Component {
                     }
                 }
                 self.connections.retire(id);
+                self.settled(up);
             }
             IoEvent::Listening { .. }
             | IoEvent::Accepted { .. }
@@ -221,9 +262,14 @@ impl Component {
             match self.slots.get(index) {
                 Some(Some(id)) => match self.connections.get_mut(*id) {
                     Some(connection) => {
-                        match connection.deadlines.due(env.now) {
-                            Some(due) => connection.timeout(env, due, io),
-                            None => {}
+                        if !connection.has_work() && connection.deadlines.due(env.now).is_none() {
+                            continue;
+                        }
+                        if !connection.aborting() {
+                            match connection.deadlines.due(env.now) {
+                                Some(due) => connection.timeout(env, due, io),
+                                None => {}
+                            }
                         }
                         connection.route(env, id.token(), up, io);
                         break;
@@ -233,6 +279,7 @@ impl Component {
                 Some(None) | None => {}
             }
         }
+        self.settled(up);
     }
 
     /// Buffered routing work that the owner should schedule before sleeping.
@@ -273,6 +320,34 @@ impl Component {
             }
         }
         earliest
+    }
+
+    fn request_close(&mut self, abort: bool) {
+        for slot in &self.slots {
+            match slot {
+                Some(id) => match self.connections.get_mut(*id) {
+                    Some(connection) => {
+                        connection.request_close(abort);
+                    }
+                    None => {}
+                },
+                None => {}
+            }
+        }
+    }
+
+    fn settled(&mut self, up: &mut Queue<Event>) {
+        match self.lifecycle {
+            Lifecycle::Live | Lifecycle::Closed => return,
+            Lifecycle::Closing | Lifecycle::Aborting => {}
+        }
+        for slot in &self.slots {
+            if slot.is_some() {
+                return;
+            }
+        }
+        self.lifecycle = Lifecycle::Closed;
+        up.push(Event::Closed);
     }
 
     /// Releases settled connection slots at the owning loop's reclaim point.
