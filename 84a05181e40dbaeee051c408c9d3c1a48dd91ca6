@@ -1,0 +1,14 @@
+Final exact-tip gate for 84a05181e40dbaeee051c408c9d3c1a48dd91ca6,
+parent e6425e185553d62b9729c4be7f8fccb0b092e6f1.
+Heavy 874 scripts/check.sh passed 2026-10-09 14:03:31 UTC:
+- cargo fmt --all --check
+- workspace all-target clippy -D warnings
+- standalone skein-tls check
+- focused 1668/1668, 3.323s, run de11ce27-767b-4364-a0f1-79a9ecf0c6f9
+- fuzzy 90/90, 9.545s, run 528e59b7-505d-4443-b2b5-118544741cd1
+- browser 6/6, 3.919s, run 54ae9331-6069-49f9-a5f2-5aafb653ede1
+
+Scoped all-target clippy and serial measure passed heavy 857: 30/30,
+0.565s, run 6c049e40-cb61-4113-b709-a3092bb485db. The files census
+confirms 257 seeds with two exact replays and all ten applicable faults;
+largest store/load checked memory in 0.189s. Probe: none.
