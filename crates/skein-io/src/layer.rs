@@ -4,7 +4,7 @@
 //! order within an iteration, and `Io::reclaim` at its end.
 
 use skein_lib::stream::{Down, OutputDown};
-use skein_lib::{Deadlines, Env, Id, Queue, Set, Slab, Time, Token};
+use skein_lib::{Deadlines, Duration, Env, Id, Queue, Set, Slab, Time, Token};
 
 use crate::kernel::{self, Addr, Complete, Done, Family, Fd, Op, Submit, Way};
 use crate::limits::{self, Limits};
@@ -38,7 +38,7 @@ pub(crate) enum Entity {
 pub(crate) struct Tables {
     /// The operations in flight, each for its entity.
     pub(crate) flights: Slab<Flight>,
-    /// Each entity's deadlines: a graceful close's, and a retry's.
+    /// Each entity's deadlines: a close or append write, and a retry.
     pub(crate) deadlines: Deadlines<(Id<Entity>, Timer)>,
     pub(crate) ready: Ready,
     /// The owners of the `Listen`s and `Connect`s refused for want of a
@@ -78,7 +78,7 @@ pub(crate) enum Purpose {
     Cancel(Id<Flight>),
 }
 
-/// What an entity's deadline is for: a stream's graceful close (io.md, 3), or
+/// What an entity's deadline is for: a close or append write (io.md, 3 and 5.1), or
 /// a retry of what found the kernel out of buffers or descriptors (io.md,
 /// 3.2 and 3.3). An entity has at most one of each.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -142,6 +142,19 @@ impl Io {
     /// stream and ownership contract as [`Io::adopt_read_pipe`].
     pub fn adopt_write_pipe(&mut self, fd: Fd) -> Result<Token, Fd> {
         self.adopt_pipe(fd, Way::In)
+    }
+
+    /// Takes an output-only append file at startup. Each Append has the owner's
+    /// `write_timeout`; Close instead flushes under io's close timeout (io.md, 5.1).
+    /// A full slab returns the descriptor to its caller without closing it.
+    pub fn adopt_append(&mut self, fd: Fd, write_timeout: Duration) -> Result<Token, Fd> {
+        match self.entities.insert(Entity::Pipe(Pipe::append(fd, write_timeout))) {
+            Ok(id) => {
+                self.tables.ready.mark(id);
+                Ok(id.token())
+            }
+            Err(_) => Err(fd),
+        }
     }
 
     fn adopt_pipe(&mut self, fd: Fd, way: Way) -> Result<Token, Fd> {
@@ -401,7 +414,11 @@ pub fn fire(io: &mut Io, env: &Env<Limits>, up: &mut Queue<Event>, subs: &mut Qu
             Timer::Retry => listener::retried(listener, id, room, env, &mut io.tables, subs),
             Timer::Close => unreachable!("only a stream closes gracefully"),
         },
-        Entity::Pipe(_) | Entity::Child(_) | Entity::Signals(_) => {
+        Entity::Pipe(pipe) => match timer {
+            Timer::Close => pipe::expired(pipe, id, env, &mut io.tables, up, subs),
+            Timer::Retry => unreachable!("append writes have no retry timer"),
+        },
+        Entity::Child(_) | Entity::Signals(_) => {
             unreachable!("processes and signals have no io deadline")
         }
     }
@@ -508,7 +525,7 @@ fn close(io: &mut Io, env: &Env<Limits>, token: Token, abort: bool, subs: &mut Q
     match entity {
         Entity::Listener(listener) => listener::close(listener, id, &mut io.tables, subs),
         Entity::Stream(stream) => stream::close(stream, id, abort, env, &mut io.tables, subs),
-        Entity::Pipe(pipe) => pipe::close(pipe, id, abort, &mut io.tables, subs),
+        Entity::Pipe(pipe) => pipe::close(pipe, id, abort, env, &mut io.tables, subs),
         Entity::Child(_) => unreachable!("handled above"),
         Entity::Signals(signals) => signals::close(signals, id, &mut io.tables, subs),
     }

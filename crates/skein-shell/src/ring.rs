@@ -126,6 +126,38 @@ pub fn set_subreaper(enabled: bool) -> Result<(), Error> {
     process::set_subreaper(enabled)
 }
 
+/// How startup adopts a standard output descriptor (io.md, section 5.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputKind {
+    /// A pipe or terminal, sent through the inherited write-pipe face.
+    Pipe,
+    /// A regular file, sent through io's append-stream face.
+    Append,
+}
+
+/// Finds an inherited output's kind at startup and enables `O_APPEND` on a
+/// regular file. Ownership stays with the caller until io adopts the descriptor.
+/// Pipes and terminals retain their flags (shell.md, section 6; io.md, 5.1).
+pub fn prepare_output(descriptor: Fd) -> Result<OutputKind, Error> {
+    // SAFETY: stat is initialized, and remains writable throughout fstat.
+    let mut stat: libc::stat = unsafe { mem::zeroed() };
+    // SAFETY: the caller owns descriptor, and stat is writable for this call.
+    let result = unsafe { libc::fstat(descriptor.raw(), ptr::from_mut(&mut stat)) };
+    if result < 0 {
+        return Err(Error::Other(last_errno()));
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Ok(OutputKind::Pipe);
+    }
+    let flags = status_flags(descriptor.raw()).map_err(Error::Other)?;
+    if flags & libc::O_ACCMODE == libc::O_RDONLY {
+        return Err(Error::Permission);
+    }
+    // SAFETY: F_SETFL takes only integer flags for the caller's live descriptor.
+    let changed = unsafe { libc::fcntl(descriptor.raw(), libc::F_SETFL, flags | libc::O_APPEND) };
+    if changed < 0 { Err(Error::Other(last_errno())) } else { Ok(OutputKind::Append) }
+}
+
 /// Opens a discovered process's pidfd for the test keeper.
 pub fn open_pidfd(pid: u32) -> Result<Fd, Error> {
     process::open_pidfd(pid)

@@ -22,9 +22,10 @@ use skein_shell::{Clock, Config, Kernel, Now, Wait};
 
 use crate::Host;
 use crate::heap::Heap;
+use crate::program::Startup;
 pub use crate::referee::Controls;
 use crate::referee::Referee;
-use crate::{HostedProgram, Inherited, StartupRoots};
+use crate::{HostedProgram, Inherited, StartupAppends, StartupRoots};
 use std::os::unix::ffi::OsStrExt;
 
 /// What a real run left.
@@ -131,7 +132,7 @@ pub struct World<P, R> {
     procs: Vec<P>,
     referee: R,
     programs: Vec<HostedProgram<P>>,
-    startup: Vec<StartupRoots>,
+    startup: Vec<Startup>,
     inherited: Vec<Vec<Fd>>,
     controls: Controls,
     signals: BTreeMap<usize, SignalSource>,
@@ -206,10 +207,15 @@ impl<P: Host, R: Referee<P>> World<P, R> {
     /// Registers independently opened startup directories selected from each
     /// spawn, shared with simulated scenarios (testing-strategy.md, section 2.8).
     pub fn host_roots(&mut self, program: HostedProgram<P>, roots: StartupRoots) {
+        self.host_startup(program, roots, crate::program::no_appends);
+    }
+
+    /// Registers independently opened roots and append files for each launch.
+    pub fn host_startup(&mut self, program: HostedProgram<P>, roots: StartupRoots, appends: StartupAppends) {
         assert!(program.instances > 0 && program.operations > 0, "a hosted program has room to run");
         assert!(!self.programs.iter().any(|entry| entry.program == program.program), "one factory per program");
         self.programs.push(program);
-        self.startup.push(roots);
+        self.startup.push(Startup { roots, appends });
     }
 
     /// Adds a root host; descriptors opened at startup may be declared with `spawn_with_fds`.
@@ -595,7 +601,10 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
         );
         let make = entry.make;
         let operations = entry.operations;
-        let declarations = self.world.startup.get(program).expect("startup selector per program")(spawn);
+        let startup = self.world.startup.get(program).expect("startup selector per program");
+        let declarations = (startup.roots)(spawn);
+        let append_declarations = (startup.appends)(spawn);
+        crate::program::check_appends(&append_declarations);
         crate::program::check_roots(&declarations);
         let mut roots = Vec::new();
         for declaration in declarations {
@@ -617,9 +626,21 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                 }
             }
         }
+        let mut appends = Vec::new();
+        for declaration in append_declarations {
+            match open_startup_append(&declaration) {
+                Ok(fd) => appends.push((declaration.name, fd)),
+                Err(error) => {
+                    for (_, fd) in roots.into_iter().chain(appends) {
+                        self.cleanup.push_back((parent, Op::Close { fd }));
+                    }
+                    return Err(error);
+                }
+            }
+        }
         match skein_shell::hosted_pipes(spawn) {
             Ok(pipes) => {
-                let inherited = Inherited { pipes: pipes.pipes, roots, signal: pipes.signal };
+                let inherited = Inherited { pipes: pipes.pipes, roots, appends, signal: pipes.signal };
                 let proc = match &mut self.world.heap {
                     Some(heap) => heap.admit(|| make(spawn, &inherited), P::worst_case),
                     None => make(spawn, &inherited),
@@ -636,6 +657,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                             .iter()
                             .map(|(_, fd)| *fd)
                             .chain(inherited.roots.iter().map(|(_, fd)| *fd))
+                            .chain(inherited.appends.iter().map(|(_, fd)| *fd))
                             .chain([inherited.signal])
                             .collect(),
                         exit: None,
@@ -659,7 +681,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                 Ok(Done::Spawned { pidfd: pipes.pidfd })
             }
             Err(error) => {
-                for (_, fd) in roots {
+                for (_, fd) in roots.into_iter().chain(appends) {
                     self.cleanup.push_back((parent, Op::Close { fd }));
                 }
                 Err(error)
@@ -885,6 +907,21 @@ impl Ring {
     fn is_empty(&self) -> bool {
         self.kernel.in_flight() == 0 && !self.has_ready()
     }
+}
+
+fn open_startup_append(declaration: &crate::StartupAppend) -> Result<Fd, Error> {
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&declaration.root));
+    let root = skein_shell::open_root(path).map_err(|errno| match errno {
+        2_i32 => Error::NotFound,
+        13_i32 => Error::Permission,
+        20_i32 => Error::NotADirectory,
+        22_i32 => Error::InvalidArgument,
+        24_i32 => Error::TooManyOpenFiles,
+        _ => Error::Other(errno),
+    })?;
+    let opened = skein_shell::open_append(root, &declaration.path, declaration.mode);
+    skein_shell::close_keeper_fd(root);
+    opened
 }
 
 #[cfg(test)]

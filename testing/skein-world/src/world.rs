@@ -21,8 +21,9 @@ use skein_sim::{Answer, Ask, Config, Entry, Handle, Pid, Program, Reply, Sim};
 
 use crate::Host;
 use crate::heap::{Heap, Memory};
+use crate::program::Startup;
 use crate::referee::{Controls, Referee};
-use crate::{HostedProgram, Inherited, Machine, NoMachine, StartupRoots};
+use crate::{HostedProgram, Inherited, Machine, NoMachine, StartupAppends, StartupRoots};
 
 /// The most iterations a world runs before it is declared stuck.
 const STEPS: u32 = 1_000_000;
@@ -30,8 +31,11 @@ const STEPS: u32 = 1_000_000;
 /// How many lines of the trace a failure prints.
 const TAIL: usize = 80;
 
-/// Roots opened for a spawn whose successful completion has not been reaped.
-type PreparedRoots = Vec<(Box<[u8]>, Handle)>;
+/// Startup descriptors prepared for a spawn before its completion is reaped.
+struct PreparedStartup {
+    roots: Vec<(Box<[u8]>, Handle)>,
+    appends: Vec<(Box<[u8]>, Handle)>,
+}
 
 /// A world: the simulator, its processes, and the referee.
 pub struct World<P, R, M = NoMachine> {
@@ -46,8 +50,8 @@ pub struct World<P, R, M = NoMachine> {
     referee: R,
     heap: Option<Heap>,
     programs: Vec<HostedProgram<P>>,
-    startup: Vec<StartupRoots>,
-    pending_roots: BTreeMap<(Pid, skein_lib::Token), PreparedRoots>,
+    startup: Vec<Startup>,
+    pending_startup: BTreeMap<(Pid, skein_lib::Token), PreparedStartup>,
     hosted: Vec<Option<usize>>,
     finished: Vec<bool>,
     machine: M,
@@ -160,7 +164,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             heap,
             programs: Vec::new(),
             startup: Vec::new(),
-            pending_roots: BTreeMap::new(),
+            pending_startup: BTreeMap::new(),
             hosted: Vec::new(),
             finished: Vec::new(),
             machine: NoMachine,
@@ -184,7 +188,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
             heap: self.heap,
             programs: self.programs,
             startup: self.startup,
-            pending_roots: self.pending_roots,
+            pending_startup: self.pending_startup,
             hosted: self.hosted,
             finished: self.finished,
             machine,
@@ -204,10 +208,15 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
     /// Registers a factory and the named directories opened independently for
     /// each launch, before its factory runs (simulator.md, section 3.1).
     pub fn host_roots(&mut self, program: HostedProgram<P>, roots: StartupRoots) {
+        self.host_startup(program, roots, crate::program::no_appends);
+    }
+
+    /// Registers independently opened roots and append files for each launch.
+    pub fn host_startup(&mut self, program: HostedProgram<P>, roots: StartupRoots, appends: StartupAppends) {
         assert!(program.instances > 0 && program.operations > 0, "a hosted program has room to run");
         assert!(!self.programs.iter().any(|entry| entry.program == program.program), "one factory per program");
         self.programs.push(program);
-        self.startup.push(roots);
+        self.startup.push(Startup { roots, appends });
     }
 
     /// Adds a process with a fake-machine root inherited from startup.
@@ -215,6 +224,13 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
         let pid = self.sim.spawn_process();
         let root = self.sim.root(pid, root);
         self.admit(pid, None, || make(root))
+    }
+
+    /// Adds a process with an append file the scenario's machine opened at startup.
+    pub fn spawn_append<F: FnOnce(Fd) -> P>(&mut self, file: Handle, make: F) -> usize {
+        let pid = self.sim.spawn_process();
+        let file = self.sim.append(pid, file);
+        self.admit(pid, None, || make(file))
     }
 
     /// Adds the process `make` builds: its heap, from its making on, is the
@@ -299,7 +315,7 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
                 }
             }
         }
-        assert!(self.pending_roots.is_empty(), "all prepared startup roots were admitted or rolled back");
+        assert!(self.pending_startup.is_empty(), "all prepared startup descriptors were admitted or rolled back");
         for (proc, pid) in self.procs.iter().zip(&self.pids) {
             assert!(proc.is_empty(), "seed {}: {pid} holds nothing once settled", self.seed);
             self.sim.assert_quiescent(*pid);
@@ -360,9 +376,15 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
                 let make = entry.make;
                 let operations = entry.operations;
                 let (child, pipes) = self.sim.bind_service(pid, *pidfd);
-                let roots = self.pending_roots.remove(&(pid, complete.op)).expect("a hosted launch prepared its roots");
-                let roots = roots.into_iter().map(|(name, handle)| (name, self.sim.root(child, handle))).collect();
-                let inherited = Inherited { pipes, roots, signal: self.sim.open_signal_source(child) };
+                let roots = self
+                    .pending_startup
+                    .remove(&(pid, complete.op))
+                    .expect("a hosted launch prepared its startup descriptors");
+                let appends =
+                    roots.appends.into_iter().map(|(name, handle)| (name, self.sim.append(child, handle))).collect();
+                let roots =
+                    roots.roots.into_iter().map(|(name, handle)| (name, self.sim.root(child, handle))).collect();
+                let inherited = Inherited { pipes, roots, appends, signal: self.sim.open_signal_source(child) };
                 self.signals.insert(self.next_host, (child, inherited.signal));
                 let child_at = self.admit(child, Some(program_at), || make(spawn, &inherited));
                 assert!(
@@ -448,10 +470,16 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
                 let (pid, token, spawn) = self.sim.hosted_spawn(call.ticket);
                 let program =
                     self.programs.iter().position(|entry| entry.program == spawn.program).expect("registered");
-                let declarations = self.startup.get(program).expect("startup selector per program")(spawn);
+                let startup = self.startup.get(program).expect("startup selector per program");
+                let declarations = (startup.roots)(spawn);
+                let append_declarations = (startup.appends)(spawn);
+                crate::program::check_appends(&append_declarations);
                 crate::program::check_roots(&declarations);
-                let descriptors =
-                    declarations.len().checked_add(spawn.pipes.len()).and_then(|count| count.checked_add(1));
+                let descriptors = declarations
+                    .len()
+                    .checked_add(append_declarations.len())
+                    .and_then(|count| count.checked_add(spawn.pipes.len()))
+                    .and_then(|count| count.checked_add(1));
                 if descriptors.is_none_or(|count| {
                     count > usize::try_from(self.sim.config().max_fds).expect("descriptor limit fits")
                 }) {
@@ -470,11 +498,35 @@ impl<P: Host, R: Referee<P>, M: Machine> World<P, R, M> {
                         }
                     }
                 }
+                let mut appends = Vec::new();
                 if result.is_ok() {
-                    self.pending_roots.insert((pid, token), roots);
+                    for declaration in append_declarations {
+                        let root = match self.machine.open_root(&declaration.root) {
+                            Ok(root) => root,
+                            Err(error) => {
+                                result = Err(error);
+                                break;
+                            }
+                        };
+                        let opened = self.machine.open_append(root, &declaration.path, declaration.mode);
+                        self.machine.close_root(root);
+                        match opened {
+                            Ok(file) => appends.push((declaration.name, file)),
+                            Err(error) => {
+                                result = Err(error);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if result.is_ok() {
+                    self.pending_startup.insert((pid, token), PreparedStartup { roots, appends });
                 } else {
                     for (_, handle) in roots {
                         self.machine.close_root(handle);
+                    }
+                    for (_, handle) in appends {
+                        self.machine.close_append(handle);
                     }
                 }
                 self.answers.push(Answer { ticket: call.ticket, result });

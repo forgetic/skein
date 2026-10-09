@@ -61,7 +61,10 @@ fn run(hosted: bool) -> skein_world::Outcome<Script, RootMachine> {
         });
     } else {
         world.spawn_signals(|signal| {
-            Script::child(&Inherited { pipes: vec![], roots: vec![], signal }, &[Act::ReadSignal, Act::ReadSignal])
+            Script::child(
+                &Inherited { pipes: vec![], appends: vec![], roots: vec![], signal },
+                &[Act::ReadSignal, Act::ReadSignal],
+            )
         });
     }
     world.run()

@@ -159,7 +159,8 @@ pub const MAX_OUT_UP: MaxOut = MaxOut { events: 3, submissions: 2 };
 /// `fire`: the cancels of a closing stream's receive and send; or a stream's
 /// receive and send or half-close tried again, and whatever its demand is
 /// then answered with (`Bytes` or `Room`, and `End`), alongside one native
-/// output terminal; or a listener's accept.
+/// output terminal; or a listener's accept. An append deadline settles any
+/// pending output right, fails the open stream once, and cancels its write.
 pub const MAX_OUT_FIRE: MaxOut = MaxOut { events: 3, submissions: 2 };
 
 /// `down`: a bound socket's receive and its listener's next accept; a close's

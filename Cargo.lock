@@ -379,6 +379,7 @@ dependencies = [
  "skein-heap",
  "skein-io",
  "skein-lib",
+ "skein-scratch",
  "skein-shell",
  "skein-sim",
  "skein-world",

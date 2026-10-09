@@ -25,6 +25,8 @@ pub enum Act {
     OpenRoot(usize, &'static [u8], OpenHow),
     /// The script writes a regular file at offset zero.
     WriteFile(usize, &'static [u8]),
+    /// Appends these bytes to an inherited startup file.
+    AppendFile(usize, &'static [u8]),
     /// The script reads a regular file at offset zero.
     ReadFile(usize),
     /// The parent closes its launch root while the child retains its own roots.
@@ -105,7 +107,8 @@ impl Script {
     #[must_use]
     pub fn child(inherited: &Inherited, acts: &[Act]) -> Self {
         let mut script = Self::new(acts);
-        script.fds = inherited.pipes.iter().map(|(_, fd)| *fd).collect();
+        script.fds =
+            inherited.pipes.iter().map(|(_, fd)| *fd).chain(inherited.appends.iter().map(|(_, fd)| *fd)).collect();
         script.signal = Some(inherited.signal);
         script.roots = inherited.roots.iter().map(|(_, fd)| *fd).collect();
         script
@@ -151,6 +154,7 @@ impl Script {
             Act::Close(at) => Op::Close { fd: self.fds.remove(at) },
             Act::OpenRoot(index, path, how) => Op::Open { root: self.roots[index], path: Box::from(path), how },
             Act::WriteFile(index, bytes) => Op::Write { fd: self.fds[index], bytes: Box::from(bytes), at: 0, from: 0 },
+            Act::AppendFile(index, bytes) => Op::Append { fd: self.fds[index], bytes: Box::from(bytes), from: 0 },
             Act::ReadFile(index) => Op::Read { fd: self.fds[index], buf: Box::new([0; 32]), at: 0 },
             Act::CloseLaunch => Op::Close { fd: self.root.take().expect("launch root") },
             Act::Wait => Op::Wait { pidfd: self.pidfd.expect("spawned child"), reap: false },

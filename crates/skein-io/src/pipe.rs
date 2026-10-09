@@ -1,12 +1,14 @@
 //! One-way pipes, whether inherited at startup or returned by a child,
-//! exposed through the same stream requests and events (io.md, sections 3 and 6).
+//! and adopted append files, exposed through the same stream requests and
+//! events (io.md, sections 3, 5.1 and 6). Append writes keep the owner's
+//! deadline; graceful closing replaces it with io's close deadline.
 
 use alloc::boxed::Box;
 use skein_lib::stream::{Down, Fault, OutputDown, OutputOutcome, Read, Up};
-use skein_lib::{Env, Id, Intake, Queue, bytes};
+use skein_lib::{Duration, Env, Id, Intake, Queue, bytes};
 
 use crate::kernel::{self, Done, Fd, Op, Submit, Way};
-use crate::layer::{Entity, Flight, Landed, Purpose, Tables};
+use crate::layer::{Entity, Flight, Landed, Purpose, Tables, Timer};
 use crate::limits::Limits;
 use crate::output::Reservation;
 use crate::records::Event;
@@ -20,6 +22,7 @@ pub(crate) struct Pipe {
     child: Option<Id<Entity>>,
     way: Way,
     fd: Option<Fd>,
+    append_timeout: Option<Duration>,
     intake: Option<Intake>,
     demand: Option<(Read, u32)>,
     granted: u32,
@@ -44,6 +47,7 @@ impl Pipe {
             child: None,
             way,
             fd: None,
+            append_timeout: None,
             intake: None,
             demand: None,
             granted: 0,
@@ -72,6 +76,12 @@ impl Pipe {
         pipe.fd = Some(fd);
         pipe
     }
+    pub(crate) fn append(fd: Fd, write_timeout: Duration) -> Pipe {
+        let mut pipe = Self::inherited(fd, Way::In);
+        pipe.append_timeout = Some(write_timeout);
+        pipe
+    }
+
     pub(crate) const fn is_closed(&self) -> bool {
         self.closed
     }
@@ -138,7 +148,7 @@ pub(crate) fn request(
                 pipe.queued_bytes = pipe.queued_bytes.checked_add(size).expect("bounded output");
                 assert!(pipe.queued_bytes <= env.limits.output, "output fits its cap");
                 pipe.queued.push(bytes);
-                start_write(pipe, id, tables, subs);
+                start_write(pipe, id, env, tables, subs);
             }
         }
         Down::Finish => {
@@ -201,49 +211,20 @@ pub(crate) fn landed(
                 }
             }
         }
-        Purpose::PipeWrite => {
-            assert!(pipe.write.take() == Some(landed.flight), "write flight matches");
-            let Op::PipeWrite { bytes, from, .. } = landed.kind else { unreachable!("a pipe write returns its bytes") };
-            let total = u32::try_from(bytes.len()).expect("queued write fits u32");
-            match landed.result {
-                Ok(Done::Count(n)) if (!pipe.closing || pipe.finish) && from.saturating_add(n) < total => {
-                    let fd = pipe.fd.expect("active pipe has descriptor");
-                    let from = from.checked_add(n).expect("a short write stays within its buffer");
-                    pipe.write = Some(tables.submit(subs, id, Purpose::PipeWrite, Op::PipeWrite { fd, bytes, from }));
-                }
-                Ok(Done::Count(n)) if n > 0 => {
-                    pipe.queued_bytes = pipe.queued_bytes.checked_sub(total).expect("queued bytes include write");
-                    start_write(pipe, id, tables, subs);
-                }
-                Err(error) if !pipe.closing => {
-                    pipe.queued_bytes = pipe.queued_bytes.checked_sub(total).expect("queued bytes include write");
-                    pipe.independent.retire(OutputOutcome::Failed(fault(error)));
-                    emit_terminal(pipe, id, up);
-                    up.push(Event::Stream { owner: id.token(), up: Up::Failed(fault(error)) });
-                    pipe.closing = true;
-                }
-                Err(_) => {}
-                Ok(
-                    Done::Nothing
-                    | Done::Fd(_)
-                    | Done::Accepted { .. }
-                    | Done::Bound(_)
-                    | Done::Stat(_)
-                    | Done::Spawned { .. }
-                    | Done::Exit(_)
-                    | Done::Usage(_)
-                    | Done::ServiceSignal(_)
-                    | Done::Count(_),
-                ) => unreachable!("a pipe write counts positive bytes"),
-            }
-        }
+        Purpose::PipeWrite => landed_write(pipe, landed, env, tables, up, subs),
         Purpose::Close => {
             assert!(pipe.close.take() == Some(landed.flight), "close flight matches");
             pipe.closed = true;
             up.push(Event::Closed { owner: id.token() });
         }
-        Purpose::Cancel(_) => {
-            pipe.cancels = pipe.cancels.checked_sub(1).expect("cancel in flight");
+        Purpose::Cancel(target) => {
+            if pipe.append_timeout.is_some() && crate::layer::unsubmitted(landed.result) && pipe.write == Some(target) {
+                // A stalled filesystem still holds the append. Keep its cancel
+                // outstanding until the backend actually submits one.
+                tables.cancel(subs, id, target);
+            } else {
+                pipe.cancels = pipe.cancels.checked_sub(1).expect("cancel in flight");
+            }
         }
         Purpose::Socket
         | Purpose::Bind
@@ -262,7 +243,14 @@ pub(crate) fn landed(
     progress(pipe, id, env, tables, up, subs);
 }
 
-pub(crate) fn close(pipe: &mut Pipe, id: Id<Entity>, abort: bool, tables: &mut Tables, subs: &mut Queue<Submit>) {
+pub(crate) fn close(
+    pipe: &mut Pipe,
+    id: Id<Entity>,
+    abort: bool,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    subs: &mut Queue<Submit>,
+) {
     if pipe.closed {
         return;
     }
@@ -284,6 +272,12 @@ pub(crate) fn close(pipe: &mut Pipe, id: Id<Entity>, abort: bool, tables: &mut T
         return;
     }
     if !abort && pipe.way == Way::In {
+        if pipe.append_timeout.is_some() {
+            tables
+                .deadlines
+                .arm((id, Timer::Close), env.now.saturating_add(env.limits.close_timeout))
+                .expect("one close timer fits its entity slots");
+        }
         pipe.finish = true;
         pipe.closing = true;
         // The queued output remains to flush.
@@ -315,7 +309,7 @@ fn progress(
     emit_terminal(pipe, id, up);
     if pipe.closing {
         if pipe.way == Way::In {
-            start_write(pipe, id, tables, subs);
+            start_write(pipe, id, env, tables, subs);
         }
         maybe_close(pipe, id, tables, subs);
         return;
@@ -371,14 +365,58 @@ fn progress(
     }
 }
 
-fn start_write(pipe: &mut Pipe, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) {
+fn start_write(pipe: &mut Pipe, id: Id<Entity>, env: &Env<Limits>, tables: &mut Tables, subs: &mut Queue<Submit>) {
     if pipe.write.is_some() {
         return;
     }
     if let Some(bytes) = pipe.queued.pop() {
-        let fd = pipe.fd.expect("active pipe has descriptor");
-        pipe.write = Some(tables.submit(subs, id, Purpose::PipeWrite, Op::PipeWrite { fd, bytes, from: 0 }));
+        submit_write(pipe, id, bytes, 0, env, tables, subs);
     }
+}
+
+fn submit_write(
+    pipe: &mut Pipe,
+    id: Id<Entity>,
+    bytes: Box<[u8]>,
+    from: u32,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    subs: &mut Queue<Submit>,
+) {
+    let fd = pipe.fd.expect("active output stream has its descriptor");
+    let operation = match pipe.append_timeout {
+        Some(write_timeout) => {
+            if !pipe.closing {
+                tables
+                    .deadlines
+                    .arm((id, Timer::Close), env.now.saturating_add(write_timeout))
+                    .expect("one write timer fits its entity slots");
+            }
+            Op::Append { fd, bytes, from }
+        }
+        None => Op::PipeWrite { fd, bytes, from },
+    };
+    pipe.write = Some(tables.submit(subs, id, Purpose::PipeWrite, operation));
+}
+
+pub(crate) fn expired(
+    pipe: &mut Pipe,
+    id: Id<Entity>,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    up: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    assert!(pipe.append_timeout.is_some(), "only append streams arm a pipe deadline");
+    if pipe.fd.is_none() {
+        return;
+    }
+    if !pipe.closing {
+        pipe.independent.retire(OutputOutcome::Failed(Fault::Other));
+        emit_terminal(pipe, id, up);
+        up.push(Event::Stream { owner: id.token(), up: Up::Failed(Fault::Other) });
+    }
+    close(pipe, id, true, env, tables, subs);
 }
 
 fn maybe_close(pipe: &mut Pipe, id: Id<Entity>, tables: &mut Tables, subs: &mut Queue<Submit>) {
@@ -476,5 +514,93 @@ pub(crate) fn output_request(
             request(pipe, id, Down::Send(bytes), env, tables, subs);
         }
         OutputDown::Release { right } => pipe.independent.release(right),
+    }
+}
+
+fn written(operation: Op) -> (Box<[u8]>, u32) {
+    match operation {
+        Op::PipeWrite { bytes, from, .. } | Op::Append { bytes, from, .. } => (bytes, from),
+        Op::Socket { .. }
+        | Op::Bind { .. }
+        | Op::Listen { .. }
+        | Op::Accept { .. }
+        | Op::Connect { .. }
+        | Op::Recv { .. }
+        | Op::Send { .. }
+        | Op::Shutdown { .. }
+        | Op::Close { .. }
+        | Op::Open { .. }
+        | Op::Read { .. }
+        | Op::Write { .. }
+        | Op::Sync { .. }
+        | Op::Stat { .. }
+        | Op::Rename { .. }
+        | Op::Remove { .. }
+        | Op::MakeDirectory { .. }
+        | Op::List { .. }
+        | Op::Spawn { .. }
+        | Op::Wait { .. }
+        | Op::Signal { .. }
+        | Op::Usage
+        | Op::ReadSignal { .. }
+        | Op::PipeRead { .. }
+        | Op::Cancel { .. } => unreachable!("a stream write returns its bytes"),
+    }
+}
+
+fn landed_write(
+    pipe: &mut Pipe,
+    landed: Landed,
+    env: &Env<Limits>,
+    tables: &mut Tables,
+    up: &mut Queue<Event>,
+    subs: &mut Queue<Submit>,
+) {
+    let id = landed.entity;
+    assert!(pipe.write.take() == Some(landed.flight), "write flight matches");
+    let (bytes, from) = written(landed.kind);
+    if pipe.append_timeout.is_some() && !pipe.closing {
+        tables.deadlines.cancel((id, Timer::Close));
+    }
+    let total = u32::try_from(bytes.len()).expect("queued write fits u32");
+    match landed.result {
+        Ok(Done::Count(n)) if (!pipe.closing || pipe.finish) && from.saturating_add(n) < total => {
+            let from = from.checked_add(n).expect("a short write stays within its buffer");
+            submit_write(pipe, id, bytes, from, env, tables, subs);
+        }
+        Ok(Done::Count(n)) if n > 0 => {
+            pipe.queued_bytes = pipe.queued_bytes.checked_sub(total).expect("queued bytes include write");
+            start_write(pipe, id, env, tables, subs);
+        }
+        Err(error) if !pipe.closing => {
+            pipe.queued_bytes = pipe.queued_bytes.checked_sub(total).expect("queued bytes include write");
+            pipe.independent.retire(OutputOutcome::Failed(fault(error)));
+            emit_terminal(pipe, id, up);
+            up.push(Event::Stream { owner: id.token(), up: Up::Failed(fault(error)) });
+            if pipe.append_timeout.is_some() {
+                close(pipe, id, true, env, tables, subs);
+            } else {
+                pipe.closing = true;
+            }
+        }
+        Err(_) => {
+            if pipe.append_timeout.is_some() {
+                // A failed flush cannot skip a piece and append later ones.
+                // Close still owes only Closed; abort the remaining output.
+                close(pipe, id, true, env, tables, subs);
+            }
+        }
+        Ok(
+            Done::Nothing
+            | Done::Fd(_)
+            | Done::Accepted { .. }
+            | Done::Bound(_)
+            | Done::Stat(_)
+            | Done::Spawned { .. }
+            | Done::Exit(_)
+            | Done::Usage(_)
+            | Done::ServiceSignal(_)
+            | Done::Count(_),
+        ) => unreachable!("a pipe write counts positive bytes"),
     }
 }

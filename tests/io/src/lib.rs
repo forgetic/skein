@@ -17,6 +17,7 @@
 //! one exchange through io over the real ring, and `tests/memory.rs` io's
 //! worst case against the counting allocator.
 
+pub mod append;
 pub mod census;
 pub mod ledger;
 pub mod output;

@@ -94,3 +94,39 @@ fn closing_a_child_whose_group_still_runs_ends_the_group() {
 fn a_signal_to_the_group_after_its_leader_exited_reaches_the_group() {
     group_story(skein_io_world::processes::Story::SignalExited);
 }
+
+#[test]
+fn an_append_stream_on_redirected_regular_output_preserves_every_byte_and_closes() {
+    use skein_io::kernel::Fd;
+    use skein_io_world::append::{CONTENTS, Evidence, Judge, Story, Writer};
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    let scratch = skein_scratch::Scratch::new("append-stream-ring");
+    let path = scratch.path().join("trace");
+    std::fs::write(&path, b"prefix:").expect("existing output file");
+    let file = std::fs::OpenOptions::new().write(true).open(&path).expect("redirected output");
+    assert_eq!(
+        skein_shell::prepare_output(Fd::new(file.as_raw_fd())).expect("output kind"),
+        skein_shell::OutputKind::Append
+    );
+    let fd = Fd::new(file.into_raw_fd());
+    let mut world = skein_world::real::World::new(Judge);
+    world.spawn_with_fds(vec![fd], || Writer::new(fd, Story::Close, Duration::from_secs(1)));
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    assert_eq!(std::fs::read(path).expect("the stream output"), CONTENTS);
+    assert_eq!(outcome.procs[0].failures(), 0);
+    assert_eq!(outcome.procs[0].events.last(), Some(&Evidence::Closed));
+}
+
+#[test]
+fn a_pipe_output_keeps_the_pipe_face_at_startup() {
+    use std::os::fd::AsRawFd;
+    let mut child =
+        std::process::Command::new("cat").stdin(std::process::Stdio::piped()).spawn().expect("a pipe output");
+    let input = child.stdin.take().expect("child input pipe");
+    assert_eq!(
+        skein_shell::prepare_output(skein_io::kernel::Fd::new(input.as_raw_fd())).expect("output kind"),
+        skein_shell::OutputKind::Pipe
+    );
+    drop(input);
+    assert!(child.wait().expect("cat ends at pipe EOF").success());
+}

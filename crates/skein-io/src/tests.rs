@@ -6,6 +6,7 @@
 
 #![expect(clippy::disallowed_types, reason = "what a step emitted is collected in Vecs, for the test to look at")]
 
+mod append;
 mod file;
 mod kernel;
 mod layer;
@@ -104,6 +105,7 @@ pub(crate) enum Kind {
     ReadSignal,
     PipeRead,
     PipeWrite,
+    Append,
 }
 
 pub(crate) const fn kind(op: &Op) -> Kind {
@@ -125,10 +127,10 @@ pub(crate) const fn kind(op: &Op) -> Kind {
         Op::ReadSignal { .. } => Kind::ReadSignal,
         Op::PipeRead { .. } => Kind::PipeRead,
         Op::PipeWrite { .. } => Kind::PipeWrite,
+        Op::Append { .. } => Kind::Append,
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
-        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
