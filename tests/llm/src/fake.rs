@@ -779,7 +779,7 @@ mod tests {
             Provider::Anthropic => {
                 input.endpoint = Endpoint::anthropic();
                 input.credential = Credential::anthropic(b"fake-token".as_slice().into());
-                input.prompt.cache_key = None;
+                input.prompt.affinity = None;
             }
         }
         input.prompt.output_ceiling(provider, 4096).expect("shared provider configuration");

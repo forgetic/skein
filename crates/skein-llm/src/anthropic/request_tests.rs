@@ -24,7 +24,7 @@ fn prompt(role: Role, block: Block) -> Prompt {
         messages: Box::new([Message { role, content: Box::new([block]) }]),
         max_output_tokens: None,
         reasoning_effort: None,
-        cache_key: None,
+        affinity: None,
         choice: crate::ToolChoice::Auto,
     }
 }
@@ -116,9 +116,10 @@ fn effort_is_explicit_and_unsupported_fields_are_rejected() {
     prompt.reasoning_effort = Some(bytes::copy_of(b"unknown"));
     assert_eq!(measure_request(&prompt, 4096, &LIMITS), Err(Error::Unsupported));
     prompt.reasoning_effort = None;
-    prompt.cache_key = Some(bytes::copy_of(b"affinity"));
-    assert_eq!(measure_request(&prompt, 4096, &LIMITS), Err(Error::Unsupported));
-    prompt.cache_key = None;
+    let without_affinity = encode_request(&prompt, 4096, &LIMITS).expect("plain request");
+    prompt.affinity = Some(crate::Affinity { key: [0x42; 16], thread: 19 });
+    assert_eq!(encode_request(&prompt, 4096, &LIMITS).expect("accepted affinity"), without_affinity);
+    prompt.affinity = None;
     prompt.max_output_tokens = Some(0);
     assert_eq!(measure_request(&prompt, 4096, &LIMITS), Err(Error::Invalid));
 }

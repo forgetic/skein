@@ -88,6 +88,13 @@ pub enum ToolChoice {
     Only(Box<[Box<[u8]>]>),
 }
 
+/// Caller-owned cache routing identity, repeated unchanged through a conversation (llm.md, section 2.1).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Affinity {
+    pub key: [u8; 16],
+    pub thread: u32,
+}
+
 /// Owned input to one call. Admission validates counts, bytes and replay data.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Prompt {
@@ -101,8 +108,8 @@ pub struct Prompt {
     pub messages: Box<[Message]>,
     /// An optional provider-supported reasoning effort value.
     pub reasoning_effort: Option<Box<[u8]>>,
-    /// Optional provider prompt-cache affinity key; it does not enable storage.
-    pub cache_key: Option<Box<[u8]>>,
+    /// Conversation routing identity; Anthropic accepts it without a wire field.
+    pub affinity: Option<Affinity>,
     /// Anthropic's `max_tokens`; `None` uses the endpoint's declared output.
     /// A cap above the declaration is refused. Codex subscription calls
     /// require `None` because that route does not support token caps.

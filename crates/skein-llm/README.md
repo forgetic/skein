@@ -67,11 +67,17 @@ Anthropic uses native ordered message blocks, tool schemas and tool-result
 error flags. `Prompt::max_output_tokens` sets its required `max_tokens`, defaulting
 to `Limits::declared_output_tokens`; zero is invalid. Codex requires this setting to be `None`.
 `reasoning_effort` accepts `off` or adaptive-thinking effort `low`, `medium`,
-`high`, `max`; model compatibility is the caller's choice. Anthropic rejects
-`cache_key`, which has no equivalent in this dialect. Completed thinking and
+`high`, `max`; model compatibility is the caller's choice. Anthropic accepts
+`Prompt::affinity` with no effect on its wire bytes. Completed thinking and
 redacted-thinking blocks retain signatures/data as Anthropic-tagged replay.
 Received tool arguments remain raw; resending requires valid JSON objects and
 native Anthropic identifiers. Provider replay cannot cross dialects.
+
+Codex renders `Affinity::key` as a lowercase UUID in `prompt_cache_key` and
+`session-id`. Its `thread-id` XORs the big-endian thread number into the key's
+last four bytes; thread zero equals the key. Without affinity all three are
+absent. Both header names are reserved, and request head limits price their
+fixed width alongside credentials and endpoint headers.
 
 The optional `anthropic::identity` module archives Tongs' Claude Code identity
 constants and static headers. A caller choosing that compatibility profile

@@ -46,7 +46,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
         Provider::Anthropic => {
             call.endpoint = skein_llm::Endpoint::anthropic();
             call.credential = Credential::anthropic(b"fake-token".as_slice().into());
-            call.prompt.cache_key = None;
+            call.prompt.affinity = None;
         }
     }
     call.prompt.output_ceiling(dialect, 4096).expect("provider output ceiling");

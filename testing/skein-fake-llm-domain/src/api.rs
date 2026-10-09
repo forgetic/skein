@@ -152,6 +152,8 @@ pub enum ToolChoice {
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Query {
+    /// Independent cache routing scope read from the actual Codex request.
+    pub cache_scope: Option<[u8; 16]>,
     /// Provider model name, treated as bytes by the domain.
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.

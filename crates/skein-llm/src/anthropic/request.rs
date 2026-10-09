@@ -36,9 +36,6 @@ pub(super) fn validate(prompt: &Prompt, declared_output: u32, limits: &openai::L
     if prompt.tools.len() > count || prompt.messages.len() > count {
         return Err(Error::limit(crate::Cap::Parts, limits.parts));
     }
-    if prompt.cache_key.is_some() {
-        return Err(Error::Unsupported);
-    }
     crate::translate::validate_choice(&prompt.choice, &prompt.tools)?;
     let mut budget: u64 = 0;
     match &prompt.choice {

@@ -84,7 +84,7 @@ fn anthropic_seeded_fragmentation_and_grants_preserve_completion() {
         let mut input = call(seed);
         input.endpoint = skein_llm::Endpoint::anthropic();
         input.credential = skein_llm::Credential::anthropic(b"synthetic-oauth-token".to_vec().into());
-        input.prompt.cache_key = None;
+        input.prompt.affinity = None;
         input.prompt.max_output_tokens = Some(1024);
         let wire = skein_llm_world::response(
             200,

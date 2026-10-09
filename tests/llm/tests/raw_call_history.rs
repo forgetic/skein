@@ -199,7 +199,7 @@ fn history(arguments: &[u8]) -> Call {
     let mut input = call(71);
     input.prompt.model = b"m".as_slice().into();
     input.prompt.instructions = Box::new([]);
-    input.prompt.cache_key = None;
+    input.prompt.affinity = None;
     input.prompt.messages = Box::new([Message {
         role: Role::Assistant,
         content: Box::new([Block::ToolCall {

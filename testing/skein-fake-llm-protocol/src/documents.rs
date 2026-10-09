@@ -167,6 +167,7 @@ fn anthropic_request(data: &[u8], limits: &anthropic::Limits) -> Result<api::Que
         messages.push(api::Message { role, parts: parts.into_boxed() }).or(Err(Error::TooLarge))?;
     }
     Ok(api::Query {
+        cache_scope: None,
         model: request.model,
         system: request.instructions,
         tools: tools.into_boxed(),
@@ -185,6 +186,10 @@ fn openai_request(data: &[u8], limits: &Limits) -> Result<api::Query, Error> {
     };
     let Ok(request) = openai::decode_request(&json, &limits.openai) else {
         return Err(Error::Malformed);
+    };
+    let cache_scope = match &request.prompt_cache_key {
+        Some(key) => Some(parse_uuid(key).ok_or(Error::Malformed)?),
+        None => None,
     };
     let mut tools = List::with_capacity(u32::try_from(request.tools.len()).or(Err(Error::TooLarge))?);
     for tool in request.tools {
@@ -231,6 +236,7 @@ fn openai_request(data: &[u8], limits: &Limits) -> Result<api::Query, Error> {
         messages.push(api::Message { role, parts: parts.into_boxed() }).or(Err(Error::TooLarge))?;
     }
     Ok(api::Query {
+        cache_scope,
         model: request.model,
         system: request.instructions,
         tools: tools.into_boxed(),
@@ -568,5 +574,36 @@ fn reported_usage(usage: api::Usage, fields: UsageFields) -> openai::Usage {
         cache_write: if fields.contains(UsageField::CacheWrite) { usage.cache_write } else { None },
         output: if fields.contains(UsageField::Output) { usage.output } else { None },
         reasoning: if fields.contains(UsageField::Reasoning) { usage.reasoning } else { None },
+    }
+}
+
+// Deliberately independent of the client's affinity renderer: the byte peer
+// validates the promised lowercase 8-4-4-4-12 form before assigning a scope.
+pub(crate) fn parse_uuid(value: &[u8]) -> Option<[u8; 16]> {
+    if value.len() != 36 {
+        return None;
+    }
+    let mut result = [0_u8; 16];
+    let mut at = 0_usize;
+    for index in 0..16 {
+        if index == 4 || index == 6 || index == 8 || index == 10 {
+            if value.get(at) != Some(&b'-') {
+                return None;
+            }
+            at = at.checked_add(1)?;
+        }
+        let high = nibble(*value.get(at)?)?;
+        at = at.checked_add(1)?;
+        let low = nibble(*value.get(at)?)?;
+        at = at.checked_add(1)?;
+        *result.get_mut(index).expect("fixed UUID width") = (high << 4_u32) | low;
+    }
+    Some(result)
+}
+fn nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => byte.checked_sub(b'0'),
+        b'a'..=b'f' => byte.checked_sub(b'a')?.checked_add(10),
+        _ => None,
     }
 }

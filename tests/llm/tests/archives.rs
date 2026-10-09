@@ -80,7 +80,7 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
         let mut input = call(51);
         input.endpoint = skein_llm::Endpoint::anthropic();
         input.credential = skein_llm::Credential::anthropic(b"fake-archive-token".as_slice().into());
-        input.prompt.cache_key = None;
+        input.prompt.affinity = None;
         input.prompt.max_output_tokens = Some(4096);
         let mut wire = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
         wire.extend_from_slice(&archive(scenario, "response.sse"));

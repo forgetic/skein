@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+mod affinity;
 pub mod anthropic;
 pub mod client;
 mod dialect;
@@ -24,6 +25,6 @@ pub use openai::{Json, Limits as DocumentLimits};
 pub use replay::{REPLAY_HEADER_BYTES, replay_bytes, replay_worst_case};
 pub use translate::decode as document_error;
 pub use types::{
-    Block, Call, Cap, Completion, Credential, Delta, Endpoint, Error, Failure, Message, Prompt, Provider, Replay, Role,
-    Stop, Tool, ToolChoice, Usage,
+    Affinity, Block, Call, Cap, Completion, Credential, Delta, Endpoint, Error, Failure, Message, Prompt, Provider,
+    Replay, Role, Stop, Tool, ToolChoice, Usage,
 };

@@ -571,6 +571,7 @@ mod tests {
     fn query(messages: Box<[Message]>) -> Query {
         let tool = ToolSpec { name: copy_of(b"ls"), description: copy_of(b""), parameters: copy_of(b"{}") };
         Query {
+            cache_scope: None,
             model: copy_of(b"fake"),
             system: copy_of(b""),
             tools: Box::new([tool]),

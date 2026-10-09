@@ -2,10 +2,11 @@
 use crate::{Block, Error, Failure, Prompt, Provider, Replay, Role, Stop, Usage, openai};
 use alloc::boxed::Box;
 use skein_json::{Kind, writer};
-use skein_lib::{List, Writer};
+use skein_lib::{List, Writer, bytes};
 
 const TOOL_ERROR: &[u8] = b"Error: ";
 
+#[expect(clippy::manual_map, reason = "the strict subset excludes closure-taking maps")]
 pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limits) -> Result<openai::Request, Error> {
     if provider != Provider::OpenAiCodex || prompt.max_output_tokens.is_some() {
         return Err(Error::Unsupported);
@@ -47,7 +48,10 @@ pub(crate) fn request(prompt: Prompt, provider: Provider, limits: &openai::Limit
         tools: tools.into_boxed(),
         input: input.into_boxed(),
         effort: prompt.reasoning_effort,
-        prompt_cache_key: prompt.cache_key,
+        prompt_cache_key: match prompt.affinity {
+            Some(affinity) => Some(bytes::copy_of(&crate::affinity::uuid(&affinity.key))),
+            None => None,
+        },
         choice: prompt.choice,
     };
     match openai::measure_request(&raw, limits) {
@@ -80,8 +84,8 @@ fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Res
     if let Some(value) = &prompt.reasoning_effort {
         charge_text(value, &mut budget, limits)?;
     }
-    if let Some(value) = &prompt.cache_key {
-        charge_text(value, &mut budget, limits)?;
+    if let Some(value) = prompt.affinity {
+        charge_text(&crate::affinity::uuid(&value.key), &mut budget, limits)?;
     }
     for tool in &prompt.tools {
         if tool.name.is_empty() || openai::json::kind(tool.schema.view(), 0) != Some(Kind::ObjectStart) {
@@ -555,7 +559,7 @@ mod tests {
             tools: Box::new([]),
             messages: Box::new([Message { role, content: Box::new([block]) }]),
             reasoning_effort: None,
-            cache_key: None,
+            affinity: None,
             choice: crate::ToolChoice::Auto,
             max_output_tokens: None,
         }

@@ -7,7 +7,7 @@ fn anthropic_call() -> skein_llm::Call {
     let mut input = call(1);
     input.endpoint = Endpoint::anthropic();
     input.credential = Credential::anthropic(b"test-token".to_vec().into());
-    input.prompt.cache_key = None;
+    input.prompt.affinity = None;
     input
 }
 fn header(name: &[u8], value: &[u8]) -> Header {
@@ -24,7 +24,14 @@ fn credentials_and_reserved_headers_cannot_cross_auth_modes() {
     let mut input = anthropic_call();
     input.credential.account_id = b"unexpected-account".to_vec().into();
     assert_eq!(rejection(input, &limits()), Error::Invalid);
-    for name in [b"Authorization".as_slice(), b"x-api-key", b"CHATGPT-ACCOUNT-ID", b"Content-Length"] {
+    for name in [
+        b"Authorization".as_slice(),
+        b"x-api-key",
+        b"CHATGPT-ACCOUNT-ID",
+        b"Content-Length",
+        b"SESSION-ID",
+        b"Thread-Id",
+    ] {
         let mut input = anthropic_call();
         input.endpoint.headers = Box::new([header(name, b"override")]);
         assert_eq!(rejection(input, &limits()), Error::Invalid);

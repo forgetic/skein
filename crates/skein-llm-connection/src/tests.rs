@@ -57,7 +57,7 @@ fn prompt() -> Prompt {
             content: Box::new([Block::Text { text: bytes::copy_of(b"hi"), replay: None }]),
         }]),
         reasoning_effort: None,
-        cache_key: None,
+        affinity: None,
         choice: skein_llm::ToolChoice::Auto,
         max_output_tokens: None,
     }

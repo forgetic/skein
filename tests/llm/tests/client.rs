@@ -27,7 +27,7 @@ fn wire_request_and_streamed_answer() {
             "\"model\":\"fixture-model\"",
             "\"stream\":true",
             "\"store\":false",
-            "\"prompt_cache_key\":\"cache-world\"",
+            "\"prompt_cache_key\":\"42424242-4242-4242-4242-424242424242\"",
             "reasoning.encrypted_content",
             "Hello",
         ] {
@@ -491,8 +491,28 @@ fn exact_request_head_cap_is_checked_before_transport_binding() {
     let mut exact = limits();
     exact.http.request = u32::try_from(head_end).unwrap();
     assert!(client::Client::prepare(call(1), &exact).is_ok());
+    let wire_body = world.sent.len() - head_end;
+    let input = call(1);
+    let measured = client::request_head(
+        &input.endpoint,
+        &client::CredentialLimits {
+            access_token: u32::try_from(input.credential.access_token.len()).unwrap(),
+            account_id: u32::try_from(input.credential.account_id.len()).unwrap(),
+        },
+        &limits(),
+    )
+    .unwrap();
+    let content_length_extra = limits().dialect.request_bytes.to_string().len() - wire_body.to_string().len();
+    assert_eq!(
+        usize::try_from(measured).unwrap(),
+        head_end + content_length_extra,
+        "standalone endpoint maximum prices both fixed affinity headers and maximum body length digits"
+    );
     exact.http.request -= 1;
-    assert!(matches!(client::Client::prepare(call(1), &exact), Err(Error::Limit { .. })));
+    assert!(matches!(
+        client::Client::prepare(call(1), &exact),
+        Err(Error::Limit { which: skein_llm::Cap::RequestHead, .. })
+    ));
 }
 
 #[test]
@@ -712,6 +732,7 @@ fn receiving_caps_admit_the_edge_and_refuse_one_over_by_name() {
                 _ => unreachable!(),
             }
             let mut input = call(10);
+            input.prompt.affinity = None;
             input.prompt.messages = Box::new([]);
             let mut world = World::new(input, bounds, wire.clone(), 10);
             world.fragmentation(1, 1);
@@ -761,7 +782,9 @@ fn header_fields_and_sse_fields_keep_their_own_exact_bounds() {
                 }
                 _ => unreachable!(),
             };
-            let mut world = World::new(call(11), bounds, wire, 11);
+            let mut input = call(11);
+            input.prompt.affinity = None;
+            let mut world = World::new(input, bounds, wire, 11);
             world.fragmentation(1, 1);
             world.request(client::Request::Start);
             world.run();

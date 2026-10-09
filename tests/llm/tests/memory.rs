@@ -422,7 +422,7 @@ fn memory_anthropic_call(owner: u64) -> skein_llm::Call {
     let mut input = call(owner);
     input.endpoint = skein_llm::Endpoint::anthropic();
     input.credential = skein_llm::Credential::anthropic(b"synthetic-oauth-token".to_vec().into());
-    input.prompt.cache_key = None;
+    input.prompt.affinity = None;
     input.prompt.max_output_tokens = Some(1024);
     input
 }

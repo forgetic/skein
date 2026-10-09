@@ -36,6 +36,7 @@ fn menu() -> Menu {
 
 fn query() -> Query {
     Query {
+        cache_scope: None,
         model: Box::new([]),
         system: b"cue".as_slice().into(),
         tools: Box::new([]),

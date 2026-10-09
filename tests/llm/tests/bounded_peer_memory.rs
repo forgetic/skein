@@ -58,7 +58,7 @@ fn input(owner: u64, provider: Provider) -> Call {
     if provider == Provider::Anthropic {
         input.endpoint = Endpoint::anthropic();
         input.credential = Credential::anthropic(b"fixture-token".as_slice().into());
-        input.prompt.cache_key = None;
+        input.prompt.affinity = None;
     }
     input.prompt.output_ceiling(provider, 4096).expect("caller output configuration");
     input.prompt.instructions = CUE.into();
@@ -95,7 +95,6 @@ fn input_bytes(input: &Call) -> u64 {
         + bytes(&input.credential.account_id)
         + bytes(&input.prompt.model)
         + bytes(&input.prompt.instructions)
-        + input.prompt.cache_key.as_ref().map_or(0, |key| bytes(key))
         + u64::try_from(input.prompt.messages.len()).expect("bounded messages") * size::<skein_llm::Message>();
     for message in &input.prompt.messages {
         let [Block::Text { text, replay: None }] = message.content.as_ref() else { panic!("literal fixture text") };

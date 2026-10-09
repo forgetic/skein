@@ -59,7 +59,8 @@ pub fn request_head(endpoint: &Endpoint, credential: &CredentialLimits, limits: 
     if credential.access_token == 0 {
         return Err(Error::Invalid);
     }
-    let fields = provider_headers(endpoint, &[]);
+    let maximum_affinity = [[b'0'; 36]; 2];
+    let fields = provider_headers(endpoint, &[], Some(&maximum_affinity));
     let account_bytes = match endpoint.provider {
         Provider::OpenAiCodex => usize::try_from(credential.account_id).expect("u32 fits usize"),
         Provider::Anthropic => 0,
@@ -242,6 +243,7 @@ impl Client {
             return Err(Error::Invalid);
         }
         let provider = input.endpoint.provider;
+        let affinity = input.prompt.affinity;
         let (headers, body) = match provider {
             Provider::OpenAiCodex => {
                 let request = translate::request(input.prompt, provider, &limits.dialect)?;
@@ -249,7 +251,7 @@ impl Client {
                     Ok(length) => length,
                     Err(error) => return Err(admission(error)),
                 };
-                let headers = headers(&input.endpoint, &input.credential, limits, length)?;
+                let headers = headers(&input.endpoint, &input.credential, affinity, limits, length)?;
                 let body = match openai::encode_request(&request, &limits.dialect) {
                     Ok(body) => body,
                     Err(error) => return Err(admission(error)),
@@ -258,7 +260,7 @@ impl Client {
             }
             Provider::Anthropic => {
                 let length = anthropic::measure_request(&input.prompt, limits.declared_output_tokens, &limits.dialect)?;
-                let headers = headers(&input.endpoint, &input.credential, limits, length)?;
+                let headers = headers(&input.endpoint, &input.credential, affinity, limits, length)?;
                 let body = anthropic::encode_request(&input.prompt, limits.declared_output_tokens, &limits.dialect)?;
                 (headers, body)
             }
@@ -1057,9 +1059,11 @@ fn admission(error: openai::DecodeError) -> Error {
     }
 }
 
+#[expect(clippy::manual_map, reason = "the strict subset excludes closure-taking maps")]
 fn headers(
     endpoint: &Endpoint,
     credential: &crate::Credential,
+    affinity: Option<crate::Affinity>,
     limits: &Limits,
     body_length: u32,
 ) -> Result<Box<[Header]>, Error> {
@@ -1077,7 +1081,11 @@ fn headers(
         Provider::Anthropic if !credential.account_id.is_empty() => return Err(Error::Invalid),
         Provider::OpenAiCodex | Provider::Anthropic => {}
     }
-    let fields = provider_headers(endpoint, &credential.account_id);
+    let rendered = match affinity {
+        Some(affinity) => Some(crate::affinity::rendered(affinity)),
+        None => None,
+    };
+    let fields = provider_headers(endpoint, &credential.account_id, rendered.as_ref());
     let total =
         head_length(endpoint, credential.access_token.len(), credential.account_id.len(), body_length, &fields)?;
     let mut fixed_count = 5_usize;
@@ -1187,12 +1195,24 @@ fn head_length(
     Ok(total)
 }
 
-fn provider_headers<'a>(endpoint: &Endpoint, account_id: &'a [u8]) -> [Option<(&'static [u8], &'a [u8])>; 2] {
+fn provider_headers<'a>(
+    endpoint: &Endpoint,
+    account_id: &'a [u8],
+    affinity: Option<&'a [[u8; 36]; 2]>,
+) -> [Option<(&'static [u8], &'a [u8])>; 3] {
+    let (session, thread) = match affinity {
+        Some(rendered) => (
+            Some((b"session-id".as_slice(), rendered.first().expect("fixed session UUID").as_slice())),
+            Some((b"thread-id".as_slice(), rendered.get(1).expect("fixed thread UUID").as_slice())),
+        ),
+        None => (None, None),
+    };
     match endpoint.provider {
-        Provider::OpenAiCodex => [Some((b"chatgpt-account-id", account_id)), None],
+        Provider::OpenAiCodex => [Some((b"chatgpt-account-id", account_id)), session, thread],
         Provider::Anthropic => [
             default_header(endpoint, b"anthropic-version", b"2023-06-01"),
             default_header(endpoint, b"anthropic-beta", b"oauth-2025-04-20"),
+            None,
         ],
     }
 }
@@ -1244,6 +1264,8 @@ fn reserved(name: &[u8]) -> bool {
         b"host".as_slice(),
         b"authorization",
         b"chatgpt-account-id",
+        b"session-id",
+        b"thread-id",
         b"x-api-key",
         b"content-type",
         b"accept",

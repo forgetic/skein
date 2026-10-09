@@ -260,6 +260,8 @@ pub struct Server {
     reply: Option<Box<[u8]>>,
     reply_offset: usize,
     refused: Option<api::Error>,
+    session: Option<[u8; 16]>,
+    thread: Option<[u8; 16]>,
     writer_closed: bool,
 }
 
@@ -289,6 +291,8 @@ impl Server {
             reply: None,
             reply_offset: 0,
             refused: None,
+            session: None,
+            thread: None,
             writer_closed: false,
         })
     }
@@ -509,9 +513,29 @@ fn entrance(
         Some(api::Error::InvalidRequest)
     };
     let mut authorization = None;
+    server.session = None;
+    server.thread = None;
     let mut account = None;
     let mut content_type = 0_u32;
     for header in &call.headers {
+        if service.config.provider == documents::Provider::OpenAi && header.is(b"session-id") {
+            if server.session.is_some() {
+                server.refused = Some(api::Error::InvalidRequest);
+            }
+            server.session = documents::parse_uuid(&header.value);
+            if server.session.is_none() {
+                server.refused = Some(api::Error::InvalidRequest);
+            }
+        }
+        if service.config.provider == documents::Provider::OpenAi && header.is(b"thread-id") {
+            if server.thread.is_some() {
+                server.refused = Some(api::Error::InvalidRequest);
+            }
+            server.thread = documents::parse_uuid(&header.value);
+            if server.thread.is_none() {
+                server.refused = Some(api::Error::InvalidRequest);
+            }
+        }
         if header.is(b"authorization") {
             if authorization.is_some() {
                 server.refused = Some(api::Error::Unauthorized);
@@ -717,6 +741,13 @@ fn requested(server: &mut Server, service: &mut Service, env: &Env<Limits>, abov
     }
     match query {
         Ok(query) => {
+            if service.config.provider == documents::Provider::OpenAi
+                && (query.cache_scope != server.session || query.cache_scope.is_some() != server.thread.is_some())
+            {
+                server.body.clear();
+                response_error(server, service, env, api::Error::InvalidRequest);
+                return;
+            }
             let Ok(id) = service.calls.insert(Call { server: server.owner, active: true }) else {
                 response_error(server, service, env, api::Error::Overloaded);
                 return;

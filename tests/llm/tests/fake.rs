@@ -14,7 +14,7 @@ fn input(provider: skein_llm::Provider, owner: u64) -> skein_llm::Call {
         skein_llm::Provider::Anthropic => {
             input.endpoint = skein_llm::Endpoint::anthropic();
             input.credential = skein_llm::Credential::anthropic(b"fake-token".as_slice().into());
-            input.prompt.cache_key = None;
+            input.prompt.affinity = None;
         }
     }
     input.prompt.output_ceiling(provider, 4096).expect("shared provider configuration");
@@ -853,4 +853,177 @@ fn key_count(document: &skein_json::Document, name: &[u8]) -> usize {
             record.kind == skein_json::Kind::Key && document.text(record) == Some(name)
         })
         .count()
+}
+
+fn affinity_head<'a>(head: &'a [skein_http::Header], name: &[u8]) -> Option<&'a [u8]> {
+    head.iter().find(|header| header.is(name)).map(|header| header.value.as_ref())
+}
+
+#[test]
+fn affinity_is_fixed_across_calls_and_threads_are_distinct_on_the_actual_wire() {
+    for thread in [0, 0x0102_0304] {
+        let mut first = input(skein_llm::Provider::OpenAiCodex, 151);
+        first.prompt.affinity.as_mut().expect("valid bounded affinity control").thread = thread;
+        let mut world = Exchange::new(first, limits(), scripts());
+        world.start();
+        world.run();
+        let mut next = input(skein_llm::Provider::OpenAiCodex, 152);
+        next.prompt.affinity.as_mut().expect("valid bounded affinity control").thread = thread;
+        let prepared = client::Client::prepare(next, &limits()).expect("valid bounded affinity control");
+        assert!(world.machine.next_call(prepared).is_ok());
+        world.seen.clear();
+        world.request(client::Request::Start);
+        world.run();
+        assert_eq!(world.heads.len(), 2);
+        assert_eq!(world.queries.len(), 2);
+        for head in &world.heads {
+            assert_eq!(affinity_head(head, b"session-id"), Some(b"42424242-4242-4242-4242-424242424242".as_slice()));
+            let expected: &[u8] = if thread == 0 {
+                b"42424242-4242-4242-4242-424242424242"
+            } else {
+                b"42424242-4242-4242-4242-424243404146"
+            };
+            assert_eq!(affinity_head(head, b"thread-id"), Some(expected));
+        }
+        assert!(world.queries.iter().all(|query| query.cache_scope == Some([0x42; 16])));
+        assert_eq!(completion(&world).stop, skein_llm::Stop::ToolUse);
+    }
+}
+
+#[test]
+fn absent_affinity_sends_none_and_anthropic_ignores_it_on_the_actual_wire() {
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        let mut without = input(provider, 161);
+        without.prompt.affinity = None;
+        let mut world = Exchange::new(without, limits(), scripts());
+        world.start();
+        world.run();
+        let [head] = world.heads.as_slice() else { panic!("one actual head") };
+        assert_eq!(affinity_head(head, b"session-id"), None);
+        assert_eq!(affinity_head(head, b"thread-id"), None);
+        assert!(!String::from_utf8_lossy(&world.requests).contains("prompt_cache_key"));
+        assert_eq!(world.queries[0].cache_scope, None);
+        if provider == skein_llm::Provider::Anthropic {
+            let mut with = input(provider, 162);
+            with.prompt.affinity = Some(skein_llm::Affinity { key: [0x17; 16], thread: 31 });
+            let mut selected = Exchange::new(with, limits(), scripts());
+            selected.start();
+            selected.run();
+            assert_eq!(selected.requests, world.requests);
+            assert_eq!(selected.heads, world.heads);
+            assert_eq!(completion(&selected), completion(&world));
+        }
+    }
+}
+
+#[test]
+fn endpoint_affinity_headers_are_reserved_for_both_dialects() {
+    for provider in [skein_llm::Provider::OpenAiCodex, skein_llm::Provider::Anthropic] {
+        for name in [b"Session-ID".as_slice(), b"THREAD-id"] {
+            let mut input = input(provider, 171);
+            input.endpoint.headers =
+                Box::new([skein_http::Header { name: name.into(), value: b"override".as_slice().into() }]);
+            assert!(matches!(client::Client::prepare(input, &limits()), Err(skein_llm::Error::Invalid)));
+        }
+    }
+}
+
+// Sends independently mutated actual HTTP bytes into the real peer. Its
+// transport grants each send and answers each read; no Client API can forge
+// these reserved fields. Returning the actual domain query distinguishes
+// admission from a refusal before the domain, and the HTTP tape proves it.
+fn peer_affinity_request(wire: &[u8]) -> (Option<skein_fake_llm_domain::api::Query>, Vec<u8>) {
+    use skein_fake_llm_protocol::{documents, provider};
+    use skein_lib::stream::{Down, Read, Up};
+    use skein_lib::{Env, Intake, Queue, Time, Token, Wall};
+    let input = input(skein_llm::Provider::OpenAiCodex, 181);
+    let bounds = skein_llm_world::fake::limits(&limits());
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: bounds };
+    let mut service = provider::Service::new(
+        provider::Config {
+            echo: skein_llm::openai::Echo::NONE,
+            usage_fields: documents::UsageFields::ALL,
+            provider: documents::Provider::OpenAi,
+            path: input.endpoint.target,
+            headers: Box::new([]),
+        },
+        &bounds,
+    )
+    .expect("valid bounded affinity control");
+    let mut server = provider::Server::new(Token::new(2), &bounds).expect("valid bounded affinity control");
+    let mut above = Queue::with_capacity(provider::MAX_UP);
+    let mut below = Queue::with_capacity(provider::MAX_DOWN);
+    let mut intake = Intake::with_capacity(32768);
+    intake.append(wire).expect("valid bounded affinity control");
+    let mut response = Vec::new();
+    let mut demand = None;
+    let mut grant = 0;
+    provider::start(&mut server, &mut service, &input.credential, &env, &mut above, &mut below);
+    for _ in 0..10000 {
+        while let Some(event) = above.pop() {
+            match event {
+                provider::Event::Domain(skein_fake_llm_domain::Event::Call { query, .. }) => {
+                    return (Some(query), response);
+                }
+                provider::Event::Head { .. } | provider::Event::Close | provider::Event::Closed => {}
+            }
+        }
+        while let Some(down) = below.pop() {
+            match down {
+                Down::Demand { read: Read::Nothing, room: 0 } => demand = None,
+                Down::Demand { read, room } => {
+                    assert!(demand.is_none());
+                    demand = Some((read, room));
+                }
+                Down::Send(data) => {
+                    assert!(usize::try_from(grant).expect("valid bounded affinity control") >= data.len());
+                    grant = 0;
+                    response.extend_from_slice(&data);
+                }
+                Down::Finish => panic!("HTTP response uses framing"),
+            }
+        }
+        if server.has_work() {
+            provider::resume(&mut server, &mut service, &input.credential, &env, &mut above, &mut below);
+            continue;
+        }
+        if let Some((read, room)) = demand {
+            let event = if room > 0 {
+                grant = room;
+                Some(Up::Room)
+            } else {
+                intake.meet(read).map(Up::Bytes)
+            };
+            if let Some(event) = event {
+                demand = None;
+                provider::up(&mut server, &mut service, &input.credential, &env, event, &mut above, &mut below);
+                continue;
+            }
+        }
+        return (None, response);
+    }
+    panic!("finite peer story settles");
+}
+
+#[test]
+fn independent_peer_refuses_mismatched_affinity_and_malformed_thread_before_dispatch() {
+    let mut world = Exchange::new(input(skein_llm::Provider::OpenAiCodex, 181), limits(), scripts());
+    world.start();
+    world.run();
+    let wire = String::from_utf8(world.requests).expect("valid bounded affinity control");
+    let (accepted, response) = peer_affinity_request(wire.as_bytes());
+    assert_eq!(accepted.expect("valid bounded affinity control").cache_scope, Some([0x42; 16]));
+    assert!(response.is_empty());
+    for (from, to) in [
+        ("session-id: 42424242", "session-id: 43434343"),
+        ("thread-id: 42424242", "thread-id: z2424242"),
+        ("session-id: 42424242-4242-4242-4242-424242424242\r\n", ""),
+        ("thread-id: 42424242-4242-4242-4242-424242424242\r\n", ""),
+    ] {
+        let changed = wire.replacen(from, to, 1);
+        assert_ne!(changed, wire, "control really mutates actual header bytes");
+        let (query, response) = peer_affinity_request(changed.as_bytes());
+        assert!(query.is_none(), "invalid affinity never enters the neutral domain");
+        assert!(response.starts_with(b"HTTP/1.1 400 "), "{:?}", String::from_utf8_lossy(&response));
+    }
 }

@@ -103,7 +103,7 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Prompt, DecodeErr
         tools: tools.into_boxed(),
         messages: messages.into_boxed(),
         reasoning_effort: None,
-        cache_key: None,
+        affinity: None,
         choice,
         max_output_tokens: Some(max),
     };

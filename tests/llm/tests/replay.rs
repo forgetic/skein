@@ -61,7 +61,7 @@ fn provider_mismatch_is_rejected_by_actual_client_after_positive_control() {
     let mut input = call(2);
     input.endpoint = skein_llm::Endpoint::anthropic();
     input.credential = skein_llm::Credential::anthropic(b"fake-token".as_slice().into());
-    input.prompt.cache_key = None;
+    input.prompt.affinity = None;
     input.prompt.messages = Box::new([Message {
         role: Role::Assistant,
         content: Box::new([Block::Text {

@@ -134,7 +134,7 @@ fn actual_prepared_anthropic_owner_and_request_survive_raw_world_adoption() {
     let mut input = call(99);
     input.endpoint = Endpoint::anthropic();
     input.credential = Credential::anthropic(b"fixture-token".as_slice().into());
-    input.prompt.cache_key = None;
+    input.prompt.affinity = None;
     input.prompt.max_output_tokens = Some(128);
     input.prompt.messages[0].content =
         Box::new([Block::Text { text: b"Original question.".as_slice().into(), replay: None }]);
