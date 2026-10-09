@@ -1,0 +1,10 @@
+Final committed, rebased-tip gate on ed93954687f173bfc474161bc2a3675f5ccddf40 (parent bf00a889890e23b5f2f664ecfb2a394b5740314b):
+heavy330 scripts/check.sh; formatting, clippy and standalone TLS passed.
+Nextest run ID 46203600-07fd-4c06-bbdc-02f00e9d0b7e with nextest profile: default
+Summary [   2.886s] 1510 tests run: 1510 passed, 0 skipped
+Nextest run ID f4abfb38-702d-4d20-b699-3efc60460e51 with nextest profile: fuzzy
+Summary [   7.532s] 85 tests run: 85 passed, 0 skipped
+Nextest run ID 2c0dfdfa-a753-43b2-bc62-4f0ab6c6b54d with nextest profile: browser
+Summary [   3.707s] 6 tests run: 6 passed, 0 skipped
+Serial end-to-end measurement: heavy306,18/18 in0.405s, runb62412e1-8567-4146-9cba-a40350688f91.
+Negative old-Tree regression: heavy310 failed, run0897ab66-7ff6-4de8-9c9b-1d5257c49649.
