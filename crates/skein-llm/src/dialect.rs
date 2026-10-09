@@ -84,7 +84,7 @@ impl Decoder {
                 }
             }
             Decoder::Anthropic(decoder) => {
-                let tokens = json.as_tokens();
+                let tokens = json.view();
                 let kind = openai::json::required(tokens, b"type")?;
                 let kind = openai::json::text_ref(openai::json::value_at(tokens, kind)?)?;
                 if name != b"message" && name != kind {

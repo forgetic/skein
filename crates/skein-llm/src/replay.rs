@@ -31,7 +31,7 @@ impl Replay {
     /// Unknown provider-owned fields stay in the envelope. Its interpretation
     /// and compatibility are checked again by the receiving Client.
     pub fn to_bytes(&self, limits: &DocumentLimits) -> Result<Box<[u8]>, Error> {
-        let value = match Json::from_tokens(self.value.as_tokens(), limits) {
+        let value = match Json::from_view(self.value.view(), limits) {
             Ok(value) => value,
             Err(error) => return Err(crate::translate::decode(error)),
         };

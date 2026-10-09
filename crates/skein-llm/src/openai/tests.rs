@@ -445,7 +445,13 @@ fn malformed_tokens_duplicates_and_every_document_limit_are_refused() {
         assert_eq!(Json::from_bytes(bytes, &LIMITS).unwrap_err(), DecodeError::Malformed);
     }
     let tokens = [Token::ObjectStart, Token::Key(owned(b"a")), Token::ObjectEnd];
-    assert_eq!(Json::from_tokens(&tokens, &LIMITS), Err(DecodeError::Malformed));
+    assert_eq!(
+        Json::from_document(
+            skein_json::Document::from_tokens(&tokens, &skein_json::document::Limits { tokens: 3, text: 1 }).unwrap(),
+            &LIMITS
+        ),
+        Err(DecodeError::Malformed)
+    );
     assert_eq!(
         Json::from_bytes(b"{}", &Limits { tokens: 1, ..LIMITS }),
         Err(DecodeError::limit(crate::Cap::Tokens, 1))
@@ -497,10 +503,9 @@ fn archived_real_provider_requests_and_answers_match_known_completions() {
         ("tool-result-final", 116, 12, 0, 0),
     ] {
         let wrapper = Json::from_bytes(&fixture(scenario, "request.json"), &LIMITS).unwrap();
-        let body = json::text_ref(
-            json::value_at(wrapper.as_tokens(), json::required(wrapper.as_tokens(), b"body").unwrap()).unwrap(),
-        )
-        .unwrap();
+        let body =
+            json::text_ref(json::value_at(wrapper.view(), json::required(wrapper.view(), b"body").unwrap()).unwrap())
+                .unwrap();
         let request = decode_request(&value(body), &LIMITS).unwrap();
         assert!(!request.input.is_empty());
         let captured = dechunk(&fixture(scenario, "response.sse"));
@@ -952,7 +957,7 @@ fn tool_choice_encodes_auto_none_and_only_without_filtering() {
         request.choice = choice.clone();
         let wire = encode_request(&request, &LIMITS).expect("bounded choice");
         let value = Json::from_bytes(&wire, &LIMITS).expect("request object");
-        let tokens = value.as_tokens();
+        let tokens = value.view();
         let encoded =
             json::text_ref(json::value_at(tokens, json::required(tokens, b"tool_choice").unwrap()).unwrap()).unwrap();
         let expected = match choice {
@@ -960,9 +965,10 @@ fn tool_choice_encodes_auto_none_and_only_without_filtering() {
             crate::ToolChoice::None => b"none".as_slice(),
         };
         assert_eq!(encoded, expected);
-        assert_eq!(
-            json::value_at(tokens, json::required(tokens, b"parallel_tool_calls").unwrap()).unwrap(),
-            [Token::True]
+        assert!(
+            json::boolean(json::value_at(tokens, json::required(tokens, b"parallel_tool_calls").unwrap()).unwrap())
+                .unwrap(),
+            "native Codex choice retains parallel tool calls"
         );
         let decoded = decode_request(&value, &LIMITS).unwrap();
         assert_eq!(decoded.tools, request.tools);
@@ -1211,4 +1217,36 @@ fn inconsistent_codex_usage_keeps_reports_and_the_model_completion() {
         }));
         assert_eq!(trace.last(), Some(&Output::Completed { stop: Stop::EndTurn, usage }));
     }
+}
+
+#[test]
+fn compact_ranges_borrow_nested_text_and_admit_only_the_selected_value() {
+    let source = value(br#"{"omit":"large irrelevant prefix","value":{"message":"abc","array":[1,{"x":"s"}]}}"#);
+    let root = source.view();
+    let selected = json::value_at(root, json::required(root, b"value").unwrap()).unwrap();
+    let message = json::value_at(selected, json::required(selected, b"message").unwrap()).unwrap();
+    assert_eq!(json::text_ref(message).unwrap(), b"abc");
+    let array = json::value_at(selected, json::required(selected, b"array").unwrap()).unwrap();
+    let offsets = json::array(array, 2).unwrap();
+    assert_eq!(json::unsigned(json::value_at(array, *offsets.get(0).unwrap()).unwrap()).unwrap(), 1);
+    let nested = json::value_at(array, *offsets.get(1).unwrap()).unwrap();
+    assert_eq!(json::text_ref(json::value_at(nested, json::required(nested, b"x").unwrap()).unwrap()).unwrap(), b"s");
+    let copied = Json::from_view(selected, &LIMITS).unwrap();
+    assert_eq!(copied, value(br#"{"message":"abc","array":[1,{"x":"s"}]}"#));
+    assert_eq!(copied.to_bytes(&LIMITS).unwrap().as_ref(), br#"{"message":"abc","array":[1,{"x":"s"}]}"#);
+    assert!(
+        copied.document().text_len() < source.document().text_len(),
+        "selected admission retains only its own text"
+    );
+}
+
+#[test]
+fn a_discarded_string_length_is_not_a_neutral_writable_json_value() {
+    let document = skein_json::Document::from_parts(
+        Box::new([]),
+        Box::new([skein_json::Compact { kind: skein_json::Kind::Long, start: 0, len: 100 }]),
+        &skein_json::document::Limits { tokens: 1, text: 0 },
+    )
+    .unwrap();
+    assert_eq!(Json::from_document(document, &LIMITS), Err(DecodeError::Malformed));
 }

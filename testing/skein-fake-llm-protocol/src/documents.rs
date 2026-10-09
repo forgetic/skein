@@ -6,7 +6,7 @@
 use alloc::boxed::Box;
 use skein_fake_llm_domain::api;
 use skein_http::sse::writer::Outgoing;
-use skein_json::Token;
+use skein_json::{Document, Kind};
 use skein_lib::{Decimal, List, Writer, bytes};
 use skein_llm::anthropic;
 use skein_llm::openai;
@@ -344,10 +344,10 @@ fn anthropic_event(
                         let Ok(value) = anthropic::Json::from_bytes(bytes, limits) else {
                             return Err(Error::Malformed);
                         };
-                        match string_field(value.as_tokens(), b"type")?.as_ref() {
+                        match string_field(value.document(), b"type")?.as_ref() {
                             b"thinking" => anthropic::BlockStart::Thinking {
-                                text: string_field(value.as_tokens(), b"thinking")?,
-                                signature: string_field(value.as_tokens(), b"signature")?,
+                                text: string_field(value.document(), b"thinking")?,
+                                signature: string_field(value.document(), b"signature")?,
                                 head: value,
                             },
                             b"redacted_thinking" => anthropic::BlockStart::Redacted { value },
@@ -448,8 +448,8 @@ fn openai_event(
                 let Ok(value) = openai::Json::from_bytes(bytes, limits) else {
                     return Err(Error::Malformed);
                 };
-                let id = string_field(value.as_tokens(), b"id")?;
-                let kind = string_field(value.as_tokens(), b"type")?;
+                let id = string_field(value.document(), b"id")?;
+                let kind = string_field(value.document(), b"type")?;
                 (id, kind, openai::Item::Opaque { value })
             }
             api::Part::ToolOutput { .. } => return Err(Error::Malformed),
@@ -507,34 +507,37 @@ fn identifier(call: u64, index: u32) -> Box<[u8]> {
     out.finish()
 }
 
-fn string_field(tokens: &[Token], name: &[u8]) -> Result<Box<[u8]>, Error> {
+fn string_field(document: &Document, name: &[u8]) -> Result<Box<[u8]>, Error> {
     let mut depth = 0_u32;
     let mut found = None;
-    for (index, token) in tokens.iter().enumerate() {
-        match token {
-            Token::ObjectStart | Token::ArrayStart => depth = depth.checked_add(1).ok_or(Error::TooLarge)?,
-            Token::ObjectEnd | Token::ArrayEnd => depth = depth.checked_sub(1).ok_or(Error::Malformed)?,
-            Token::Key(key) if depth == 1 && key.as_ref() == name => {
-                if found.is_some() {
-                    return Err(Error::Malformed);
+    for index in 0..document.len() {
+        let record = document.token(index).ok_or(Error::Malformed)?;
+        match record.kind {
+            Kind::ObjectStart | Kind::ArrayStart => depth = depth.checked_add(1).ok_or(Error::TooLarge)?,
+            Kind::ObjectEnd | Kind::ArrayEnd => depth = depth.checked_sub(1).ok_or(Error::Malformed)?,
+            Kind::Key => {
+                if depth == 1 && document.text(record) == Some(name) {
+                    if found.is_some() {
+                        return Err(Error::Malformed);
+                    }
+                    let next = document.token(index.checked_add(1).ok_or(Error::TooLarge)?).ok_or(Error::Malformed)?;
+                    match next.kind {
+                        Kind::String => found = Some(bytes::copy_of(document.text(next).ok_or(Error::Malformed)?)),
+                        Kind::ObjectStart
+                        | Kind::ObjectEnd
+                        | Kind::ArrayStart
+                        | Kind::ArrayEnd
+                        | Kind::Key
+                        | Kind::Number
+                        | Kind::True
+                        | Kind::False
+                        | Kind::Null
+                        | Kind::Long => return Err(Error::Malformed),
+                    }
                 }
-                found = match tokens.get(index.saturating_add(1)) {
-                    Some(Token::String(text)) => Some(text.clone()),
-                    Some(
-                        Token::ObjectStart
-                        | Token::ArrayStart
-                        | Token::ObjectEnd
-                        | Token::ArrayEnd
-                        | Token::Key(_)
-                        | Token::Number(_)
-                        | Token::True
-                        | Token::False
-                        | Token::Null,
-                    )
-                    | None => return Err(Error::Malformed),
-                };
             }
-            Token::Key(_) | Token::String(_) | Token::Number(_) | Token::True | Token::False | Token::Null => {}
+            Kind::String | Kind::Number | Kind::True | Kind::False | Kind::Null => {}
+            Kind::Long => return Err(Error::Malformed),
         }
     }
     found.ok_or(Error::Malformed)

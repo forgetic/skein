@@ -53,14 +53,18 @@ fn historical_messages_captures_flow_through_the_actual_shared_client() {
         };
         let captured_request = archive(scenario, "request.json");
         let wrapper = skein_llm::Json::from_bytes(&captured_request, &dialect).expect("historical request wrapper");
-        let bodies: Vec<_> = wrapper
-            .as_tokens()
-            .windows(2)
-            .filter_map(|tokens| match tokens {
-                [skein_json::Token::Key(name), skein_json::Token::String(body)] if name.as_ref() == b"body" => {
-                    Some(body)
+        let document = wrapper.document();
+        let bodies: Vec<_> = (0..document.len())
+            .filter_map(|index| {
+                let record = document.token(index)?;
+                if record.kind != skein_json::Kind::Key || document.text(record)? != b"body" {
+                    return None;
                 }
-                _ => None,
+                let next = document.token(index.checked_add(1)?)?;
+                if next.kind != skein_json::Kind::String {
+                    return None;
+                }
+                document.text(next)
             })
             .collect();
         let [body] = bodies.as_slice() else {

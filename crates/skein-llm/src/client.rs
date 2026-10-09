@@ -1028,19 +1028,8 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     {
         return None;
     }
-    // The event term covers the gathering buffer and decoding copies.
-    // Every opaque item was charged by its serialized length in the
-    // dialect's answer budget. A JSON token occupies at least one wire byte.
-    // Metadata envelopes are also charged in the held completion. Include
-    // token wrappers for all retained replay values and their emission copy.
-    let replay_tokens = u64::from(limits.dialect.parts)
-        .checked_mul(u64::from(limits.dialect.tokens))?
-        .min(u64::from(limits.dialect.answer_bytes));
-    let replay_storage =
-        replay_tokens.checked_mul(u64::try_from(size_of::<skein_json::Token>()).ok()?)?.checked_mul(2)?;
     u64::try_from(size_of::<Client>())
         .ok()?
-        .checked_add(replay_storage)?
         .checked_add(http::worst_case(&limits.http)?)?
         .checked_add(sse::worst_case(&limits.sse)?)?
         .checked_add(openai::worst_case(&limits.dialect)?.max(anthropic::worst_case(&limits.dialect)?))?
@@ -1357,20 +1346,21 @@ fn block_size(block: &Block) -> u64 {
         Block::Dropped { .. } => return 0,
     };
     if let Some(replay) = replay {
-        for token in replay.value.as_tokens() {
-            let length = match token {
-                skein_json::Token::Key(value) | skein_json::Token::String(value) | skein_json::Token::Number(value) => {
-                    value.len()
-                }
-                skein_json::Token::ObjectStart
-                | skein_json::Token::ObjectEnd
-                | skein_json::Token::ArrayStart
-                | skein_json::Token::ArrayEnd
-                | skein_json::Token::True
-                | skein_json::Token::False
-                | skein_json::Token::Null => 1,
+        let document = replay.value.document();
+        for index in 0..document.len() {
+            let record = document.token(index).expect("admitted record");
+            let length = match record.kind {
+                skein_json::Kind::Key | skein_json::Kind::String | skein_json::Kind::Number => u64::from(record.len),
+                skein_json::Kind::ObjectStart
+                | skein_json::Kind::ObjectEnd
+                | skein_json::Kind::ArrayStart
+                | skein_json::Kind::ArrayEnd
+                | skein_json::Kind::True
+                | skein_json::Kind::False
+                | skein_json::Kind::Null => 1,
+                skein_json::Kind::Long => unreachable!("admitted Json contains no Long"),
             };
-            bytes = bytes.saturating_add(u64::try_from(length).expect("a slice length fits u64"));
+            bytes = bytes.saturating_add(length);
         }
     }
     bytes

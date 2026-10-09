@@ -108,22 +108,8 @@ fn terminal_bytes(completion: &Completion) -> u64 {
     let [Block::Text { text, replay }] = completion.content.as_ref() else { panic!("one real native text") };
     let mut owned = size::<Block>() + bytes(text);
     if let Some(replay) = replay {
-        owned +=
-            u64::try_from(replay.value.as_tokens().len()).expect("bounded replay tokens") * size::<skein_json::Token>();
-        for token in replay.value.as_tokens() {
-            owned += match token {
-                skein_json::Token::Key(value) | skein_json::Token::String(value) | skein_json::Token::Number(value) => {
-                    bytes(value)
-                }
-                skein_json::Token::ObjectStart
-                | skein_json::Token::ObjectEnd
-                | skein_json::Token::ArrayStart
-                | skein_json::Token::ArrayEnd
-                | skein_json::Token::True
-                | skein_json::Token::False
-                | skein_json::Token::Null => 0,
-            };
-        }
+        let document = replay.value.document();
+        owned += u64::from(document.len()) * size::<skein_json::Compact>() + u64::from(document.text_len());
     }
     owned
 }

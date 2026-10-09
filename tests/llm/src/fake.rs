@@ -178,23 +178,8 @@ fn query_bytes(query: &api::Query) -> Option<u64> {
 
 fn replay_bytes(replay: Option<&skein_llm::Replay>) -> Option<u64> {
     let Some(replay) = replay else { return Some(0) };
-    let tokens = replay.value.as_tokens();
-    let mut owned = cells::<skein_json::Token>(u32::try_from(tokens.len()).ok()?)?;
-    for token in tokens {
-        let payload = match token {
-            skein_json::Token::Key(value) | skein_json::Token::String(value) | skein_json::Token::Number(value) => {
-                bytes(value)?
-            }
-            skein_json::Token::ObjectStart
-            | skein_json::Token::ObjectEnd
-            | skein_json::Token::ArrayStart
-            | skein_json::Token::ArrayEnd
-            | skein_json::Token::True
-            | skein_json::Token::False
-            | skein_json::Token::Null => 0,
-        };
-        owned = owned.checked_add(payload)?;
-    }
+    let document = replay.value.document();
+    let owned = cells::<skein_json::Compact>(document.len())?.checked_add(u64::from(document.text_len()))?;
     Some(owned)
 }
 

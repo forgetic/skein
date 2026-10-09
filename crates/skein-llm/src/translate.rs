@@ -1,8 +1,8 @@
 //! Bridge between the provider-neutral vocabulary and Codex documents.
 use crate::{Block, Error, Failure, Prompt, Provider, Replay, Role, Stop, Usage, openai};
 use alloc::boxed::Box;
-use skein_json::{Token, writer};
-use skein_lib::{List, Writer, bytes};
+use skein_json::{Kind, writer};
+use skein_lib::{List, Writer};
 
 const TOOL_ERROR: &[u8] = b"Error: ";
 
@@ -84,7 +84,7 @@ fn validate(prompt: &Prompt, provider: Provider, limits: &openai::Limits) -> Res
         charge_text(value, &mut budget, limits)?;
     }
     for tool in &prompt.tools {
-        if tool.name.is_empty() || tool.schema.as_tokens().first() != Some(&Token::ObjectStart) {
+        if tool.name.is_empty() || openai::json::kind(tool.schema.view(), 0) != Some(Kind::ObjectStart) {
             return Err(Error::Invalid);
         }
         charge_text(&tool.name, &mut budget, limits)?;
@@ -206,25 +206,28 @@ fn charge(size: usize, budget: &mut u64, limits: &openai::Limits) -> Result<(), 
     Ok(())
 }
 fn charge_json(value: &openai::Json, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
-    if value.as_tokens().len() > usize::try_from(limits.tokens).expect("u32 fits usize") {
+    if value.document().len() > limits.tokens {
         return Err(Error::limit(crate::Cap::Tokens, limits.tokens));
     }
     let mut measure = writer::Encoder::measure(&limits.writer_limits());
-    for token in value.as_tokens() {
-        // Even empty key/string payloads own a token wrapper after cloning.
+    let view = value.view();
+    for index in 0..openai::json::len(view) {
         charge(1, budget, limits)?;
-        match token {
-            Token::Key(text) | Token::String(text) | Token::Number(text) => charge_text(text, budget, limits)?,
-            Token::ObjectStart
-            | Token::ObjectEnd
-            | Token::ArrayStart
-            | Token::ArrayEnd
-            | Token::True
-            | Token::False
-            | Token::Null => {}
+        match openai::json::kind(view, index).expect("admitted record") {
+            Kind::Key | Kind::String | Kind::Number => {
+                charge_text(openai::json::record_text(view, index).expect("admitted text"), budget, limits)?;
+            }
+            Kind::ObjectStart
+            | Kind::ObjectEnd
+            | Kind::ArrayStart
+            | Kind::ArrayEnd
+            | Kind::True
+            | Kind::False
+            | Kind::Null => {}
+            Kind::Long => unreachable!("admitted Json contains no Long"),
         }
-        measure.token(token);
     }
+    value.write(&mut measure);
     match measure.measured() {
         Ok(_) => Ok(()),
         Err(writer::Refusal::TooLong) => Err(Error::limit(crate::Cap::Document, limits.document_bytes)),
@@ -242,7 +245,7 @@ fn charge_replay(
         if replay.provider != provider {
             return Err(Error::Unsupported);
         }
-        if replay.value.as_tokens().first() != Some(&Token::ObjectStart) {
+        if openai::json::kind(replay.value.view(), 0) != Some(Kind::ObjectStart) {
             return Err(Error::Invalid);
         }
         charge_json(&replay.value, budget, limits)?;
@@ -255,31 +258,55 @@ fn metadata(replay: Option<&Replay>, first: &[u8], second: &[u8]) -> Result<(), 
     let Some(replay) = replay else {
         return Ok(());
     };
-    for token in replay.value.as_tokens() {
-        match token {
-            Token::Key(name) if name.as_ref() == first || name.as_ref() == second => {}
-            Token::Key(_) => return Err(Error::Invalid),
-            Token::ObjectStart
-            | Token::ObjectEnd
-            | Token::ArrayStart
-            | Token::ArrayEnd
-            | Token::String(_)
-            | Token::Number(_)
-            | Token::True
-            | Token::False
-            | Token::Null => {}
+    let view = replay.value.view();
+    for index in 0..openai::json::len(view) {
+        match openai::json::kind(view, index).expect("admitted record") {
+            Kind::Key => {
+                let name = openai::json::record_text(view, index).expect("admitted key");
+                if name != first && name != second {
+                    return Err(Error::Invalid);
+                }
+            }
+            Kind::ObjectStart
+            | Kind::ObjectEnd
+            | Kind::ArrayStart
+            | Kind::ArrayEnd
+            | Kind::String
+            | Kind::Number
+            | Kind::True
+            | Kind::False
+            | Kind::Null => {}
+            Kind::Long => unreachable!("admitted Json contains no Long"),
         }
     }
     for name in [first, second] {
-        let tokens = replay.value.as_tokens();
+        let tokens = replay.value.view();
         let field = match openai::json::field(tokens, name) {
             Ok(at) => at,
             Err(error) => return Err(decode(error)),
         };
         if let Some(at) = field {
             match openai::json::value_at(tokens, at) {
-                Ok([Token::String(_) | Token::Null]) => {}
-                Ok(_) => return Err(Error::Invalid),
+                Ok(value) => {
+                    if openai::json::len(value) != 1 {
+                        return Err(Error::Invalid);
+                    }
+                    match openai::json::kind(value, 0) {
+                        Some(Kind::String | Kind::Null) => {}
+                        Some(
+                            Kind::ObjectStart
+                            | Kind::ObjectEnd
+                            | Kind::ArrayStart
+                            | Kind::ArrayEnd
+                            | Kind::Key
+                            | Kind::Number
+                            | Kind::True
+                            | Kind::False
+                            | Kind::Long,
+                        )
+                        | None => return Err(Error::Invalid),
+                    }
+                }
                 Err(error) => return Err(decode(error)),
             }
         }
@@ -334,7 +361,7 @@ fn input_block(block: &Block, role: Role) -> Result<openai::Input, Error> {
             Ok(openai::Input::FunctionOutput { call_id: id.clone(), output })
         }
         Block::Reasoning { replay } => {
-            let tokens = replay.value.as_tokens();
+            let tokens = replay.value.view();
             let kind = match openai::json::required(tokens, b"type") {
                 Ok(at) => match openai::json::value_at(tokens, at) {
                     Ok(value) => value,
@@ -342,11 +369,10 @@ fn input_block(block: &Block, role: Role) -> Result<openai::Input, Error> {
                 },
                 Err(error) => return Err(decode(error)),
             };
-            match kind {
-                [Token::String(kind)] if kind.as_ref() == b"reasoning" => {
-                    Ok(openai::Input::Opaque { value: replay.value.clone() })
-                }
-                _ => Err(Error::Invalid),
+            match openai::json::text_ref(kind) {
+                Ok(b"reasoning") => Ok(openai::Input::Opaque { value: replay.value.clone() }),
+                Ok(_) => Err(Error::Invalid),
+                Err(error) => Err(decode(error)),
             }
         }
     }
@@ -355,7 +381,7 @@ fn replay_text(replay: Option<&Replay>, name: &[u8]) -> Result<Option<Box<[u8]>>
     let Some(replay) = replay else {
         return Ok(None);
     };
-    let tokens = replay.value.as_tokens();
+    let tokens = replay.value.view();
     let field = match openai::json::field(tokens, name) {
         Ok(at) => at,
         Err(error) => return Err(decode(error)),
@@ -364,9 +390,16 @@ fn replay_text(replay: Option<&Replay>, name: &[u8]) -> Result<Option<Box<[u8]>>
         return Ok(None);
     };
     match openai::json::value_at(tokens, at) {
-        Ok([Token::String(text)]) => Ok(Some(text.clone())),
-        Ok([Token::Null]) => Ok(None),
-        Ok(_) => Err(Error::Invalid),
+        Ok(value) => {
+            if openai::json::len(value) == 1 && openai::json::kind(value, 0) == Some(Kind::Null) {
+                Ok(None)
+            } else {
+                match openai::json::text(value) {
+                    Ok(text) => Ok(Some(text)),
+                    Err(error) => Err(decode(error)),
+                }
+            }
+        }
         Err(error) => Err(decode(error)),
     }
 }
@@ -375,16 +408,7 @@ pub(crate) fn part(value: openai::Part, limits: &openai::Limits) -> Result<Block
     match value {
         openai::Part::Dropped { bytes } => Ok(Block::Dropped { bytes }),
         openai::Part::Text { id, phase, text, refusal } => {
-            let mut tokens = List::with_capacity(6);
-            push(&mut tokens, Token::ObjectStart)?;
-            push(&mut tokens, Token::Key(bytes::copy_of(b"id")))?;
-            push(&mut tokens, Token::String(id))?;
-            if let Some(phase) = phase {
-                push(&mut tokens, Token::Key(bytes::copy_of(b"phase")))?;
-                push(&mut tokens, Token::String(phase))?;
-            }
-            push(&mut tokens, Token::ObjectEnd)?;
-            let replay = Some(replay(tokens.as_slice(), limits)?);
+            let replay = Some(replay(b"id", &id, b"phase", phase.as_deref(), limits)?);
             if refusal { Ok(Block::Refusal { text, replay }) } else { Ok(Block::Text { text, replay }) }
         }
         openai::Part::Opaque { bytes } => {
@@ -401,29 +425,45 @@ pub(crate) fn part(value: openai::Part, limits: &openai::Limits) -> Result<Block
             if cut {
                 return Ok(Block::Cut { id: call_id, name, arguments: input });
             }
-            let mut tokens = List::with_capacity(4);
-            push(&mut tokens, Token::ObjectStart)?;
-            push(&mut tokens, Token::Key(bytes::copy_of(b"item_id")))?;
-            push(&mut tokens, Token::String(item_id))?;
-            push(&mut tokens, Token::ObjectEnd)?;
-            let replay = Some(replay(tokens.as_slice(), limits)?);
+            let replay = Some(replay(b"item_id", &item_id, b"", None, limits)?);
             Ok(Block::ToolCall { id: call_id, name, arguments: input, replay })
         }
     }
 }
-fn push(tokens: &mut List<Token>, token: Token) -> Result<(), Error> {
-    match tokens.push(token) {
-        Ok(()) => Ok(()),
-        Err(_) => Err(Error::limit(crate::Cap::Tokens, tokens.capacity())),
-    }
-}
-fn replay(tokens: &[Token], limits: &openai::Limits) -> Result<Replay, Error> {
+fn replay(
+    first: &[u8],
+    value: &[u8],
+    second: &[u8],
+    optional: Option<&[u8]>,
+    limits: &openai::Limits,
+) -> Result<Replay, Error> {
     // Synthesized text/refusal/tool metadata must obey the same raw replay
     // cap as native opaque blocks. Json admission measures escaped bytes
-    // before emission, without another serialized buffer just to count them.
+    // before emission; the measuring pass allocates no serialized byte buffer.
     let mut bounded = *limits;
     bounded.document_bytes = bounded.document_bytes.min(bounded.opaque_bytes);
-    match openai::Json::from_tokens(tokens, &bounded) {
+    let mut measure = writer::Encoder::measure(&bounded.writer_limits());
+    write_replay(&mut measure, first, value, second, optional);
+    let length = match measure.measured() {
+        Ok(length) => length,
+        Err(error) => {
+            return Err(decode(match error {
+                writer::Refusal::TooLong => openai::DecodeError::limit(
+                    if bounded.document_bytes == limits.opaque_bytes {
+                        crate::Cap::Opaque
+                    } else {
+                        crate::Cap::Document
+                    },
+                    bounded.document_bytes,
+                ),
+                writer::Refusal::TooDeep => openai::DecodeError::limit(crate::Cap::Depth, limits.depth),
+                writer::Refusal::Text | writer::Refusal::Number => openai::DecodeError::Malformed,
+            }));
+        }
+    };
+    let mut out = writer::Encoder::write(length, &bounded.writer_limits());
+    write_replay(&mut out, first, value, second, optional);
+    match openai::Json::from_bytes(&out.finish(), &bounded) {
         Ok(value) => Ok(Replay { provider: Provider::OpenAiCodex, value }),
         Err(openai::DecodeError::TooLarge { which: crate::Cap::Document, bound })
             if bounded.document_bytes == limits.opaque_bytes =>
@@ -432,6 +472,17 @@ fn replay(tokens: &[Token], limits: &openai::Limits) -> Result<Replay, Error> {
         }
         Err(error) => Err(decode(error)),
     }
+}
+
+fn write_replay(out: &mut writer::Encoder, first: &[u8], value: &[u8], second: &[u8], optional: Option<&[u8]>) {
+    out.object_start();
+    out.key(first);
+    out.string(value);
+    if let Some(value) = optional {
+        out.key(second);
+        out.string(value);
+    }
+    out.object_end();
 }
 
 /// Classifies a bounded document refusal without starting or driving a call.

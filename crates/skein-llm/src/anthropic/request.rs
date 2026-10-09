@@ -2,7 +2,7 @@
 use super::identity::CLAUDE_CODE_SYSTEM_IDENTITY;
 use crate::{Block, Error, Json, Prompt, Provider, Replay, Role, Tool, openai};
 use alloc::boxed::Box;
-use skein_json::{Token, writer};
+use skein_json::{Document, Kind, writer};
 
 /// Encode the request under the endpoint's nonzero declared output ceiling.
 pub fn encode_request(prompt: &Prompt, declared_output: u32, limits: &openai::Limits) -> Result<Box<[u8]>, Error> {
@@ -63,7 +63,7 @@ pub(super) fn validate(prompt: &Prompt, declared_output: u32, limits: &openai::L
         text(&tool.name, &mut budget, limits)?;
         text(&tool.description, &mut budget, limits)?;
         json(&tool.schema, &mut budget, limits)?;
-        if tool.schema.as_tokens().first() != Some(&Token::ObjectStart) {
+        if openai::json::kind(tool.schema.view(), 0) != Some(Kind::ObjectStart) {
             return Err(Error::Invalid);
         }
     }
@@ -157,7 +157,7 @@ fn identifier(value: &[u8], maximum: usize) -> Result<(), Error> {
 }
 
 fn validate_reasoning(value: &Json) -> Result<(), Error> {
-    let tokens = value.as_tokens();
+    let tokens = value.view();
     let kind = field_text(tokens, b"type")?;
     match kind {
         b"thinking" => {
@@ -178,7 +178,7 @@ fn validate_reasoning(value: &Json) -> Result<(), Error> {
     Ok(())
 }
 
-fn field_text<'a>(tokens: &'a [Token], key: &[u8]) -> Result<&'a [u8], Error> {
+fn field_text<'a>(tokens: (&'a Document, openai::json::Span), key: &[u8]) -> Result<&'a [u8], Error> {
     let at = match openai::json::required(tokens, key) {
         Ok(at) => at,
         Err(error) => return Err(crate::translate::decode(error)),
@@ -216,20 +216,24 @@ fn text(value: &[u8], budget: &mut u64, limits: &openai::Limits) -> Result<(), E
 }
 
 fn json(value: &Json, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
-    if value.as_tokens().len() > usize::try_from(limits.tokens).expect("u32 fits usize") {
+    if value.document().len() > limits.tokens {
         return Err(Error::limit(crate::Cap::Tokens, limits.tokens));
     }
-    for token in value.as_tokens() {
+    let view = value.view();
+    for index in 0..openai::json::len(view) {
         charge(1, budget, limits)?;
-        match token {
-            Token::Key(value) | Token::String(value) | Token::Number(value) => text(value, budget, limits)?,
-            Token::ObjectStart
-            | Token::ObjectEnd
-            | Token::ArrayStart
-            | Token::ArrayEnd
-            | Token::True
-            | Token::False
-            | Token::Null => {}
+        match openai::json::kind(view, index).expect("admitted record") {
+            Kind::Key | Kind::String | Kind::Number => {
+                text(openai::json::record_text(view, index).expect("admitted text"), budget, limits)?;
+            }
+            Kind::ObjectStart
+            | Kind::ObjectEnd
+            | Kind::ArrayStart
+            | Kind::ArrayEnd
+            | Kind::True
+            | Kind::False
+            | Kind::Null => {}
+            Kind::Long => unreachable!("admitted Json contains no Long"),
         }
     }
     let mut measure = writer::Encoder::measure(&limits.writer_limits());
@@ -381,7 +385,7 @@ fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits
                 Ok(value) => value,
                 Err(error) => return Err(crate::translate::decode(error)),
             };
-            if value.as_tokens().first() != Some(&Token::ObjectStart) {
+            if openai::json::kind(value.view(), 0) != Some(Kind::ObjectStart) {
                 return Err(Error::Invalid);
             }
             out.object_start();

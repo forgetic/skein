@@ -4,9 +4,7 @@ mod peer;
 mod request;
 mod response;
 
-pub use crate::openai::{
-    Collector, DecodeError, Failure, Json, Limits, ProviderError, RateLimit, Stop, Usage, classify,
-};
+pub use crate::openai::{DecodeError, Failure, Json, Limits, ProviderError, RateLimit, Stop, Usage, classify};
 pub use peer::{decode_request, encode_event};
 pub use request::{encode_request, measure_request};
 pub use response::{

@@ -1,6 +1,6 @@
 use crate::openai::{DecodeError, Json, Limits, identity, json};
 use alloc::boxed::Box;
-use skein_json::{Token, writer::Encoder};
+use skein_json::{Document, Kind, writer::Encoder};
 use skein_lib::{List, bytes};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -52,7 +52,7 @@ fn validate(request: &Request, limits: &Limits) -> Result<(), DecodeError> {
         return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
     }
     for tool in &request.tools {
-        if tool.schema.as_tokens().first() != Some(&Token::ObjectStart) {
+        if json::kind(tool.schema.view(), 0) != Some(Kind::ObjectStart) {
             return Err(DecodeError::WrongType);
         }
     }
@@ -66,7 +66,7 @@ fn validate(request: &Request, limits: &Limits) -> Result<(), DecodeError> {
                 }
             }
             Input::Opaque { value } => {
-                if value.as_tokens().first() != Some(&Token::ObjectStart) {
+                if json::kind(value.view(), 0) != Some(Kind::ObjectStart) {
                     return Err(DecodeError::WrongType);
                 }
             }
@@ -221,7 +221,7 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
         skein_json::writer::Limits { depth: limits.depth, length: limits.request_bytes },
         crate::Cap::Request,
     )?;
-    let tokens = value.as_tokens();
+    let tokens = value.view();
     if !json::boolean(json::value_at(tokens, json::required(tokens, b"stream")?)?)?
         || json::boolean(json::value_at(tokens, json::required(tokens, b"store")?)?)?
     {
@@ -243,7 +243,7 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
             let tool = Tool {
                 name: json::text(json::value_at(tool, json::required(tool, b"name")?)?)?,
                 description,
-                schema: Json::from_tokens(json::value_at(tool, json::required(tool, b"parameters")?)?, limits)?,
+                schema: Json::from_view(json::value_at(tool, json::required(tool, b"parameters")?)?, limits)?,
             };
             if tools.push(tool).is_err() {
                 return Err(DecodeError::limit(crate::Cap::Parts, limits.parts));
@@ -283,16 +283,19 @@ pub fn decode_request(value: &Json, limits: &Limits) -> Result<Request, DecodeEr
     validate(&request, limits)?;
     Ok(request)
 }
-pub(crate) fn optional_text(tokens: &[Token], name: &[u8]) -> Result<Option<Box<[u8]>>, DecodeError> {
+pub(crate) fn optional_text(tokens: (&Document, json::Span), name: &[u8]) -> Result<Option<Box<[u8]>>, DecodeError> {
     match json::optional_at(tokens, json::field(tokens, name)?)? {
-        Some(value) => match value {
-            [Token::Null] => Ok(None),
-            _ => Ok(Some(json::text(value)?)),
-        },
+        Some(value) => {
+            if json::kind(value, 0) == Some(Kind::Null) && json::len(value) == 1 {
+                Ok(None)
+            } else {
+                Ok(Some(json::text(value)?))
+            }
+        }
         None => Ok(None),
     }
 }
-fn read_input(tokens: &[Token], limits: &Limits) -> Result<Input, DecodeError> {
+fn read_input(tokens: (&Document, json::Span), limits: &Limits) -> Result<Input, DecodeError> {
     let kind = match json::optional_at(tokens, json::field(tokens, b"type")?)? {
         Some(value) => json::text_ref(value)?,
         None => b"message",
@@ -350,6 +353,6 @@ fn read_input(tokens: &[Token], limits: &Limits) -> Result<Input, DecodeError> {
             call_id: json::text(json::value_at(tokens, json::required(tokens, b"call_id")?)?)?,
             output: json::text(json::value_at(tokens, json::required(tokens, b"output")?)?)?,
         }),
-        _ => Ok(Input::Opaque { value: Json::from_tokens(tokens, limits)? }),
+        _ => Ok(Input::Opaque { value: Json::from_view(tokens, limits)? }),
     }
 }

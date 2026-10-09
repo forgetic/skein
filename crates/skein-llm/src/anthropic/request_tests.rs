@@ -1,7 +1,6 @@
 use super::{encode_request, measure_request};
 use crate::{Block, Error, Json, Message, Prompt, Provider, Replay, Role, Tool, openai};
 use alloc::boxed::Box;
-use skein_json::Token;
 use skein_lib::bytes;
 
 const LIMITS: openai::Limits = openai::Limits {
@@ -377,21 +376,15 @@ fn tool_choice_none_is_native_and_auto_and_only_are_omitted() {
         assert_eq!(decoded.tools, prompt.tools);
         match choice {
             crate::ToolChoice::Auto | crate::ToolChoice::Only(_) => {
-                assert_eq!(openai::json::field(value.as_tokens(), b"tool_choice").expect("unique field"), None);
+                assert_eq!(openai::json::field(value.view(), b"tool_choice").expect("unique field"), None);
                 assert_eq!(decoded.choice, crate::ToolChoice::Auto);
             }
             crate::ToolChoice::None => {
-                let tokens = value.as_tokens();
+                let tokens = value.view();
                 let at = openai::json::required(tokens, b"tool_choice").expect("native choice");
-                assert_eq!(
-                    openai::json::value_at(tokens, at).expect("choice object"),
-                    [
-                        Token::ObjectStart,
-                        Token::Key(bytes::copy_of(b"type")),
-                        Token::String(bytes::copy_of(b"none")),
-                        Token::ObjectEnd
-                    ]
-                );
+                let choice =
+                    Json::from_view(openai::json::value_at(tokens, at).expect("choice object"), &LIMITS).unwrap();
+                assert_eq!(choice.to_bytes(&LIMITS).unwrap().as_ref(), br#"{"type":"none"}"#);
                 assert_eq!(decoded.choice, crate::ToolChoice::None);
             }
         }

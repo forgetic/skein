@@ -202,7 +202,7 @@ fn multiple_reasoning_items_with_many_empty_tokens_fit_the_bound() {
     let bound = client::worst_case(&bounds).unwrap();
     let meter = Meter::new();
     // Near 1024 tokens per event and near 8192 bytes across the answer, while
-    // empty strings make owned token wrappers much larger than their bytes.
+    // Empty strings have no payload allocation; fixed records still cost bytes.
     let tiny_values = vec![r#""""#; 850].join(",");
     let mut documents = Vec::new();
     for index in 0..3 {
@@ -235,7 +235,7 @@ fn multiple_reasoning_items_with_many_empty_tokens_fit_the_bound() {
     assert_eq!(completed.content.len(), 3);
     for block in &completed.content {
         let skein_llm::Block::Reasoning { replay } = block else { panic!("fixture only contains reasoning") };
-        assert!(replay.value.as_tokens().len() > 850, "the small-token wrapper storage is exercised");
+        assert!(replay.value.document().len() > 850, "many fixed records exercise compact replay storage");
     }
     world.request(client::Request::Close);
     world.settle();
@@ -247,7 +247,7 @@ fn multiple_reasoning_items_with_many_empty_tokens_fit_the_bound() {
 }
 
 #[test]
-fn thirty_two_reasoning_arrays_exercise_the_token_wrapper_bound() {
+fn thirty_two_reasoning_arrays_exercise_the_compact_record_bound() {
     let mut bounds = limits();
     bounds.dialect.parts = 32;
     bounds.dialect.tokens = 2048;
@@ -291,9 +291,9 @@ fn thirty_two_reasoning_arrays_exercise_the_token_wrapper_bound() {
     assert_eq!(completed.content.len(), 32);
     for block in &completed.content {
         let skein_llm::Block::Reasoning { replay } = block else { panic!("fixture only contains reasoning") };
-        assert!(replay.value.as_tokens().len() > 1900);
+        assert!(replay.value.document().len() > 1900);
     }
-    assert!(most > 2_000_000, "many short values exercise substantial owned token storage: {most}");
+    assert!(most > 2_000_000, "many short values exercise substantial compact record storage: {most}");
     world.request(client::Request::Close);
     world.settle();
     drop(world);
@@ -600,4 +600,32 @@ fn an_oversized_call_completes_within_the_declared_bound() {
     world.settle();
     drop(world);
     assert_eq!(meter.held(), 0, "oversize settlement releases owned buffers");
+}
+
+#[test]
+fn replay_at_its_cap_owns_only_shared_text_and_fixed_records() {
+    let raw =
+        format!("{{\"type\":\"reasoning\",\"summary\":[{}],\"encrypted_content\":\"x\"}}", vec!["\"\""; 512].join(","));
+    let mut bounded = limits().dialect;
+    bounded.document_bytes = u32::try_from(raw.len()).unwrap();
+    bounded.opaque_bytes = bounded.document_bytes;
+    bounded.tokens = 1024;
+    let admitted = skein_llm::Replay {
+        provider: skein_llm::Provider::OpenAiCodex,
+        value: skein_llm::Json::from_bytes(raw.as_bytes(), &bounded).unwrap(),
+    };
+    let wire = admitted.to_bytes(&bounded).unwrap();
+    assert_eq!(wire.len(), raw.len() + usize::try_from(skein_llm::REPLAY_HEADER_BYTES).unwrap());
+    drop(admitted);
+    let meter = Meter::new();
+    let replay = skein_llm::Replay::from_bytes(&wire, &bounded).unwrap();
+    let document = replay.value.document();
+    let owned = u64::from(document.text_len())
+        + u64::from(document.len()) * u64::try_from(size_of::<skein_json::Compact>()).unwrap();
+    assert_eq!(meter.held(), owned, "one shared text allocation and one fixed-record allocation");
+    let cloned = replay.clone();
+    assert_eq!(meter.held(), owned * 2, "clone has the same compact storage");
+    drop(cloned);
+    drop(replay);
+    assert_eq!(meter.held(), 0, "compact replay allocations release together");
 }

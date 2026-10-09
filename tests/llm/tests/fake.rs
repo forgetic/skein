@@ -712,29 +712,28 @@ fn configured_codex_echoes_preserve_the_completion_and_retain_the_token_cliff() 
     plain.run();
     let expected = completion(&plain).clone();
     let plain_document = echoed_completion_json(&plain, &bounds);
-    assert!(!plain_document.as_tokens().iter().any(|token| matches!(token, skein_json::Token::Key(key) if key.as_ref() == b"instructions" || key.as_ref() == b"tools" || key.as_ref() == b"attribution")), "echoes are off by default");
+    assert!(
+        [b"instructions".as_slice(), b"tools", b"attribution"]
+            .iter()
+            .all(|name| key_count(plain_document.document(), name) == 0),
+        "echoes are off by default"
+    );
     let mut echoed = Exchange::new_with_codex_echo(echo_input(1), bounds, scripts(), echo);
     echoed.start();
     echoed.run();
     assert_eq!(completion(&echoed), &expected);
     let document = echoed_completion_json(&echoed, &bounds);
-    let tokens = document.as_tokens();
-    assert!(tokens.iter().any(|token| matches!(token, skein_json::Token::Key(key) if key.as_ref() == b"instructions")));
-    assert!(tokens.iter().any(|token| matches!(token, skein_json::Token::Key(key) if key.as_ref() == b"tools")));
-    assert_eq!(
-        tokens
-            .iter()
-            .filter(|token| matches!(token, skein_json::Token::Key(key) if key.as_ref() == b"input_index"))
-            .count(),
-        20
-    );
-    let edge = u32::try_from(tokens.len()).unwrap();
+    let tokens = document.document();
+    assert!(key_count(tokens, b"instructions") > 0);
+    assert!(key_count(tokens, b"tools") > 0);
+    assert_eq!(key_count(tokens, b"input_index"), 20);
+    let edge = tokens.len();
     let request = skein_llm::Json::from_bytes(
         &skein_http_world::reference::request(&echoed.requests, &skein_llm_world::fake::limits(&bounds).http).body,
         &bounds.dialect,
     )
     .unwrap();
-    assert!(request.as_tokens().len() < tokens.len(), "attribution cliff exceeds the admitted request");
+    assert!(request.document().len() < tokens.len(), "attribution cliff exceeds the admitted request");
     for cap in [edge, edge - 1] {
         bounds.dialect.tokens = cap;
         let mut world = Exchange::new_with_codex_echo(echo_input(1), bounds, scripts(), echo);
@@ -845,4 +844,13 @@ fn explicit_call_reasoning_policy_overrides_the_default_without_changing_wire_by
             assert!(!world.seen.iter().any(|event| matches!(event, client::Event::Completed { .. })));
         }
     }
+}
+
+fn key_count(document: &skein_json::Document, name: &[u8]) -> usize {
+    (0..document.len())
+        .filter(|index| {
+            let record = document.token(*index).expect("record index within document");
+            record.kind == skein_json::Kind::Key && document.text(record) == Some(name)
+        })
+        .count()
 }

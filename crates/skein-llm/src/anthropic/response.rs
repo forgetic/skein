@@ -1,7 +1,7 @@
 use crate::anthropic::{DecodeError, Failure, Json, Limits, ProviderError, RateLimit, Stop, Usage, classify};
 use crate::openai::{clip_detail, json};
 use alloc::boxed::Box;
-use skein_json::Token;
+use skein_json::{Document, Kind};
 use skein_lib::{List, Queue, Wall, bytes};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -334,7 +334,7 @@ impl StreamDecoder {
                 Ok(Active::Thinking { text: value, signature: signed, head })
             }
             BlockStart::Redacted { value } => {
-                validate_redacted(value.as_tokens())?;
+                validate_redacted(value.view())?;
                 let data = value.to_bytes(limits)?;
                 if data.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
                     return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
@@ -343,8 +343,8 @@ impl StreamDecoder {
                 Ok(Active::Opaque { bytes: data })
             }
             BlockStart::Opaque { value } => {
-                let value = Json::from_tokens(value.as_tokens(), limits)?;
-                validate_opaque(value.as_tokens())?;
+                let value = Json::from_view(value.view(), limits)?;
+                validate_opaque(value.view())?;
                 let data = value.to_bytes(limits)?;
                 if data.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
                     return Err(DecodeError::limit(crate::Cap::Opaque, limits.opaque_bytes));
@@ -432,8 +432,8 @@ impl StreamDecoder {
 }
 
 pub(super) fn thinking_head(head: &Json, text: &[u8], signature: &[u8], limits: &Limits) -> Result<Json, DecodeError> {
-    let head = Json::from_tokens(head.as_tokens(), limits)?;
-    let tokens = head.as_tokens();
+    let head = Json::from_view(head.view(), limits)?;
+    let tokens = head.view();
     if text_ref(tokens, b"type")? != b"thinking" {
         return Err(DecodeError::WrongType);
     }
@@ -480,33 +480,32 @@ fn finish(active: Active, limits: &Limits) -> Result<Part, DecodeError> {
 }
 pub(super) fn write_thinking(out: &mut skein_json::writer::Encoder, head: &Json, text: &[u8], signature: &[u8]) {
     out.object_start();
-    let tokens = head.as_tokens();
-    let mut skip: usize = 1;
-    for (at, token) in tokens.iter().enumerate() {
+    let tokens = head.view();
+    let mut skip = 1_u32;
+    for at in 1..json::len(tokens) {
         if at < skip {
             continue;
         }
-        match token {
-            Token::Key(key) => {
+        match json::kind(tokens, at).expect("admitted record") {
+            Kind::Key => {
+                let key = json::record_text(tokens, at).expect("admitted key");
                 let start = at.checked_add(1).expect("bounded token offset");
-                let end = json::span(tokens, start).expect("admitted provider envelope");
-                skip = end;
-                if key.as_ref() != b"thinking" && key.as_ref() != b"signature" {
+                skip = json::span(tokens, start).expect("admitted provider envelope");
+                if key != b"thinking" && key != b"signature" {
                     out.key(key);
-                    for token in tokens.get(start..end).expect("admitted value") {
-                        out.token(token);
-                    }
+                    json::write_view(out, json::value_at(tokens, start).expect("admitted value"));
                 }
             }
-            Token::ObjectEnd => break,
-            Token::ObjectStart
-            | Token::ArrayStart
-            | Token::ArrayEnd
-            | Token::String(_)
-            | Token::Number(_)
-            | Token::True
-            | Token::False
-            | Token::Null => unreachable!("object values already consumed"),
+            Kind::ObjectEnd => break,
+            Kind::ObjectStart
+            | Kind::ArrayStart
+            | Kind::ArrayEnd
+            | Kind::String
+            | Kind::Number
+            | Kind::True
+            | Kind::False
+            | Kind::Null
+            | Kind::Long => unreachable!("object values already consumed"),
         }
     }
     out.key(b"thinking");
@@ -532,7 +531,7 @@ fn merge_usage(usage: &mut Usage, patch: UsagePatch) {
 }
 
 pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError> {
-    let tokens = value.as_tokens();
+    let tokens = value.view();
     match text_ref(tokens, b"type")? {
         b"message_start" => {
             let message = field(tokens, b"message")?;
@@ -553,27 +552,27 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
                 b"text" => BlockStart::Text { text: text(block, b"text")? },
                 b"tool_use" => {
                     let input = field(block, b"input")?;
-                    if input.first() != Some(&Token::ObjectStart) {
+                    if json::kind(input, 0) != Some(Kind::ObjectStart) {
                         return Err(DecodeError::WrongType);
                     }
                     BlockStart::ToolCall {
                         id: text(block, b"id")?,
                         name: text(block, b"name")?,
-                        input: Json::from_tokens(input, limits)?.to_bytes(limits)?,
+                        input: Json::from_view(input, limits)?.to_bytes(limits)?,
                     }
                 }
                 b"thinking" => BlockStart::Thinking {
                     text: text(block, b"thinking")?,
                     signature: optional_text(block, b"signature")?,
-                    head: Json::from_tokens(block, limits)?,
+                    head: Json::from_view(block, limits)?,
                 },
                 b"redacted_thinking" => {
                     validate_redacted(block)?;
-                    BlockStart::Redacted { value: Json::from_tokens(block, limits)? }
+                    BlockStart::Redacted { value: Json::from_view(block, limits)? }
                 }
                 _ => {
                     validate_opaque(block)?;
-                    BlockStart::Opaque { value: Json::from_tokens(block, limits)? }
+                    BlockStart::Opaque { value: Json::from_view(block, limits)? }
                 }
             };
             Ok(Event::Added { index: index(tokens)?, block })
@@ -591,16 +590,17 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
         }
         b"content_block_stop" => Ok(Event::Done { index: index(tokens)? }),
         b"message_delta" => {
-            let stop = match field(field(tokens, b"delta")?, b"stop_reason")? {
-                [Token::Null] => None,
-                [Token::String(value)] => match value.as_ref() {
+            let value = field(field(tokens, b"delta")?, b"stop_reason")?;
+            let stop = if json::kind(value, 0) == Some(Kind::Null) && json::len(value) == 1 {
+                None
+            } else {
+                match json::text_ref(value)? {
                     b"end_turn" | b"stop_sequence" | b"pause_turn" => Some(Stop::EndTurn),
                     b"tool_use" => Some(Stop::ToolUse),
                     b"max_tokens" => Some(Stop::MaxTokens),
                     b"refusal" => Some(Stop::Refusal),
                     _ => return Err(DecodeError::WrongType),
-                },
-                _ => return Err(DecodeError::WrongType),
+                }
             };
             Ok(Event::MessageDelta { stop, usage: read_usage(json::reported_field(tokens, b"usage")) })
         }
@@ -610,14 +610,14 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
         _ => Ok(Event::Unknown),
     }
 }
-pub(super) fn validate_redacted(tokens: &[Token]) -> Result<(), DecodeError> {
+pub(super) fn validate_redacted(tokens: (&Document, json::Span)) -> Result<(), DecodeError> {
     if text_ref(tokens, b"type")? != b"redacted_thinking" || text_ref(tokens, b"data")?.is_empty() {
         return Err(DecodeError::Malformed);
     }
     Ok(())
 }
 
-pub(super) fn validate_opaque(tokens: &[Token]) -> Result<(), DecodeError> {
+pub(super) fn validate_opaque(tokens: (&Document, json::Span)) -> Result<(), DecodeError> {
     match text_ref(tokens, b"type")? {
         b"" => Err(DecodeError::Malformed),
         b"text" | b"tool_use" | b"tool_result" | b"thinking" | b"redacted_thinking" => Err(DecodeError::WrongType),
@@ -627,7 +627,7 @@ pub(super) fn validate_opaque(tokens: &[Token]) -> Result<(), DecodeError> {
 pub fn decode_error(value: &Json, limits: &Limits) -> Result<ProviderError, DecodeError> {
     crate::openai::decode_error(value, limits)
 }
-fn read_usage(tokens: Option<&[Token]>) -> UsagePatch {
+fn read_usage(tokens: Option<(&Document, json::Span)>) -> UsagePatch {
     let Some(tokens) = tokens else {
         return UsagePatch { input: None, output: None, cache_read: None, cache_write: None };
     };
@@ -638,22 +638,22 @@ fn read_usage(tokens: Option<&[Token]>) -> UsagePatch {
         cache_write: json::reported_unsigned(tokens, b"cache_creation_input_tokens"),
     }
 }
-fn optional_text(tokens: &[Token], name: &[u8]) -> Result<Box<[u8]>, DecodeError> {
+fn optional_text(tokens: (&Document, json::Span), name: &[u8]) -> Result<Box<[u8]>, DecodeError> {
     match json::optional_at(tokens, json::field(tokens, name)?)? {
         Some(value) => json::text(value),
         None => Ok(bytes::copy_of(b"")),
     }
 }
-fn field<'a>(tokens: &'a [Token], name: &[u8]) -> Result<&'a [Token], DecodeError> {
+fn field<'a>(tokens: (&'a Document, json::Span), name: &[u8]) -> Result<(&'a Document, json::Span), DecodeError> {
     json::value_at(tokens, json::required(tokens, name)?)
 }
-fn text_ref<'a>(tokens: &'a [Token], name: &[u8]) -> Result<&'a [u8], DecodeError> {
+fn text_ref<'a>(tokens: (&'a Document, json::Span), name: &[u8]) -> Result<&'a [u8], DecodeError> {
     json::text_ref(field(tokens, name)?)
 }
-fn text(tokens: &[Token], name: &[u8]) -> Result<Box<[u8]>, DecodeError> {
+fn text(tokens: (&Document, json::Span), name: &[u8]) -> Result<Box<[u8]>, DecodeError> {
     json::text(field(tokens, name)?)
 }
-fn index(tokens: &[Token]) -> Result<u32, DecodeError> {
+fn index(tokens: (&Document, json::Span)) -> Result<u32, DecodeError> {
     u32::try_from(json::unsigned(field(tokens, b"index")?)?).or(Err(DecodeError::Malformed))
 }
 /// Includes the active block's buffers and replay JSON construction, excluding
@@ -664,6 +664,6 @@ pub fn decoder_worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(u64::from(limits.input_bytes).checked_mul(2)?)?
         .checked_add(u64::from(limits.opaque_bytes).checked_mul(4)?)?
         .checked_add(u64::from(limits.string_bytes).checked_mul(2)?)?
-        .checked_add(List::<Token>::worst_case(limits.tokens)?.checked_mul(2)?)?
+        .checked_add(List::<skein_json::Compact>::worst_case(limits.tokens)?.checked_mul(2)?)?
         .checked_add(u64::from(limits.document_bytes).checked_mul(2)?)
 }

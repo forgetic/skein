@@ -1,6 +1,6 @@
 use crate::openai::{Input, Tool};
 use alloc::boxed::Box;
-use skein_json::{Token, tokenizer, writer};
+use skein_json::{Compact, collector, document, tokenizer, writer};
 use skein_lib::{Duration, List, Wall, bytes};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -36,7 +36,7 @@ impl Limits {
 /// tokenizer/writer storage and a completion being handed to its owner.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
-    let tokens = List::<Token>::worst_case(limits.tokens)?;
+    let tokens = document::worst_case(&document::Limits { tokens: limits.tokens, text: limits.document_bytes })?;
     // Translation validates the aggregate request before it clones it.
     // Every JSON token costs at least one byte in that request budget.
     // The caller's prompt and its translated copy may coexist until encoding.
@@ -44,7 +44,22 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_mul(u64::from(limits.parts))?
         .checked_mul(2)?
         .min(u64::from(limits.request_bytes));
-    let request_tokens = request_count.checked_mul(u64::try_from(size_of::<Token>()).ok()?)?.checked_mul(2)?;
+    let request_tokens = request_count.checked_mul(u64::try_from(size_of::<Compact>()).ok()?)?.checked_mul(2)?;
+    let answer_records = u64::from(limits.parts)
+        .checked_mul(u64::from(limits.tokens))?
+        .min(u64::from(limits.answer_bytes))
+        .checked_mul(u64::try_from(size_of::<Compact>()).ok()?)?
+        .checked_mul(2)?;
+    let collector = collector::worst_case(
+        &collector::Limits {
+            tokenizer: limits.tokenizer_limits(),
+            tokens: limits.tokens,
+            text: limits.document_bytes,
+            skip: u64::from(limits.document_bytes),
+        },
+        &[],
+        &collector::Filter { root: collector::Keep::Value },
+    )?;
     let request_slots = List::<Input>::worst_case(limits.parts)?
         .checked_add(List::<Tool>::worst_case(limits.parts)?)?
         .checked_mul(2)?;
@@ -53,6 +68,8 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
     tokens
         .checked_mul(4)?
         .checked_add(request_tokens)?
+        .checked_add(answer_records)?
+        .checked_add(collector)?
         .checked_add(request_slots)?
         .checked_add(documents)?
         .checked_add(answer)?

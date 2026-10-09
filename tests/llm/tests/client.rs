@@ -656,7 +656,6 @@ fn non_json_errors_keep_their_status_and_exact_error_body_bound() {
 #[test]
 #[expect(clippy::wildcard_enum_match_arm, reason = "focused controls inspect failures and their selected caps")]
 fn receiving_caps_admit_the_edge_and_refuse_one_over_by_name() {
-    use skein_json::Token as JsonToken;
     use skein_llm::{Cap, Json};
     let documents = [skein_llm_world::TEXT_ADDED, skein_llm_world::TEXT_DELTA, skein_llm_world::TEXT_DONE, TERMINAL];
     let wire = text_response(false);
@@ -664,19 +663,21 @@ fn receiving_caps_admit_the_edge_and_refuse_one_over_by_name() {
     let document = u32::try_from(documents.iter().map(|document| document.len()).max().unwrap()).unwrap();
     let values: Vec<_> =
         documents.iter().map(|text| Json::from_bytes(text.as_bytes(), &limits().dialect).unwrap()).collect();
-    let tokens = u32::try_from(values.iter().map(|value| value.as_tokens().len()).max().unwrap()).unwrap();
-    let string = u32::try_from(
-        values
-            .iter()
-            .flat_map(Json::as_tokens)
-            .filter_map(|token| match token {
-                JsonToken::Key(text) | JsonToken::String(text) => Some(text.len()),
-                _ => None,
+    let tokens = values.iter().map(|value| value.document().len()).max().unwrap();
+    let string = values
+        .iter()
+        .flat_map(|value| {
+            let document = value.document();
+            (0..document.len()).filter_map(move |index| {
+                let record = document.token(index).unwrap();
+                match record.kind {
+                    skein_json::Kind::Key | skein_json::Kind::String => Some(record.len),
+                    _ => None,
+                }
             })
-            .max()
-            .unwrap(),
-    )
-    .unwrap();
+        })
+        .max()
+        .unwrap();
     let opaque = u32::try_from(br#"{"id":"msg_1","phase":"final_answer"}"#.len()).unwrap();
     for (which, edge) in [
         (Cap::Head, head),

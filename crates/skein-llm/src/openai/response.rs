@@ -3,7 +3,7 @@ use crate::openai::{
 };
 use alloc::boxed::Box;
 use core::mem;
-use skein_json::{Token, writer::Encoder};
+use skein_json::{Document, Kind, writer::Encoder};
 use skein_lib::{List, Queue, Wall, bytes};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -573,7 +573,7 @@ fn prepare(
             })
         }
         Item::Opaque { value } => {
-            let tokens = value.as_tokens();
+            let tokens = value.view();
             if json::text_ref(json::value_at(tokens, json::required(tokens, b"id")?)?)? != expected_id
                 || json::text_ref(json::value_at(tokens, json::required(tokens, b"type")?)?)? != expected_kind
             {
@@ -600,7 +600,7 @@ fn prepare(
 }
 
 pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError> {
-    let tokens = value.as_tokens();
+    let tokens = value.view();
     let kind = json::text_ref(json::value_at(tokens, json::required(tokens, b"type")?)?)?;
     match kind {
         b"response.created" => Ok(Event::Created { echo: None }),
@@ -689,16 +689,16 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
         _ => Ok(Event::Unknown),
     }
 }
-fn index(tokens: &[Token]) -> Result<u32, DecodeError> {
+fn index(tokens: (&Document, json::Span)) -> Result<u32, DecodeError> {
     named_index(tokens, b"output_index")
 }
-fn named_index(tokens: &[Token], field: &[u8]) -> Result<u32, DecodeError> {
+fn named_index(tokens: (&Document, json::Span), field: &[u8]) -> Result<u32, DecodeError> {
     match u32::try_from(json::unsigned(json::value_at(tokens, json::required(tokens, field)?)?)?) {
         Ok(n) => Ok(n),
         Err(_) => Err(DecodeError::Malformed),
     }
 }
-fn read_item(tokens: &[Token], limits: &Limits) -> Result<Item, DecodeError> {
+fn read_item(tokens: (&Document, json::Span), limits: &Limits) -> Result<Item, DecodeError> {
     match json::text_ref(json::value_at(tokens, json::required(tokens, b"type")?)?)? {
         b"function_call" => {
             let id = json::text(json::value_at(tokens, json::required(tokens, b"id")?)?)?;
@@ -751,10 +751,10 @@ fn read_item(tokens: &[Token], limits: &Limits) -> Result<Item, DecodeError> {
                 refusal,
             })
         }
-        _ => Ok(Item::Opaque { value: Json::from_tokens(tokens, limits)? }),
+        _ => Ok(Item::Opaque { value: Json::from_view(tokens, limits)? }),
     }
 }
-fn read_usage(tokens: Option<&[Token]>) -> Usage {
+fn read_usage(tokens: Option<(&Document, json::Span)>) -> Usage {
     let Some(tokens) = tokens else {
         return Usage::NONE;
     };
@@ -781,18 +781,23 @@ fn read_usage(tokens: Option<&[Token]>) -> Usage {
     Usage { input, cache_read, cache_write, output: json::reported_unsigned(tokens, b"output_tokens"), reasoning }
 }
 pub fn decode_error(value: &Json, limits: &Limits) -> Result<ProviderError, DecodeError> {
-    let tokens = value.as_tokens();
+    let tokens = value.view();
     let error = match json::optional_at(tokens, json::field(tokens, b"error")?)? {
         Some(value) => value,
         None => tokens,
     };
     read_error(error, limits)
 }
-fn read_error(tokens: &[Token], limits: &Limits) -> Result<ProviderError, DecodeError> {
+fn read_error(tokens: (&Document, json::Span), limits: &Limits) -> Result<ProviderError, DecodeError> {
     let kind = match json::optional_at(tokens, json::field(tokens, b"code")?)? {
-        Some([Token::String(code)]) => code.clone(),
-        Some([Token::Null]) | None => json::text(json::value_at(tokens, json::required(tokens, b"type")?)?)?,
-        Some(_) => return Err(DecodeError::WrongType),
+        Some(value) => {
+            if json::kind(value, 0) == Some(Kind::Null) && json::len(value) == 1 {
+                json::text(json::value_at(tokens, json::required(tokens, b"type")?)?)?
+            } else {
+                json::text(value)?
+            }
+        }
+        None => json::text(json::value_at(tokens, json::required(tokens, b"type")?)?)?,
     };
     let message = common::clipped(
         json::text_ref(json::value_at(tokens, json::required(tokens, b"message")?)?)?,
