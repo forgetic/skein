@@ -55,6 +55,23 @@ After a fatal file failure, repair reports `Recovered { last }` or
 - **Refusals happen at the entrance,** before anything is written: a
   commit whose bytes would take the map past its budget, an op past the
   key or value limit, a queue full.
+- **An in-memory store** (`Store::memory`) has no directory: it takes
+  commits without an `Open` and applies them at once, for an owner's
+  tests that need no files.
+
+### 2.1 Keys
+
+Owners build composite keys whose byte order is their logical order
+(temper's `task/<n>/msg/<seq>`, `proj/<p>/ended/<rtime>/<n>`), with the
+crate's `KeyWriter`, bounded by the key limit, and read them back with
+`KeyReader`:
+
+- `tag(u8)`: a key space;
+- `u64(n)`: big-endian, fixed width; `rev_u64(n)`, its complement, newest
+  first;
+- `bytes(b)`: `0x00` escaped as `0x00 0xff`, ended by `0x00 0x00`, so a
+  shorter string sorts before its extensions;
+- `finish()`: the key, or none past the limit.
 
 ## 3. On disk
 
@@ -64,10 +81,16 @@ The store owns a directory, a root (io.md, section 5):
   starts from (section 5), in checksummed chunks and a trailer;
   replaced atomically.
 - **Log segments,** `log-<first number, 20 decimal digits>`: frames
-  appended in commit order. A frame is a version, its commit number,
-  its length, its ops and a CRC-32C checksum over all of it. New
-  segments are announced with a directory sync before any commit in
-  them is acknowledged.
+  appended in commit order. New segments are announced with a directory
+  sync before any commit in them is acknowledged.
+
+| A frame's field | Bytes |
+|---|---|
+| magic `SKVC`, format version | 4, 2 |
+| commit number | 8 |
+| op count, body length | 4, 4 |
+| ops: kind (1), key length (4), key, and for a put value length (4), value | body |
+| CRC-32C of everything before it | 4 |
 
 **Recovery** reads the snapshot, then applies the frames of the segments
 from the snapshot's start number, accepting the longest valid prefix: it
@@ -127,6 +150,13 @@ transcripts), and so are not held in memory:
 - **Removal:** a log whose extent record is erased is removed once that
   commit is durable; at recovery, a log with no extent record is removed.
 - **Bounds:** a size per log, the open logs, the bytes in flight.
+- **In the vocabulary:** two ops, `Extend { log, length }` and
+  `Drop { log }`, which the store keeps in a key space of its own; and
+  two requests, `Append { log, bytes }`, written at the committed extent
+  and synced, answered with the length to commit, and
+  `ReadLog { log, offset, max }`, never past the extent.
+- **What it needs of io:** opening an existing file to write, in the
+  kernel's records, the ring, the simulator and the conformance suite.
 
 ## 7. Memory and bounds
 
@@ -156,10 +186,11 @@ store needs more of io, which its file requests (`skein_io::file`) give:
 - **creating a file with given permission bits** (a store of secrets is
   `0o600`), and removing and listing.
 
-The simulator's disk must model what a crash keeps: synced data; nothing
-unsynced in any order, a write torn at any byte; a directory entry only
-once its directory is synced; a rename whole or not at all; failed and
-short writes, and failed syncs.
+The fake machine behind the simulator models what a crash keeps: synced
+data; of what is not synced, any writes in any order, the last torn at
+any byte; a directory entry only once its directory is synced; a rename
+whole or not at all. Its faults include failed and short writes, and
+failed syncs.
 
 ## 9. Verification
 
@@ -175,8 +206,10 @@ short writes, and failed syncs.
   commit leaves the extent as it was, and the next append overwrites the
   tail.
 - **Over the real ring:** a scratch-directory integration test commits,
-  closes, reopens on the same root descriptor and verifies the value.
-  Power-loss behavior is checked in the simulator's crash model.
+  closes, reopens on the same root descriptor and verifies the value. A
+  killed process leaves the page cache, so the ring shows integration,
+  not power loss: that is the crash model's (section 8), which no test
+  against a kernel can check.
 
 ## 10. For temper
 
@@ -264,7 +297,14 @@ around it:
 - `Limits` supplies fixed segment and snapshot thresholds, and a timeout
   for each file request. A hung kernel operation is cancelled; its owner
   receives one terminal failure after the operation settles.
-- One store owns one directory and one file driver. Payload logs and
-  sharing a sync across stores are later work.
-- When the dataset outgrows memory, retention comes first, then an
-  on-disk index or the approach in redb.md.
+- One store owns one directory and one file driver.
+- Later, when a user needs them: payload logs (section 6); several
+  stores sharing a sync; reads at one commit across pages, for a
+  consistent view of many; `Load` in reverse order, where reversed keys
+  do not serve.
+- When the dataset outgrows memory, retention comes first, then values
+  on disk: keys in memory with where their values lie, values read by
+  offset, compaction in place of snapshots, and the index rebuilt at
+  start from hint files. `Get` and `Load` then answer after their reads,
+  not in the step that asks; the rest of the vocabulary stays. The
+  approach in redb.md is the other way past memory.
