@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Run one heavy command through the machine's pueue queue, wait for it and
+# exit with its status (development.md, section 11).
+#
+#   heavy [--gate] [--tail N] [--] command...
+#
+# Two lanes. The build lane (group `build`, default) runs check, clippy,
+# builds and the tests of a few crates, two at once, each with
+# HEAVY_BUILD_JOBS cargo jobs. The gate lane (group `gate`, parallelism 1)
+# runs gates, whole suites, measurements and benchmarks alone: it pauses
+# every other group, waits for their running tasks, runs, and resumes them.
+# The task runs from the current directory with the caller's environment.
+# Its whole output goes to a log file; heavy prints the last lines and the
+# log's path.
+set -euo pipefail
+
+kit=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+root=${DEV_ROOT:-$HOME/src/rust}
+tmp=${DEV_TMP:-$root/tmp}
+build_jobs=${HEAVY_BUILD_JOBS:-4}
+
+usage() {
+    echo "usage: heavy [--gate] [--tail N] [--] command..." >&2
+    exit 2
+}
+
+# Inside a gate task: hold every other group, run the command alone, then
+# release what it held.
+held=()
+# shellcheck disable=SC2317 # called by the EXIT trap
+release() {
+    local group
+    for group in "${held[@]}"; do
+        pueue start --group "$group" >/dev/null || true
+    done
+}
+exclusive() {
+    trap release EXIT
+    local group
+    for group in $(pueue group --json |
+        jq -r 'to_entries[] | select(.key != "gate" and .value.status == "Running") | .key'); do
+        pueue pause --wait --group "$group" >/dev/null
+        held+=("$group")
+    done
+    while [[ $(pueue status --json status=running |
+        jq '[.tasks[] | select(.group != "gate")] | length') != 0 ]]; do
+        sleep 1
+    done
+    local status=0 start=$SECONDS
+    "$@" || status=$?
+    echo "heavy: ran alone for $((SECONDS - start))s"
+    return "$status"
+}
+
+lane=build
+tail_lines=${HEAVY_TAIL:-200}
+while (($#)); do
+    case $1 in
+    --gate) lane=gate; shift ;;
+    --tail) tail_lines=${2:?}; shift 2 ;;
+    --exclusive) shift; [[ ${1:-} == -- ]] && shift; exclusive "$@"; exit ;;
+    --) shift; break ;;
+    -*) usage ;;
+    *) break ;;
+    esac
+done
+(($#)) || usage
+
+# A heavy command inside a heavy task waits for itself.
+if [[ -n ${HEAVY_TASK:-} ]]; then
+    echo "heavy: already inside a heavy task; run the command directly" >&2
+    exit 2
+fi
+export HEAVY_TASK=1
+
+# Lane settings come from here, never from the caller.
+unset CARGO_BUILD_JOBS NEXTEST_TEST_THREADS
+if [[ $lane == build ]]; then
+    export CARGO_BUILD_JOBS=$build_jobs
+    task=("$@")
+else
+    task=("$kit/heavy" --exclusive -- "$@")
+fi
+
+# Logs go to the active run's directory, or to the machine's.
+logs=$tmp/logs
+if [[ -f $tmp/active-plan ]]; then
+    logs=$tmp/$(head -n1 "$tmp/active-plan")/logs
+fi
+mkdir -p "$logs"
+
+id=$(pueue add --print-task-id --group "$lane" --working-directory "$PWD" \
+    --label "${HEAVY_LABEL:-$(basename "$PWD")}" --escape -- "${task[@]}")
+echo "heavy: queued task $id in the $lane lane" >&2
+pueue wait --quiet "$id" >/dev/null 2>&1 || true
+
+# pueue reuses the ids of removed tasks, so a log is named by time and id.
+log=$logs/$(date -u +%Y%m%dT%H%M%S)-$id.log
+json=$(pueue log --json --full "$id")
+jq -r 'to_entries[0].value.output' <<<"$json" >"$log"
+info=$(jq -c 'to_entries[0].value.task' <<<"$json")
+result=$(jq -c '.status.Done.result // "Unfinished"' <<<"$info")
+code=$(jq -r 'if . == "Success" then 0
+    elif type == "object" and has("Failed") then .Failed
+    else 1 end' <<<"$result")
+times=$(jq -r '.status.Done | if . == null then "0 0" else
+    [(.start | sub("\\.[0-9]+Z$"; "Z") | fromdate)
+        - (.enqueued_at | sub("\\.[0-9]+Z$"; "Z") | fromdate),
+     (.end | sub("\\.[0-9]+Z$"; "Z") | fromdate)
+        - (.start | sub("\\.[0-9]+Z$"; "Z") | fromdate)]
+    | map(tostring) | join(" ") end' <<<"$info")
+read -r waited ran <<<"$times"
+memory=$(awk '/MemAvailable/ { printf "%.1f", $2 / 1048576 }' /proc/meminfo)
+
+# One line per task, for the queue's statistics (section 11.2); then forget
+# the task, so the daemon's state stays small.
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$lane" \
+    "$(date -u +%FT%TZ)" "$waited" "$ran" "$code" "$memory" "$PWD" "$log" \
+    "$*" >>"$logs/heavy.tsv"
+pueue remove "$id" >/dev/null 2>&1 || true
+
+total=$(wc -l <"$log")
+if ((total > tail_lines)); then
+    echo "heavy: … $((total - tail_lines)) earlier lines in $log"
+fi
+tail -n "$tail_lines" "$log"
+echo "heavy: task $id ($lane) exit $code, waited ${waited}s, ran ${ran}s, log $log"
+if [[ $result == '"Unfinished"' ]]; then
+    echo "heavy: task $id did not finish" >&2
+fi
+exit "$code"
