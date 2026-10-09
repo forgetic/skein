@@ -611,14 +611,20 @@ name = "skein-tls-world"
 version = "0.0.0"
 dependencies = [
  "rustls",
+ "skein-fake-llm-domain",
+ "skein-fake-llm-protocol",
+ "skein-fake-peers",
  "skein-heap",
  "skein-http",
  "skein-io",
  "skein-lib",
+ "skein-llm",
+ "skein-llm-world",
  "skein-scratch",
  "skein-shell",
  "skein-sim",
  "skein-tls",
+ "skein-world",
 ]
 
 [[package]]

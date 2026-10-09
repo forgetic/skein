@@ -97,30 +97,13 @@ impl Wire {
                         self.header = Some(header);
                     }
                     Some(header) => {
-                        let tls = self.tls.as_mut().expect("TLS face");
                         let mut record = Vec::with_capacity(bytes.len().checked_add(5).expect("bounded record"));
                         record.extend_from_slice(&header);
                         record.extend_from_slice(&bytes);
-                        if tls.read_tls(&mut record.as_slice()).is_err() {
+                        if self.receive(&record).is_err() {
                             self.fail(above, requests);
                             return;
                         }
-                        let Ok(state) = tls.process_new_packets() else {
-                            self.fail(above, requests);
-                            return;
-                        };
-                        let size = state.plaintext_bytes_to_read();
-                        if size > usize::try_from(self.input.room()).expect("u32 fits") {
-                            self.fail(above, requests);
-                            return;
-                        }
-                        let mut plain = vec![0; size];
-                        if tls.reader().read_exact(&mut plain).is_err() {
-                            self.fail(above, requests);
-                            return;
-                        }
-                        self.input.append(&plain).expect("admitted plaintext");
-                        self.ended |= state.peer_has_closed();
                     }
                 }
             }
@@ -135,6 +118,28 @@ impl Wire {
             }
         }
         self.pump(above, requests);
+    }
+
+    // Buffered rustls may consume only part of a supplied record. Process
+    // each accepted prefix, retain its suffix, and drain plaintext before
+    // feeding more; rustls keeps an incomplete record until the next call.
+    fn receive(&mut self, mut record: &[u8]) -> Result<(), Fault> {
+        let tls = self.tls.as_mut().expect("TLS face");
+        while !record.is_empty() {
+            if tls.read_tls(&mut record).map_err(|_| Fault::Invalid)? == 0 {
+                return Err(Fault::Invalid);
+            }
+            let state = tls.process_new_packets().map_err(|_| Fault::Invalid)?;
+            let size = state.plaintext_bytes_to_read();
+            if size > usize::try_from(self.input.room()).expect("u32 fits") {
+                return Err(Fault::Invalid);
+            }
+            let mut plain = vec![0; size];
+            tls.reader().read_exact(&mut plain).map_err(|_| Fault::Invalid)?;
+            self.input.append(&plain).expect("admitted plaintext");
+            self.ended |= state.peer_has_closed();
+        }
+        Ok(())
     }
 
     pub fn output(&mut self, up: OutputUp, above: &mut Queue<Up>, requests: &mut Queue<io::Request>) {
@@ -195,6 +200,8 @@ impl Wire {
                 self.fail(above, requests);
                 return;
             }
+            // Unwritten ciphertext stays in rustls. This prefix owns one
+            // output right; later pumps drain the suffix after it is handed down.
             let length = cap.checked_sub(writer.len()).expect("slice writer advanced");
             assert!(self.output.is_empty(), "a previous ciphertext send was handed down");
             self.output.extend_from_slice(&scratch[..length]);
@@ -306,6 +313,9 @@ fn config() -> Arc<ServerConfig> {
     config.max_fragment_size = Some(4096);
     Arc::new(config)
 }
+
+#[cfg(test)]
+mod tests;
 
 pub(crate) fn validate(limits: &Limits, transport: Transport) -> Result<(), Error> {
     if transport == Transport::Tls && limits.plaintext < 16_384 {
