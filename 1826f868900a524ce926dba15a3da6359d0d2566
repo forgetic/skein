@@ -1,0 +1,7 @@
+01.4 final rebased-tip gate: heavy650 scripts/check.sh PASS at 1826f868900a524ce926dba15a3da6359d0d2566, parent efc33998bd5b23e85a13d81805affb844140e789.
+Formatting, workspace all-target clippy -D warnings, standalone skein-tls check all passed.
+Focused runfc10a4a5-56f6-48e3-924e-bb0170dea3eb: 1607/1607, 3.172s.
+Fuzzy runfc519b45-0bad-42ad-b370-c75562ef82a8: 88/88, 8.289s.
+Browser rund7c7fd4b-b921-4c6c-9ca0-ef2e78f13dad: 6/6, 3.845s.
+Serial worlds/fault census and regression evidence recorded in commit body.
+No probe in skein01.4; no push or design edits.
