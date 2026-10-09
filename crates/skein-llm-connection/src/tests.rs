@@ -463,7 +463,7 @@ fn close_starts_one_binding_per_fire_and_waits_for_physical_settlement() {
                 endpoint: 0,
                 prompt: prompt(),
                 credential: credential(),
-                deadlines: Deadlines::none(),
+                deadlines: Deadlines { whole: Some(Duration::from_secs(1)), ..Deadlines::none() },
             },
             &mut up,
             &mut io,

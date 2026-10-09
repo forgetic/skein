@@ -289,6 +289,9 @@ impl Component {
     /// The first call or idle-connection deadline for the owning loop.
     #[must_use]
     pub fn next_deadline(&self) -> Option<skein_lib::Time> {
+        if self.closing {
+            return None;
+        }
         let mut earliest: Option<skein_lib::Time> = None;
         for slot in &self.slots {
             match slot {
