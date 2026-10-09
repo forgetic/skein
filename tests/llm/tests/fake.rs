@@ -686,3 +686,70 @@ fn scripted_codex_reasoning_drops_only_by_owner_opt_in_and_can_remain_in_history
         }
     }
 }
+
+fn echo_input(owner: u64) -> skein_llm::Call {
+    let mut input = input(skein_llm::Provider::OpenAiCodex, owner);
+    input.prompt.messages = (0..20)
+        .map(|_| Message {
+            role: Role::User,
+            content: Box::new([Block::Text { text: b"history".as_slice().into(), replay: None }]),
+        })
+        .collect();
+    input
+}
+
+fn echoed_completion_json(world: &Exchange, bounds: &client::Limits) -> skein_llm::Json {
+    let response =
+        skein_http_world::reference::response(&world.responses, skein_http::Method::Post, false, &bounds.http);
+    let events = skein_http_world::reference::events(&response.body, &bounds.sse);
+    let terminal =
+        events.events.iter().find(|event| event.name == b"response.completed").expect("actual terminal wire echo");
+    skein_llm::Json::from_bytes(&terminal.data, &bounds.dialect)
+        .expect("reference framing and bounded terminal document")
+}
+
+#[test]
+fn configured_codex_echoes_preserve_the_completion_and_retain_the_token_cliff() {
+    let mut bounds = limits();
+    bounds.dialect.parts = 32;
+    let echo = skein_llm::openai::Echo { instructions: true, tools: true, attribution_bytes: 24 };
+    let mut plain = Exchange::new(echo_input(1), bounds, scripts());
+    plain.start();
+    plain.run();
+    let expected = completion(&plain).clone();
+    let plain_document = echoed_completion_json(&plain, &bounds);
+    assert!(!plain_document.as_tokens().iter().any(|token| matches!(token, skein_json::Token::Key(key) if key.as_ref() == b"instructions" || key.as_ref() == b"tools" || key.as_ref() == b"attribution")), "echoes are off by default");
+    let mut echoed = Exchange::new_with_codex_echo(echo_input(1), bounds, scripts(), echo);
+    echoed.start();
+    echoed.run();
+    assert_eq!(completion(&echoed), &expected);
+    let document = echoed_completion_json(&echoed, &bounds);
+    let tokens = document.as_tokens();
+    assert!(tokens.iter().any(|token| matches!(token, skein_json::Token::Key(key) if key.as_ref() == b"instructions")));
+    assert!(tokens.iter().any(|token| matches!(token, skein_json::Token::Key(key) if key.as_ref() == b"tools")));
+    assert_eq!(
+        tokens
+            .iter()
+            .filter(|token| matches!(token, skein_json::Token::Key(key) if key.as_ref() == b"input_index"))
+            .count(),
+        20
+    );
+    let edge = u32::try_from(tokens.len()).unwrap();
+    let request = skein_llm::Json::from_bytes(
+        &skein_http_world::reference::request(&echoed.requests, &skein_llm_world::fake::limits(&bounds).http).body,
+        &bounds.dialect,
+    )
+    .unwrap();
+    assert!(request.as_tokens().len() < tokens.len(), "attribution cliff exceeds the admitted request");
+    for cap in [edge, edge - 1] {
+        bounds.dialect.tokens = cap;
+        let mut world = Exchange::new_with_codex_echo(echo_input(1), bounds, scripts(), echo);
+        world.start();
+        world.run();
+        if cap == edge {
+            assert_eq!(completion(&world), &expected);
+        } else {
+            assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Tokens, bound }, .. } if *bound == u64::from(cap))));
+        }
+    }
+}

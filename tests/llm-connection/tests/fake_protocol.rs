@@ -61,7 +61,12 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
         Provider::Anthropic => documents::Provider::Anthropic,
     };
     let mut service = provider::Service::new(
-        provider::Config { provider: provider_kind, path: call.endpoint.target.clone(), headers: Box::new([]) },
+        provider::Config {
+            echo: skein_llm::openai::Echo::NONE,
+            provider: provider_kind,
+            path: call.endpoint.target.clone(),
+            headers: Box::new([]),
+        },
         &peer_limits,
     )
     .expect("fake service");

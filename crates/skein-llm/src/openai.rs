@@ -10,8 +10,8 @@ pub use common::{DecodeError, Failure, Limits, ProviderError, RateLimit, Stop, U
 pub use json::{Collector, Json};
 pub use request::{Input, Request, Role, Tool, decode_request, encode_request, measure_request};
 pub use response::{
-    Event, Item, MAX_OUT, Output, Part, StreamDecoder, decode_error, decode_event, encode_completion, encode_error,
-    encode_event,
+    Echo, Event, Item, MAX_OUT, Output, Part, StreamDecoder, decode_error, decode_event, encode_completion,
+    encode_error, encode_event, encode_peer_event,
 };
 
 #[cfg(test)]

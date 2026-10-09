@@ -804,13 +804,41 @@ fn read_error(tokens: &[Token], limits: &Limits) -> Result<ProviderError, Decode
 pub fn encode_error(error: &ProviderError, limits: &Limits) -> Result<Box<[u8]>, DecodeError> {
     encode_event(&Event::Failed { error: error.clone() }, limits)
 }
+/// Fake-server metadata selection, bounded by the configured event document.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Echo {
+    pub instructions: bool,
+    pub tools: bool,
+    /// Payload bytes in each input attribution entry; zero omits attribution.
+    pub attribution_bytes: u32,
+}
+impl Echo {
+    pub const NONE: Echo = Echo { instructions: false, tools: false, attribution_bytes: 0 };
+    const REQUEST: Echo = Echo { instructions: true, tools: true, attribution_bytes: 0 };
+    #[must_use]
+    pub const fn enabled(self) -> bool {
+        self.instructions || self.tools || self.attribution_bytes > 0
+    }
+}
 pub fn encode_event(event: &Event, limits: &Limits) -> Result<Box<[u8]>, DecodeError> {
+    encode_peer_event(event, None, Echo::REQUEST, limits)
+}
+/// Encode a fake event with selected request echoes and sized usage attribution.
+pub fn encode_peer_event(
+    event: &Event,
+    request: Option<&Request>,
+    echo: Echo,
+    limits: &Limits,
+) -> Result<Box<[u8]>, DecodeError> {
+    if echo.attribution_bytes > limits.document_bytes {
+        return Err(DecodeError::limit(crate::Cap::Document, limits.document_bytes));
+    }
     let bounded = limits.writer_limits();
     let mut measure = Encoder::measure(&bounded);
-    write_event(&mut measure, event, None);
+    write_event(&mut measure, event, request, echo);
     let len = common::measured(measure, bounded, crate::Cap::Document)?;
     let mut write = Encoder::write(len, &bounded);
-    write_event(&mut write, event, None);
+    write_event(&mut write, event, request, echo);
     Ok(write.finish())
 }
 fn write_error(out: &mut Encoder, error: &ProviderError) {
@@ -829,7 +857,7 @@ fn write_error(out: &mut Encoder, error: &ProviderError) {
     }
     out.object_end();
 }
-fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Request>) {
+fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Request>, selection: Echo) {
     out.object_start();
     out.key(b"type");
     match event {
@@ -852,11 +880,8 @@ fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Reques
             out.object_start();
             out.key(b"status");
             out.string(b"in_progress");
-            if let Some(request) = echo {
-                out.key(b"instructions");
-                out.string(&request.instructions);
-                out.key(b"tools");
-                request::write_tools(out, &request.tools);
+            if let Some(request) = echo.as_ref().or(completion_echo) {
+                write_echo(out, request, selection);
             }
             out.object_end();
         }
@@ -919,7 +944,7 @@ fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Reques
             out.key(b"item");
             write_item(out, item);
         }
-        Event::Completed { stop, usage } => write_terminal(out, *stop, *usage, completion_echo),
+        Event::Completed { stop, usage } => write_terminal(out, *stop, *usage, completion_echo, selection),
         Event::Failed { error } => {
             out.string(b"error");
             out.key(b"error");
@@ -930,7 +955,7 @@ fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Reques
     }
     out.object_end();
 }
-fn write_terminal(out: &mut Encoder, stop: Stop, usage: Usage, completion_echo: Option<&Request>) {
+fn write_terminal(out: &mut Encoder, stop: Stop, usage: Usage, completion_echo: Option<&Request>, selection: Echo) {
     out.string(match stop {
         Stop::MaxTokens | Stop::Refusal => b"response.incomplete",
         Stop::EndTurn | Stop::ToolUse => b"response.completed",
@@ -957,13 +982,13 @@ fn write_terminal(out: &mut Encoder, stop: Stop, usage: Usage, completion_echo: 
         Stop::EndTurn | Stop::ToolUse => {}
     }
     if let Some(request) = completion_echo {
-        out.key(b"instructions");
-        out.string(&request.instructions);
-        out.key(b"tools");
-        request::write_tools(out, &request.tools);
+        write_echo(out, request, selection);
     }
     out.key(b"usage");
     out.object_start();
+    if let Some(request) = completion_echo {
+        write_attribution(out, request.input.len(), selection.attribution_bytes);
+    }
     out.key(b"input_tokens");
     out.unsigned(usage.input_tokens.saturating_add(usage.cache_read_tokens));
     out.key(b"output_tokens");
@@ -1043,12 +1068,49 @@ pub fn encode_completion(
     request: &Request,
     limits: &Limits,
 ) -> Result<Box<[u8]>, DecodeError> {
-    let event = Event::Completed { stop, usage };
-    let bounded = limits.writer_limits();
-    let mut measure = Encoder::measure(&bounded);
-    write_event(&mut measure, &event, Some(request));
-    let len = common::measured(measure, bounded, crate::Cap::Document)?;
-    let mut write = Encoder::write(len, &bounded);
-    write_event(&mut write, &event, Some(request));
-    Ok(write.finish())
+    encode_peer_event(&Event::Completed { stop, usage }, Some(request), Echo::REQUEST, limits)
+}
+
+fn write_echo(out: &mut Encoder, request: &Request, selection: Echo) {
+    if selection.instructions {
+        out.key(b"instructions");
+        out.string(&request.instructions);
+    }
+    if selection.tools {
+        out.key(b"tools");
+        request::write_tools(out, &request.tools);
+    }
+}
+fn write_attribution(out: &mut Encoder, items: usize, entry_bytes: u32) {
+    if entry_bytes == 0 {
+        return;
+    }
+    let mut payload = List::with_capacity(entry_bytes);
+    for _byte in 0..entry_bytes {
+        payload.push(b'x').expect("configured bounded entry");
+    }
+    out.key(b"attribution");
+    out.object_start();
+    out.key(b"items");
+    out.array_start();
+    for index in 0..items {
+        out.object_start();
+        out.key(b"input_index");
+        out.unsigned(u64::try_from(index).expect("slice index fits u64"));
+        out.key(b"payload");
+        out.string(payload.as_slice());
+        for field in [b"input_tokens".as_slice(), b"cached_tokens".as_slice(), b"cache_write_tokens".as_slice()] {
+            out.key(field);
+            out.unsigned(0);
+        }
+        out.key(b"model");
+        out.string(b"fake-codex");
+        out.key(b"kind");
+        out.string(b"input");
+        out.key(b"reasoning");
+        out.boolean(false);
+        out.object_end();
+    }
+    out.array_end();
+    out.object_end();
 }

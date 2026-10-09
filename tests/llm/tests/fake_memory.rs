@@ -272,3 +272,61 @@ fn random_and_scripted_full_and_truncated_tool_scratch_stays_within_the_bound() 
         assert_eq!(meter.held(), 0, "caller scripts, menus, scratch and transferred tools are all released");
     }
 }
+
+#[test]
+fn configured_codex_echo_request_and_entry_scratch_fit_the_peer_price() {
+    let mut bounds = skein_llm_world::limits();
+    bounds.dialect.parts = 32;
+    bounds.dialect.document_bytes = 32768;
+    bounds.sse.line = 32768;
+    bounds.sse.event = 32768;
+    let observations = skein_llm_world::fake::ObservationLimits {
+        events: 64,
+        event_bytes: 65536,
+        queries: 1,
+        query_bytes: 65536,
+        pending: 0,
+        request_bytes: 32768,
+        response_bytes: 65536,
+    };
+    let echo = skein_llm::openai::Echo { instructions: true, tools: true, attribution_bytes: 256 };
+    let meter = Meter::new();
+    meter.start();
+    let mut input = skein_llm_world::call(1);
+    input.prompt.instructions = vec![b'i'; 2048].into_boxed_slice();
+    input.prompt.messages = (0..16)
+        .map(|_| skein_llm::Message {
+            role: skein_llm::Role::User,
+            content: Box::new([skein_llm::Block::Text { text: vec![b'h'; 64].into_boxed_slice(), replay: None }]),
+        })
+        .collect();
+    let extra =
+        skein_llm_world::fake::extra_worst_case(&bounds, &observations, &input.endpoint, &input.credential).unwrap();
+    let bound = extra + skein_llm::client::worst_case(&bounds).unwrap() + 32768;
+    let scripts = Box::new([Script {
+        cue: input.prompt.instructions.clone(),
+        turns: Box::new([Turn {
+            lines: Box::new([Line::Text { text: b"done".as_slice().into() }]),
+            finish: Finish::Stop,
+            tokens: 1,
+        }]),
+    }]);
+    let mut world = skein_llm_world::fake::Exchange::new_with_codex_echo(input, bounds, scripts, echo);
+    world.observe(observations);
+    let constructed = meter.end();
+    meter.check(constructed, bound, &"bounded echo peer construction");
+    meter.start();
+    world.start();
+    world.run();
+    let receiving = meter.end();
+    meter.check(receiving, bound, &"actual retained request and repeated native echo scratch");
+    assert!(world.seen.iter().any(|event| matches!(event, skein_llm::client::Event::Completed { .. })));
+    assert!(world.responses.len() > 8192, "configured attribution reaches the actual wire");
+    meter.start();
+    world.request(skein_llm::client::Request::Close);
+    world.settle();
+    drop(world);
+    let settled = meter.end();
+    meter.check(settled, bound, &"closed echo peer reclamation");
+    assert_eq!(meter.held(), 0, "every echo/request owner releases its bounded storage");
+}

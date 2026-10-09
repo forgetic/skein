@@ -44,7 +44,12 @@ fn make(address: SocketAddr, transport: Transport) -> Result<llm::Peer, skein_fa
         address,
         transport,
         limits(),
-        provider::Config { provider: documents::Provider::OpenAi, path: call.endpoint.target, headers: Box::new([]) },
+        provider::Config {
+            echo: skein_llm::openai::Echo::NONE,
+            provider: documents::Provider::OpenAi,
+            path: call.endpoint.target,
+            headers: Box::new([]),
+        },
         call.credential,
         skein_llm_world::fake::limits(&skein_llm_world::limits()),
         domain,

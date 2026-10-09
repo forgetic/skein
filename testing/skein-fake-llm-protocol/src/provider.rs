@@ -57,6 +57,8 @@ pub struct Limits {
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
 #[expect(missing_debug_implementations, reason = "configured header values must not enter traces")]
 pub struct Config {
+    /// Codex metadata echoes; off unless the world explicitly selects them.
+    pub echo: openai::Echo,
     /// Provider dialect selected by this scripted service.
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -142,7 +144,10 @@ impl Service {
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
     pub fn new(config: Config, limits: &Limits) -> Result<Service, Error> {
-        if worst_case(limits).is_none() || config.path.first() != Some(&b'/') {
+        if worst_case(limits).is_none()
+            || config.path.first() != Some(&b'/')
+            || config.echo.attribution_bytes > limits.documents.openai.document_bytes
+        {
             return Err(Error::Limits);
         }
         if config.path.len() > usize::try_from(limits.http.head).expect("u32 fits usize")
@@ -674,6 +679,7 @@ fn http_event(
         },
         http::Event::Done(reuse) => {
             server.answer = None;
+            server.body.clear();
             server.reply = None;
             match reuse {
                 http::Reuse::Keep => {
@@ -700,7 +706,9 @@ fn requested(server: &mut Server, service: &mut Service, env: &Env<Limits>, abov
         return;
     }
     let query = documents::request(service.config.provider, server.body.as_slice(), &env.limits.documents);
-    server.body.clear();
+    if service.config.provider != documents::Provider::OpenAi || !service.config.echo.enabled() {
+        server.body.clear();
+    }
     match query {
         Ok(query) => {
             let Ok(id) = service.calls.insert(Call { server: server.owner, active: true }) else {
@@ -730,8 +738,15 @@ fn next_event(
     let Some(answer) = &server.answer else {
         return;
     };
-    match documents::event(service.config.provider, answer, server.sequence, server.response_id, &env.limits.documents)
-    {
+    match documents::event_with_echo(
+        service.config.provider,
+        answer,
+        server.sequence,
+        server.response_id,
+        server.body.as_slice(),
+        service.config.echo,
+        &env.limits.documents,
+    ) {
         Ok(Some(event)) => {
             let Some(next) = server.sequence.checked_add(1) else {
                 close(server, service, env, above, below);
@@ -911,6 +926,8 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(sse::worst_case(&limits.sse)?)?
         .checked_add(openai::worst_case(&limits.documents.openai)?)?
         .checked_add(anthropic::worst_case(&limits.documents.anthropic)?)?
+        // Configured echoes retain this raw request in the existing body List;
+        // native codec worst_case above prices transient decoded metadata and entry scratch.
         .checked_add(List::<u8>::worst_case(request)?)?
         .checked_add(
             u64::from(limits.documents.openai.answer_bytes.max(limits.documents.anthropic.answer_bytes))

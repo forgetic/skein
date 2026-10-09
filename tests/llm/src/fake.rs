@@ -311,13 +311,24 @@ impl Exchange {
     /// Validates the actual Client and peer independently; scripts are caller data.
     #[must_use]
     pub fn new(input: Call, bounds: client::Limits, scripts: Box<[api::Script]>) -> Self {
+        Self::new_with_codex_echo(input, bounds, scripts, skein_llm::openai::Echo::NONE)
+    }
+
+    /// Construct one actual exchange with configured Codex metadata echoes.
+    #[must_use]
+    pub fn new_with_codex_echo(
+        input: Call,
+        bounds: client::Limits,
+        scripts: Box<[api::Script]>,
+        echo: skein_llm::openai::Echo,
+    ) -> Self {
         let endpoint = input.endpoint.clone();
         let credential = Credential {
             access_token: input.credential.access_token.clone(),
             account_id: input.credential.account_id.clone(),
         };
         let machine = client::Client::prepare(input, &bounds).expect("actual shared Client admission");
-        Self::prepared(machine, endpoint, credential, bounds, scripts)
+        Self::prepared_with_codex_echo(machine, endpoint, credential, bounds, scripts, echo)
     }
 
     /// Adopts the caller's one prepared Client without preparing another call.
@@ -336,13 +347,26 @@ impl Exchange {
         bounds: client::Limits,
         scripts: Box<[api::Script]>,
     ) -> Self {
+        Self::prepared_with_codex_echo(machine, endpoint, credential, bounds, scripts, skein_llm::openai::Echo::NONE)
+    }
+
+    /// Adopt the prepared Client with independently configured Codex echoes.
+    #[must_use]
+    pub fn prepared_with_codex_echo(
+        machine: client::Client,
+        endpoint: Endpoint,
+        credential: Credential,
+        bounds: client::Limits,
+        scripts: Box<[api::Script]>,
+        echo: skein_llm::openai::Echo,
+    ) -> Self {
         let provider = match endpoint.provider {
             Provider::OpenAiCodex => documents::Provider::OpenAi,
             Provider::Anthropic => documents::Provider::Anthropic,
         };
         let peer_limits = limits(&bounds);
         let service = provider::Service::new(
-            provider::Config { provider, path: endpoint.target, headers: Box::new([]) },
+            provider::Config { echo, provider, path: endpoint.target, headers: Box::new([]) },
             &peer_limits,
         )
         .expect("bounded independent peer");

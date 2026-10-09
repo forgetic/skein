@@ -201,6 +201,19 @@ pub fn event(
     call: u64,
     limits: &Limits,
 ) -> Result<Option<Outgoing>, Error> {
+    event_with_echo(provider, answer, sequence, call, &[], openai::Echo::NONE, limits)
+}
+
+/// Encode one event with the optional Codex request echo from its bounded body.
+pub fn event_with_echo(
+    provider: Provider,
+    answer: &api::Answer,
+    sequence: u32,
+    call: u64,
+    body: &[u8],
+    echo: openai::Echo,
+    limits: &Limits,
+) -> Result<Option<Outgoing>, Error> {
     let (name, data) = match provider {
         Provider::Anthropic => {
             let Some((name, event)) = anthropic_event(answer, sequence, &limits.anthropic)? else {
@@ -215,9 +228,27 @@ pub fn event(
             let Some((name, event)) = openai_event(answer, sequence, call, &limits.openai)? else {
                 return Ok(None);
             };
-            let Ok(data) = openai::encode_event(&event, &limits.openai) else {
-                return Err(Error::TooLarge);
+            let echo_event = match &event {
+                openai::Event::Created { .. } | openai::Event::Completed { .. } => echo.enabled(),
+                openai::Event::InProgress { .. }
+                | openai::Event::Added { .. }
+                | openai::Event::ToolAdded { .. }
+                | openai::Event::Done { .. }
+                | openai::Event::TextDelta { .. }
+                | openai::Event::ArgumentsDelta { .. }
+                | openai::Event::ReasoningDelta { .. }
+                | openai::Event::Failed { .. }
+                | openai::Event::Progress
+                | openai::Event::Unknown => false,
             };
+            let request = if echo_event {
+                let value = openai::Json::from_bytes(body, &limits.openai).or(Err(Error::Malformed))?;
+                Some(openai::decode_request(&value, &limits.openai).or(Err(Error::Malformed))?)
+            } else {
+                None
+            };
+            let data =
+                openai::encode_peer_event(&event, request.as_ref(), echo, &limits.openai).or(Err(Error::TooLarge))?;
             (name, data)
         }
     };

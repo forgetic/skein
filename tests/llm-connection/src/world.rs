@@ -134,6 +134,7 @@ impl Peer {
             owner,
             service: provider::Service::new(
                 provider::Config {
+                    echo: skein_llm::openai::Echo::NONE,
                     provider: documents::Provider::OpenAi,
                     path: call.endpoint.target,
                     headers: Box::new([]),
