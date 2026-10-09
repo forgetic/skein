@@ -1,0 +1,5 @@
+Implement json.md sections 3.1 and 3.3: Text reports decoded lengths beyond its cap, Skip validates one complete value without retaining text, and both preserve the bounded grammar stack and stream framing. Next-only JSON consumers explicitly reject the new answers. Reference-driven demand scripts, malformed-tail checks, replay and megabyte allocation tests cover the new paths.
+
+Final rebased-tip gate: heavy task 311, scripts/check.sh on bf00a889890e23b5f2f664ecfb2a394b5740314b, parent c006edba5982d6965656bd8c5599415a9d12838a. Formatting, workspace clippy with warnings as errors, separate skein-tls no-std check, 1506 focused tests / 2.774 s, 85 fuzzy tests / 7.834 s, 6 browser tests / 3.802 s all pass. Whole gate 27 s. JSON focused memory story 0.422 s; JSON fuzzy mixed-demands 2000 generated documents 0.379 s. No new world package. Production subset checked: exhaustive own-enum matches, no recursion/closures/loops/tuple scrutinees; checked counts and bounded containers.
+
+Probe: none; deterministic tests cover this mechanism. No credentials, design changes or push.
