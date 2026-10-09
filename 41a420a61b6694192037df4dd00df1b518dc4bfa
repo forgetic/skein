@@ -1,0 +1,14 @@
+Final exact-commit gate evidence
+
+The final gate on 41a420a61b6694192037df4dd00df1b518dc4bfa, through heavy
+scripts/check.sh on parent 55ac10d6750bc077d9b0a703737d6c6f1a625a74:
+formatting, workspace clippy with warnings as errors, standalone TLS;
+focused 1491/1491 in 2.783s (8855a73b-c9a1-4502-b33b-7e067e926d7c);
+fuzzy 83/83 in 8.274s (ab90ff9a-1727-4b5f-abb5-0b961ec3e015);
+browser 6/6 in 3.615s (f65d58d9-a5f4-4aee-9b6d-13687eccad00).
+
+Final serial measure: 15/15 in 0.265s; new 600-story fuzzy sweep 0.075s,
+new focused worlds and ring stories 0.013--0.015s. Includes replay, heap
+checking, actual four-child/four-pipe slab with each signal in flight,
+and the referee's missing-EOF/missing-close negative controls.
+Deterministic evidence in skein; process-tree probe awaits smith09 adoption.
