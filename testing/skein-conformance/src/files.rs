@@ -1111,3 +1111,61 @@ pub fn cancel_append<B: Backend>(backend: &mut B) -> Cancelling {
         taken_once,
     }
 }
+
+/// File owner and hard-link counts observed through open descriptors.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FileMetadata {
+    pub root: Stat,
+    pub files: [Stat; 5],
+    pub after_one_removal: Stat,
+    pub after_last_removal: Stat,
+    pub retained_bytes: Result<Vec<u8>, Error>,
+}
+
+/// The same inode has two names, then one, then none while still open.
+#[must_use]
+pub fn file_metadata<B: Backend>(backend: &mut B) -> FileMetadata {
+    let tree = [
+        Item::file(b"original", b"shared"),
+        Item::hard_link(b"alias", b"original"),
+        Item::file(b"plain", b"one"),
+        Item::directory(b"d"),
+        Item::file(b"d/inner", b"inside"),
+    ];
+    let mut run = Run::new(backend);
+    let process = run.process();
+    let root = run.root(process, &tree);
+    let root_stat = run.stat(process, root).expect("the root's metadata");
+    let names: [&[u8]; 4] = [b"original", b"alias", b"plain", b"d/inner"];
+    let opened = names.map(|path| run.open(process, root, path, OpenHow::Read).expect("a laid file"));
+    let made = run.open(process, root, b"new", OpenHow::Create { mode: None }).expect("a created file");
+    let files = [opened[0], opened[1], opened[2], opened[3], made]
+        .map(|file| run.stat(process, file).expect("open file metadata"));
+    assert_eq!(run.rename(process, (root, b"original"), (root, b"alias")), NOTHING, "same inode rename is a no-op");
+    assert_eq!(run.remove(process, root, b"original", false), NOTHING, "one hard-link name removed");
+    let after_one_removal = run.stat(process, opened[0]).expect("still named through the alias");
+    assert_eq!(run.remove(process, root, b"alias", false), NOTHING, "the final hard-link name removed");
+    let after_last_removal = run.stat(process, opened[1]).expect("still open without a name");
+    let retained_bytes = run.read_all(process, opened[0]).0;
+    for file in opened.into_iter().chain([made]) {
+        run.close(process, file);
+    }
+    run.close(process, root);
+    run.finish();
+    FileMetadata { root: root_stat, files, after_one_removal, after_last_removal, retained_bytes }
+}
+
+impl Check for FileMetadata {
+    fn check(&self) {
+        for (stat, links) in self.files.iter().zip([2, 2, 1, 1, 1]) {
+            assert_eq!(stat.kind, Kind::File, "metadata belongs to regular files");
+            assert_eq!(stat.owner, self.root.owner, "all scenario files have their directory's owner");
+            assert_eq!(stat.links, links, "hard-linked files have two names, all other files one");
+        }
+        assert_eq!(self.files[0], self.files[1], "two names report the same inode metadata");
+        assert_eq!(self.after_one_removal.links, 1, "the alias is the sole remaining name");
+        assert_eq!(self.after_last_removal.links, 0, "a descriptor keeps an unlinked file open");
+        assert_eq!(self.after_last_removal.owner, self.root.owner, "unlink preserves owner");
+        assert_eq!(self.retained_bytes, Ok(b"shared".to_vec()), "unlinked open files retain their bytes");
+    }
+}

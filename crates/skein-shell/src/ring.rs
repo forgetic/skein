@@ -810,7 +810,7 @@ fn prepare(
         Op::Sync { fd } => opcode::Fsync::new(types::Fd(fd.raw())).build(),
         Op::Stat { fd } => opcode::Statx::new(types::Fd(fd.raw()), EMPTY.as_ptr(), statx.get().cast())
             .flags(libc::AT_EMPTY_PATH)
-            .mask(libc::STATX_TYPE | libc::STATX_SIZE | libc::STATX_MODE)
+            .mask(libc::STATX_TYPE | libc::STATX_SIZE | libc::STATX_MODE | libc::STATX_UID | libc::STATX_NLINK)
             .build(),
         Op::Rename { from_dir, from, to_dir, to } => {
             *path = c_path(from);
@@ -1270,7 +1270,7 @@ fn open(how: OpenHow) -> types::OpenHow {
 fn stat(raw: &libc::statx) -> Stat {
     let kind = if raw.stx_mask & libc::STATX_TYPE == 0 { Kind::Other } else { kind_of(u32::from(raw.stx_mode)) };
     let mode = if raw.stx_mask & libc::STATX_MODE == 0 { 0 } else { u32::from(raw.stx_mode) & PERMISSIONS };
-    Stat { kind, size: raw.stx_size, mode }
+    Stat { kind, size: raw.stx_size, mode, owner: raw.stx_uid, links: raw.stx_nlink }
 }
 
 /// The kind of a file whose mode is `mode`.

@@ -5,9 +5,10 @@
 use skein_conformance::{
     Check, Pairing, Shortness, accept_past_the_descriptor_limit, address_in_use, backpressure, cancel_accept,
     cancel_connect, cancel_connect_established_while_away, cancel_read, cancel_recv, closed_before_accept, escapes,
-    file_lifecycle, full_accept_queue, graceful_close, ipv6_only, lifecycle, list, listener_close_resets_waiting,
-    make_directory, nested_roots, open_past_the_descriptor_limit, permissions, processes, refused, remove, rename,
-    reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv, unread_close_meets_send, wrong_state,
+    file_lifecycle, file_metadata, full_accept_queue, graceful_close, ipv6_only, lifecycle, list,
+    listener_close_resets_waiting, make_directory, nested_roots, open_past_the_descriptor_limit, permissions,
+    processes, refused, remove, rename, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
+    unread_close_meets_send, wrong_state,
 };
 use skein_conformance_sim::{
     CALM, RACES, SMOKE, Simulated, cancel_chaos, each_seed, file_cancel_chaos, loopback_chaos, racing_accept,
@@ -288,4 +289,9 @@ fn a_cancel_of_an_append_stops_it_or_comes_too_late() {
     each_seed(Config::calm(), CALM, skein_conformance::cancel_append);
     each_seed(loopback_chaos(), SMOKE, skein_conformance::cancel_append);
     each_seed(file_cancel_chaos(), SMOKE, skein_conformance::cancel_append);
+}
+
+#[test]
+fn stat_keeps_the_owner_and_counts_hard_links_through_removal() {
+    calm_and_chaos(file_metadata);
 }

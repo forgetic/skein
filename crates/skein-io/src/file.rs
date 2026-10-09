@@ -153,7 +153,7 @@ pub enum Event {
         owner: Token,
         size: u64,
     },
-    /// Metadata of the open file or directory.
+    /// Kind, size, permissions, owner and links of the open file or directory.
     Stated {
         owner: Token,
         stat: crate::kernel::Stat,

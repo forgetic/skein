@@ -44,7 +44,7 @@ fn a_file_is_made_written_read_listed_renamed_and_removed_through_the_machine() 
     assert_eq!(world.write(pid, file, 0, b"abcdef"), Ok(Done::Count(6)));
     assert_eq!(world.write(pid, file, 8, b"Z"), Ok(Done::Count(1)), "past the end: zeros fill the gap");
     assert_eq!(world.call(pid, Op::Sync { fd: file }).result, Ok(Done::Nothing));
-    assert_eq!(world.stat(pid, file), Ok(Stat { kind: Kind::File, size: 9, mode: 0o644 }));
+    assert_eq!(world.stat(pid, file), Ok(Stat { kind: Kind::File, size: 9, mode: 0o644, owner: 1000, links: 1 }));
     world.close(pid, file);
     let file = world.open(pid, root, b"new", OpenHow::Read).unwrap();
     assert_eq!(world.read(pid, file, 2, 64), Ok(b"cdef\0\0Z".to_vec()));

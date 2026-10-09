@@ -7,9 +7,9 @@ use std::collections::BTreeSet;
 use skein_conformance::{
     Cancelling, Check, Pairing, Race, Shortness, accept_past_the_descriptor_limit, address_in_use, backpressure,
     cancel_accept, cancel_connect, cancel_connect_established_while_away, cancel_read, cancel_recv,
-    closed_before_accept, escapes, file_lifecycle, full_accept_queue, graceful_close, ipv6_only, lifecycle, list,
-    listener_close_resets_waiting, make_directory, nested_roots, open_past_the_descriptor_limit, permissions, refused,
-    remove, rename, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
+    closed_before_accept, escapes, file_lifecycle, file_metadata, full_accept_queue, graceful_close, ipv6_only,
+    lifecycle, list, listener_close_resets_waiting, make_directory, nested_roots, open_past_the_descriptor_limit,
+    permissions, refused, remove, rename, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
     unread_close_meets_send, wrong_state,
 };
 use skein_conformance_sim::{
@@ -290,4 +290,9 @@ fn appends_continue_short_counts_and_cancel_meets_every_pairing() {
     }
     assert_eq!(shorts, Shortness { short: true, full: true });
     assert_eq!(pairings, BTreeSet::from([Pairing::Stopped, Pairing::Interrupted, Pairing::Completed, Pairing::RanOn]));
+}
+
+#[test]
+fn stat_keeps_the_owner_and_counts_hard_links_through_removal() {
+    chaos(file_metadata);
 }

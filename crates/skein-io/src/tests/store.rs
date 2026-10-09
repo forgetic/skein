@@ -144,7 +144,7 @@ fn a_changed_file_refuses_the_store_and_removes_its_temporary() {
     rig.complete(check, Ok(Done::Fd(CHECK)));
     let stat = rig.take();
     assert_eq!(stat.kind, Op::Stat { fd: CHECK });
-    rig.complete(stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 3, mode: 0o644 })));
+    rig.complete(stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 3, mode: 0o644, owner: 1000, links: 1 })));
     let first = rig.take();
     rig.read(first, b"ba");
     let second = rig.take();
@@ -175,7 +175,7 @@ fn an_existing_large_file_conflicts_with_expected_absence_and_reports_its_digest
     let check = rig.take();
     rig.complete(check, Ok(Done::Fd(CHECK)));
     let stat = rig.take();
-    rig.complete(stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 17, mode: 0o644 })));
+    rig.complete(stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 17, mode: 0o644, owner: 1000, links: 1 })));
     let content = b"abcdefghijklmnopq";
     for chunk in content.chunks(2) {
         let read = rig.take();
@@ -215,7 +215,7 @@ fn an_existing_file_keeps_its_mode_and_matching_content_version() {
     rig.complete(old, Ok(Done::Fd(CHECK)));
     let stat = rig.take();
     assert_eq!(stat.kind, Op::Stat { fd: CHECK });
-    rig.complete(stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 3, mode: 0o640 })));
+    rig.complete(stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 3, mode: 0o640, owner: 1000, links: 1 })));
     let close = rig.take();
     assert_eq!(close.kind, Op::Close { fd: CHECK });
     rig.complete(close, Ok(Done::Nothing));
@@ -232,7 +232,7 @@ fn an_existing_file_keeps_its_mode_and_matching_content_version() {
     let check = rig.take();
     rig.complete(check, Ok(Done::Fd(CHECK)));
     let stat = rig.take();
-    rig.complete(stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 3, mode: 0o640 })));
+    rig.complete(stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 3, mode: 0o640, owner: 1000, links: 1 })));
     let read = rig.take();
     rig.read(read, b"ol");
     let read = rig.take();

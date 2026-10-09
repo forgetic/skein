@@ -627,6 +627,9 @@ pub struct Stat {
     pub size: u64,
     /// Its permission bits (`0o777` at most).
     pub mode: u32,
+    /// The filesystem user ID that owns it.
+    pub owner: u32,
+    pub links: u32,
 }
 
 /// The permission bits a mode may hold: an `OpenHow::Create`'s, a `Stat`'s.

@@ -130,6 +130,9 @@ impl Backend for Ring {
                 Made::File(bytes) => fs::write(&path, bytes).expect("a file laid"),
                 Made::Directory => fs::create_dir(&path).expect("a directory laid"),
                 Made::Link(target) => symlink(OsStr::from_bytes(target), &path).expect("a symbolic link laid"),
+                Made::HardLink(target) => {
+                    fs::hard_link(root.join(OsStr::from_bytes(target)), &path).expect("a hard link laid");
+                }
                 // No FIFO without libc's mkfifo, which is unsafe: the
                 // program does it.
                 Made::Fifo => {
@@ -144,7 +147,7 @@ impl Backend for Ring {
                 Made::File(_) | Made::Directory | Made::Fifo => {
                     mode(&root.join(OsStr::from_bytes(&item.path)), item.mode);
                 }
-                Made::Link(_) => {}
+                Made::Link(_) | Made::HardLink(_) => {}
             }
         }
         let fd = open_root(&root).expect("a scratch directory opens as a root");

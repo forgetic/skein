@@ -97,6 +97,9 @@ pub struct Facts {
     pub size: u64,
     /// Its permission bits.
     pub mode: u32,
+    /// The minimal machine uses user ID 1000 for every node.
+    pub owner: u32,
+    pub links: u32,
 }
 
 /// What the machine refuses, as Linux would beneath a root.
@@ -137,6 +140,8 @@ pub enum Made {
     Directory,
     /// A symbolic link, to the path it holds.
     Link(Vec<u8>),
+    /// Another name for a regular file already laid beneath this root.
+    HardLink(Vec<u8>),
     /// A FIFO, which opens as no file.
     Fifo,
     /// A device, which opens as no file: as on a filesystem not mounted
@@ -161,6 +166,12 @@ impl Item {
     #[must_use]
     pub fn link(path: &[u8], target: &[u8]) -> Item {
         Item { path: path.to_vec(), made: Made::Link(target.to_vec()), mode: 0o777 }
+    }
+
+    /// A second name for the file already laid at `target`, relative to the root.
+    #[must_use]
+    pub fn hard_link(path: &[u8], target: &[u8]) -> Item {
+        Item { path: path.to_vec(), made: Made::HardLink(target.to_vec()), mode: 0 }
     }
 
     /// A FIFO, mode `0o644`.
@@ -193,6 +204,7 @@ pub(crate) struct Node {
     parent: Option<NodeId>,
     /// Whether a directory names it. Unnamed, it lives on while open.
     named: bool,
+    links: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +253,7 @@ pub struct Machine {
     /// The directory every laid root hangs from, beyond reach: `..` from a
     /// root is an escape before it is a step up.
     top: NodeId,
+    owner: u32,
     roots: u32,
 }
 
@@ -258,6 +271,7 @@ impl Machine {
             mode: NEW_DIRECTORY,
             parent: None,
             named: true,
+            links: 2,
         };
         Machine {
             nodes: BTreeMap::from([(0, top.clone())]),
@@ -268,6 +282,7 @@ impl Machine {
             handles: BTreeMap::new(),
             next_handle: 1,
             top: 0,
+            owner: 1000,
             roots: 0,
         }
     }
@@ -286,6 +301,17 @@ impl Machine {
                 parent = self.lookup(parent, name).expect("an item's directories are laid before it");
             }
             let body = match &item.made {
+                Made::HardLink(target) => {
+                    let found =
+                        self.resolve(root, target, false, true).expect("a laid hard-link target beneath its root");
+                    let node = found.node.expect("a hard-link target is laid first");
+                    assert!(matches!(self.node(node).body, Body::File(_)), "hard links name regular files");
+                    let previous = self.entries_mut(parent).insert(Box::from(last), node);
+                    assert!(previous.is_none(), "a new hard-link name");
+                    let node = self.node_mut(node);
+                    node.links = node.links.checked_add(1).expect("bounded scenario links");
+                    continue;
+                }
                 Made::File(bytes) => Body::File(bytes.clone()),
                 Made::Directory => Body::Directory { entries: BTreeMap::new(), removed: false },
                 Made::Link(target) => Body::Link(target.clone().into_boxed_slice()),
@@ -477,6 +503,7 @@ impl Machine {
                 write_bytes(contents, *at, bytes.get(..len).expect("torn within write"));
             }
         }
+        recover_links(&mut surviving);
         self.nodes = surviving.clone();
         self.durable_nodes = surviving;
         self.pending_dirs.clear();
@@ -492,16 +519,22 @@ impl Machine {
         self.issue(node, How::Directory)
     }
 
-    /// What `file` has open: its kind and size.
+    /// What `file` has open: kind, size, permissions, owner and current links.
     #[must_use]
     pub fn stat(&self, file: Opened) -> Facts {
         let node = self.node(self.handle(file).node);
         let mode = node.mode;
+        let owner = self.owner;
+        let links = node.links;
         match &node.body {
-            Body::File(bytes) => {
-                Facts { is: Is::File, size: u64::try_from(bytes.len()).expect("a usize fits a u64"), mode }
-            }
-            Body::Directory { .. } => Facts { is: Is::Directory, size: 0, mode },
+            Body::File(bytes) => Facts {
+                is: Is::File,
+                size: u64::try_from(bytes.len()).expect("a usize fits a u64"),
+                mode,
+                owner,
+                links,
+            },
+            Body::Directory { .. } => Facts { is: Is::Directory, size: 0, mode, owner, links },
             Body::Link(_) | Body::Special(_) => fail("a handle is never to a link, a FIFO or a device"),
         }
     }
@@ -553,6 +586,12 @@ impl Machine {
         self.entries_mut(from_dir).remove(from);
         self.entries_mut(to_dir).insert(Box::from(to), source);
         if self.is_directory(source) {
+            if from_dir != to_dir {
+                let from = self.node_mut(from_dir);
+                from.links = from.links.checked_sub(1).expect("moved child directory counted");
+                let to = self.node_mut(to_dir);
+                to.links = to.links.checked_add(1).expect("bounded directory links");
+            }
             self.node_mut(source).parent = Some(to_dir);
         }
         Ok(())
@@ -783,9 +822,14 @@ impl Machine {
             Body::Link(target) => Body::Link(target.clone()),
             Body::Special(is) => Body::Special(*is),
         };
+        let links = if parent_of.is_some() { 2 } else { 1 };
+        if parent_of.is_some() {
+            let parent = self.node_mut(parent);
+            parent.links = parent.links.checked_add(1).expect("bounded directory links");
+        }
         self.durable_nodes
-            .insert(id, Node { body: durable_body, mode: mode & PERMISSIONS, parent: parent_of, named: true });
-        self.nodes.insert(id, Node { body, mode: mode & PERMISSIONS, parent: parent_of, named: true });
+            .insert(id, Node { body: durable_body, mode: mode & PERMISSIONS, parent: parent_of, named: true, links });
+        self.nodes.insert(id, Node { body, mode: mode & PERMISSIONS, parent: parent_of, named: true, links });
         let previous = self.entries_mut(parent).insert(name, id);
         assert!(previous.is_none(), "a name is made only where none is");
         id
@@ -802,11 +846,18 @@ impl Machine {
     /// for good, and `node` goes once nothing has it open.
     fn unname(&mut self, dir: NodeId, name: &[u8], node: NodeId) {
         self.entries_mut(dir).remove(name);
+        if self.is_directory(node) {
+            let parent = self.node_mut(dir);
+            parent.links = parent.links.checked_sub(1).expect("a removed child directory counted");
+        }
         let unnamed = self.node_mut(node);
-        unnamed.named = false;
         if let Body::Directory { removed, .. } = &mut unnamed.body {
             *removed = true;
+            unnamed.links = 0;
+        } else {
+            unnamed.links = unnamed.links.checked_sub(1).expect("a removed name counted");
         }
+        unnamed.named = unnamed.links > 0;
         self.release(node);
     }
 
@@ -917,4 +968,36 @@ fn components(path: &[u8]) -> VecDeque<Box<[u8]>> {
 #[expect(clippy::panic, reason = "the machine checks its client, as a fake does (testing-strategy.md, 4)")]
 fn fail(what: &str) -> ! {
     panic!("skein-fake-machine: {what}");
+}
+
+// Crash recovery follows the surviving namespace, rather than a stale inode
+// copy from before an unlink or directory move.
+fn recover_links(nodes: &mut BTreeMap<NodeId, Node>) {
+    let mut counts = BTreeMap::<NodeId, u32>::new();
+    for (&id, node) in nodes.iter() {
+        if let Body::Directory { removed, .. } = &node.body {
+            counts.insert(id, if *removed { 0 } else { 2 });
+        }
+    }
+    for (&id, node) in nodes.iter() {
+        if let Body::Directory { entries, .. } = &node.body {
+            for child in entries.values() {
+                let links = counts.entry(*child).or_default();
+                // A directory's parent name is already part of its two base
+                // links; its .. instead contributes to the parent's count.
+                if nodes.get(child).is_some_and(|node| matches!(node.body, Body::Directory { .. })) {
+                    let links = counts.entry(id).or_default();
+                    *links = links.checked_add(1).expect("bounded directory links");
+                } else {
+                    *links = links.checked_add(1).expect("bounded file links");
+                }
+            }
+        }
+    }
+    for (&id, node) in nodes.iter_mut() {
+        node.links = counts.get(&id).copied().unwrap_or(0);
+        if !matches!(node.body, Body::Directory { .. }) {
+            node.named = node.links > 0;
+        }
+    }
 }

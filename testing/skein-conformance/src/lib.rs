@@ -39,9 +39,9 @@ use skein_io::kernel::{Complete, Error, Fd, Submit};
 use skein_lib::{Duration, Queue, Time};
 
 pub use files::{
-    Appending, Entries, Escapes, FileLifecycle, Listing, MakeDirectories, Nested, OpenLimit, Permissions, Removes,
-    Renames, Shortness, appending, cancel_append, cancel_read, escapes, file_lifecycle, list, make_directory,
-    nested_roots, open_past_the_descriptor_limit, permissions, remove, rename,
+    Appending, Entries, Escapes, FileLifecycle, FileMetadata, Listing, MakeDirectories, Nested, OpenLimit, Permissions,
+    Removes, Renames, Shortness, appending, cancel_append, cancel_read, escapes, file_lifecycle, file_metadata, list,
+    make_directory, nested_roots, open_past_the_descriptor_limit, permissions, remove, rename,
 };
 pub use processes::{Groups, Processes, ResourcesCheck, groups, processes, usage};
 
@@ -117,6 +117,8 @@ pub enum Made {
     Directory,
     /// A symbolic link, to the path it holds.
     Link(Vec<u8>),
+    /// Another name for a regular file already laid beneath this root.
+    HardLink(Vec<u8>),
     /// A FIFO.
     Fifo,
 }
@@ -138,6 +140,12 @@ impl Item {
     #[must_use]
     pub fn link(path: &[u8], target: &[u8]) -> Item {
         Item { path: path.to_vec(), made: Made::Link(target.to_vec()), mode: 0o777 }
+    }
+
+    /// A second name for the file already laid at `target`, relative to the root.
+    #[must_use]
+    pub fn hard_link(path: &[u8], target: &[u8]) -> Item {
+        Item { path: path.to_vec(), made: Made::HardLink(target.to_vec()), mode: 0 }
     }
 
     /// A FIFO, mode `0o644`.

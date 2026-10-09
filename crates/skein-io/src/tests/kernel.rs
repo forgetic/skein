@@ -13,7 +13,7 @@ use crate::kernel::{
 
 const FD: Fd = Fd::new(3);
 const NEW: Fd = Fd::new(4);
-const STAT: Stat = Stat { kind: Kind::File, size: 5, mode: 0o644 };
+const STAT: Stat = Stat { kind: Kind::File, size: 5, mode: 0o644, owner: 1000, links: 1 };
 
 fn v4() -> Addr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 8080))
@@ -580,9 +580,13 @@ fn an_entry_names_its_bytes_of_names() {
 #[test]
 fn a_stat_answers_any_kind_and_size() {
     for kind in [Kind::File, Kind::Directory, Kind::Symlink, Kind::Other] {
-        let answer = complete(Op::Stat { fd: FD }, Ok(Done::Stat(Stat { kind, size: u64::MAX, mode: 0o777 })));
+        let answer = complete(
+            Op::Stat { fd: FD },
+            Ok(Done::Stat(Stat { kind, size: u64::MAX, mode: 0o777, owner: u32::MAX, links: u32::MAX })),
+        );
         assert!(answer.is_valid(), "{answer:?}");
-        let answer = complete(Op::Stat { fd: FD }, Ok(Done::Stat(Stat { kind, size: 0, mode: 0o4755 })));
+        let answer =
+            complete(Op::Stat { fd: FD }, Ok(Done::Stat(Stat { kind, size: 0, mode: 0o4755, owner: 1000, links: 1 })));
         assert!(!answer.is_valid(), "permission bits only: {answer:?}");
     }
 }

@@ -157,7 +157,7 @@ const fn kind(is: Is) -> Kind {
 }
 
 const fn stat(facts: Facts) -> Stat {
-    Stat { kind: kind(facts.is), size: facts.size, mode: facts.mode }
+    Stat { kind: kind(facts.is), size: facts.size, mode: facts.mode, owner: facts.owner, links: facts.links }
 }
 
 /// Translates a filesystem refusal into the kernel boundary's named error.
