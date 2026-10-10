@@ -600,16 +600,21 @@ fn journal_memory<W: Item + std::fmt::Debug, O: Item + std::fmt::Debug>(limits: 
 fn a_request_table_filled_to_every_limit_stays_within_its_worst_case() {
     for capacity in CAPACITIES {
         for restored in [false, true] {
-            request_table_memory::<u8>(capacity, restored);
-            request_table_memory::<u64>(capacity, restored);
-            request_table_memory::<u128>(capacity, restored);
-            request_table_memory::<[u64; 8]>(capacity, restored);
+            request_table_memory::<u8, u8>(capacity, restored);
+            request_table_memory::<u64, u64>(capacity, restored);
+            request_table_memory::<u128, u128>(capacity, restored);
+            request_table_memory::<[u64; 8], [u64; 8]>(capacity, restored);
+            request_table_memory::<[u64; 8], u8>(capacity, restored);
+            request_table_memory::<u8, [u64; 8]>(capacity, restored);
         }
     }
 }
 
-fn request_table_memory<T: Item + std::fmt::Debug>(capacity: u32, restored: bool) {
-    use skein_lib::{Duration, RequestLimits, RequestRecord, RequestTable, Token, Wall};
+fn request_table_memory<O: Item + Copy + std::fmt::Debug + PartialEq, T: Item + std::fmt::Debug>(
+    capacity: u32,
+    restored: bool,
+) {
+    use skein_lib::{Duration, RequestLimits, RequestRecord, RequestTable, Wall};
 
     let limits = RequestLimits {
         requests: capacity,
@@ -623,7 +628,8 @@ fn request_table_memory<T: Item + std::fmt::Debug>(capacity: u32, restored: bool
     let mut keys = Vec::with_capacity(index(capacity));
     let mut saved = vec![None; index(capacity)];
     let mut attempts = Vec::with_capacity(index(capacity));
-    let mut metered = Metered::new("RequestTable", type_name::<T>(), capacity, RequestTable::<T>::worst_case(&limits));
+    let mut metered =
+        Metered::new("RequestTable", type_name::<(O, T)>(), capacity, RequestTable::<O, T>::worst_case(&limits));
     metered.start();
     let mut table = RequestTable::new(&limits, 0xB5_7A);
     metered.end(());
@@ -636,10 +642,10 @@ fn request_table_memory<T: Item + std::fmt::Debug>(capacity: u32, restored: bool
             let record =
                 RequestRecord { key: restored_key, scope: 7, first_sent: Some(Wall::EPOCH), request: T::nth(n) };
             saved[index(n)] = Some(record.clone());
-            table.restore(Token::new(u64::from(n)), 2, record).expect("room for restored records");
+            table.restore(O::nth(n), 2, record).expect("room for restored records");
             key = restored_key;
         } else {
-            key = table.ask(Token::new(u64::from(n)), 7, 2, T::nth(n)).expect("room to every limit");
+            key = table.ask(O::nth(n), 7, 2, T::nth(n)).expect("room to every limit");
         }
         metered.end(());
         keys.push(key);
@@ -647,7 +653,7 @@ fn request_table_memory<T: Item + std::fmt::Debug>(capacity: u32, restored: bool
     assert_eq!(table.len(), capacity);
     assert_eq!(table.bytes(), limits.bytes);
     metered.start();
-    assert!(table.ask(Token::new(u64::MAX), 7, 1, T::nth(0)).is_err(), "full count and bytes refuse");
+    assert!(table.ask(O::nth(0), 7, 1, T::nth(0)).is_err(), "full count and bytes refuse");
     metered.end(());
     request_table_outputs(&mut table, &mut metered, &keys, &mut saved, &mut attempts, Time::ZERO);
     metered.start();
@@ -677,8 +683,8 @@ fn request_table_memory<T: Item + std::fmt::Debug>(capacity: u32, restored: bool
     assert!(saved.iter().all(Option::is_none));
 }
 
-fn request_table_outputs<T: Item>(
-    table: &mut skein_lib::RequestTable<T>,
+fn request_table_outputs<O: Copy, T: Item>(
+    table: &mut skein_lib::RequestTable<O, T>,
     metered: &mut Metered,
     keys: &[skein_lib::RequestKey],
     saved: &mut [Option<skein_lib::RequestRecord<T>>],
@@ -708,14 +714,14 @@ fn request_table_outputs<T: Item>(
     }
 }
 
-fn request_table_finish<T: Item + std::fmt::Debug>(
-    table: &mut skein_lib::RequestTable<T>,
+fn request_table_finish<O: Item + Copy + std::fmt::Debug + PartialEq, T: Item + std::fmt::Debug>(
+    table: &mut skein_lib::RequestTable<O, T>,
     metered: &mut Metered,
     keys: &[skein_lib::RequestKey],
     saved: &mut [Option<skein_lib::RequestRecord<T>>],
     attempts: &mut Vec<skein_lib::Token>,
 ) {
-    use skein_lib::{RequestAnswered, RequestEnvelope, Token, Wall};
+    use skein_lib::{RequestAnswered, RequestEnvelope, Wall};
     for attempt in attempts.iter() {
         metered.start();
         assert_eq!(table.answered(Time::ZERO, *attempt, RequestEnvelope::Again), RequestAnswered::Pending);
@@ -741,7 +747,7 @@ fn request_table_finish<T: Item + std::fmt::Debug>(
         metered.start();
         assert_eq!(
             table.answered(Time::from_nanos(8_000_000_000), *attempt, RequestEnvelope::Final),
-            RequestAnswered::Final(Token::new(u64::try_from(owner).expect("small owner")))
+            RequestAnswered::Final(O::nth(u32::try_from(owner).expect("small owner")))
         );
         metered.end(());
     }

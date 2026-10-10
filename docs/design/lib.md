@@ -354,12 +354,19 @@ traits, takes no closures, and uses no `dyn` (programming-model.md,
 
 ## 12. The request table
 
-`RequestTable<R>` keeps bounded keyed requests until their answers are
-final. It is generic over what it holds and inspects neither requests nor
-answers. It belongs in lib because it is a data structure with a
-lifecycle, like a queue or the journal; a service does not hand-roll one
+`RequestTable<O, R>` keeps bounded keyed requests until their answers are
+final. It is generic over the asker's owner value and the requests it
+holds, and inspects neither owners, requests nor answers. It belongs in
+lib because it is a data structure with a lifecycle, like a queue or the journal; a service does not hand-roll one
 (programming-model.md, 10.2).
 
+- **Owner:** each request keeps the asker's own value, of a `Copy` type,
+  held and handed back with progress and a final answer, never read. An
+  asker composing several parts names each owner with a variant of its
+  own enum, carrying the part's token, or naming a restored request whose
+  asker is gone. It can then route by the variant to the part that asked
+  without keeping a routing table of its own. The owner is not required
+  to be a token: a token's holder never interprets it (section 2).
 - **Keys:** each admitted request gets a key drawn from the seed given
   at construction, never reused for another request. A restored request
   keeps its key. Exhausting the key space refuses admission rather than
@@ -372,10 +379,10 @@ lifecycle, like a queue or the journal; a service does not hand-roll one
   leave before the sends they cover, in order; each take emits at most
   its configured count. Retiring a request emits its erase.
 - **One attempt:** a request has at most one attempt in flight. Each
-  attempt has its own fresh token, distinct from the owner's token.
+  attempt has its own fresh token, independent of the owner value.
   An answer for a superseded or retired attempt changes nothing.
 - **Envelopes:** the protocol layer says which kind of answer came.
-  *Final* retires the request and hands back its owner's token, so the
+  *Final* retires the request and hands back its owner value, so the
   asker routes the answer unopened. *Again* schedules a retry under the
   same key. *Lost* does likewise while the link is up, and parks while
   it is down. *Signed out* parks until the request's scope is confirmed
@@ -395,19 +402,19 @@ lifecycle, like a queue or the journal; a service does not hand-roll one
 - **Restoration:** records are admitted at startup within the same
   limits, keeping their keys and first sending times. They begin parked
   until the link is up and their scope is confirmed. The asker supplies
-  their owner tokens and declared sizes again.
+  their owner values and declared sizes again.
 - **Progress:** changes to in flight, retrying, parked or unknown leave
-  with the owner's token, for display. The table never reads the answer
+  with the owner value, for display. The table never reads the answer
   or decides how progress is shown.
 - **Admission and memory:** capacities are fixed at construction. A
   request past the held-request count or the sum of owners' declared
   bytes is refused at admission, returning ownership and changing
   nothing. The table does not measure a request. `worst_case` prices its
-  containers and bookkeeping from the limits with checked arithmetic;
-  the owner prices the payload bytes it declares separately.
+  containers, owner values and bookkeeping from the limits with checked
+  arithmetic; the owner prices the payload bytes it declares separately.
 
 The asker decides each request's scope and contents, supplies its owner
-token and declared size, and tells the table the link, confirmed scope,
+value and declared size, and tells the table the link, confirmed scope,
 retention and clocks. The protocol layer classifies envelopes; final
 answers go directly to their owner. The table decides keys, attempts,
 backoff, parking, retention cutoffs, store records and progress.
