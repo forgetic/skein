@@ -69,3 +69,161 @@ fn an_exchange_through_io_over_the_ring() {
     assert!(!client.broken(), "nothing broke on loopback");
     proc.ledger.settled();
 }
+
+fn group_story(story: skein_io_world::processes::Story) {
+    use skein_io_world::processes::{Judge, Process};
+    use std::os::unix::ffi::OsStrExt;
+    let root = skein_shell::open_root(std::path::Path::new("/tmp")).expect("the fixture's directory opens");
+    let program = std::path::Path::new(env!("CARGO_BIN_EXE_io_process_fixture"));
+    let process = Process::new(root, program.as_os_str().as_bytes(), story, true);
+    let mut world = skein_world::real::World::new(Judge::default());
+    world.spawn_with_fds(vec![root], || process);
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    outcome.procs[0].check();
+}
+
+#[test]
+fn a_descendant_holding_the_pipe_ends_with_a_signal_to_the_group() {
+    group_story(skein_io_world::processes::Story::SignalRunning);
+}
+#[test]
+fn closing_a_child_whose_group_still_runs_ends_the_group() {
+    group_story(skein_io_world::processes::Story::CloseExited);
+}
+#[test]
+fn a_signal_to_the_group_after_its_leader_exited_reaches_the_group() {
+    group_story(skein_io_world::processes::Story::SignalExited);
+}
+
+#[test]
+fn an_append_stream_on_redirected_regular_output_preserves_every_byte_and_closes() {
+    use skein_io::kernel::Fd;
+    use skein_io_world::append::{CONTENTS, Evidence, Judge, Story, Writer};
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    let scratch = skein_scratch::Scratch::new("append-stream-ring");
+    let path = scratch.path().join("trace");
+    std::fs::write(&path, b"prefix:").expect("existing output file");
+    let file = std::fs::OpenOptions::new().write(true).open(&path).expect("redirected output");
+    assert_eq!(
+        skein_shell::prepare_output(Fd::new(file.as_raw_fd())).expect("output kind"),
+        skein_shell::OutputKind::Append
+    );
+    let fd = Fd::new(file.into_raw_fd());
+    let mut world = skein_world::real::World::new(Judge);
+    world.spawn_with_fds(vec![fd], || Writer::new(fd, Story::Close, Duration::from_secs(1)));
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    assert_eq!(std::fs::read(path).expect("the stream output"), CONTENTS);
+    assert_eq!(outcome.procs[0].failures(), 0);
+    assert_eq!(outcome.procs[0].events.last(), Some(&Evidence::Closed));
+}
+
+#[test]
+fn a_pipe_output_keeps_the_pipe_face_at_startup() {
+    use std::os::fd::AsRawFd;
+    let mut child =
+        std::process::Command::new("cat").stdin(std::process::Stdio::piped()).spawn().expect("a pipe output");
+    let input = child.stdin.take().expect("child input pipe");
+    assert_eq!(
+        skein_shell::prepare_output(skein_io::kernel::Fd::new(input.as_raw_fd())).expect("output kind"),
+        skein_shell::OutputKind::Pipe
+    );
+    drop(input);
+    assert!(child.wait().expect("cat ends at pipe EOF").success());
+}
+
+#[test]
+fn a_childs_cpu_and_peak_join_the_reaped_childrens_usage_at_close() {
+    use skein_io_world::usage::{Judge, Process};
+    use std::os::unix::ffi::OsStrExt;
+    let root = skein_shell::open_root(std::path::Path::new("/tmp")).expect("startup root");
+    let program = std::path::Path::new(env!("CARGO_BIN_EXE_io_process_fixture"));
+    let mut world = skein_world::real::World::new(Judge { simulated: false });
+    world.spawn_with_fds(vec![root], || Process::new(root, program.as_os_str().as_bytes()));
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    outcome.procs[0].check(false);
+}
+
+#[test]
+fn private_files_created_and_replaced_over_the_ring_have_private_modes() {
+    use skein_io_world::private::{Judge, Owner as PrivateOwner, Story};
+    use std::os::unix::fs::PermissionsExt;
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let capabilities = status.lines().find_map(|line| line.strip_prefix("CapEff:")).unwrap().trim();
+    let bypasses_modes = u64::from_str_radix(capabilities, 16).unwrap() & (1_u64 << 1_u32) != 0;
+    for story in [
+        Story::Create,
+        Story::Replace,
+        Story::RootMode,
+        Story::FileMode,
+        Story::FileLink,
+        Story::FileKind,
+        Story::FileLinks,
+        Story::RootDeniedSafe,
+        Story::FileDeniedSafe,
+    ] {
+        if bypasses_modes && matches!(story, Story::RootDeniedSafe | Story::FileDeniedSafe) {
+            eprintln!(
+                "CAP_DAC_OVERRIDE bypasses the own-mode-000 denial; path-only fallback is tested in simulator and steps"
+            );
+            continue;
+        }
+        let scratch = skein_scratch::Scratch::new("io-private");
+        let path = scratch.path();
+        if !matches!(story, Story::Create) {
+            std::fs::create_dir(path.join("secret")).unwrap();
+            std::fs::set_permissions(
+                path.join("secret"),
+                std::fs::Permissions::from_mode(if matches!(story, Story::RootMode) {
+                    0o755
+                } else if matches!(story, Story::RootDeniedSafe) {
+                    0o000
+                } else {
+                    0o700
+                }),
+            )
+            .unwrap();
+            match story {
+                Story::FileDeniedSafe => {
+                    std::fs::write(path.join("secret/record"), b"old").unwrap();
+                    std::fs::set_permissions(path.join("secret/record"), std::fs::Permissions::from_mode(0o000))
+                        .unwrap();
+                }
+                Story::Replace | Story::FileMode => {
+                    std::fs::write(path.join("secret/record"), b"old").unwrap();
+                    std::fs::set_permissions(path.join("secret/record"), std::fs::Permissions::from_mode(0o644))
+                        .unwrap();
+                }
+                Story::FileLink => std::os::unix::fs::symlink("missing", path.join("secret/record")).unwrap(),
+                Story::FileKind => {
+                    std::fs::create_dir(path.join("secret/record")).unwrap();
+                    std::fs::set_permissions(path.join("secret/record"), std::fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                }
+                Story::FileLinks => {
+                    std::fs::write(path.join("secret/record"), b"old").unwrap();
+                    std::fs::set_permissions(path.join("secret/record"), std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                    std::fs::hard_link(path.join("secret/record"), path.join("secret/other")).unwrap();
+                }
+                Story::Create
+                | Story::RootMode
+                | Story::RootOwner
+                | Story::RootLink
+                | Story::RootKind
+                | Story::FileOwner
+                | Story::RootDeniedSafe => {}
+            }
+        }
+        let root = skein_shell::open_root(path).unwrap();
+        let user = skein_shell::effective_user();
+        let mut world = skein_world::real::World::new(Judge);
+        world.spawn_with_fds(vec![root], || PrivateOwner::new(root, story, user));
+        let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+        outcome.procs[0].check(user);
+        if matches!(story, Story::Create | Story::Replace) {
+            assert_eq!(std::fs::metadata(path.join("secret")).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(std::fs::metadata(path.join("secret/record")).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        drop(scratch);
+    }
+}

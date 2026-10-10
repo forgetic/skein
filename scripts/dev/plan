@@ -1,0 +1,452 @@
+#!/usr/bin/env bash
+# A plan's run on this machine (development.md, sections 6, 7 and 10).
+#
+#   plan check [--fix] [PLAN_DIR] is the machine ready (to run the plan)?
+#   plan claim PLAN_DIR           make it this machine's active run
+#   plan release                  end the active run
+#   plan worktree REPO NAME       a session's worktree, at origin/main
+#   plan worktree --remove REPO NAME
+#   plan set STEP KEY=VALUE...    add or change a step in the ledger
+#   plan status                   render status.md from the ledger
+#   plan watch                    wait for something the designer must see
+#
+# PLAN_DIR is the plan's directory in its repository's primary checkout,
+# for example ~/src/rust/smith/docs/plans/reliability. A run lives in
+# $DEV_TMP/<repository>/<plan>/, and $DEV_TMP/active-plan names it; the
+# commands after claim act on that run.
+# shellcheck disable=SC2015 # in check, ok and warn always succeed
+set -euo pipefail
+
+root=${DEV_ROOT:-$HOME/src/rust}
+tmp=${DEV_TMP:-$root/tmp}
+repos=${DEV_REPOS:-skein smith temper}
+active=$tmp/active-plan
+columns='step	repo	session	state	slot	branch	commit	updated	title	note'
+
+die() { echo "plan: $*" >&2; exit 2; }
+
+usage() {
+    sed -n '3,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+}
+
+now() { date -u +%FT%TZ; }
+
+# The active run: its name (repository/plan), plan directory and path.
+load() {
+    [[ -f $active ]] || die "no active run on this machine"
+    name=$(sed -n 1p "$active")
+    plan_dir=$(sed -n 2p "$active")
+    run=$tmp/$name
+    plan=${name#*/}
+}
+
+# A plan directory's repository and run name.
+locate() {
+    plan_dir=$(cd "${1:?plan directory}" && pwd)
+    local top
+    top=$(git -C "$plan_dir" rev-parse --show-toplevel)
+    project=$(basename "$top")
+    plan=$(basename "$plan_dir")
+    name=$project/$plan
+    run=$tmp/$name
+    rel=${plan_dir#"$top"/}
+    top_dir=$top
+}
+
+check() {
+    local fix=0 failed=0
+    [[ ${1:-} == --fix ]] && { fix=1; shift; }
+    ok() { echo "ok    $*"; }
+    warn() { echo "warn  $*"; }
+    fail() { echo "FAIL  $*"; failed=1; }
+    local kit
+    kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+    (($#)) && check_plan "$1"
+
+    # Every primary checkout: on main, clean, and equal to origin's main.
+    local repo dir ahead behind
+    for repo in $repos; do
+        dir=$root/$repo
+        [[ -d $dir/.git ]] || { warn "$repo: no checkout at $dir"; continue; }
+        if [[ $(git -C "$dir" symbolic-ref --quiet --short HEAD || true) != main ]]; then
+            fail "$repo: primary checkout is not on main"
+            continue
+        fi
+        [[ -z $(git -C "$dir" status --porcelain) ]] ||
+            fail "$repo: primary checkout has changes"
+        git -C "$dir" fetch --quiet origin || { fail "$repo: cannot fetch origin"; continue; }
+        read -r behind ahead < <(git -C "$dir" rev-list --left-right --count origin/main...main)
+        if ((ahead || behind)); then
+            fail "$repo: main is $ahead ahead and $behind behind origin/main"
+        else
+            ok "$repo: main is origin/main"
+        fi
+    done
+
+    # One run per machine.
+    if [[ ! -f $active ]]; then
+        ok "no run is active"
+    elif [[ $(sed -n 1p "$active") == "${name:-}" ]]; then
+        ok "this run is the active one"
+    elif [[ -n ${name:-} ]]; then
+        fail "another run is active: $(sed -n 1p "$active")"
+    else
+        warn "a run is active: $(sed -n 1p "$active")"
+    fi
+
+    check_machine
+    return "$failed"
+}
+
+# The plan: complete, committed, on origin, and ready in STATUS.md.
+check_plan() {
+    locate "$1"
+    local file
+    git -C "$top_dir" fetch --quiet origin || fail "$project: cannot fetch origin"
+    for file in README.md code-organization.md; do
+        [[ -f $plan_dir/$file ]] && ok "plan has $file" || fail "plan has no $file"
+    done
+    if [[ -n $(git -C "$top_dir" status --porcelain -- "$rel") ]]; then
+        fail "plan has uncommitted changes"
+    elif git -C "$top_dir" cat-file -e "origin/main:$rel/README.md" 2>/dev/null; then
+        ok "plan is on origin/main"
+    else
+        fail "plan is not on origin/main"
+    fi
+
+    # The plan's row in its repository's STATUS.md: ready, or this
+    # machine's run being resumed.
+    local row state
+    row=$(grep -E "^\| *$plan *\|" "$top_dir/docs/design/STATUS.md" 2>/dev/null | head -n1 || true)
+    state=$(awk -F'|' '{ gsub(/^ +| +$/, "", $3); print $3 }' <<<"$row")
+    case $state in
+    "") warn "no row for $plan in $project's docs/design/STATUS.md" ;;
+    ready | "active on $(hostname)"*) ok "STATUS.md says $state" ;;
+    *) fail "STATUS.md says $state" ;;
+    esac
+}
+
+# The tools, the workspace's files, the queue and room to work.
+check_machine() {
+    # Tools.
+    local tool
+    for tool in git jq pueue flock cargo; do
+        command -v "$tool" >/dev/null && ok "has $tool" || fail "no $tool"
+    done
+    cargo nextest --version >/dev/null 2>&1 && ok "has cargo-nextest" || fail "no cargo-nextest"
+    local bin=$HOME/.local/bin
+    for tool in heavy land plan; do
+        if [[ $(readlink -f "$bin/$tool" 2>/dev/null) == "$kit/$tool" ]]; then
+            ok "$tool is on PATH"
+        elif ((fix)); then
+            mkdir -p "$bin" && ln -sfn "$kit/$tool" "$bin/$tool" && ok "linked $bin/$tool"
+        else
+            fail "$bin/$tool does not link to $kit/$tool (--fix links it)"
+        fi
+    done
+
+    # The workspace's own files live in skein, beside the tools.
+    local pair link target
+    for pair in "$root/AGENTS.md=AGENTS.md" "$root/CLAUDE.md=CLAUDE.md" \
+        "${CODEX_HOME:-$HOME/.codex}/coordinator.config.toml=coordinator.config.toml"; do
+        link=${pair%%=*}
+        target=$kit/workspace/${pair#*=}
+        if [[ $(readlink -f "$link" 2>/dev/null) == "$target" ]]; then
+            ok "$link is skein's"
+        elif [[ -e $link && ! -L $link ]]; then
+            fail "$link is a file of its own; replace it with a link to $target"
+        elif ((fix)); then
+            mkdir -p "$(dirname "$link")" && ln -sfn "$target" "$link" && ok "linked $link"
+        else
+            fail "$link does not link to $target (--fix links it)"
+        fi
+    done
+
+    # Cargo reaches the workspace's repositories on GitHub.
+    if grep -qs 'git\.ekanayaka\.io' "$root"/*/Cargo.toml; then
+        git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null |
+            grep -q ' https://git\.ekanayaka\.io/ai/$' &&
+            ok "git rewrites git.ekanayaka.io to GitHub" ||
+            fail "Cargo.toml names git.ekanayaka.io: git config --global url.git@github.com:forgetic/.insteadOf https://git.ekanayaka.io/ai/"
+    fi
+    grep -qs 'git-fetch-with-cli *= *true' "$HOME/.cargo/config.toml" &&
+        ok "cargo fetches with git" ||
+        fail "cargo must fetch with git: [net] git-fetch-with-cli = true in ~/.cargo/config.toml"
+    if grep -qs kache "$HOME/.cargo/config.toml"; then
+        systemctl --user is-active --quiet kache && ok "kache is running" ||
+            warn "kache is configured but not running"
+    else
+        warn "no kache rustc-wrapper in ~/.cargo/config.toml"
+    fi
+
+    # The queue: the daemon as a user service, and its two lanes.
+    local unit=$HOME/.config/systemd/user/pueued.service
+    if systemctl --user is-active --quiet pueued; then
+        ok "pueued is running as a user service"
+        [[ $(systemctl --user show pueued -p UnitFileState --value) == enabled ]] ||
+            warn "pueued's unit is not enabled: it will not start after a reboot (stop it when the queue is idle, then --fix)"
+    elif ((fix)); then
+        if ! systemctl --user cat pueued >/dev/null 2>&1; then
+            mkdir -p "$(dirname "$unit")"
+            printf '%s\n' '[Unit]' 'Description=pueue daemon' '' '[Service]' \
+                "ExecStart=$(command -v pueued) --verbose" 'Restart=on-failure' '' \
+                '[Install]' 'WantedBy=default.target' >"$unit"
+            systemctl --user daemon-reload
+            systemctl --user enable --quiet pueued
+        fi
+        systemctl --user restart pueued && sleep 1
+        systemctl --user is-active --quiet pueued && ok "pueued started" ||
+            fail "pueued does not start"
+    else
+        fail "pueued is not running as a user service (--fix starts it)"
+    fi
+    [[ $(loginctl show-user "$USER" -p Linger --value 2>/dev/null) == yes ]] ||
+        warn "no lingering: user services stop when $USER logs out (loginctl enable-linger)"
+    local group want have status
+    for group in gate build; do
+        want=1
+        [[ $group == build ]] && want=${HEAVY_BUILD_SLOTS:-2}
+        have=$(pueue group --json 2>/dev/null | jq -r --arg g "$group" '.[$g].parallel_tasks // empty')
+        if [[ -z $have ]] && ((fix)); then
+            pueue group add "$group" >/dev/null
+            pueue parallel "$want" --group "$group" >/dev/null
+            have=$want
+        fi
+        if [[ -z $have ]]; then
+            fail "queue lane $group is missing (--fix adds it)"
+            continue
+        fi
+        if [[ $have != "$want" ]] && ((fix)); then
+            pueue parallel "$want" --group "$group" >/dev/null && have=$want
+        fi
+        [[ $have == "$want" ]] && ok "queue lane $group runs $want at once" ||
+            warn "queue lane $group runs $have at once, not $want (--fix sets it)"
+        status=$(pueue group --json | jq -r --arg g "$group" '.[$g].status')
+        if [[ $status != Running ]] && ((fix)); then
+            pueue start --group "$group" >/dev/null && status=Running
+        fi
+        [[ $status == Running ]] && ok "queue lane $group is running" ||
+            fail "queue lane $group is $status (--fix starts it)"
+    done
+
+    # Room to work.
+    local disk mem
+    disk=$(df -BG --output=avail "$root" | tail -n1 | tr -dc 0-9)
+    mem=$(awk '/MemAvailable/ { print int($2 / 1048576) }' /proc/meminfo)
+    ((disk >= ${PLAN_MIN_DISK_GB:-40})) && ok "disk: ${disk} GB free" ||
+        fail "disk: ${disk} GB free, want ${PLAN_MIN_DISK_GB:-40}"
+    ((mem >= ${PLAN_MIN_MEM_GB:-6})) && ok "memory: ${mem} GB available" ||
+        fail "memory: ${mem} GB available, want ${PLAN_MIN_MEM_GB:-6}"
+
+    # The coordinator's Codex profile.
+    local profile=${CODEX_HOME:-$HOME/.codex}/coordinator.config.toml
+    grep -qs max_threads "$profile" && ok "Codex profile coordinator sets max_threads" ||
+        fail "no Codex profile at $profile setting [agents] max_threads"
+
+}
+
+claim() {
+    locate "${1:?plan directory}"
+    if [[ -f $active && $(sed -n 1p "$active") != "$name" ]]; then
+        die "another run is active: $(sed -n 1p "$active")"
+    fi
+    mkdir -p "$run"/{logs,sessions,wt}
+    [[ -f $run/ledger.tsv ]] || printf '%s\n' "$columns" >"$run/ledger.tsv"
+    [[ -f $run/log.md ]] || printf '# %s on %s\n\n' "$name" "$(hostname)" >"$run/log.md"
+    if [[ -f $active ]]; then
+        echo "$run"
+        return
+    fi
+    printf '%s\n%s\n%s\n%s\n' "$name" "$plan_dir" "$(hostname)" "$(now)" >"$active"
+    printf '## Claimed, %s\n\nThe run of %s started on %s.\n\n' "$(now)" "$plan_dir" "$(hostname)" >>"$run/log.md"
+    touch "$run/heartbeat"
+    echo "$run"
+}
+
+release() {
+    load
+    if [[ -n $(ls -A "$run/wt" 2>/dev/null) ]]; then
+        die "worktrees are left in $run/wt; remove them first"
+    fi
+    printf '## Released, %s\n\n' "$(now)" >>"$run/log.md"
+    rm -f "$active"
+    echo "released $name"
+}
+
+worktree() {
+    load
+    local remove=0
+    [[ ${1:-} == --remove ]] && { remove=1; shift; }
+    local repo=${1:?repository} label=${2:?name}
+    local dir=$root/$repo path=$run/wt/$repo-$label
+    if ((remove)); then
+        git -C "$dir" worktree remove "$path"
+        echo "removed $path"
+        return
+    fi
+    git -C "$dir" fetch --quiet origin main
+    git -C "$dir" worktree add --quiet --detach "$path" origin/main
+    echo "$path"
+}
+
+set_step() {
+    load
+    local step=${1:?step}
+    shift
+    local pairs=() pair key
+    for pair in "$@"; do
+        key=${pair%%=*}
+        case $key in
+        repo | session | slot | branch | commit | title | note) ;;
+        state)
+            case ${pair#*=} in
+            waiting | ready | running | blocked | landed | dropped) ;;
+            *) die "state is one of waiting, ready, running, blocked, landed, dropped" ;;
+            esac
+            ;;
+        *) die "unknown key $key" ;;
+        esac
+        [[ $pair != *$'\t'* ]] || die "no tabs in values"
+        pairs+=("$pair")
+    done
+    local ledger=$run/ledger.tsv
+    exec 8>"$ledger.lock"
+    flock 8
+    STEP=$step AT=$(now) SETS=$(printf '%s\n' "${pairs[@]}") awk -F'\t' -v OFS='\t' '
+        BEGIN {
+            step = ENVIRON["STEP"]; at = ENVIRON["AT"]; sets = ENVIRON["SETS"]
+            n = split("step repo session state slot branch commit updated title note", name, " ")
+            for (i = 1; i <= n; i++) col[name[i]] = i
+            m = split(sets, line, "\n")
+            for (i = 1; i <= m; i++) if (line[i] != "") {
+                k = substr(line[i], 1, index(line[i], "=") - 1)
+                value[col[k]] = substr(line[i], index(line[i], "=") + 1)
+                given[col[k]] = 1
+            }
+        }
+        function apply(   i) {
+            for (i = 1; i <= 10; i++) if (i in given) $i = value[i]
+            $col["updated"] = at
+        }
+        NR > 1 && $1 == step { apply(); found = 1 }
+        { print }
+        END {
+            if (!found) {
+                $0 = step; for (i = 2; i <= 10; i++) $i = ""
+                if (!("4" in given)) { value[4] = "waiting"; given[4] = 1 }
+                apply(); print
+            }
+        }' "$ledger" >"$ledger.new"
+    mv "$ledger.new" "$ledger"
+    flock -u 8
+}
+
+status() {
+    load
+    local ledger=$run/ledger.tsv out=$run/status.md landed_git
+    # Steps landed according to origin/main's trailers, in every repository.
+    landed_git=$(for repo in $repos; do
+        [[ -d $root/$repo/.git ]] || continue
+        git -C "$root/$repo" log origin/main --since="$(sed -n 4p "$active")" \
+            --format='%(trailers:key=Plan,valueonly,separator=)%x09%(trailers:key=Step,valueonly,separator=)' 2>/dev/null |
+            awk -F'\t' -v plan="$plan" '$1 == plan { print $2 }'
+    done)
+    {
+        printf '# %s on %s\n\nRendered %s from ledger.tsv.\n\n' "$name" "$(sed -n 3p "$active")" "$(now)"
+        awk -F'\t' -v git="$landed_git" '
+            BEGIN { n = split(git, g, "\n"); for (i = 1; i <= n; i++) if (g[i] != "") ongit[g[i]] = 1 }
+            NR == 1 { next }
+            {
+                key = $2 " " $3; if (!(key in seen)) { seen[key] = 1; order[++k] = key }
+                count[key, $4]++; total[key]++; all[$4]++; steps++
+                if ($4 == "running") running[++r] = $0
+                if ($4 == "blocked") blocked[++b] = $0
+                if ($4 == "landed" && !($1 in ongit)) missing[++x] = $1
+                if ($4 != "landed" && ($1 in ongit)) extra[++y] = $1 " (" $4 ")"
+            }
+            END {
+                printf "%d of %d steps landed; %d running, %d blocked, %d ready, %d waiting.\n\n",
+                    all["landed"], steps, all["running"], all["blocked"], all["ready"], all["waiting"]
+                print "| Repo | Session | Landed | Running | Blocked | Ready | Waiting | Total |"
+                print "|---|---|---|---|---|---|---|---|"
+                for (i = 1; i <= k; i++) {
+                    split(order[i], p, " ")
+                    printf "| %s | %s | %d | %d | %d | %d | %d | %d |\n", p[1], p[2],
+                        count[order[i], "landed"], count[order[i], "running"],
+                        count[order[i], "blocked"], count[order[i], "ready"],
+                        count[order[i], "waiting"], total[order[i]]
+                }
+                if (r) {
+                    print "\n## Running\n\n| Step | Slot | Branch | Since | Title |\n|---|---|---|---|---|"
+                    for (i = 1; i <= r; i++) { split(running[i], f, "\t"); printf "| %s | %s | %s | %s | %s |\n", f[1], f[5], f[6], f[8], f[9] }
+                }
+                if (b) {
+                    print "\n## Blocked\n\n| Step | Since | Note |\n|---|---|---|"
+                    for (i = 1; i <= b; i++) { split(blocked[i], f, "\t"); printf "| %s | %s | %s |\n", f[1], f[8], f[10] }
+                }
+                if (x || y) {
+                    print "\n## Ledger and origin/main disagree\n"
+                    for (i = 1; i <= x; i++) printf "- %s: landed in the ledger, no commit on origin/main says so\n", missing[i]
+                    for (i = 1; i <= y; i++) printf "- %s: on origin/main, not landed in the ledger\n", extra[i]
+                }
+            }' "$ledger"
+    } >"$out.new"
+    mv "$out.new" "$out"
+    cat "$out"
+}
+
+# Wait until the designer has something to do: a new blocked report, the
+# coordinator gone quiet, a pause or the end. Prints what, and exits.
+watch() {
+    load
+    local seen=$run/.watch quiet=${PLAN_QUIET:-600} sig beat
+    touch "$seen"
+    while :; do
+        if [[ -f $run/done.md ]] && ! grep -qx "done" "$seen"; then
+            echo "done" >>"$seen"
+            echo "done: $run/done.md"
+            return
+        fi
+        if [[ -f $run/paused.md ]]; then
+            sig=paused:$(stat -c %Y "$run/paused.md")
+            if ! grep -qxF "$sig" "$seen"; then
+                echo "$sig" >>"$seen"
+                echo "paused: $run/paused.md"
+                return
+            fi
+        fi
+        if [[ -f $run/blocked.md && ! -f $run/unblock.md ]]; then
+            sig=blocked:$(grep '^## ' "$run/blocked.md" | sha1sum | cut -c1-12)
+            if ! grep -qxF "$sig" "$seen"; then
+                echo "$sig" >>"$seen"
+                echo "blocked: $run/blocked.md"
+                grep '^## ' "$run/blocked.md"
+                return
+            fi
+        fi
+        if [[ -f $run/heartbeat && ! -f $run/paused.md && ! -f $run/done.md ]]; then
+            beat=$(stat -c %Y "$run/heartbeat")
+            sig=quiet:$beat
+            if (($(date +%s) - beat > quiet)) && ! grep -qxF "$sig" "$seen"; then
+                echo "$sig" >>"$seen"
+                echo "quiet: no heartbeat from the coordinator since $(date -u -d "@$beat" +%TZ)"
+                return
+            fi
+        fi
+        sleep "${PLAN_POLL:-30}"
+    done
+}
+
+cmd=${1:-}
+(($#)) && shift
+case $cmd in
+check) check "$@" ;;
+claim) claim "$@" ;;
+release) release ;;
+worktree) worktree "$@" ;;
+set) set_step "$@" ;;
+status) status ;;
+watch) watch ;;
+*) usage ;;
+esac

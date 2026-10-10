@@ -17,10 +17,16 @@
 //! one exchange through io over the real ring, and `tests/memory.rs` io's
 //! worst case against the counting allocator.
 
+pub mod append;
 pub mod census;
+pub mod cuts;
+pub mod files;
 pub mod ledger;
 pub mod output;
 pub mod owner;
+pub mod private;
+pub mod processes;
 pub mod referee;
 pub mod scenarios;
+pub mod usage;
 pub mod world;

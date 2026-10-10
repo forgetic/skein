@@ -1,11 +1,12 @@
 # HTTP
 
-Provisional, 2026-10-04. The design of `skein-http`: the protocol
-machines for HTTP/1.1, client and server, and for server-sent events,
-reader and writer. They are step machines of a connection's stack
-(programming-model.md, 4): each depends on lib only, and meets the
-stream below it and the user above it through entry points of the
-model's shape. All four are built (section 9).
+Provisional, 2026-10-04; revised 2026-10-09. The design of
+`skein-http`: the protocol machines for HTTP/1.1, client and server, and
+for server-sent events, reader and writer. They are step machines of a
+connection's stack (programming-model.md, 4): each depends on lib only,
+and meets the stream below it and the user above it through entry points
+of the model's shape. All four are built, the reader's data face aside
+(section 9).
 
 ## 1. In one page
 
@@ -31,9 +32,10 @@ model's shape. All four are built (section 9).
   held.
 - **Server-sent events** are a machine over a body stream each way. The
   reader reads lines, fields, and an event at each blank line, each
-  under a maximum; an event's data goes up whole, and `sse::Data` reads
-  it to a JSON tokenizer. The writer frames each event sized and sends
-  it within the room it is granted.
+  under a maximum; an event's data goes up as a stream while its lines
+  are read, so a JSON tokenizer reads it as it arrives, and the reader
+  holds a piece of a line, never an event. The writer frames each event
+  sized and sends it within the room it is granted.
 - **Both sides of each machine** are skein's (client and server, reader
   and writer), and each is tested against transcripts of real peers'
   formats, generated messages, and the other side: a protocol world
@@ -51,7 +53,7 @@ domain
   ▲  typed calls
 skein-llm's provider decoder (or the service's own decoder)
   ▲  tokens
-json                  a tokenizer for each event's data, through sse::Data
+json                  the selective collector on each event's data stream
   ▲  events
 sse                   skein_http::sse
   ▲  body stream
@@ -102,10 +104,10 @@ pub fn down(server: &mut Server, env: &Env<Limits>, rq: Request,
 Whoever stacks a machine checks at startup that its largest demand fits
 the side below: `client::largest_read` and `client::largest_room`, or
 `server::largest_read` and `server::largest_room`, against the stream's
-intake and output caps; `sse::largest_demand` and the JSON tokenizer's
-against the client's `Limits::read`; the tokenizer's against the
-server's `Limits::read`, and `writer::largest_room` against its
-`Limits::send`. The method and the version a start line names
+intake and output caps; `sse::largest_demand` against the client's
+`Limits::read`, and the JSON tokenizer's against the reader's
+`Limits::chunk`; the tokenizer's against the server's `Limits::read`,
+and `writer::largest_room` against its `Limits::send`. The method and the version a start line names
 (`Method`, `Version`) and a field (`Header`) are the crate's, both sides
 the same.
 
@@ -344,36 +346,71 @@ on a response body, and the writer (4.3), which a server stacks on its
 reply. The reader:
 
 ```rust
-pub enum Request { Next, Close }           // from the side above
+pub enum Request {                         // from the side above
+    Next,                                  // the next event: Opened, Ended or Failed answers it
+    Data(stream::Down),                    // the open event's data, read as a stream
+    Close,                                 // Closed answers it
+}
 
 pub enum Event {                           // to the side above
-    Message(Message),                      // for a Next
-    Ended,                                 // for a Next: the stream ended; an event it cut short is dropped
+    Opened,                                // for a Next: an event's first data line has begun
+    Data(stream::Up),                      // Bytes; End at the event's blank line; Failed if it is cut short
+    Dispatched(Dispatch),                  // with the data's End: the event's type and the last event ID
+    Ended,                                 // for a Next: the stream ended between events
     Failed(Error),                         // for a Next: a limit passed, or the stream failed
     Closed,                                // for a Close: terminal
 }
 
-pub struct Message { name: Box<[u8]>, data: Box<[u8]>, id: Box<[u8]> }
+pub struct Dispatch { name: Box<[u8]>, id: Box<[u8]> }
 pub enum Error { LineTooLong, EventTooLong, FieldTooLong, Stream(Fault) }
 ```
 
-- **`Next` demands one event.** Exactly one event answers it: the next
-  `Message`, or the stream's outcome, `Ended` or `Failed`, after which
-  nothing follows but `Closed`. One `Next` at a time, and none after the
-  outcome or the close: the side above's bug otherwise, asserted.
+- **`Next` asks for the next event.** Exactly one event answers it:
+  `Opened`, once an event's first `data` line begins; or the stream's
+  outcome, `Ended` or `Failed`, after which nothing follows but `Closed`.
+  An event with no data line is never opened, as the standard dispatches
+  nothing for it, though its `id` and `retry` take effect. One `Next` at a
+  time, none while an event is open, and none after the outcome or the
+  close: the side above's bug otherwise, asserted.
+- **The open event's data is a stream** (`Data`), a `lib::stream` face of
+  which the reader is the side below (lib.md, 7), as the HTTP client is a
+  body's (3.3). Its bytes are the values of the event's `data` lines,
+  joined by LF as the standard joins them, delivered as they are read.
+  The side above demands fills and scans; the reader meets each from the
+  line pieces it reads below, holding what a demand has not taken yet in
+  an intake of `Limits::chunk`, and reads below only what a demand still
+  needs. A JSON tokenizer, or skein-json's selective collector, stacks on
+  it as on any stream (json.md, 5.1).
+- **The data ends at the event's blank line.** `End` answers a demand
+  that what the data holds can no longer meet, and `Dispatched` follows
+  it in the same step, with the event's type (`message` when none was
+  set) and the last event ID. The type goes up only then, as the standard
+  lets a type line follow the data lines.
+- **An event cut short is never dispatched.** When the stream ends or
+  fails before an open event's blank line, its data stream hears
+  `Failed`, with the stream's own fault or `Other` for an end, and the
+  side above drops what it read of it, as the standard drops the event.
+  The outcome answers the next `Next`. A limit passed while an event is
+  open fails its data stream with `Invalid`, and the error answers the
+  next `Next`.
+- **A withdrawal** of the data's demand means the side above reads no
+  more of this event (lib.md, 7): the reader reads the rest of it to its
+  blank line, counted and dropped, then goes on as at its end,
+  `Dispatched` included.
 - **`Close` ends the reader in any state,** as the JSON tokenizer's does
   (json.md, 3.1): it withdraws what it demanded below, drops a `Next`
-  not yet answered, and answers `Closed`.
-- **An event's data goes up whole,** in one box, once its blank line is
-  read. A machine stacked above reads it through **`sse::Data`**, a side
-  below over one box: each demand answered at once by exactly what it
-  reads, or by `End` when what is left cannot meet it, as lib's intake
-  would. A tokenizer is made for each event's data, as temper's LLM client
-  does (its llm.md, 3).
-- **What it waits for**, `waiting()`: `Next`, `Bytes`, `Close`,
-  `Nothing`. Every line is progress, a comment sent to keep the stream
-  alive among them. The reconnection time and the last event ID are
-  `retry()` and `last_event_id()`, for a client that reconnects.
+  not yet answered and an open event's data without a word, and answers
+  `Closed`.
+- **`sse::Data`,** a side below over one box, remains for data already
+  whole, such as a recorded event: each demand answered at once by
+  exactly what it reads, or by `End` when what is left cannot meet it, as
+  lib's intake would.
+- **What it waits for**, `waiting()`: `Next`, `Bytes`, `Above` (an open
+  event's data waits for a demand), `Close`, `Nothing`. Every line is
+  progress, a comment sent to keep the stream alive among them, and so is
+  each piece of a data line delivered. The reconnection time and the last
+  event ID are `retry()` and `last_event_id()`, for a client that
+  reconnects.
 
 ### 4.1 Lines, fields and events
 
@@ -386,9 +423,10 @@ pub enum Error { LineTooLong, EventTooLong, FieldTooLong, Stream(Fault) }
   a stream shorter than a scan as it comes. An LF-only or a CR-only
   stream is one delivery a line; a CRLF is two, the line to its CR and
   then the LF alone, which the reader skips as the CR's pair.
-- **An event ends its delivery,** as the line end that dispatches it is
-  a delivery's last byte, so the reader keeps nothing of a delivery past
-  the step that reads it. An end or a failure that comes while the reader
+- **A delivery never crosses a line's end,** as each line scan stops at
+  one, so the reader keeps nothing of a delivery past the step that reads
+  it but a data line's piece, which waits in the data intake for the side
+  above's demands. An end or a failure that comes while the reader
   demands nothing answers the next `Next`; after the end, a failure says
   only that the stream can no longer send, and what was read stands.
 - **At the end of the stream, only an incomplete last line goes unread,**
@@ -397,17 +435,20 @@ pub enum Error { LineTooLong, EventTooLong, FieldTooLong, Stream(Fault) }
   are read, so one that passes a limit fails if a whole chunk past the
   limit came, and otherwise ends the stream.
 - **Fields** (WHATWG HTML, 9.2.6), each value going where it belongs as
-  its bytes come: `data` into the event's data, an LF after each line;
-  `event` into its type; `id` into a value held until its line ends, then
+  its bytes come: `data` onto the event's data stream, an LF before each
+  data line but the first; `event` into its type; `id` into a value held
+  until its line ends, then
   into the last event ID buffer unless it holds a NUL; `retry` into the
   reconnection time if its value is ASCII digits, and no more than a
   `u64`. A line that begins with a colon is a comment; one whose name is
   no field's is ignored; a name with no colon is the field with an empty
   value; one space after the colon is dropped.
 - **Dispatch at each blank line:** the last event ID is set from its
-  buffer; with no data, nothing is dispatched; otherwise the data, its
-  last LF dropped, goes up with its type (`message` when none was set)
-  and the last event ID.
+  buffer; with no data line, nothing is dispatched; otherwise the data
+  stream ends, and the dispatch goes up with its type (`message` when
+  none was set) and the last event ID. No LF trails the data: one goes
+  before each data line but the first, which is what the standard's
+  dropping of the last LF leaves.
 - **One leading byte order mark** is skipped, as UTF-8 decoding does.
   Nothing else is decoded: the data goes to a decoder that checks UTF-8
   (JSON does), and a type or an id is compared as bytes.
@@ -416,11 +457,12 @@ pub enum Error { LineTooLong, EventTooLong, FieldTooLong, Stream(Fault) }
 
 ```rust
 pub struct Limits {
-    pub line: u32,    // the longest line before its ending: past it, LineTooLong
+    pub line: u32,    // the longest line before its ending, counted as read: past it, LineTooLong
     pub event: u32,   // the bytes read from the end of the last event to the blank line of this one,
-                      // endings included: past it, EventTooLong
+                      // endings included, counted as read: past it, EventTooLong
     pub field: u32,   // the longest event type or id: past it, FieldTooLong
-    pub chunk: u32,   // the most demanded at once: each line scan's maximum; at least one
+    pub chunk: u32,   // the most demanded at once: each line scan's maximum, and the data intake's cap;
+                      // at least one
 }
 ```
 
@@ -428,15 +470,24 @@ pub struct Limits {
   and an unknown field's too, so a stream that never ends an event fails
   whatever it sends; each blank line starts over, so a stream kept alive
   by comment blocks runs on.
-- **`worst_case(&limits)`** is the event's data (`event`), its type, an
-  `id` value, the last event ID buffer and the last event ID (`field`
-  each), all allocated with the reader, and the delivery it reads
-  (`chunk`), dropped by the step that reads it. An event's boxes are
-  handed out when it goes up. `None` for a chunk of zero.
-- **`largest_demand`** is `chunk`.
-- **`UP_MAX_OUT` and `DOWN_MAX_OUT`** are one event and one request each:
-  only a `Close` while reading emits both, `Closed` and the demand
-  withdrawn.
+- **`line` and `event` bound what a peer sends, not what the reader
+  holds.** A data line's bytes pass through the data intake a piece at a
+  time, so an event of any size within `event` costs the reader no more
+  than one of a few bytes. The LLM client sets both from its skip cap
+  (llm.md, section 4.2).
+- **`worst_case(&limits)`** is the event's type, an `id` value, the last
+  event ID buffer and the last event ID (`field` each), and the data
+  intake (`chunk`), all allocated with the reader, and the delivery it
+  reads (`chunk`), dropped by the step that reads it. A dispatch's boxes
+  are handed out when it goes up, and so is each piece of data. `None`
+  for a chunk of zero.
+- **`largest_demand`** is `chunk`, and so is the largest demand the data
+  face meets: whoever stacks a tokenizer on it checks the tokenizer's
+  largest demand against it at startup.
+- **`UP_MAX_OUT`** is two events and one request: an open event's data
+  ending and its dispatch; below, the next demand. **`DOWN_MAX_OUT`** is
+  one event and one request: only a `Close` while reading emits both,
+  `Closed` and the demand withdrawn.
 
 ### 4.3 The writer
 
@@ -1088,8 +1139,22 @@ pub struct Limits {
   asserting that a writer and an upload were held back, an upload
   stopped, a writer heard its stream fail, a stream reset, a connection
   carried several calls, an event's id or reconnection time was checked,
-  and each outcome at each end fell. It stands in for the fuzz targets,
-  which wait for a nightly toolchain.
+  and each outcome at each end fell. It stands in for the fuzz targets, which wait for a nightly
+  toolchain.
+- **The reader's data face** (section 4), joins each tier
+  above. Step tests: the data under fills and scans of every shape, data
+  lines joined across a CRLF split and a CR alone, comments and other
+  fields between data lines, a type line after the data, an event with no
+  data line, an event cut short by the end and by a failure, a limit
+  passed mid-event, a withdrawal mid-event, and a close while an event is
+  open. The reader's world holds each event's data, joined from its
+  stream, its type and its ID to the reference's, and an event cut short
+  to a data stream that failed where the reference drops the event. The
+  memory test adds an event of a megabyte under a chunk of a few bytes,
+  whose peak is the reader's worst case, the same as for an event of a
+  few bytes. The stacked machines and the protocol worlds read each
+  event's data through the face, the JSON reference judging what the
+  tokenizer, or the collector, makes of it.
 
 ## 7. Decisions
 
@@ -1122,14 +1187,16 @@ pub struct Limits {
   guessing.
 - **The head's budget covers interim heads,** rather than a separate
   limit on how many there may be.
-- **An event's data goes up whole.** The standard dispatches an event
-  only at its blank line, and its type and id may come after its data
-  lines, so a decoder learns what the data is (or that it is not JSON at
-  all: `[DONE]`) only then; an event the stream cuts short is dropped,
-  which data already streamed up could not be. The reader then holds an
-  event under `Limits::event`, which temper sizes for ChatGPT's large
-  events (its llm.md, 3 and 13). Streaming an event's data to the
-  tokenizer would hold a line instead, at the price of these.
+- **An event's data goes up as a stream.** Held whole, an event cost
+  every connection its provider's largest event, and an event that
+  echoes its request grows with the conversation. Streamed, the reader
+  holds a piece of a line, and a decoder that reads selectively holds only
+  what it keeps (json.md, 5.1). The standard's reasons for holding an
+  event are kept another way: its type, which may follow its data, goes
+  up at dispatch, and an event cut short fails its data stream, so the
+  side above drops what it read, as the standard drops the event. A
+  decoder that must tell JSON from a sentinel such as `[DONE]` reads the
+  data's first byte before it stacks a tokenizer.
 - **lib's line scan, for the reader's lines.** A line ends at LF, CRLF
   or CR alone, and a scan has one delimiter. Scanning to LF always would
   read a stream of CR alone only when a scan filled, and lose its last

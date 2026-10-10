@@ -770,7 +770,8 @@ pub fn escapes<B: Backend>(backend: &mut B) -> Escapes {
             }
             (
                 Ok(fd),
-                OpenHow::Directory
+                OpenHow::PathNoFollow
+                | OpenHow::Directory
                 | OpenHow::DirectoryNoFollow
                 | OpenHow::Create { .. }
                 | OpenHow::CreateNoFollow { .. },
@@ -976,5 +977,258 @@ fn open_patiently<B: Backend>(run: &mut Run<'_, B>, process: B::Process, root: F
             Err(Error::Cancelled) => {}
             other => unexpected("an Open of a file, or one cancelled", &other),
         }
+    }
+}
+
+/// Appends from two startup descriptors, their counts, preserved bytes and startup refusals.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Appending {
+    pub counts: Shortness,
+    pub existing: Vec<u8>,
+    pub created: Vec<u8>,
+    pub modes: [u32; 2],
+    pub refused: [Error; 5],
+    pub positioned: Vec<u8>,
+}
+
+/// Each append lands after what either descriptor previously appended, including existing bytes.
+#[must_use]
+pub fn appending<B: Backend>(backend: &mut B) -> Appending {
+    let mut run = Run::new(backend);
+    let process = run.process();
+    let root = run.root(
+        process,
+        &[
+            Item::file(b"f", b"prefix:").mode(0o604),
+            Item::directory(b"d"),
+            Item::fifo(b"pipe"),
+            Item::link(b"outside", b"../outside/secret"),
+            Item::link(b"inside", b"f"),
+        ],
+    );
+    let a = run.append(process, root, b"inside", 0o600).expect("existing file through a contained link");
+    let b = run.append(process, root, b"f", 0o400).expect("another append descriptor");
+    let mut counts = run.append_all(process, a, b"first").expect("first piece");
+    counts = counts.and(run.append_all(process, b, b"/between/").expect("another descriptor's piece"));
+    counts = counts.and(run.append_all(process, a, b"last").expect("next piece follows both"));
+    let existing_mode = run.stat(process, a).expect("existing file stated").mode;
+    run.close(process, a);
+    run.close(process, b);
+    let existing = run.contents(process, root, b"f").expect("existing bytes read back");
+    let new = run.append(process, root, b"new", 0o400).expect("file made at startup");
+    counts = counts.and(run.append_all(process, new, b"created").expect("created piece"));
+    let new_mode = run.stat(process, new).expect("new file stated").mode;
+    run.close(process, new);
+    let created = run.contents(process, root, b"new").expect("created bytes read back");
+    let refused = [
+        run.append(process, root, b"d", 0o600).expect_err("startup open must be refused"),
+        run.append(process, root, b"pipe", 0o600).expect_err("startup open must be refused"),
+        run.append(process, root, b"outside", 0o600).expect_err("startup open must be refused"),
+        run.append(process, root, b"", 0o600).expect_err("startup open must be refused"),
+        run.append(process, root, b"invalid-mode", 0o10000).expect_err("startup open must be refused"),
+    ];
+    let plain = run.open(process, root, b"position", OpenHow::Create { mode: None }).expect("plain writable file");
+    run.write_all(process, plain, 0, b"000000").expect("offset write does not move descriptor position");
+    run.append_all(process, plain, b"ab").expect("descriptor starts at zero");
+    run.append_all(process, plain, b"cd").expect("descriptor position advances");
+    run.close(process, plain);
+    let positioned = run.contents(process, root, b"position").expect("positioned bytes read back");
+    run.close(process, root);
+    run.finish();
+    Appending { counts, existing, created, modes: [existing_mode, new_mode], refused, positioned }
+}
+
+impl Check for Appending {
+    fn check(&self) {
+        rule(self.existing == b"prefix:first/between/last", "appends preserve the prefix and each other's bytes", self);
+        rule(self.created == b"created", "a startup append creates a missing file", self);
+        rule(self.modes == [0o604, 0o400], "existing mode stays and creation uses the configured mode", self);
+        rule(
+            self.refused
+                == [
+                    Error::IsADirectory,
+                    Error::NotAFile,
+                    Error::Escape,
+                    Error::InvalidArgument,
+                    Error::InvalidArgument,
+                ],
+            "startup append refuses directories, special files, escapes and invalid configuration",
+            self,
+        );
+        rule(self.positioned == b"abcd00", "Append on a plain writable file advances its position", self);
+    }
+}
+
+/// A cancelled append either lands once or leaves the original bytes unchanged.
+#[must_use]
+pub fn cancel_append<B: Backend>(backend: &mut B) -> Cancelling {
+    let mut run = Run::new(backend);
+    let process = run.process();
+    let root = run.root(process, &[Item::file(b"f", b"prefix:")]);
+    let file = run.append(process, root, b"f", 0o600).expect("startup append");
+    let bytes = b"once";
+    let append = run.start(process, Op::append(file, Box::from(&bytes[..]), 0).expect("bytes to append"));
+    let (cancels, target) = run.cancel(process, append);
+    run.close(process, file);
+    let expected = match target.result {
+        Ok(Done::Count(n)) => [
+            b"prefix:".as_slice(),
+            bytes.get(..usize::try_from(n).expect("a count fits")).expect("a count within its bytes"),
+        ]
+        .concat(),
+        Err(Error::Cancelled) => b"prefix:".to_vec(),
+        _ => unexpected("a cancelled append counts or is stopped", &target.result),
+    };
+    let reader = open_patiently(&mut run, process, root);
+    let mut read = Vec::new();
+    loop {
+        let at = u64::try_from(read.len()).expect("file length fits");
+        let token = run.start(process, Op::read(reader, Box::from([0; 16]), at).expect("room to read"));
+        let complete = match run.within(process, token, BRIEFLY) {
+            Some(complete) => complete,
+            None => run.cancel(process, token).1,
+        };
+        match (complete.kind, complete.result) {
+            (_, Ok(Done::Count(0))) => break,
+            (Op::Read { buf, .. }, Ok(Done::Count(n))) => {
+                read.extend_from_slice(
+                    buf.get(..usize::try_from(n).expect("count fits")).expect("a count within its buffer"),
+                );
+            }
+            (_, Err(Error::Cancelled)) => {}
+            (_, other) => unexpected("a Read counts or is cancelled", &other),
+        }
+    }
+    run.close(process, reader);
+    let taken_once = read == expected;
+    run.close(process, root);
+    run.finish();
+    Cancelling {
+        of: Target::Append,
+        cancels,
+        target: target.result,
+        could_complete: true,
+        decided_first: false,
+        taken_once,
+    }
+}
+
+/// File owner and hard-link counts observed through open descriptors.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FileMetadata {
+    pub root: Stat,
+    pub files: [Stat; 5],
+    pub after_one_removal: Stat,
+    pub after_last_removal: Stat,
+    pub retained_bytes: Result<Vec<u8>, Error>,
+}
+
+/// The same inode has two names, then one, then none while still open.
+#[must_use]
+pub fn file_metadata<B: Backend>(backend: &mut B) -> FileMetadata {
+    let tree = [
+        Item::file(b"original", b"shared"),
+        Item::hard_link(b"alias", b"original"),
+        Item::file(b"plain", b"one"),
+        Item::directory(b"d"),
+        Item::file(b"d/inner", b"inside"),
+    ];
+    let mut run = Run::new(backend);
+    let process = run.process();
+    let root = run.root(process, &tree);
+    let root_stat = run.stat(process, root).expect("the root's metadata");
+    let names: [&[u8]; 4] = [b"original", b"alias", b"plain", b"d/inner"];
+    let opened = names.map(|path| run.open(process, root, path, OpenHow::Read).expect("a laid file"));
+    let made = run.open(process, root, b"new", OpenHow::Create { mode: None }).expect("a created file");
+    let files = [opened[0], opened[1], opened[2], opened[3], made]
+        .map(|file| run.stat(process, file).expect("open file metadata"));
+    assert_eq!(run.rename(process, (root, b"original"), (root, b"alias")), NOTHING, "same inode rename is a no-op");
+    assert_eq!(run.remove(process, root, b"original", false), NOTHING, "one hard-link name removed");
+    let after_one_removal = run.stat(process, opened[0]).expect("still named through the alias");
+    assert_eq!(run.remove(process, root, b"alias", false), NOTHING, "the final hard-link name removed");
+    let after_last_removal = run.stat(process, opened[1]).expect("still open without a name");
+    let retained_bytes = run.read_all(process, opened[0]).0;
+    for file in opened.into_iter().chain([made]) {
+        run.close(process, file);
+    }
+    run.close(process, root);
+    run.finish();
+    FileMetadata { root: root_stat, files, after_one_removal, after_last_removal, retained_bytes }
+}
+
+impl Check for FileMetadata {
+    fn check(&self) {
+        for (stat, links) in self.files.iter().zip([2, 2, 1, 1, 1]) {
+            assert_eq!(stat.kind, Kind::File, "metadata belongs to regular files");
+            assert_eq!(stat.owner, self.root.owner, "all scenario files have their directory's owner");
+            assert_eq!(stat.links, links, "hard-linked files have two names, all other files one");
+        }
+        assert_eq!(self.files[0], self.files[1], "two names report the same inode metadata");
+        assert_eq!(self.after_one_removal.links, 1, "the alias is the sole remaining name");
+        assert_eq!(self.after_last_removal.links, 0, "a descriptor keeps an unlinked file open");
+        assert_eq!(self.after_last_removal.owner, self.root.owner, "unlink preserves owner");
+        assert_eq!(self.retained_bytes, Ok(b"shared".to_vec()), "unlinked open files retain their bytes");
+    }
+}
+
+/// Path-only metadata from unreadable entries, a final link, and a special file (kernel.md, 6.1).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PathMetadata {
+    pub denied: [Result<Fd, Error>; 2],
+    pub denial_expected: bool,
+    pub root_owner: u32,
+    pub stats: [Stat; 4],
+    pub parent_link: Result<Fd, Error>,
+}
+
+/// A path-only descriptor needs parent search permission and no permission on its entry.
+#[must_use]
+pub fn path_metadata<B: Backend>(backend: &mut B, denial_expected: bool) -> PathMetadata {
+    let tree = [
+        Item::file(b"file", b"x").mode(0),
+        Item::directory(b"dir").mode(0),
+        Item::link(b"link", b"file"),
+        Item::fifo(b"fifo"),
+        Item::directory(b"parent"),
+        Item::file(b"parent/child", b"x"),
+        Item::link(b"parent-link", b"parent"),
+    ];
+    let mut run = Run::new(backend);
+    let process = run.process();
+    let root = run.root(process, &tree);
+    let root_owner = run.stat(process, root).expect("scenario owner").owner;
+    let denied = [b"file".as_slice(), b"dir".as_slice()].map(|path| {
+        let result = run.open(process, root, path, OpenHow::ReadNoFollow);
+        if let Ok(fd) = result {
+            run.close(process, fd);
+        }
+        result
+    });
+    let stats = [b"file".as_slice(), b"dir".as_slice(), b"link".as_slice(), b"fifo".as_slice()].map(|path| {
+        let fd = run.open(process, root, path, OpenHow::PathNoFollow).expect("path-only metadata is readable");
+        let stat = run.stat(process, fd).expect("stat a path-only descriptor");
+        run.close(process, fd);
+        stat
+    });
+    let parent_link = run.open(process, root, b"parent-link/child", OpenHow::PathNoFollow);
+    run.close(process, root);
+    run.finish();
+    PathMetadata { denied, denial_expected, root_owner, stats, parent_link }
+}
+
+impl Check for PathMetadata {
+    fn check(&self) {
+        if self.denial_expected {
+            assert_eq!(self.denied, [Err(Error::Permission); 2], "mode 000 refuses a readable open");
+        }
+        for (stat, kind) in self.stats.iter().zip([Kind::File, Kind::Directory, Kind::Symlink, Kind::Other]) {
+            assert_eq!(stat.kind, kind, "path-only Stat reports the entry itself");
+            assert_eq!(stat.owner, self.root_owner, "laid entries belong to the scenario user");
+        }
+        assert_eq!(self.stats[0].mode, 0, "the unreadable file keeps mode 000");
+        assert_eq!(self.stats[1].mode, 0, "the unreadable directory keeps mode 000");
+        assert_eq!(self.stats[0].size, 1, "stat needs no content read");
+        assert_eq!(self.stats[2].size, 4, "stat reports the link's target length");
+        assert_eq!(self.parent_link, Err(Error::TooManyLinks), "parent links are never followed");
     }
 }

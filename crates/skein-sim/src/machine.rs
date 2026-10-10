@@ -74,6 +74,8 @@ pub enum Ask {
     Read { file: Handle, at: u64, len: u32 },
     /// `bytes`, every one, written at `at`: [`Reply::Done`].
     Write { file: Handle, at: u64, bytes: Box<[u8]> },
+    /// `bytes` written whole at the file's end when this call is delivered: [`Reply::Done`].
+    Append { file: Handle, bytes: Box<[u8]> },
     /// [`Reply::Done`].
     Sync { file: Handle },
     /// [`Reply::Stat`].
@@ -83,7 +85,7 @@ pub enum Ask {
     /// [`Reply::Done`].
     Remove { dir: Handle, name: Box<[u8]>, directory: bool },
     /// [`Reply::Done`].
-    MakeDirectory { dir: Handle, name: Box<[u8]> },
+    MakeDirectory { dir: Handle, name: Box<[u8]>, mode: u32 },
     /// The next entries of the directory, from where the last `List` of
     /// this handle stopped: at most `most`, their names `room` bytes
     /// together at most, and at least one while any is left. `room` is at
@@ -121,6 +123,8 @@ pub enum Program {
     Exit(u8),
     /// Stay alive until signalled.
     Never,
+    /// Start a child that holds the output pipes in the leader's group; optionally exit the leader.
+    Fork { exit_leader: bool },
     /// Run a service hosted by the world in a process bound to these pipes.
     Service,
 }

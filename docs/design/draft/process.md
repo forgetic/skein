@@ -56,6 +56,21 @@ its tools and checks, and its hosts for the agent processes they spawn.
   - pidfds.
 
   A service checks these at startup and refuses to start without them.
+- **Groundwork already in skein.** Trees start from what io and the kernel
+  boundary already have, rather than beside it:
+  - children are pidfds from their spawn;
+  - `Signal` names its target, the child or its group (kernel.md, 6.2),
+    and a tree's stopping steps extend that target;
+  - a `Wait` observes an exit apart from the reap, and a child's
+    `Closed` follows everything it held;
+  - the process's `Usage` (kernel.md, 6.3; io.md, 6.1);
+  - the simulator's groups, zombies and reparenting (simulator.md, 3.2).
+
+  The end-to-end kit already spawns a binary into a cgroup, waits for it
+  to empty, kills it and reads its counts (examples.md, 6). That code is
+  the prototype of io's trees. It moves into io when trees are designed
+  here, and the kit then takes io's trees, so skein keeps one cgroup
+  implementation.
 
 ## 3. Spawning a tree
 

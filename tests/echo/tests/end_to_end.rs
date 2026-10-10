@@ -33,6 +33,10 @@ impl Process {
 }
 
 impl Host for Process {
+    fn drain(&mut self) {
+        self.host_mut().drain();
+    }
+
     fn iterate(&mut self, now: Time, wall: Wall) {
         self.host_mut().iterate(now, wall);
     }
@@ -48,6 +52,11 @@ impl Host for Process {
     fn next_deadline(&self) -> Option<Time> {
         self.host().next_deadline()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.host().next_policy_deadline()
+    }
+
     fn is_empty(&self) -> bool {
         self.host().is_empty()
     }
@@ -59,10 +68,18 @@ impl Host for Process {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Clients {
+    Waiting,
+    Answered,
+    Done,
+}
+
 struct Judge {
     listening: Option<Addr>,
     told: bool,
-    clients_done: bool,
+    clients: Clients,
+    idle: bool,
     signalled: bool,
     exit: Option<Exit>,
     now: Time,
@@ -83,7 +100,7 @@ impl Referee<Process> for Judge {
             }
             self.told = true;
         }
-        if self.clients_done && !self.signalled {
+        if self.clients != Clients::Waiting && !self.signalled {
             let Process::Echo(binary) = procs.first_mut().expect("the binary observer") else {
                 panic!("the binary observer")
             };
@@ -114,7 +131,8 @@ impl Referee<Process> for Judge {
             assert!(self.signalled, "the echo stays alive until the referee's termination signal");
             self.exit = Some(exit);
         }
-        self.clients_done = true;
+        let mut done = true;
+        let mut ready = true;
         for process in procs.get(1..).expect("the two fake clients") {
             let Process::Client(client) = process else { panic!("a fake client") };
             let client = client.as_client().expect("a fake client");
@@ -123,12 +141,20 @@ impl Referee<Process> for Judge {
             if seen.done.is_some() {
                 assert!(seen.complete, "every line was answered before the fake ended");
             }
-            self.clients_done &= seen.done.is_some();
+            done &= seen.done.is_some();
+            ready &= if self.idle { seen.complete } else { seen.done.is_some() };
         }
+        self.clients = if done {
+            Clients::Done
+        } else if ready {
+            Clients::Answered
+        } else {
+            Clients::Waiting
+        };
     }
 
     fn next_deadline(&self) -> Option<Time> {
-        if (!self.told && self.listening.is_some()) || (self.clients_done && !self.signalled) {
+        if (!self.told && self.listening.is_some()) || (self.clients != Clients::Waiting && !self.signalled) {
             Some(self.now)
         } else if self.passed() {
             None
@@ -142,7 +168,7 @@ impl Referee<Process> for Judge {
             format!(
                 "echo end to end did not settle: listening={}, clients_done={}, signalled={}, exited={}",
                 self.listening.is_some(),
-                self.clients_done,
+                self.clients == Clients::Done,
                 self.signalled,
                 self.exit.is_some()
             )
@@ -150,12 +176,21 @@ impl Referee<Process> for Judge {
     }
 
     fn passed(&self) -> bool {
-        self.clients_done && self.signalled && self.exit.is_some()
+        self.clients == Clients::Done && self.signalled && self.exit.is_some()
     }
 }
 
 #[test]
 fn the_shipped_echo_answers_two_loopback_clients_and_terminates_successfully() {
+    run(false);
+}
+
+#[test]
+fn sigterm_with_idle_clients_exits_at_once_with_success() {
+    run(true);
+}
+
+fn run(idle: bool) {
     let clock = Clock::new();
     let start = clock.now().now;
     let binary = Binary::start(
@@ -171,12 +206,14 @@ fn the_shipped_echo_answers_two_loopback_clients_and_terminates_successfully() {
     .unwrap_or_else(|error| match error {
         StartError::Ring(why) => panic!("io_uring is not usable here, so the echo end to end cannot run: {why}"),
         StartError::Directory(errno) => panic!("echo working directory failed: errno {errno}"),
+        StartError::Tree(error) => panic!("tree startup failed: {error:?}"),
         StartError::Child(error) => panic!("starting the shipped echo failed: {error:?}"),
     });
     let mut world = real::World::new(Judge {
         listening: None,
         told: false,
-        clients_done: false,
+        clients: Clients::Waiting,
+        idle,
         signalled: false,
         exit: None,
         now: start,
@@ -184,13 +221,19 @@ fn the_shipped_echo_answers_two_loopback_clients_and_terminates_successfully() {
     });
     world.spawn_with_fds(binary.descriptors(), || Process::Echo(binary));
     for seed in [7, 11] {
-        let plans = [plan(start, seed)];
+        let plans = [skein_echo_client::Plan {
+            then: if idle { skein_echo_client::Then::Linger } else { skein_echo_client::Then::Finish },
+            ..plan(start, seed)
+        }];
         world.spawn(|| Process::Client(Proc::client(client_limits(1), &plans)));
     }
     let outcome = world.run(&clock, Duration::from_secs(2));
     let Process::Echo(binary) = outcome.procs.first().expect("the binary observer") else {
         panic!("the shipped binary observer")
     };
-    assert_eq!(binary.exit_status(), Some(Exit::Code(0)));
-    assert!(outcome.end.saturating_since(outcome.start) < Duration::from_secs(1));
+    assert_eq!(binary.exit_status(), Some(Exit::Code(0)), "the signalled echo exits successfully");
+    assert!(
+        outcome.end.saturating_since(outcome.start) < Duration::from_secs(1),
+        "shutdown settles well before the shipped idle time"
+    );
 }

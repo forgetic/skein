@@ -1,8 +1,9 @@
 # Framed channels
 
-Provisional, 2026-10-06. `skein-channel` is a framed channel between two
-peers over a stream, for the application protocols that services built on
-skein design for themselves. An application gives it two things:
+Provisional, 2026-10-06, revised 2026-10-09. `skein-channel` is a framed
+channel between two peers over a stream, for the application protocols
+that services built on skein design for themselves. An application gives
+it two things:
 
 - a schema, as data: its magic, its versions and its kinds;
 - codecs for its bodies (codec.md).
@@ -67,13 +68,15 @@ offset  size  field
 8       ...   body
 ```
 
-- **The header is frozen.** Every version, of every application, reads it
-  the same way.
+- **The header is the channel's own,** the same in every version of every
+  application, so that a peer of another version is read far enough to be
+  refused (5.2). It changes only with skein's channel, for every
+  application at once.
 - **Flags must be zero** unless a feature agreed at the opening (5.1) gives
   them a meaning.
 - **Kinds come in two ranges:**
-  - **`0x0001`–`0x00ff` are the channel's own** (5.1). The same for every
-    application, they never change meaning.
+  - **`0x0001`–`0x00ff` are the channel's own** (5.1), with the same
+    meaning in every application and every version.
   - **`0x0100`–`0xffff` are the application's.** Each kind belongs to one
     direction: from the initiator, or from the responder.
 - **Bodies** are the application's records, encoded by its codecs. The
@@ -85,7 +88,11 @@ What an application gives the machine, as data, checked when the machine
 is made:
 
 - **its magic:** four bytes naming the application's protocol;
-- **its versions:** the contiguous range this side speaks;
+- **its versions:** the contiguous range this side speaks. An
+  application speaks one version at a time: its formats change at will,
+  and a change its peer would notice is a new version (codec.md, 5). Its
+  range is then that one version, a peer of another is refused with
+  *version* (5.2), and nothing is translated;
 - **for each version, its kinds:** for each kind, its direction and the
   largest body this side takes or may send of it, from the owner's limits;
 - **the role:** initiator or responder, for this machine;
@@ -111,8 +118,9 @@ The machine refuses a schema in which:
 | `0x0005` | `Ping` | nothing |
 | `0x0006` | `Unsupported` | kind `u16` |
 
-- **Layouts are frozen,** for every application and every version. Bytes
-  and lists are a `u32` length, then their contents.
+- **Layouts are the channel's own,** the same for every application and
+  every version, so an opening between two versions ends in a refusal
+  both read. Bytes and lists are a `u32` length, then their contents.
 - **Features** are the channel's own extensions, such as a meaning for the
   header's flags. `Open` offers them, and `Accept` names those taken. None
   are defined, so both are zero today.

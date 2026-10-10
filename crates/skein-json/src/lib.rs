@@ -19,6 +19,8 @@
 
 extern crate alloc;
 
+pub mod collector;
+pub mod document;
 mod number;
 mod string;
 #[cfg(test)]
@@ -28,4 +30,5 @@ pub mod tokenizer;
 mod utf8;
 pub mod writer;
 
+pub use document::{Compact, Document, Kind};
 pub use token::Token;

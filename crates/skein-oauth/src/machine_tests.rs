@@ -1,5 +1,6 @@
 use crate::*;
 use alloc::boxed::Box;
+use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use skein_lib::{Duration, Queue, Time, Wall, bytes};
 
 fn boxed(input: &[u8]) -> Box<[u8]> {
@@ -124,7 +125,7 @@ fn public_sign_in_uses_s256_state_and_one_code_exchange() {
     };
     assert_eq!(record.key, 7);
     assert_eq!(record.generation, 1);
-    assert_eq!(record.refresh_token.as_ref(), b"refresh-new");
+    assert_eq!(record.refresh_token.as_deref().expect("refresh token"), b"refresh-new");
     assert!(client.is_done());
     assert!(step(&mut client, answered(http.id, 200, &token_body(), 4)).is_none(), "late answer ignored");
 }
@@ -187,6 +188,111 @@ fn confidential_registration_can_require_pkce_too() {
     ));
     assert!(bytes::find(&http.body, b"code_verifier=").is_some());
     assert!(bytes::find(&http.body, b"client_secret=secret").is_some());
+}
+
+#[test]
+fn public_redirect_spellings_supply_the_exact_loopback_bind_address() {
+    for (uri, expected) in [
+        (b"http://localhost:2345/callback".as_slice(), IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        (b"http://127.0.0.1:2345/callback".as_slice(), IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        (b"http://[::1]:2345/callback".as_slice(), IpAddr::V6(Ipv6Addr::LOCALHOST)),
+    ] {
+        assert_eq!(redirect_address(uri).expect("public redirect"), SocketAddr::new(expected, 2345));
+        let mut client = Client::new(limits()).expect("limits");
+        let mut registration = registration(true, WireFormat::Form);
+        registration.redirect_uri = boxed(uri);
+        let Some(Request::Visit { .. }) = step(
+            &mut client,
+            Event::SignIn {
+                registration,
+                key: 1,
+                generation: 0,
+                state: state(),
+                verifier: Some(verifier()),
+                now: time(1),
+            },
+        ) else {
+            panic!("visit expected")
+        };
+    }
+}
+
+#[test]
+fn localhost_redirect_admission_refuses_other_spellings_and_missing_parts() {
+    for uri in [
+        b"http://localhost.evil:2345/callback".as_slice(),
+        b"http://localhost.:2345/callback",
+        b"http://LOCALHOST:2345/callback",
+        b"http://localhost:0/callback",
+        b"http://localhost/callback",
+        b"http://localhost:2345",
+        b"http://localhost:2345?query=/callback",
+        b"http://localhost:65536/callback",
+        b"http://localhost:2345@evil/callback",
+        b"https://localhost:2345/callback",
+    ] {
+        assert_eq!(redirect_address(uri), Err(Failure::InvalidRedirect));
+        let mut client = Client::new(limits()).expect("limits");
+        let mut registration = registration(true, WireFormat::Form);
+        registration.redirect_uri = boxed(uri);
+        assert_eq!(
+            failure(step(
+                &mut client,
+                Event::SignIn {
+                    registration,
+                    key: 1,
+                    generation: 0,
+                    state: state(),
+                    verifier: Some(verifier()),
+                    now: time(1)
+                }
+            )),
+            Failure::InvalidRedirect
+        );
+    }
+}
+
+#[test]
+fn localhost_registration_refuses_every_redirect_uri_change_before_exchange() {
+    for uri in [
+        b"http://127.0.0.1:2345/callback".as_slice(),
+        b"http://localhost.:2345/callback",
+        b"http://localhost.evil:2345/callback",
+        b"http://LOCALHOST:2345/callback",
+        b"http://localhost:2346/callback",
+        b"http://localhost:2345/Callback",
+        b"http://localhost:02345/callback",
+    ] {
+        let mut client = Client::new(limits()).expect("limits");
+        let mut registration = registration(true, WireFormat::Form);
+        registration.redirect_uri = boxed(b"http://localhost:2345/callback");
+        let Some(Request::Visit { .. }) = step(
+            &mut client,
+            Event::SignIn {
+                registration,
+                key: 1,
+                generation: 0,
+                state: state(),
+                verifier: Some(verifier()),
+                now: time(1),
+            },
+        ) else {
+            panic!("visit expected")
+        };
+        assert_eq!(
+            failure(step(
+                &mut client,
+                Event::Redirected {
+                    uri: boxed(uri),
+                    state: state(),
+                    code: Some(boxed(b"code")),
+                    error: None,
+                    now: time(2)
+                }
+            )),
+            Failure::InvalidRedirect
+        );
+    }
 }
 
 #[test]
@@ -278,7 +384,7 @@ fn refresh_rotation_preserves_old_token_when_answer_omits_one() {
     let Some(Request::Tokens { record }) = step(&mut client, answered(http.id, 200, &body, 2)) else {
         panic!("tokens expected")
     };
-    assert_eq!(record.refresh_token.as_ref(), b"old");
+    assert_eq!(record.refresh_token.as_deref().expect("refresh token"), b"old");
     assert_eq!(record.generation, 5);
 }
 

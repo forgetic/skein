@@ -127,7 +127,7 @@ fn adopted_root_and_open_directory_keep_tokens_inside_io() {
     let submit = subs.pop().expect("one stat");
     let Op::Stat { fd } = &submit.kind else { panic!("a stat") };
     assert_eq!(*fd, CHILD);
-    let stat = Stat { kind: Kind::Directory, size: 0, mode: 0o755 };
+    let stat = Stat { kind: Kind::Directory, size: 0, mode: 0o755, owner: 17, links: 2 };
     file_layer::up(
         &mut io,
         Complete { op: submit.op, kind: submit.kind, result: Ok(Done::Stat(stat)) },
@@ -158,7 +158,10 @@ fn read_and_create_no_follow_use_the_safe_kernel_modes() {
         &mut events,
         &mut subs,
     );
-    assert_eq!(events.pop(), Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::NotFound }));
+    assert_eq!(
+        events.pop(),
+        Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::NotFound, committed: false, residue: None })
+    );
 
     file_layer::down(
         &mut io,
@@ -190,7 +193,13 @@ fn a_whole_load_continues_short_reads_and_closes_before_its_terminal() {
     assert_eq!(*how, OpenHow::ReadNoFollow);
     complete(&mut io, open, Ok(Done::Fd(CHILD)), &mut events, &mut subs);
     let stat = subs.pop().expect("stat");
-    complete(&mut io, stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 3, mode: 0o644 })), &mut events, &mut subs);
+    complete(
+        &mut io,
+        stat,
+        Ok(Done::Stat(Stat { kind: Kind::File, size: 3, mode: 0o644, owner: 1000, links: 1 })),
+        &mut events,
+        &mut subs,
+    );
     read(&mut io, subs.pop().expect("first read"), b"ab", &mut events, &mut subs);
     read(&mut io, subs.pop().expect("second read"), b"c", &mut events, &mut subs);
     read(&mut io, subs.pop().expect("end read"), b"", &mut events, &mut subs);
@@ -219,7 +228,7 @@ fn a_whole_load_refuses_a_file_over_its_bound_after_closing() {
     complete(
         &mut io,
         subs.pop().expect("stat"),
-        Ok(Done::Stat(Stat { kind: Kind::File, size: 4, mode: 0o644 })),
+        Ok(Done::Stat(Stat { kind: Kind::File, size: 4, mode: 0o644, owner: 1000, links: 1 })),
         &mut events,
         &mut subs,
     );
@@ -353,10 +362,19 @@ fn a_deadline_waits_for_uncancellable_stat_then_closes_the_file() {
     let stat = subs.pop().expect("stat");
     file_layer::expire(&mut io, Time::ZERO.saturating_add(Duration::from_secs(1)), &mut subs);
     assert!(subs.is_empty(), "stat is not cancellable");
-    complete(&mut io, stat, Ok(Done::Stat(Stat { kind: Kind::File, size: 1, mode: 0o644 })), &mut events, &mut subs);
+    complete(
+        &mut io,
+        stat,
+        Ok(Done::Stat(Stat { kind: Kind::File, size: 1, mode: 0o644, owner: 1000, links: 1 })),
+        &mut events,
+        &mut subs,
+    );
     assert!(events.is_empty());
     complete(&mut io, subs.pop().expect("cleanup close"), Ok(Done::Nothing), &mut events, &mut subs);
-    assert_eq!(events.pop(), Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::TimedOut }));
+    assert_eq!(
+        events.pop(),
+        Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::TimedOut, committed: false, residue: None })
+    );
 }
 
 #[test]
@@ -381,7 +399,10 @@ fn each_file_request_uses_its_own_absolute_deadline() {
     assert_eq!(cancel.kind, Op::Cancel { target: open.op });
     complete(&mut io, cancel, Ok(Done::Nothing), &mut events, &mut subs);
     complete(&mut io, open, Err(crate::kernel::Error::Cancelled), &mut events, &mut subs);
-    assert_eq!(events.pop(), Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::TimedOut }));
+    assert_eq!(
+        events.pop(),
+        Some(Event::Failed { owner: OWNER, error: crate::kernel::Error::TimedOut, committed: false, residue: None })
+    );
     assert!(io.takes());
 }
 

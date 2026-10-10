@@ -146,6 +146,7 @@ impl Rig {
             Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }
@@ -155,6 +156,7 @@ impl Rig {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. } => panic!("the echo uses only socket operations"),
@@ -256,7 +258,7 @@ fn an_idle_connection_is_closed_at_its_deadline() {
 }
 
 #[test]
-fn shutdown_stops_the_listener_and_the_service_empties_once_its_peers_leave() {
+fn shutdown_closes_idle_connections_without_waiting_for_their_idle_deadline() {
     let mut rig = Rig::new();
     rig.settle();
     let peer = rig.connect();
@@ -265,10 +267,8 @@ fn shutdown_stops_the_listener_and_the_service_empties_once_its_peers_leave() {
     assert!(rig.svc.work_pending(rig.now), "the shutdown waits on the ready list");
     rig.settle();
     assert_eq!(rig.svc.listening(), None, "the listener stopped");
-    assert!(!rig.svc.is_empty(), "a peer is still served");
-    rig.deliver(peer, b"bye\n");
-    rig.settle();
-    assert_eq!(rig.sent_on(peer), b"bye\n", "served after the shutdown");
+    assert!(!rig.svc.is_empty(), "io awaits the peer’s end during graceful close");
+    assert!(rig.sent_on(peer).is_empty(), "the idle connection is no longer served");
     // The peer ends: the server closes, and io's drain has nothing more to
     // read.
     rig.deliver(peer, b"");
@@ -312,5 +312,5 @@ fn the_worst_case_is_the_sum_of_the_layers_and_the_queues() {
     assert!(wider > total, "and grow with their capacity");
     let huge = skein_io::Limits { sockets: u32::MAX, ..limits.io };
     assert_eq!(worst_case(&Limits { io: huge, ..limits }), None, "past a u64");
-    assert_eq!(operations(&limits), Some(16), "four operations a socket");
+    assert_eq!(operations(&limits), Some(17), "four operations an entity and one process usage slot");
 }

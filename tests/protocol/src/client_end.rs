@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 
 use skein_http::client::{self, Body, Call, Client};
-use skein_http::sse::{self, Data, Reader};
+use skein_http::sse::{self, Reader};
 use skein_http::{Header, MaxOut, Method};
 use skein_json::Token;
 use skein_json::tokenizer::{self as json, Tokenizer};
@@ -35,8 +35,8 @@ impl Limits {
     pub fn check(&self) {
         assert!(sse::largest_demand(&self.reader) <= self.client.read, "the reader's scans within the client's reads");
         assert!(
-            json::largest_demand(&self.json) <= self.client.read,
-            "the tokenizer's demands within the client's reads"
+            json::largest_demand(&self.json) <= self.reader.chunk,
+            "the tokenizer's demands within the reader's data face"
         );
     }
 }
@@ -97,13 +97,22 @@ pub enum Outcome {
 
 /// The client's end: its machines, the stream below, and the user.
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the test endpoint tracks event dispatch, cut, demand and owner shutdown separately"
+)]
 pub struct End {
     limits: Limits,
     client: Client,
     reader: Option<Reader>,
     /// The tokenizer of the document being read, and the event's data it
     /// reads from, or none when it reads the response body.
-    tokenizer: Option<(Tokenizer, Option<Data>)>,
+    tokenizer: Option<(Tokenizer, bool)>,
+    event_data: Vec<u8>,
+    pending_document: Option<Vec<Token>>,
+    dispatched: bool,
+    cut: bool,
+    stopping: bool,
     pub bottom: Bottom,
     script: Script,
     pub seen: Seen,
@@ -147,6 +156,11 @@ impl End {
             client: Client::new(&limits.client),
             reader: None,
             tokenizer: None,
+            event_data: Vec::new(),
+            pending_document: None,
+            dispatched: false,
+            cut: false,
+            stopping: false,
             bottom,
             script,
             seen: Seen::default(),
@@ -269,6 +283,7 @@ impl End {
     /// The user closes: each machine above the client, then the client,
     /// then the stream, each close routed before the next.
     fn close(&mut self) {
+        self.stopping = true;
         if self.tokenizer.is_some() {
             let mut work = Work::new();
             self.tokenizer_down(json::Request::Close, &mut work);
@@ -407,7 +422,7 @@ impl End {
                 if streams {
                     self.reader = Some(Reader::new(&self.limits.reader));
                 } else {
-                    self.tokenizer = Some((Tokenizer::new(&self.limits.json), None));
+                    self.tokenizer = Some((Tokenizer::new(&self.limits.json), false));
                     self.tokenizer_down(json::Request::Next, work);
                 }
             }
@@ -439,15 +454,36 @@ impl End {
     /// stream's end.
     fn reader_event(&mut self, event: sse::Event, work: &mut Work) {
         match event {
-            sse::Event::Message(message) => {
+            sse::Event::Opened => {
+                self.event_data.clear();
+                self.pending_document = None;
+                self.dispatched = false;
+                self.cut = false;
+                self.tokenizer = Some((Tokenizer::new(&self.limits.json), true));
+                self.tokenizer_down(json::Request::Next, work);
+            }
+            sse::Event::Data(data) => {
+                if let Up::Bytes(bytes) = &data {
+                    self.event_data.extend_from_slice(bytes);
+                }
+                if matches!(data, Up::Failed(_)) {
+                    self.asked = false;
+                }
+                if self.tokenizer.is_some() {
+                    self.tokenizer_up(data, work);
+                } else if matches!(data, Up::Bytes(_)) {
+                    self.reader_down(sse::Request::Data(Down::Demand { read: Read::Fill(1), room: 0 }), work);
+                }
+            }
+            sse::Event::Dispatched(dispatch) => {
+                self.dispatched = true;
+                if let Some(document) = self.pending_document.take() {
+                    self.seen.documents.push(document);
+                }
                 self.asked = false;
-                // What the reader's own face says once the event came: what
-                // a client that reconnects would send, and wait.
                 let reader = self.reader.as_ref().expect("a reader");
                 self.seen.ids.push((reader.last_event_id().to_vec(), reader.retry()));
-                self.seen.events.push((message.name.to_vec(), message.data.to_vec()));
-                self.tokenizer = Some((Tokenizer::new(&self.limits.json), Some(Data::new(message.data))));
-                self.tokenizer_down(json::Request::Next, work);
+                self.seen.events.push((dispatch.name.to_vec(), std::mem::take(&mut self.event_data)));
             }
             sse::Event::Ended | sse::Event::Failed(_) => {
                 self.asked = false;
@@ -461,15 +497,11 @@ impl End {
     /// A demand from the tokenizer: met by the event's data at once, or
     /// passed to the client as the body's.
     fn tokenizer_below(&mut self, request: Down, work: &mut Work) {
-        let (_, data) = self.tokenizer.as_mut().expect("a tokenizer");
-        match data {
-            Some(data) => {
-                let Down::Demand { read, room: 0 } = request else { panic!("the tokenizer reads") };
-                if let Some(answer) = data.answer(read) {
-                    self.tokenizer_up(answer, work);
-                }
-            }
-            None => self.client_down(client::Request::Body(request), work),
+        let streaming = self.reader.is_some();
+        if streaming {
+            self.reader_down(sse::Request::Data(request), work);
+        } else {
+            self.client_down(client::Request::Body(request), work);
         }
     }
 
@@ -481,10 +513,25 @@ impl End {
                 self.tokenizer_down(json::Request::Next, work);
             }
             json::Event::Done | json::Event::Failed(_) => {
-                self.seen.documents.push(std::mem::take(&mut self.tokens));
+                let document = std::mem::take(&mut self.tokens);
+                let (_, streaming) = self.tokenizer.as_ref().expect("a tokenizer");
+                if !*streaming || self.dispatched {
+                    self.seen.documents.push(document);
+                } else if !self.cut {
+                    self.pending_document = Some(document);
+                }
                 self.tokenizer_down(json::Request::Close, work);
             }
-            json::Event::Closed => self.tokenizer = None,
+            json::Event::Long(_) | json::Event::Skipped(_) => unreachable!("only Next is demanded"),
+            json::Event::Closed => {
+                let (_, streaming) = self.tokenizer.take().expect("a tokenizer");
+                if !self.stopping
+                    && streaming
+                    && self.reader.as_ref().is_some_and(|reader| reader.waiting() == sse::Waiting::Above)
+                {
+                    self.reader_down(sse::Request::Data(Down::Demand { read: Read::Fill(1), room: 0 }), work);
+                }
+            }
         }
     }
 }

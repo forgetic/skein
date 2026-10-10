@@ -304,7 +304,7 @@ fn native_pipe_close_settles_waiting_output_and_actual_reap_waits_for_both_close
     assert_eq!(
         rig.complete(wait, Ok(Done::Exit(crate::kernel::Exit::Code(0)))).events,
         [Event::Exited { owner: owner(1), exit: crate::kernel::Exit::Code(0) }],
-        "reap is real evidence, but the child still owns both actual pipe lifetimes"
+        "the observed exit keeps both actual pipe lifetimes owned"
     );
     rig.down(Request::Close { entity: input }).nothing();
     assert_eq!(
@@ -326,6 +326,7 @@ fn native_pipe_close_settles_waiting_output_and_actual_reap_waits_for_both_close
         | Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
@@ -335,6 +336,7 @@ fn native_pipe_close_settles_waiting_output_and_actual_reap_waits_for_both_close
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::Cancel { .. }) => panic!("actual continued PipeWrite: {other:?}"),
@@ -345,7 +347,14 @@ fn native_pipe_close_settles_waiting_output_and_actual_reap_waits_for_both_close
     let output_close = rig.down(Request::Close { entity: output_pipe }).take(Kind::Close);
     let mut closed = rig.complete(output_close, Ok(Done::Nothing));
     assert_eq!(closed.events, [Event::Closed { owner: output_pipe }]);
-    let pidfd_close = closed.take(Kind::Close);
+    let killing = closed.take(Kind::Signal);
+    assert_eq!(
+        killing.kind,
+        Op::Signal { pidfd: Fd::new(20), signal: crate::kernel::Signal::Kill, to: crate::kernel::Target::Group }
+    );
+    let reaping = rig.complete(killing, Ok(Done::Nothing)).take(Kind::Wait);
+    assert_eq!(reaping.kind, Op::Wait { pidfd: Fd::new(20), reap: true });
+    let pidfd_close = rig.complete(reaping, Ok(Done::Exit(crate::kernel::Exit::Code(0)))).take(Kind::Close);
     assert_eq!(pidfd_close.kind, Op::Close { fd: Fd::new(20) });
     assert_eq!(rig.complete(pidfd_close, Ok(Done::Nothing)).events, [Event::Closed { owner: owner(1) }]);
     rig.next().nothing();

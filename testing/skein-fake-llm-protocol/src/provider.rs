@@ -57,6 +57,10 @@ pub struct Limits {
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
 #[expect(missing_debug_implementations, reason = "configured header values must not enter traces")]
 pub struct Config {
+    /// Codex metadata echoes; off unless the world explicitly selects them.
+    pub echo: openai::Echo,
+    /// Usage fields this dialect reports; absent selections are omitted.
+    pub usage_fields: documents::UsageFields,
     /// Provider dialect selected by this scripted service.
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -96,6 +100,8 @@ pub enum Error {
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
 #[derive(PartialEq, Eq, Debug)]
 pub enum Event {
+    /// Actual HTTP request fields, handed to the owner before its body/query.
+    Head { headers: Box<[Header]> },
     /// Typed request forwarded to the neutral fake provider domain.
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -142,7 +148,10 @@ impl Service {
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
     pub fn new(config: Config, limits: &Limits) -> Result<Service, Error> {
-        if worst_case(limits).is_none() || config.path.first() != Some(&b'/') {
+        if worst_case(limits).is_none()
+            || config.path.first() != Some(&b'/')
+            || config.echo.attribution_bytes > limits.documents.openai.retained
+        {
             return Err(Error::Limits);
         }
         if config.path.len() > usize::try_from(limits.http.head).expect("u32 fits usize")
@@ -251,6 +260,8 @@ pub struct Server {
     reply: Option<Box<[u8]>>,
     reply_offset: usize,
     refused: Option<api::Error>,
+    session: Option<[u8; 16]>,
+    thread: Option<[u8; 16]>,
     writer_closed: bool,
 }
 
@@ -262,7 +273,7 @@ impl Server {
         if worst_case(limits).is_none() {
             return Err(Error::Limits);
         }
-        let request = limits.documents.anthropic.request_bytes.max(limits.documents.openai.request_bytes);
+        let request = limits.documents.anthropic.request.max(limits.documents.openai.request);
         Ok(Server {
             owner,
             state: State::New,
@@ -280,6 +291,8 @@ impl Server {
             reply: None,
             reply_offset: 0,
             refused: None,
+            session: None,
+            thread: None,
             writer_closed: false,
         })
     }
@@ -490,6 +503,7 @@ fn entrance(
     credential: &skein_llm::Credential,
     limits: &Limits,
     call: http::Call,
+    above: &mut Queue<Event>,
 ) {
     let identity = next_response(&mut service.count);
     server.response_id = identity.unwrap_or(0);
@@ -499,9 +513,29 @@ fn entrance(
         Some(api::Error::InvalidRequest)
     };
     let mut authorization = None;
+    server.session = None;
+    server.thread = None;
     let mut account = None;
     let mut content_type = 0_u32;
     for header in &call.headers {
+        if service.config.provider == documents::Provider::OpenAi && header.is(b"session-id") {
+            if server.session.is_some() {
+                server.refused = Some(api::Error::InvalidRequest);
+            }
+            server.session = documents::parse_uuid(&header.value);
+            if server.session.is_none() {
+                server.refused = Some(api::Error::InvalidRequest);
+            }
+        }
+        if service.config.provider == documents::Provider::OpenAi && header.is(b"thread-id") {
+            if server.thread.is_some() {
+                server.refused = Some(api::Error::InvalidRequest);
+            }
+            server.thread = documents::parse_uuid(&header.value);
+            if server.thread.is_none() {
+                server.refused = Some(api::Error::InvalidRequest);
+            }
+        }
         if header.is(b"authorization") {
             if authorization.is_some() {
                 server.refused = Some(api::Error::Unauthorized);
@@ -565,6 +599,7 @@ fn entrance(
         http::Body::Length(length) => Some(length),
         http::Body::Chunked => None,
     };
+    above.push(Event::Head { headers: call.headers });
     demand_body(server, limits);
 }
 
@@ -674,6 +709,7 @@ fn http_event(
         },
         http::Event::Done(reuse) => {
             server.answer = None;
+            server.body.clear();
             server.reply = None;
             match reuse {
                 http::Reuse::Keep => {
@@ -684,7 +720,7 @@ fn http_event(
                 http::Reuse::Close => close(server, service, env, above, below),
             }
         }
-        http::Event::Call(call) => entrance(server, service, credential, &env.limits, call),
+        http::Event::Call(call) => entrance(server, service, credential, &env.limits, call, above),
         http::Event::Ended
         | http::Event::Failed(_)
         | http::Event::Refused(_)
@@ -700,9 +736,22 @@ fn requested(server: &mut Server, service: &mut Service, env: &Env<Limits>, abov
         return;
     }
     let query = documents::request(service.config.provider, server.body.as_slice(), &env.limits.documents);
-    server.body.clear();
+    if service.config.provider != documents::Provider::OpenAi || !service.config.echo.enabled() {
+        server.body.clear();
+    }
     match query {
         Ok(query) => {
+            let scope = match query.caching {
+                api::Caching::Scope(key) => Some(key),
+                api::Caching::Unscoped | api::Caching::Marks(_) => None,
+            };
+            if service.config.provider == documents::Provider::OpenAi
+                && (scope != server.session || scope.is_some() != server.thread.is_some())
+            {
+                server.body.clear();
+                response_error(server, service, env, api::Error::InvalidRequest);
+                return;
+            }
             let Ok(id) = service.calls.insert(Call { server: server.owner, active: true }) else {
                 response_error(server, service, env, api::Error::Overloaded);
                 return;
@@ -730,8 +779,15 @@ fn next_event(
     let Some(answer) = &server.answer else {
         return;
     };
-    match documents::event(service.config.provider, answer, server.sequence, server.response_id, &env.limits.documents)
-    {
+    match documents::event_with_options(
+        service.config.provider,
+        answer,
+        server.sequence,
+        server.response_id,
+        server.body.as_slice(),
+        documents::Options { echo: service.config.echo, usage_fields: service.config.usage_fields },
+        &env.limits.documents,
+    ) {
         Ok(Some(event)) => {
             let Some(next) = server.sequence.checked_add(1) else {
                 close(server, service, env, above, below);
@@ -778,7 +834,7 @@ fn response_error(server: &mut Server, service: &Service, env: &Env<Limits>, err
                     anthropic::DecodeError::Malformed
                     | anthropic::DecodeError::Missing
                     | anthropic::DecodeError::WrongType
-                    | anthropic::DecodeError::TooLarge,
+                    | anthropic::DecodeError::TooLarge { .. },
                 ) => bytes::copy_of(b"{}"),
             }
         }
@@ -795,7 +851,7 @@ fn response_error(server: &mut Server, service: &Service, env: &Env<Limits>, err
                     openai::DecodeError::Malformed
                     | openai::DecodeError::Missing
                     | openai::DecodeError::WrongType
-                    | openai::DecodeError::TooLarge,
+                    | openai::DecodeError::TooLarge { .. },
                 ) => bytes::copy_of(b"{}"),
             }
         }
@@ -859,7 +915,9 @@ fn send_error(server: &mut Server, env: &Env<Limits>) {
 }
 
 fn answer_fits(answer: &api::Answer, limits: &documents::Limits) -> bool {
-    if answer.parts.len() > usize::try_from(limits.openai.parts.min(limits.anthropic.parts)).expect("u32 fits usize") {
+    if answer.parts.len()
+        > usize::try_from(limits.openai.output_items.min(limits.anthropic.output_items)).expect("u32 fits usize")
+    {
         return false;
     }
     let mut length = Some(0_usize);
@@ -882,12 +940,30 @@ fn answer_fits(answer: &api::Answer, limits: &documents::Limits) -> bool {
     }
     match length {
         Some(length) => {
-            length
-                <= usize::try_from(limits.openai.answer_bytes.max(limits.anthropic.answer_bytes))
-                    .expect("u32 fits usize")
+            length <= usize::try_from(limits.openai.answer.max(limits.anthropic.answer)).expect("u32 fits usize")
         }
         None => false,
     }
+}
+
+/// Counts all owned field wrappers, names and values in an actual request head.
+#[must_use]
+pub fn head_bytes(headers: &[Header]) -> Option<u64> {
+    let mut bytes = u64::try_from(headers.len().checked_mul(size_of::<Header>())?).ok()?;
+    for header in headers {
+        bytes = bytes
+            .checked_add(u64::try_from(header.name.len()).ok()?)?
+            .checked_add(u64::try_from(header.value.len()).ok()?)?;
+    }
+    Some(bytes)
+}
+
+/// Checked maximum ownership of one admitted HTTP request head.
+#[must_use]
+pub fn head_worst_case(limits: &Limits) -> Option<u64> {
+    u64::from(limits.http.headers)
+        .checked_mul(u64::try_from(size_of::<Header>()).ok()?)?
+        .checked_add(u64::from(limits.http.head))
 }
 
 /// Checked maximum owned bytes under limits, or `None` when counters or containers cannot be bounded.
@@ -895,7 +971,7 @@ fn answer_fits(answer: &api::Answer, limits: &documents::Limits) -> bool {
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
-    let request = limits.documents.openai.request_bytes.max(limits.documents.anthropic.request_bytes);
+    let request = limits.documents.openai.request.max(limits.documents.anthropic.request);
     if limits.http.body < u64::from(request)
         || limits.sse.chunk > limits.http.send
         || limits.documents.model_ceiling == 0
@@ -911,11 +987,10 @@ pub fn worst_case(limits: &Limits) -> Option<u64> {
         .checked_add(sse::worst_case(&limits.sse)?)?
         .checked_add(openai::worst_case(&limits.documents.openai)?)?
         .checked_add(anthropic::worst_case(&limits.documents.anthropic)?)?
+        // Configured echoes retain this raw request in the existing body List;
+        // native codec worst_case above prices transient decoded metadata and entry scratch.
         .checked_add(List::<u8>::worst_case(request)?)?
-        .checked_add(
-            u64::from(limits.documents.openai.answer_bytes.max(limits.documents.anthropic.answer_bytes))
-                .checked_mul(8)?,
-        )?
+        .checked_add(u64::from(limits.documents.openai.answer.max(limits.documents.anthropic.answer)).checked_mul(8)?)?
         .checked_add(Queue::<http::Event>::worst_case(EVENTS)?)?
         .checked_add(Queue::<http::Request>::worst_case(REQUESTS)?)?
         .checked_add(Queue::<sse::Event>::worst_case(1)?)?

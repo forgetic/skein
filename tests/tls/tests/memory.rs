@@ -24,13 +24,38 @@ use skein_heap::{Counting, Meter, Span};
 use skein_lib::stream::{Down, Fault, Read, Up};
 use skein_lib::{Env, Queue, Rng, Time};
 use skein_tls::client::{self, Client, Error, Event, Limits, Request};
-use skein_tls::{Config, Name};
+use skein_tls::{Config, Name, Parsed, roots_worst_case};
 use skein_tls_world::pki::{self, Chain, Versions};
 use skein_tls_world::server::Server;
 use skein_tls_world::world;
 
 #[global_allocator]
 static HEAP: Counting = Counting;
+
+#[test]
+fn shared_roots_at_their_bounds_fit_the_measured_factor() {
+    let root = std::fs::read("fixtures/root.der").expect("actual fixture root");
+    // One-byte protocols maximize the ALPN vector's element count at its
+    // 256-byte wire bound. Counts beside growth boundaries price slack.
+    let alpn = [b"a".as_slice(); 128];
+    for count in [1_u32, 3, 4, 5, 8, 9, 16, 17, 128, 129] {
+        let certificates: Vec<Box<[u8]>> = (0..count).map(|_| root.as_slice().into()).collect();
+        let each = u32::try_from(root.len()).expect("fixture fits");
+        let bound = roots_worst_case(count, each).expect("bounds fit");
+        let span = Span::start();
+        let (config, parsed) = Config::from_der(&certificates, &alpn).expect("actual DER roots");
+        let grown = span.end();
+        assert_eq!(parsed, Parsed { taken: count, skipped: 0 }, "all roots are retained");
+        assert!(grown.peak <= i64::try_from(bound).expect("bound fits"), "{count} roots: {grown:?}, bound {bound}");
+        let span = Span::start();
+        let shared = config.clone();
+        assert_eq!(span.end().net, 0, "connections share their configuration's roots");
+        drop(shared);
+        let span = Span::start();
+        drop(config);
+        assert_eq!(grown.net + span.end().net, 0, "dropping the shared configuration releases every root");
+    }
+}
 
 /// How a case ends, besides its exchange.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

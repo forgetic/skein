@@ -16,7 +16,7 @@
 //! It follows the programming model as any other step crate does.
 
 //!
-//! It keeps bounded pending calls, reply rights, scripts, RNG state and due
+//! It keeps bounded cached prefix digests, pending calls, reply rights, scripts, RNG state and due
 //! alarms, never agent state, credential secrets, tool authority, checkout
 //! effects or live network behavior. [`step`] accepts calls and [`fire`]
 //! settles due work under injected time; callers reserve [`MAX_OUT`] output
@@ -30,6 +30,7 @@
 extern crate alloc;
 
 pub mod api;
+mod cache;
 mod domain;
 mod limits;
 mod respond;

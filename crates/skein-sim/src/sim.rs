@@ -16,14 +16,14 @@ use skein_io::kernel::{Addr, Complete, Done, Error, Family, Fd, Op, OpenHow, Ser
 use skein_lib::{Duration, Queue, Rng, Time, Token, Wall};
 
 use crate::config::Config;
-use crate::machine::{Call, Ticket};
+use crate::machine::{Call, Handle, Ticket};
 use crate::net::{
     EPHEMERAL_FIRST, EPHEMERAL_LAST, Fate, Listener, Socket, SocketId, State, Stream, bindable, loopback, mapped,
     overlaps,
 };
 use crate::trace::{self, Entry, Event, Fault, Summary};
 use files::{Asked, File};
-use processes::{Child, InheritedPipe, PipeEnd};
+use processes::{Child, InheritedPipe, PipeEnd, WaitState};
 
 /// A simulated process: a plain handle, from [`Sim::spawn_process`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -56,6 +56,7 @@ const UNSUBMITTED: i32 = 11;
 struct Process {
     /// The parent spawn represented by this process, when it hosts a child service.
     parent: Option<(Pid, u64)>,
+    usage: skein_io::kernel::Usage,
     /// The next descriptor number: numbers are never reused.
     next_fd: i32,
     /// The open descriptors of sockets, and the socket each names.
@@ -201,6 +202,7 @@ impl Sim {
         let pid = Pid(u32::try_from(self.processes.len()).expect("fewer than 2^32 processes"));
         self.processes.push(Process {
             parent: None,
+            usage: skein_io::kernel::Usage::ZERO,
             next_fd: FIRST_FD,
             fds: BTreeMap::new(),
             files: BTreeMap::new(),
@@ -216,6 +218,88 @@ impl Sim {
             deferred: VecDeque::new(),
         });
         pid
+    }
+
+    /// Cuts a process with every record it owns, never completing them,
+    /// and releases its descriptors (simulator.md, 3.3). The world settles
+    /// the returned file handles; calls discarded by this cut are not answered.
+    pub fn cut(&mut self, pid: Pid) -> Box<[Handle]> {
+        self.cut_with(pid, drop)
+    }
+
+    /// As [`Sim::cut`], disposing each original record through `discard` so
+    /// a world can charge its buffers to their owner's destruction span.
+    /// Simulator metadata and returned handles belong to the harness.
+    #[doc(hidden)]
+    pub fn cut_with<F: FnMut(Op)>(&mut self, pid: Pid, mut discard: F) -> Box<[Handle]> {
+        let scheduled: Vec<_> = self
+            .schedule
+            .iter()
+            .filter_map(|(key, due)| {
+                let owner = match due {
+                    Due::Post { pid, .. } | Due::Land { pid, .. } | Due::Expire { pid, .. } => *pid,
+                };
+                (owner == pid).then_some(*key)
+            })
+            .collect();
+        for key in scheduled {
+            match self.schedule.remove(&key).expect("a selected scheduled item") {
+                Due::Post { complete, .. } => discard(complete.kind),
+                Due::Land { .. } | Due::Expire { .. } => {}
+            }
+        }
+        while let Some(complete) = self.process_mut(pid).ready.pop_front() {
+            discard(complete.kind);
+        }
+        let waiting: Vec<_> = self.process(pid).flights.keys().copied().collect();
+        for token in waiting {
+            let flight = self.process_mut(pid).flights.remove(&token).expect("a selected flight");
+            if let Some(op) = flight.held {
+                match &op {
+                    Op::Accept { .. }
+                    | Op::Connect { .. }
+                    | Op::Recv { .. }
+                    | Op::Send { .. }
+                    | Op::Wait { .. }
+                    | Op::ReadSignal { .. }
+                    | Op::PipeRead { .. }
+                    | Op::PipeWrite { .. } => self.withdraw(pid, token, &op),
+                    Op::Socket { .. }
+                    | Op::Bind { .. }
+                    | Op::Listen { .. }
+                    | Op::Shutdown { .. }
+                    | Op::Close { .. }
+                    | Op::Open { .. }
+                    | Op::Read { .. }
+                    | Op::Write { .. }
+                    | Op::Append { .. }
+                    | Op::Sync { .. }
+                    | Op::Stat { .. }
+                    | Op::Rename { .. }
+                    | Op::Remove { .. }
+                    | Op::MakeDirectory { .. }
+                    | Op::List { .. }
+                    | Op::Spawn { .. }
+                    | Op::Signal { .. }
+                    | Op::Usage
+                    | Op::Cancel { .. } => {}
+                }
+                discard(op);
+            }
+        }
+        let held = self.cut_files(pid);
+        self.spawn_asked.retain(|_, (owner, _)| *owner != pid);
+        let sockets: Vec<_> = self.process(pid).fds.iter().map(|(fd, socket)| (*fd, *socket)).collect();
+        for (fd, socket) in sockets {
+            self.close_socket(pid, fd, socket);
+        }
+        self.cut_process_descriptors(pid);
+        let process = self.process_mut(pid);
+        process.opening = 0;
+        process.spawning = 0;
+        process.deferred.clear();
+        self.settle();
+        held
     }
 
     /// Installs a simulated signalfd before a service loop starts.
@@ -287,6 +371,11 @@ impl Sim {
             }
             let event = Event::Complete { op: complete.op, kind: flight.kind, result: complete.result.clone() };
             self.record(pid, event);
+            if let (Op::Wait { pidfd, reap: false }, Ok(Done::Exit(_))) = (&complete.kind, &complete.result) {
+                let child_id = *self.process(pid).pidfds.get(pidfd).expect("an observed child has its pidfd");
+                self.process_mut(pid).children.get_mut(&child_id).expect("the observed child").wait_state =
+                    WaitState::Observed;
+            }
             completions.push(complete);
         }
     }
@@ -462,6 +551,10 @@ impl Sim {
             On::Nothing => None,
         };
         match kind {
+            Op::Usage => {
+                let usage = self.process(pid).usage;
+                self.complete(pid, token, kind, Ok(Done::Usage(usage)));
+            }
             Op::Socket { family } => self.socket(pid, token, kind, family),
             Op::Bind { addr, .. } => self.bind(pid, token, kind, on(socket), addr),
             Op::Listen { backlog, .. } => self.listen(pid, token, kind, on(socket), backlog),
@@ -475,6 +568,7 @@ impl Sim {
             Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }
@@ -590,6 +684,7 @@ impl Sim {
             | Summary::Open { .. }
             | Summary::Read { .. }
             | Summary::Write { .. }
+            | Summary::Append { .. }
             | Summary::Sync { .. }
             | Summary::Stat { .. }
             | Summary::Rename { .. }
@@ -600,6 +695,7 @@ impl Sim {
             Summary::Spawn { .. }
             | Summary::Wait { .. }
             | Summary::Signal { .. }
+            | Summary::Usage
             | Summary::ReadSignal { .. }
             | Summary::PipeRead { .. }
             | Summary::PipeWrite { .. } => self.bug("a process operation passed socket checks"),
@@ -616,6 +712,14 @@ impl Sim {
     /// sockets, and nothing in flight beside it.
     fn check_file(&self, pid: Pid, kind: Summary) {
         let process = self.process(pid);
+        for fd in kind.fds().into_iter().flatten() {
+            if let Some(file) = process.files.get(&fd)
+                && file.access == files::Access::Record(OpenHow::PathNoFollow)
+                && !matches!(kind, Summary::Stat { .. } | Summary::Close { .. })
+            {
+                self.fail(pid, "only Stat and Close may use a path-only descriptor");
+            }
+        }
         if let Summary::Close { fd } = kind {
             for flight in process.flights.values() {
                 if flight.kind.fds().contains(&Some(fd)) {
@@ -635,20 +739,46 @@ impl Sim {
         let Some(fd) = kind.fd() else {
             self.bug("an operation on files names a descriptor");
         };
-        let how = process.files.get(&fd).expect("checked open, and not a socket's").how;
+        let how = process.files.get(&fd).expect("checked open, and not a socket's").access;
         let broken = match kind {
-            Summary::Read { .. } if !matches!(how, OpenHow::Read | OpenHow::ReadNoFollow) => {
+            Summary::Read { .. } if !matches!(how, files::Access::Record(OpenHow::Read | OpenHow::ReadNoFollow)) => {
                 Some("a Read on a descriptor not opened to read")
             }
-            Summary::Write { .. } if !matches!(how, OpenHow::Create { .. } | OpenHow::CreateNoFollow { .. }) => {
+            Summary::Write { .. }
+                if !matches!(how, files::Access::Record(OpenHow::Create { .. } | OpenHow::CreateNoFollow { .. })) =>
+            {
                 Some("a Write on a descriptor not opened to create")
             }
-            Summary::List { .. } if matches!(how, OpenHow::Create { .. } | OpenHow::CreateNoFollow { .. }) => {
+            Summary::Append { .. }
+                if !matches!(
+                    how,
+                    files::Access::Append
+                        | files::Access::Record(OpenHow::Create { .. } | OpenHow::CreateNoFollow { .. })
+                ) =>
+            {
+                Some("an Append on a descriptor not opened to write")
+            }
+            Summary::Append { fd, .. }
+                if process
+                    .flights
+                    .values()
+                    .any(|flight| matches!(flight.kind, Summary::Append { fd: other, .. } if other == fd)) =>
+            {
+                Some("a second Append in flight")
+            }
+            Summary::List { .. }
+                if matches!(
+                    how,
+                    files::Access::Append
+                        | files::Access::Record(OpenHow::Create { .. } | OpenHow::CreateNoFollow { .. })
+                ) =>
+            {
                 Some("a List on a descriptor opened to create")
             }
             Summary::Open { .. }
             | Summary::Read { .. }
             | Summary::Write { .. }
+            | Summary::Append { .. }
             | Summary::Sync { .. }
             | Summary::Stat { .. }
             | Summary::Rename { .. }
@@ -668,6 +798,7 @@ impl Sim {
             Summary::Spawn { .. }
             | Summary::Wait { .. }
             | Summary::Signal { .. }
+            | Summary::Usage
             | Summary::ReadSignal { .. }
             | Summary::PipeRead { .. }
             | Summary::PipeWrite { .. } => self.bug("a process operation passed file checks"),
@@ -878,6 +1009,11 @@ impl Sim {
     }
 
     fn close(&mut self, pid: Pid, token: Token, op: Op, fd: Fd, id: SocketId) {
+        self.close_socket(pid, fd, id);
+        self.complete(pid, token, op, Ok(Done::Nothing));
+    }
+
+    fn close_socket(&mut self, pid: Pid, fd: Fd, id: SocketId) {
         self.process_mut(pid).fds.remove(&fd);
         let socket = self.sockets.remove(&id).expect("checked at submit");
         match socket.state {
@@ -916,7 +1052,6 @@ impl Sim {
                 }
             }
         }
-        self.complete(pid, token, op, Ok(Done::Nothing));
     }
 
     fn cancel(&mut self, pid: Pid, token: Token, op: Op, target: Token) {
@@ -979,14 +1114,14 @@ impl Sim {
     fn withdraw(&mut self, pid: Pid, token: Token, op: &Op) {
         // A hung operation on files waits on nothing; an Open gives back
         // the place it held.
-        if let Op::Open { .. } | Op::Read { .. } | Op::Write { .. } | Op::Sync { .. } = op {
+        if let Op::Open { .. } | Op::Read { .. } | Op::Write { .. } | Op::Append { .. } | Op::Sync { .. } = op {
             if let Op::Open { .. } = op {
                 let process = self.process_mut(pid);
                 process.opening = process.opening.checked_sub(1).expect("an Open waiting holds a place");
             }
             return;
         }
-        if let Op::Wait { pidfd } = op {
+        if let Op::Wait { pidfd, .. } = op {
             let child_id = *self.process(pid).pidfds.get(pidfd).expect("a Wait keeps its pidfd open");
             self.process_mut(pid).children.get_mut(&child_id).expect("pidfd names a child").wait = None;
             return;
@@ -1023,6 +1158,7 @@ impl Sim {
             | Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }
@@ -1032,6 +1168,7 @@ impl Sim {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }

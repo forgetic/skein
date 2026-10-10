@@ -1,10 +1,11 @@
 # Testing skein
 
-Provisional, 2026-10-03. How testing-strategy.md applies to skein itself:
-which tiers skein has, what they run, the example services and the
-minimal fake machine they need, where the tests live, what skein supplies
-for a service's own tiers, and where things stand. How each part is
-tested in its own tier is in that part's document.
+Provisional, 2026-10-03, revised 2026-10-09. How testing-strategy.md
+applies to skein itself: which tiers skein has, what they run, the
+example services and the minimal fake machine they need, where the tests
+live, what skein supplies for a service's own tiers, and where things
+stand. How each part is tested in its own tier is in that part's
+document.
 
 ## 1. In one page
 
@@ -73,19 +74,20 @@ worlds need a minimal one:
 It lives with skein's tests, and stays that small. A service's fake
 machine is the service's.
 
-It is `skein-fake-machine`, in `testing/`. A world lays a root in it from
-a scenario's items (files, directories, symbolic links, each with its
-mode) and gives its handle to a process as the shell would a root opened
-at startup; after each submit, the world takes the simulator's calls and
-has the machine answer each (simulator.md, 3.1). The machine resolves
-paths beneath a root as `openat2` with `RESOLVE_BENEATH` does, follows the
-links that stay beneath it, keeps its owner's permissions, and refuses
-what a real filesystem refuses, in the order Linux checks; the conformance
-suite holds it, through the simulator, to the real kernel in a scratch
-directory. It keeps a step machine's shape, a call in and an answer out,
-in a vocabulary of its own that a face translates to and from the
-simulator's. Its programs (`echo`, `exit`, `never`) answer the simulator's
-spawns.
+It is `skein-fake-machine`, in `testing/`. A world lays a
+root in it from a scenario's items (files, directories, symbolic links,
+each with its mode) and gives its handle to a process as the shell would
+a root opened at startup; after each submit, the world takes the
+simulator's calls and has the machine answer each (simulator.md, 3.1).
+The machine resolves paths beneath a root as `openat2` with
+`RESOLVE_BENEATH` does, follows the links that stay beneath it, keeps its
+owner's permissions, and refuses what a real filesystem refuses, in the
+order Linux checks; the conformance suite holds it, through the
+simulator, to the real kernel in a scratch directory. It keeps a step
+machine's shape, a call in and an answer out, in a vocabulary of its own
+that a face translates to and from the simulator's. Its programs are
+built too, the fixture of the conformance suite's processes, and so is
+its crash model, which keeps what a crash keeps (simulator.md, 3.3).
 
 A separate dependency-free kit, `skein-fake-checkout`, supplies generic
 byte-path files, scripted commands and local git mechanics for domain
@@ -105,6 +107,7 @@ stay beside the crate in `testing/skein-fake-checkout/tests`.
 | protocol worlds | its protocol layer, over skein's machines | the machines, tested in skein's tiers; the counting allocator |
 | simulated worlds | every layer, `iterate` per process | the simulator, the world harness, the counting allocator, the examples as a template |
 | real loop | the service as it ships | the shell kit, the world harness's real loop; for a service with a web, the browser kit (browser.md) |
+| end to end | the service's binaries as they ship | the world harness's end-to-end kit: binaries started on pipes or a pseudo-terminal, and each binary's process tree settled and counted, its CPU and peak memory (examples.md, 6) |
 
 The service supplies its fakes, the fake machine that plugs into the
 simulator among them, and the scenarios its worlds run. A failure in a
@@ -140,6 +143,21 @@ processes, with the referee's expectations, the trace, the heap at every
 iteration, and the settled world's invariants; and the same loop over the
 shell's shared ring, on the real clock. The examples are its first user and its
 second, which is why it is skein's (testing-strategy.md, 7).
+
+- **It hosts the shell's `Host`.** `Host` and `drive` are `skein-shell`'s
+  (shell.md, 12), and `skein-world` re-exports both, so a service's worlds
+  host the same `Host` its `main` drives, and a shipped binary links no
+  testing crate.
+- **It calls each process's hook** where `drive` does: once per
+  iteration, after the process's `iterate` and before its submit. The
+  drains a world runs are then the ones that ship.
+- **It checks the teardown invariant** (testing-strategy.md, 6) in every
+  world, at every tier it runs, for every service: after the scenario's
+  last word, by default the referee's last expectation met, it fails the
+  world when time must reach a process's `next_policy_deadline()` before
+  the world settles, naming the process and the deadline. In the
+  replaying tiers that is a jump of the clock to it; in the real loop, a
+  wake for it. No service writes the check, and none opts out.
 
 ## 6. Layout
 

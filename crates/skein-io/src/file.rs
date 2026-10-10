@@ -8,8 +8,40 @@ use crate::kernel::Fd;
 use alloc::boxed::Box;
 use skein_lib::Token;
 
+/// The target version a store's owner permits replacing (io.md, section 5.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expect {
+    /// The owner permits replacing any target, without reading its content.
+    Any,
+    /// The owner permits creating a target only when its name is absent.
+    Absent,
+    /// The owner permits replacing only the target with this content digest.
+    Digest(Digest),
+}
+
+/// A temporary whose cleanup failed, reported by io at the store's terminal.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Residue {
+    /// A bounded leaf name beside the request's target, in the same directory.
+    pub name: Box<[u8]>,
+    pub error: crate::kernel::Error,
+}
+
 #[derive(PartialEq, Eq, Debug)]
 pub enum Request {
+    /// Makes a directory beneath the owner's root: `Made` or `Failed`.
+    MakeDirectory {
+        owner: Token,
+        root: Token,
+        path: Box<[u8]>,
+        mode: u32,
+    },
+    /// Opens or makes a private root: `Opened`, `Refused` or `Failed` (io.md, 5.3).
+    OpenPrivate {
+        owner: Token,
+        root: Token,
+        path: Box<[u8]>,
+    },
     Create {
         owner: Token,
         root: Fd,
@@ -59,13 +91,13 @@ pub enum Request {
         max_bytes: u64,
         no_follow: bool,
     },
-    /// Replaces one file after rechecking its content version, through a synced temporary.
+    /// Replaces one file under its stated expectation, through a synced temporary.
     Store {
         owner: Token,
         root: Token,
         path: Box<[u8]>,
         bytes: Box<[u8]>,
-        expected: Option<Digest>,
+        expected: Expect,
         no_follow: bool,
     },
     /// States an open file or directory.
@@ -120,8 +152,32 @@ pub struct Entry {
     pub kind: crate::kernel::Kind,
 }
 
+/// The unsafe metadata io found before reading a private root or file (io.md, 5.3).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Unsafe {
+    /// The requested name or a parent is a symbolic link.
+    Link,
+    /// The opened root is not a directory or its file is not regular.
+    Kind(crate::kernel::Kind),
+    /// The opened node has these group or other permission bits.
+    Mode(u32),
+    /// The opened file has this link count, rather than one.
+    Links(u32),
+    /// The opened node belongs to someone other than the configured effective user.
+    Owner { found: u32, expected: u32 },
+}
+
 #[derive(PartialEq, Eq, Debug)]
 pub enum Event {
+    /// The owner's directory request made its directory.
+    Made {
+        owner: Token,
+    },
+    /// The private root or load was refused unread with this unsafe metadata.
+    Refused {
+        owner: Token,
+        found: Unsafe,
+    },
     Opened {
         owner: Token,
         file: Token,
@@ -153,7 +209,7 @@ pub enum Event {
         owner: Token,
         size: u64,
     },
-    /// Metadata of the open file or directory.
+    /// Kind, size, permissions, owner and links of the open file or directory.
     Stated {
         owner: Token,
         stat: crate::kernel::Stat,
@@ -184,6 +240,12 @@ pub enum Event {
     Failed {
         owner: Token,
         error: crate::kernel::Error,
+        /// A Store's rename succeeded before this failure. The new file is
+        /// present; its durability may be unknown (io.md, section 5.2).
+        /// False for failures of other file requests.
+        committed: bool,
+        /// A temporary still beside the target after its removal failed.
+        residue: Option<Residue>,
     },
     /// The owner stopped a file request before it completed.
     Cancelled {
@@ -195,7 +257,9 @@ impl Event {
     #[must_use]
     pub const fn owner(&self) -> Token {
         match self {
-            Event::Opened { owner, .. }
+            Event::Made { owner }
+            | Event::Refused { owner, .. }
+            | Event::Opened { owner, .. }
             | Event::Loaded { owner, .. }
             | Event::Scanned { owner, .. }
             | Event::Stored { owner, .. }

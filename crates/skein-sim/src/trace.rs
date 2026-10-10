@@ -52,31 +52,119 @@ pub enum Fault {
 /// the start of each path or name for it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Summary {
-    Socket { family: Family },
-    Bind { fd: Fd, addr: Addr },
-    Listen { fd: Fd, backlog: u32 },
-    Accept { fd: Fd },
-    Connect { fd: Fd, addr: Addr },
-    Recv { fd: Fd, len: usize },
-    Send { fd: Fd, len: usize, from: u32 },
-    Shutdown { fd: Fd },
-    Close { fd: Fd },
-    Open { root: Fd, path: Text, how: OpenHow },
-    Read { fd: Fd, len: usize, at: u64 },
-    Write { fd: Fd, len: usize, from: u32, at: u64 },
-    Sync { fd: Fd },
-    Stat { fd: Fd },
-    Rename { from_dir: Fd, from: Text, to_dir: Fd, to: Text },
-    Remove { dir: Fd, name: Text, directory: bool },
-    MakeDirectory { dir: Fd, name: Text },
-    List { fd: Fd, entries: usize, names: usize },
-    Spawn { root: Fd, program: Text, pipes: usize },
-    Wait { pidfd: Fd },
-    Signal { pidfd: Fd, signal: u32 },
-    ReadSignal { fd: Fd },
-    PipeRead { fd: Fd, len: usize },
-    PipeWrite { fd: Fd, len: usize, from: u32 },
-    Cancel { target: Token },
+    Socket {
+        family: Family,
+    },
+    Bind {
+        fd: Fd,
+        addr: Addr,
+    },
+    Listen {
+        fd: Fd,
+        backlog: u32,
+    },
+    Accept {
+        fd: Fd,
+    },
+    Connect {
+        fd: Fd,
+        addr: Addr,
+    },
+    Recv {
+        fd: Fd,
+        len: usize,
+    },
+    Send {
+        fd: Fd,
+        len: usize,
+        from: u32,
+    },
+    Shutdown {
+        fd: Fd,
+    },
+    Close {
+        fd: Fd,
+    },
+    Open {
+        root: Fd,
+        path: Text,
+        how: OpenHow,
+    },
+    Read {
+        fd: Fd,
+        len: usize,
+        at: u64,
+    },
+    Write {
+        fd: Fd,
+        len: usize,
+        from: u32,
+        at: u64,
+    },
+    /// A write at a writable descriptor's position, including startup append files.
+    Append {
+        fd: Fd,
+        len: usize,
+        from: u32,
+    },
+    Sync {
+        fd: Fd,
+    },
+    Stat {
+        fd: Fd,
+    },
+    Rename {
+        from_dir: Fd,
+        from: Text,
+        to_dir: Fd,
+        to: Text,
+    },
+    Remove {
+        dir: Fd,
+        name: Text,
+        directory: bool,
+    },
+    MakeDirectory {
+        dir: Fd,
+        name: Text,
+        mode: u32,
+    },
+    List {
+        fd: Fd,
+        entries: usize,
+        names: usize,
+    },
+    Spawn {
+        root: Fd,
+        program: Text,
+        pipes: usize,
+    },
+    Wait {
+        pidfd: Fd,
+        reap: bool,
+    },
+    Signal {
+        pidfd: Fd,
+        signal: u32,
+        to: skein_io::kernel::Target,
+    },
+    /// Process and reaped children usage.
+    Usage,
+    ReadSignal {
+        fd: Fd,
+    },
+    PipeRead {
+        fd: Fd,
+        len: usize,
+    },
+    PipeWrite {
+        fd: Fd,
+        len: usize,
+        from: u32,
+    },
+    Cancel {
+        target: Token,
+    },
 }
 
 /// The start of a path or a name, and its length: enough of it to read a
@@ -128,6 +216,7 @@ impl Summary {
             Op::Open { root, path, how } => Summary::Open { root: *root, path: Text::of(path), how: *how },
             Op::Read { fd, buf, at } => Summary::Read { fd: *fd, len: buf.len(), at: *at },
             Op::Write { fd, bytes, from, at } => Summary::Write { fd: *fd, len: bytes.len(), from: *from, at: *at },
+            Op::Append { fd, bytes, from } => Summary::Append { fd: *fd, len: bytes.len(), from: *from },
             Op::Sync { fd } => Summary::Sync { fd: *fd },
             Op::Stat { fd } => Summary::Stat { fd: *fd },
             Op::Rename { from_dir, from, to_dir, to } => {
@@ -136,14 +225,17 @@ impl Summary {
             Op::Remove { dir, name, directory } => {
                 Summary::Remove { dir: *dir, name: Text::of(name), directory: *directory }
             }
-            Op::MakeDirectory { dir, name } => Summary::MakeDirectory { dir: *dir, name: Text::of(name) },
+            Op::MakeDirectory { dir, name, mode } => {
+                Summary::MakeDirectory { dir: *dir, name: Text::of(name), mode: *mode }
+            }
             Op::List { fd, entries, names } => Summary::List { fd: *fd, entries: entries.len(), names: names.len() },
             Op::Spawn { spawn } => {
                 Summary::Spawn { root: spawn.root, program: Text::of(&spawn.program), pipes: spawn.pipes.len() }
             }
-            Op::Wait { pidfd } => Summary::Wait { pidfd: *pidfd },
-            Op::Signal { pidfd, signal } => Summary::Signal {
+            Op::Wait { pidfd, reap } => Summary::Wait { pidfd: *pidfd, reap: *reap },
+            Op::Signal { pidfd, signal, to } => Summary::Signal {
                 pidfd: *pidfd,
+                to: *to,
                 signal: match signal {
                     Signal::Terminate => 15,
                     Signal::Kill => 9,
@@ -152,6 +244,7 @@ impl Summary {
             Op::ReadSignal { fd } => Summary::ReadSignal { fd: *fd },
             Op::PipeRead { fd, buf } => Summary::PipeRead { fd: *fd, len: buf.len() },
             Op::PipeWrite { fd, bytes, from } => Summary::PipeWrite { fd: *fd, len: bytes.len(), from: *from },
+            Op::Usage => Summary::Usage,
             Op::Cancel { target } => Summary::Cancel { target: *target },
         }
     }
@@ -171,6 +264,7 @@ impl Summary {
             Summary::Open { .. }
             | Summary::Read { .. }
             | Summary::Write { .. }
+            | Summary::Append { .. }
             | Summary::Sync { .. }
             | Summary::Stat { .. }
             | Summary::Rename { .. }
@@ -179,6 +273,7 @@ impl Summary {
             | Summary::List { .. } => true,
             Summary::Spawn { .. }
             | Summary::Wait { .. }
+            | Summary::Usage
             | Summary::Signal { .. }
             | Summary::ReadSignal { .. }
             | Summary::PipeRead { .. }
@@ -203,6 +298,7 @@ impl Summary {
         match self {
             Summary::Cancel { .. }
             | Summary::Spawn { .. }
+            | Summary::Usage
             | Summary::Signal { .. }
             | Summary::Stat { .. }
             | Summary::Rename { .. }
@@ -221,6 +317,7 @@ impl Summary {
             | Summary::Open { .. }
             | Summary::Read { .. }
             | Summary::Write { .. }
+            | Summary::Append { .. }
             | Summary::Sync { .. }
             | Summary::Wait { .. }
             | Summary::PipeRead { .. }
@@ -245,19 +342,20 @@ impl Summary {
             | Summary::Open { root: fd, .. }
             | Summary::Read { fd, .. }
             | Summary::Write { fd, .. }
+            | Summary::Append { fd, .. }
             | Summary::Sync { fd }
             | Summary::Stat { fd }
             | Summary::Remove { dir: fd, .. }
             | Summary::MakeDirectory { dir: fd, .. }
             | Summary::List { fd, .. }
             | Summary::Spawn { root: fd, .. }
-            | Summary::Wait { pidfd: fd }
+            | Summary::Wait { pidfd: fd, .. }
             | Summary::Signal { pidfd: fd, .. }
             | Summary::ReadSignal { fd }
             | Summary::PipeRead { fd, .. }
             | Summary::PipeWrite { fd, .. } => [Some(*fd), None],
             Summary::Rename { from_dir, to_dir, .. } => [Some(*from_dir), Some(*to_dir)],
-            Summary::Socket { .. } | Summary::Cancel { .. } => [None, None],
+            Summary::Usage | Summary::Socket { .. } | Summary::Cancel { .. } => [None, None],
         }
     }
 }

@@ -259,6 +259,7 @@ version = "0.0.0"
 dependencies = [
  "skein-echo-client",
  "skein-echo-service",
+ "skein-echo-shell",
  "skein-heap",
  "skein-io",
  "skein-lib",
@@ -374,11 +375,14 @@ dependencies = [
 name = "skein-io-world"
 version = "0.0.0"
 dependencies = [
+ "skein-fake-machine",
  "skein-heap",
  "skein-io",
  "skein-lib",
+ "skein-scratch",
  "skein-shell",
  "skein-sim",
+ "skein-world",
 ]
 
 [[package]]
@@ -494,6 +498,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "skein-oauth-accounts"
+version = "0.0.0"
+dependencies = [
+ "skein-http",
+ "skein-io",
+ "skein-lib",
+ "skein-oauth",
+ "skein-tls",
+]
+
+[[package]]
+name = "skein-oauth-accounts-world"
+version = "0.0.0"
+dependencies = [
+ "skein-fake-machine",
+ "skein-fake-oauth",
+ "skein-fake-peers",
+ "skein-heap",
+ "skein-http",
+ "skein-io",
+ "skein-lib",
+ "skein-oauth",
+ "skein-oauth-accounts",
+ "skein-shell",
+ "skein-sim",
+ "skein-tls",
+ "skein-tls-world",
+ "skein-world",
+]
+
+[[package]]
 name = "skein-oauth-world"
 version = "0.0.0"
 dependencies = [
@@ -576,12 +611,20 @@ name = "skein-tls-world"
 version = "0.0.0"
 dependencies = [
  "rustls",
+ "skein-fake-llm-domain",
+ "skein-fake-llm-protocol",
+ "skein-fake-peers",
  "skein-heap",
  "skein-http",
  "skein-io",
  "skein-lib",
+ "skein-llm",
+ "skein-llm-world",
+ "skein-scratch",
+ "skein-shell",
  "skein-sim",
  "skein-tls",
+ "skein-world",
 ]
 
 [[package]]

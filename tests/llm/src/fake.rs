@@ -24,6 +24,10 @@ use skein_llm::{Call, Credential, Endpoint, Provider, client};
 /// sections 2–5; programming-model.md, section 6.3.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ObservationLimits {
+    /// Maximum actual request heads retained beside query observations.
+    pub heads: u32,
+    /// Maximum owned header wrappers, names and values in each retained head.
+    pub head_bytes: u64,
     /// Maximum currently retained Client event wrappers, supplied by the caller.
     /// Contract: docs/design/fake-llm.md, sections 2–5.
     pub events: u32,
@@ -47,7 +51,7 @@ pub struct ObservationLimits {
 
     /// Maximum retained actual client-to-peer HTTP bytes, checked before append.
     /// Contract: docs/design/fake-llm.md, sections 2–5.
-    pub request_bytes: u32,
+    pub request: u32,
 
     /// Maximum retained actual peer-to-client HTTP bytes, checked before append.
     /// Contract: docs/design/fake-llm.md, sections 2–5.
@@ -75,6 +79,7 @@ pub fn extra_worst_case(
     let queues = Queue::<client::Event>::worst_case(client::MAX_OUT.above)?
         .checked_add(Queue::<Down>::worst_case(client::MAX_OUT.below)?)?
         .checked_add(Queue::<provider::Event>::worst_case(provider::MAX_UP)?)?
+        .checked_add(u64::from(provider::MAX_UP).checked_mul(provider::head_worst_case(&peer)?)?)?
         .checked_add(Queue::<Down>::worst_case(provider::MAX_DOWN)?)?
         .checked_add(Queue::<fake::Request>::worst_case(fake::MAX_OUT)?)?
         .checked_add(u64::from(fake::MAX_OUT).checked_mul(u64::from(config().answer_bytes))?)?;
@@ -99,12 +104,14 @@ pub fn extra_worst_case(
 
 fn observation_worst_case(observations: &ObservationLimits) -> Option<u64> {
     cells::<client::Event>(observations.events)?
+        .checked_add(cells::<Box<[skein_http::Header]>>(observations.heads)?)?
+        .checked_add(u64::from(observations.heads).checked_mul(observations.head_bytes)?)?
         .checked_add(u64::from(observations.events).checked_mul(observations.event_bytes)?)?
         .checked_add(cells::<api::Query>(observations.queries)?)?
         .checked_add(u64::from(observations.queries).checked_mul(observations.query_bytes)?)?
         .checked_add(cells::<fake::Event>(observations.pending)?)?
         .checked_add(u64::from(observations.pending).checked_mul(observations.query_bytes)?)?
-        .checked_add(u64::from(observations.request_bytes))?
+        .checked_add(u64::from(observations.request))?
         .checked_add(u64::from(observations.response_bytes))
 }
 
@@ -137,6 +144,19 @@ fn query_bytes(query: &api::Query) -> Option<u64> {
         .checked_add(bytes(&query.system)?)?
         .checked_add(cells::<api::ToolSpec>(u32::try_from(query.tools.len()).ok()?)?)?
         .checked_add(cells::<api::Message>(u32::try_from(query.messages.len()).ok()?)?)?;
+    match &query.choice {
+        api::ToolChoice::Auto | api::ToolChoice::None => {}
+        api::ToolChoice::Only(names) => {
+            owned = owned.checked_add(cells::<Box<[u8]>>(u32::try_from(names.len()).ok()?)?)?;
+            for name in names {
+                owned = owned.checked_add(bytes(name)?)?;
+            }
+        }
+    }
+    if let api::Caching::Marks(marks) = &query.caching {
+        owned = owned
+            .checked_add(u64::try_from(marks.len()).ok()?.checked_mul(u64::try_from(size_of::<api::Mark>()).ok()?)?)?;
+    }
     for tool in &query.tools {
         owned = owned
             .checked_add(bytes(&tool.name)?)?
@@ -162,23 +182,8 @@ fn query_bytes(query: &api::Query) -> Option<u64> {
 
 fn replay_bytes(replay: Option<&skein_llm::Replay>) -> Option<u64> {
     let Some(replay) = replay else { return Some(0) };
-    let tokens = replay.value.as_tokens();
-    let mut owned = cells::<skein_json::Token>(u32::try_from(tokens.len()).ok()?)?;
-    for token in tokens {
-        let payload = match token {
-            skein_json::Token::Key(value) | skein_json::Token::String(value) | skein_json::Token::Number(value) => {
-                bytes(value)?
-            }
-            skein_json::Token::ObjectStart
-            | skein_json::Token::ObjectEnd
-            | skein_json::Token::ArrayStart
-            | skein_json::Token::ArrayEnd
-            | skein_json::Token::True
-            | skein_json::Token::False
-            | skein_json::Token::Null => 0,
-        };
-        owned = owned.checked_add(payload)?;
-    }
+    let document = replay.value.document();
+    let owned = cells::<skein_json::Compact>(document.len())?.checked_add(u64::from(document.text_len()))?;
     Some(owned)
 }
 
@@ -192,7 +197,12 @@ fn block_bytes(block: &skein_llm::Block) -> Option<u64> {
             .checked_add(bytes(arguments)?)?
             .checked_add(replay_bytes(replay.as_ref())?),
         skein_llm::Block::ToolResult { id, text, is_error: _ } => bytes(id)?.checked_add(bytes(text)?),
+        skein_llm::Block::Oversize { id, name, .. } => bytes(id)?.checked_add(bytes(name)?),
+        skein_llm::Block::Cut { id, name, arguments } => {
+            bytes(id)?.checked_add(bytes(name)?)?.checked_add(bytes(arguments)?)
+        }
         skein_llm::Block::Reasoning { replay } => replay_bytes(Some(replay)),
+        skein_llm::Block::Dropped { .. } => Some(0),
     }
 }
 
@@ -223,6 +233,8 @@ pub struct Exchange {
     pub machine: client::Client,
     pub seen: Vec<client::Event>,
     pub queries: Vec<api::Query>,
+    /// Actual ordered HTTP field names and values, before their decoded queries.
+    pub heads: Vec<Box<[skein_http::Header]>>,
     pub requests: Vec<u8>,
     pub responses: Vec<u8>,
     pub env: Env<client::Limits>,
@@ -254,11 +266,15 @@ pub struct Exchange {
 /// Shared peer limits compatible with this world's small client limits.
 #[must_use]
 pub fn limits(bounds: &client::Limits) -> provider::Limits {
+    // The peer may write past a client's receiving answer ceiling. Price that
+    // independent bounded storage through provider::worst_case, including in
+    // extra_worst_case; never make the test peer pre-filter an oversized call.
+    let documents = skein_llm::openai::Limits { answer: bounds.answer.max(32768), ..bounds.native() };
     provider::Limits {
         calls: 4,
         http: http::Limits { head: 4096, headers: 32, body: 32768, read: 256, response: 4096, send: 128 },
         sse: sse::Limits { event: 16384, chunk: 128 },
-        documents: documents::Limits { anthropic: bounds.dialect, openai: bounds.dialect, model_ceiling: 4096 },
+        documents: documents::Limits { anthropic: documents, openai: documents, model_ceiling: 4096 },
     }
 }
 
@@ -283,7 +299,11 @@ pub fn config() -> fake::Config {
         answer_tokens: 1,
         calls_per_answer: 1,
         malformed: 0,
+        outside_choice: 0,
         tool_rounds: 0,
+        cache_lifetime: skein_lib::Duration::from_secs(300),
+        cache_entries: 16,
+        unscoped_reads: 0,
     }
 }
 
@@ -291,13 +311,40 @@ impl Exchange {
     /// Validates the actual Client and peer independently; scripts are caller data.
     #[must_use]
     pub fn new(input: Call, bounds: client::Limits, scripts: Box<[api::Script]>) -> Self {
+        Self::new_with_codex_echo(input, bounds, scripts, skein_llm::openai::Echo::NONE)
+    }
+
+    /// Construct one actual exchange with configured Codex metadata echoes.
+    #[must_use]
+    pub fn new_with_codex_echo(
+        input: Call,
+        bounds: client::Limits,
+        scripts: Box<[api::Script]>,
+        echo: skein_llm::openai::Echo,
+    ) -> Self {
+        Self::new_configured(
+            input,
+            bounds,
+            scripts,
+            documents::Options { echo, usage_fields: documents::UsageFields::ALL },
+        )
+    }
+
+    /// Construct an exchange with the independent peer's echo and usage reporting.
+    #[must_use]
+    pub fn new_configured(
+        input: Call,
+        bounds: client::Limits,
+        scripts: Box<[api::Script]>,
+        options: documents::Options,
+    ) -> Self {
         let endpoint = input.endpoint.clone();
         let credential = Credential {
             access_token: input.credential.access_token.clone(),
             account_id: input.credential.account_id.clone(),
         };
         let machine = client::Client::prepare(input, &bounds).expect("actual shared Client admission");
-        Self::prepared(machine, endpoint, credential, bounds, scripts)
+        Self::prepared_with_options(machine, endpoint, credential, bounds, scripts, options)
     }
 
     /// Adopts the caller's one prepared Client without preparing another call.
@@ -316,13 +363,52 @@ impl Exchange {
         bounds: client::Limits,
         scripts: Box<[api::Script]>,
     ) -> Self {
+        Self::prepared_with_codex_echo(machine, endpoint, credential, bounds, scripts, skein_llm::openai::Echo::NONE)
+    }
+
+    /// Adopt the prepared Client with independently configured Codex echoes.
+    #[must_use]
+    pub fn prepared_with_codex_echo(
+        machine: client::Client,
+        endpoint: Endpoint,
+        credential: Credential,
+        bounds: client::Limits,
+        scripts: Box<[api::Script]>,
+        echo: skein_llm::openai::Echo,
+    ) -> Self {
+        Self::prepared_with_options(
+            machine,
+            endpoint,
+            credential,
+            bounds,
+            scripts,
+            documents::Options { echo, usage_fields: documents::UsageFields::ALL },
+        )
+    }
+
+    /// Adopt the prepared Client under the peer's explicit reporting configuration.
+    #[must_use]
+    pub fn prepared_with_options(
+        machine: client::Client,
+        endpoint: Endpoint,
+        credential: Credential,
+        bounds: client::Limits,
+        scripts: Box<[api::Script]>,
+        options: documents::Options,
+    ) -> Self {
         let provider = match endpoint.provider {
             Provider::OpenAiCodex => documents::Provider::OpenAi,
             Provider::Anthropic => documents::Provider::Anthropic,
         };
         let peer_limits = limits(&bounds);
         let service = provider::Service::new(
-            provider::Config { provider, path: endpoint.target, headers: Box::new([]) },
+            provider::Config {
+                usage_fields: options.usage_fields,
+                echo: options.echo,
+                provider,
+                path: endpoint.target,
+                headers: Box::new([]),
+            },
             &peer_limits,
         )
         .expect("bounded independent peer");
@@ -331,6 +417,7 @@ impl Exchange {
             machine,
             seen: Vec::new(),
             queries: Vec::new(),
+            heads: Vec::new(),
             requests: Vec::new(),
             responses: Vec::new(),
             env: Env { now: Time::ZERO, wall: Wall::EPOCH, limits: bounds },
@@ -369,7 +456,7 @@ impl Exchange {
         assert_eq!(self.machine.waiting(), client::Waiting::Start, "observation ownership precedes Start");
         assert_eq!(self.ticks, 0, "observation ownership precedes progress");
         assert!(self.observations.is_none(), "observation limits are immutable");
-        assert!(self.seen.is_empty() && self.queries.is_empty() && self.pending.is_empty());
+        assert!(self.seen.is_empty() && self.queries.is_empty() && self.heads.is_empty() && self.pending.is_empty());
         assert!(self.requests.is_empty() && self.responses.is_empty());
         // Validate all container/payload products before reserving storage.
         observation_worst_case(&observations).expect("finite configured peer observation ownership");
@@ -377,12 +464,20 @@ impl Exchange {
         self.reserve_observations();
     }
 
+    /// Sets the independent Codex model's output ceiling before any wire progress.
+    pub fn model_ceiling(&mut self, ceiling: u32) {
+        assert_eq!(self.ticks, 0, "model configuration precedes progress");
+        assert!(ceiling > 0, "the independent model has a nonzero ceiling");
+        self.peer_env.limits.documents.model_ceiling = ceiling;
+    }
+
     fn reserve_observations(&mut self) {
         if let Some(observations) = self.observations {
             reserve(&mut self.seen, observations.events);
             reserve(&mut self.queries, observations.queries);
+            reserve(&mut self.heads, observations.heads);
             reserve(&mut self.pending, observations.pending);
-            reserve(&mut self.requests, observations.request_bytes);
+            reserve(&mut self.requests, observations.request);
             reserve(&mut self.responses, observations.response_bytes);
         }
     }
@@ -458,6 +553,17 @@ impl Exchange {
         self.take();
     }
 
+    fn observe_head(&mut self, headers: Box<[skein_http::Header]>) {
+        if let Some(observations) = self.observations {
+            assert!(self.heads.len() < index(observations.heads), "head observation ceiling");
+            assert!(
+                provider::head_bytes(&headers).is_some_and(|bytes| bytes <= observations.head_bytes),
+                "head owned-byte ceiling before retention"
+            );
+        }
+        self.heads.push(headers);
+    }
+
     fn take(&mut self) {
         self.reserve_observations();
         while let Some(event) = self.client_above.pop() {
@@ -472,6 +578,7 @@ impl Exchange {
         }
         while let Some(event) = self.peer_above.pop() {
             match event {
+                provider::Event::Head { headers } => self.observe_head(headers),
                 provider::Event::Domain(event) => {
                     match &event {
                         fake::Event::Call { query, .. } => {
@@ -518,7 +625,7 @@ impl Exchange {
                             self.requests
                                 .len()
                                 .checked_add(data.len())
-                                .is_some_and(|length| length <= index(observations.request_bytes)),
+                                .is_some_and(|length| length <= index(observations.request)),
                             "request tape ceiling before append"
                         );
                     }
@@ -678,7 +785,7 @@ mod tests {
             Provider::Anthropic => {
                 input.endpoint = Endpoint::anthropic();
                 input.credential = Credential::anthropic(b"fake-token".as_slice().into());
-                input.prompt.cache_key = None;
+                input.prompt.affinity = None;
             }
         }
         input.prompt.output_ceiling(provider, 4096).expect("shared provider configuration");

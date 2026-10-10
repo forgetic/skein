@@ -9,6 +9,17 @@
 //! Each cell is a small handler over the state it leaves; what the new state
 //! implies (its demand, whether its idle deadline runs) is applied after
 //! every transition, in [`follow`] (programming-model.md, 5.4).
+//!
+//! Owner transitions (examples.md, section 3.3; shell.md, section 13):
+//! | State | Owner request | Next and effects |
+//! |---|---|---|
+//! | Greeting, Reading, Draining | Drain | Closing; Close and Gone if admitted |
+//! | Admitting, Answering | Drain | Same; ended noted until its reply |
+//! | Closing | Drain | Same |
+//! | Open | Abort | Closing; Abort, Gone if known, any call still awaited |
+//! | Closing | Abort | Same; Abort unless Closed already arrived |
+//! | Closing owing Gone | Resume | Gone; retire only after both bindings end |
+//! No peer bytes or domain text are kept after they have moved to their owner.
 
 use alloc::boxed::Box;
 use core::mem;
@@ -26,6 +37,18 @@ use crate::limits::{BUSY, Limits, TOO_LONG};
 pub(crate) struct Conn {
     socket: Token,
     state: State,
+    stop: Stop,
+}
+
+/// Work requested by the owner, applied from the bounded ready list.
+#[derive(Clone, Copy, Debug)]
+enum Stop {
+    /// No owner work pending.
+    None,
+    /// Finish a call out, then close.
+    Drain,
+    /// Abandon a remaining close.
+    Abort,
 }
 
 /// The states of a connection, each holding what it holds (examples.md,
@@ -75,10 +98,15 @@ const CLOSING: Closing = Closing { closed: false, call: false, owed: None };
 
 /// A socket just bound, greeting its peer. [`follow`] states its demand.
 pub(crate) const fn opened(socket: Token) -> Conn {
-    Conn { socket, state: State::Greeting }
+    Conn { socket, state: State::Greeting, stop: Stop::None }
 }
 
 impl Conn {
+    /// Schedules the owner’s drain or abort.
+    pub(crate) fn stop(&mut self, abort: bool) {
+        self.stop = if abort { Stop::Abort } else { Stop::Drain };
+    }
+
     /// Whether it owes the domain a `Gone`, for the ready list.
     pub(crate) const fn owes(&self) -> bool {
         match self.state {
@@ -188,7 +216,21 @@ pub(crate) fn replied(conn: &mut Conn, reply: Reply, env: &Env<Limits>, down: &m
 }
 
 /// `Gone` told, from the ready list.
-pub(crate) fn resumed(conn: &mut Conn, up: &mut Queue<Call>) {
+pub(crate) fn resumed(conn: &mut Conn, up: &mut Queue<Call>, down: &mut Queue<Io>) {
+    let stop = mem::replace(&mut conn.stop, Stop::None);
+    match stop {
+        Stop::Drain => {
+            let state = mem::replace(&mut conn.state, State::Closed);
+            conn.state = ended(state, conn.socket, up, down);
+            return;
+        }
+        Stop::Abort => {
+            let state = mem::replace(&mut conn.state, State::Closed);
+            conn.state = abort(state, conn.socket, up, down);
+            return;
+        }
+        Stop::None => {}
+    }
     let state = mem::replace(&mut conn.state, State::Closed);
     conn.state = match state {
         State::Closing(Closing { owed: Some(session), call: false, closed }) => {
@@ -203,6 +245,41 @@ pub(crate) fn resumed(conn: &mut Conn, up: &mut Queue<Call>) {
         | State::Draining { .. }
         | State::Closed => unreachable!("only a connection that owes a Gone is on the ready list"),
     };
+}
+
+/// An owner abort leaves calls to settle, but io no longer flushes output.
+fn abort(state: State, socket: Token, up: &mut Queue<Call>, down: &mut Queue<Io>) -> State {
+    match state {
+        State::Closing(closing) => {
+            if !closing.closed {
+                down.push(Io::Abort { entity: socket });
+            }
+            State::Closing(closing)
+        }
+        State::Closed => State::Closed,
+        State::Greeting
+        | State::Admitting { .. }
+        | State::Reading { .. }
+        | State::Answering { .. }
+        | State::Draining { .. } => abort_open(state, socket, up, down),
+    }
+}
+
+fn abort_open(state: State, socket: Token, up: &mut Queue<Call>, down: &mut Queue<Io>) -> State {
+    down.push(Io::Abort { entity: socket });
+    match state {
+        State::Greeting => State::Closing(CLOSING),
+        State::Reading { session } | State::Draining { session } => {
+            up.push(Call::Gone { session });
+            State::Closing(CLOSING)
+        }
+        State::Admitting { .. } => State::Closing(Closing { call: true, ..CLOSING }),
+        State::Answering { session, .. } => {
+            up.push(Call::Gone { session });
+            State::Closing(Closing { call: true, ..CLOSING })
+        }
+        State::Closing(_) | State::Closed => unreachable!("only open states abort here"),
+    }
 }
 
 fn read(state: State, bytes: &[u8], id: Id<Conn>, socket: Token, up: &mut Queue<Call>, down: &mut Queue<Io>) -> State {

@@ -42,20 +42,16 @@ fn request_evidence(bytes: &[u8], path: &[u8]) -> bool {
         && body.windows(b"Original question.".len()).any(|part| part == b"Original question.")
 }
 
-fn completion_evidence(completion: &Completion, usage: [u64; 4], replay: bool) -> bool {
+fn completion_evidence(completion: &Completion, usage: [Option<u64>; 4], replay: bool) -> bool {
     let [Block::Text { text, replay: actual_replay }] = completion.content.as_ref() else { return false };
     text.as_ref() == b"Original owner."
         && actual_replay.is_some() == replay
         && completion.stop == Stop::EndTurn
-        && [
-            completion.usage.input_tokens,
-            completion.usage.output_tokens,
-            completion.usage.cache_read_tokens,
-            completion.usage.cache_write_tokens,
-        ] == usage
+        && [completion.usage.input, completion.usage.output, completion.usage.cache_read, completion.usage.cache_write]
+            == usage
 }
 
-fn observe(mut world: World, owner: Token, path: &[u8], usage: [u64; 4], replay: bool) {
+fn observe(mut world: World, owner: Token, path: &[u8], usage: [Option<u64>; 4], replay: bool) {
     assert_eq!(world.machine.owner(), owner);
     assert_eq!(world.machine.waiting(), client::Waiting::Start);
     assert!(world.seen.is_empty());
@@ -94,7 +90,7 @@ fn observe(mut world: World, owner: Token, path: &[u8], usage: [u64; 4], replay:
     let [completion] = completed.as_slice() else { panic!("one original owner's Completed") };
     assert!(completion_evidence(completion, usage, replay));
     let mut changed = (*completion).clone();
-    changed.usage.cache_read_tokens += 1;
+    changed.usage.cache_read = Some(changed.usage.cache_read.unwrap_or(0) + 1);
     assert!(!completion_evidence(&changed, usage, replay));
     changed = (*completion).clone();
     changed.content = Box::new([]);
@@ -123,21 +119,27 @@ fn actual_prepared_codex_owner_and_request_survive_raw_world_adoption() {
     let machine = client::Client::prepare(input, &bounds).expect("one caller-owned prepared Client");
     let source = response(200, "Content-Type: text/event-stream\r\n", &events(CODEX), false);
     let world = World::prepared(machine, bounds, source, 17);
-    observe(world, Token::new(0), b"POST /backend-api/codex/responses HTTP/1.1\r\n", [8, 3, 4, 0], true);
+    observe(
+        world,
+        Token::new(0),
+        b"POST /backend-api/codex/responses HTTP/1.1\r\n",
+        [Some(8), Some(3), Some(4), None],
+        true,
+    );
 }
 
 #[test]
 fn actual_prepared_anthropic_owner_and_request_survive_raw_world_adoption() {
-    let bounds = limits();
+    let bounds = skein_llm_world::limits_for(skein_llm::Provider::Anthropic);
     let mut input = call(99);
     input.endpoint = Endpoint::anthropic();
     input.credential = Credential::anthropic(b"fixture-token".as_slice().into());
-    input.prompt.cache_key = None;
+    input.prompt.affinity = None;
     input.prompt.max_output_tokens = Some(128);
     input.prompt.messages[0].content =
         Box::new([Block::Text { text: b"Original question.".as_slice().into(), replay: None }]);
     let machine = client::Client::prepare(input, &bounds).expect("one caller-owned prepared Client");
     let source = response(200, "Content-Type: text/event-stream\r\n", ANTHROPIC, true);
     let world = World::prepared(machine, bounds, source, 29);
-    observe(world, Token::new(99), b"POST /v1/messages HTTP/1.1\r\n", [7, 9, 11, 13], false);
+    observe(world, Token::new(99), b"POST /v1/messages HTTP/1.1\r\n", [Some(7), Some(9), Some(11), Some(13)], false);
 }

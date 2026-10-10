@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# Land the current branch on main (development.md, section 9).
+#
+#   land [--docs] [--local] [--gate COMMAND] [--tries N]
+#
+# From a clean worktree on the branch to land: rebase it on origin/main,
+# run the repository's gate through `heavy --gate`, record the gate's
+# evidence in the tip commit's trailers, and push the tip to origin's main.
+# The push only fast-forwards, so it is the lock: a rejected push means
+# main moved, and land starts again from the rebase. Then the local main,
+# and the checkout that has it, follow.
+#
+# --docs   Markdown only: check that, and skip the gate.
+# --local  No remote: land on the local main under a lock (LAND_LOCK, or
+#          the repository's land.lock) instead of pushing.
+# --gate   The gate, a shell command, instead of scripts/check.sh.
+# --tries  How many times to start again when main moves (default 5).
+#
+# Exit status:
+#   0  landed
+#   2  refused before starting, or nothing to land
+#   3  the rebase stopped on conflicts, left for you to resolve
+#   4  the gate failed
+#   5  the local main could not follow: with a push, the commit landed on
+#      origin/main; with --local, nothing landed
+#   6  main kept moving
+#   7  fetching or pushing failed
+#   8  another command failed
+set -euo pipefail
+
+kit=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+root=${DEV_ROOT:-$HOME/src/rust}
+tmp=${DEV_TMP:-$root/tmp}
+start_dir=$PWD
+
+docs=0 local=0 gate=scripts/check.sh tries=5
+while (($#)); do
+    case $1 in
+    --docs) docs=1; shift ;;
+    --local) local=1; shift ;;
+    --gate) gate=${2:?}; shift 2 ;;
+    --tries) tries=${2:?}; shift 2 ;;
+    *) echo "usage: land [--docs] [--local] [--gate COMMAND] [--tries N]" >&2; exit 2 ;;
+    esac
+done
+
+die() { echo "land: $2" >&2; exit "$1"; }
+trap 'echo "land: line $LINENO failed" >&2; exit 8' ERR
+
+top=$(git rev-parse --show-toplevel)
+cd "$top"
+branch=$(git symbolic-ref --quiet --short HEAD) || die 2 "not on a branch"
+[[ $branch != main ]] || die 2 "on main; land a branch"
+[[ -z $(git status --porcelain) ]] || die 2 "the worktree is not clean"
+for state in rebase-merge rebase-apply MERGE_HEAD; do
+    [[ ! -e $(git rev-parse --git-path "$state") ]] || die 2 "a rebase or merge is in progress"
+done
+common=$(git rev-parse --path-format=absolute --git-common-dir)
+repo=$(basename "$(dirname "$common")")
+lock=${LAND_LOCK:-$common/land.lock}
+[[ $lock == /* ]] || lock=$start_dir/$lock
+
+fetch() {
+    local wait
+    for wait in 1 2 4; do
+        git fetch --quiet origin main 2>/dev/null && return
+        sleep "$wait"
+    done
+    die 7 "cannot fetch origin's main"
+}
+
+# Move the local main, and the checkout that has it, to $1. Returns 0 when
+# main is there or past it, 1 when a checkout of main has changes, 2 when
+# main has commits that $1 lacks. Called under the lock.
+follow() {
+    local commit=$1 main wt
+    main=$(git rev-parse main)
+    if git merge-base --is-ancestor "$commit" "$main"; then
+        return 0
+    fi
+    git merge-base --is-ancestor "$main" "$commit" || return 2
+    wt=$(git worktree list --porcelain | awk '
+        /^worktree / { w = substr($0, 10) } $0 == "branch refs/heads/main" { print w }')
+    if [[ -z $wt ]]; then
+        git update-ref refs/heads/main "$commit" "$main"
+    elif [[ -n $(git -C "$wt" status --porcelain --untracked-files=no) ]]; then
+        return 1
+    else
+        git -C "$wt" merge --quiet --ff-only "$commit"
+    fi
+}
+
+# The gate's evidence, as one line: each nextest summary, in the order the
+# gate runs them, then the time the gate ran.
+evidence() {
+    local log=$1 secs=$2 parts label=$gate
+    parts=$(sed -E 's/\x1b\[[0-9;]*m//g' "$log" |
+        sed -nE 's/^ *Summary \[ *([0-9.]+)s\] ([0-9]+) tests? run: ([0-9]+) passed.*/\3 tests \/ \1 s/p' |
+        paste -sd ';' - | sed 's/;/; /g')
+    [[ $gate != *" "* ]] || label=gate
+    echo "$label passed: ${parts:+$parts; }$secs s in all"
+}
+
+try=0
+while :; do
+    try=$((try + 1))
+    ((try <= tries)) || die 6 "main moved $tries times; giving up"
+
+    if ((local)); then
+        base=$(git rev-parse main)
+    else
+        fetch
+        base=$(git rev-parse origin/main)
+    fi
+    if ! git rebase --quiet "$base"; then
+        die 3 "the rebase on $(git rev-parse --short "$base") stopped on conflicts. \
+Resolve them, run git rebase --continue, then land again."
+    fi
+    [[ $(git rev-parse HEAD) != "$base" ]] ||
+        die 2 "nothing to land: the branch has no commits beyond main"
+
+    tree=$(git rev-parse 'HEAD^{tree}')
+    if ((docs)); then
+        others=$(git diff --no-renames --name-only "$base" HEAD | grep -v '\.md$' || true)
+        [[ -z $others ]] || die 2 "--docs, but these are not Markdown: $others"
+        summary="none (Markdown only)"
+    else
+        [[ $gate != scripts/check.sh || -x $gate ]] ||
+            die 2 "no scripts/check.sh: give the gate with --gate (see the repository's workflow)"
+        # A result holds for one tree, one gate and one compiler.
+        key=$(printf '%s\n%s\n%s\n' "$tree" "$gate" "$(rustc -V 2>/dev/null || true)" |
+            sha1sum | cut -c1-40)
+        cache=$tmp/gates/$repo/$key
+        if [[ -f $cache ]]; then
+            summary=$(cat "$cache")
+        else
+            out=$(mktemp)
+            if ! "$kit/heavy" --gate --tail 60 bash -c "$gate" >"$out" 2>&1; then
+                cat "$out"
+                rm -f "$out"
+                die 4 "the gate failed on $(git rev-parse --short HEAD)"
+            fi
+            cat "$out"
+            last=$(grep '^heavy: task ' "$out" | tail -n1 || true)
+            log=$(sed -nE 's/.* log (.*)$/\1/p' <<<"$last")
+            secs=$(sed -nE 's/^heavy: ran alone for ([0-9]+)s$/\1/p' "${log:-$out}" | tail -n1)
+            summary=$(evidence "${log:-$out}" "${secs:-?}")
+            rm -f "$out"
+            mkdir -p "$(dirname "$cache")"
+            printf '%s\n' "$summary" >"$cache"
+        fi
+    fi
+
+    # The evidence goes in the tip's trailers. Amending the message keeps
+    # the tree, so the evidence still holds for what lands.
+    message=$(git log -1 --format=%B |
+        git interpret-trailers --if-exists replace \
+            --trailer "Gate-Tree: $tree" --trailer "Gate-Result: $summary")
+    git commit --quiet --amend --no-verify --message "$message"
+    commit=$(git rev-parse HEAD)
+
+    if ((local)); then
+        exec 9>"$lock"
+        flock 9
+        if [[ $(git rev-parse main) != "$base" ]]; then
+            flock -u 9
+            echo "land: main moved; again" >&2
+            continue
+        fi
+        status=0
+        follow "$commit" || status=$?
+        flock -u 9
+        ((status == 0)) || die 5 "nothing landed: a checkout of main has changes"
+        where="local main"
+        break
+    fi
+
+    if ! err=$(git push --quiet origin "$commit:refs/heads/main" 2>&1); then
+        if grep -qE 'non-fast-forward|fetch first|stale info' <<<"$err"; then
+            echo "land: main moved on origin; again" >&2
+            continue
+        fi
+        die 7 "the push failed: $err"
+    fi
+    where="origin/main"
+    exec 9>"$lock"
+    flock 9
+    status=0
+    follow "$commit" || status=$?
+    flock -u 9
+    case $status in
+    0) ;;
+    1) die 5 "landed $commit on origin/main, but a checkout of main has changes and did not follow" ;;
+    *) die 5 "landed $commit on origin/main, but the local main has commits origin lacks: reconcile it (development.md, section 9.6)" ;;
+    esac
+    break
+done
+
+cat <<EOF
+land: landed $repo $branch on $where
+  commit  $commit
+  parent  $base
+  tree    $tree
+  gate    $summary
+EOF

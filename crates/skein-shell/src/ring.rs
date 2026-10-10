@@ -67,6 +67,9 @@
 )]
 
 mod process;
+mod startup;
+
+pub(crate) use startup::read_file;
 
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -99,7 +102,102 @@ pub fn hosted_pipes(command: &mut skein_io::kernel::Spawn) -> Result<HostedPipes
 /// Starts a shipped binary on pipes or a controlling pseudo-terminal for
 /// an end-to-end world; stderr is always separate (examples.md, section 6).
 pub fn start_binary(command: &mut skein_io::kernel::Spawn, terminal: bool) -> Result<(Fd, Option<Fd>), Error> {
-    process::start_binary(command, terminal)
+    process::start_binary(command, terminal, None)
+}
+
+/// Starts the binary in an already-open delegated cgroup, before its exec.
+pub fn start_binary_in_cgroup(
+    command: &mut skein_io::kernel::Spawn,
+    terminal: bool,
+    cgroup: Fd,
+) -> Result<(Fd, Option<Fd>), Error> {
+    process::start_binary(command, terminal, Some(cgroup))
+}
+
+/// Makes the test process a subreaper for its binary's descendants.
+pub fn make_subreaper() -> Result<(), Error> {
+    process::make_subreaper()
+}
+
+/// Reads whether this test process adopts orphaned descendants.
+pub fn subreaper() -> Result<bool, Error> {
+    process::subreaper()
+}
+
+/// Restores or enables this test process's orphan adoption setting.
+pub fn set_subreaper(enabled: bool) -> Result<(), Error> {
+    process::set_subreaper(enabled)
+}
+
+/// How startup adopts a standard output descriptor (io.md, section 5.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputKind {
+    /// A pipe or terminal, sent through the inherited write-pipe face.
+    Pipe,
+    /// A regular file, sent through io's append-stream face.
+    Append,
+}
+
+/// Finds an inherited output's kind at startup and enables `O_APPEND` on a
+/// regular file. Ownership stays with the caller until io adopts the descriptor.
+/// Pipes and terminals retain their flags (shell.md, section 6; io.md, 5.1).
+pub fn prepare_output(descriptor: Fd) -> Result<OutputKind, Error> {
+    // SAFETY: stat is initialized, and remains writable throughout fstat.
+    let mut stat: libc::stat = unsafe { mem::zeroed() };
+    // SAFETY: the caller owns descriptor, and stat is writable for this call.
+    let result = unsafe { libc::fstat(descriptor.raw(), ptr::from_mut(&mut stat)) };
+    if result < 0 {
+        return Err(Error::Other(last_errno()));
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Ok(OutputKind::Pipe);
+    }
+    let flags = status_flags(descriptor.raw()).map_err(Error::Other)?;
+    if flags & libc::O_ACCMODE == libc::O_RDONLY {
+        return Err(Error::Permission);
+    }
+    // SAFETY: F_SETFL takes only integer flags for the caller's live descriptor.
+    let changed = unsafe { libc::fcntl(descriptor.raw(), libc::F_SETFL, flags | libc::O_APPEND) };
+    if changed < 0 { Err(Error::Other(last_errno())) } else { Ok(OutputKind::Append) }
+}
+
+/// Opens a discovered process's pidfd for the test keeper.
+pub fn open_pidfd(pid: u32) -> Result<Fd, Error> {
+    process::open_pidfd(pid)
+}
+
+/// Opens a cgroup directory for the binary's atomic placement at spawn.
+pub fn open_cgroup(path: &Path) -> Result<Fd, Error> {
+    process::open_cgroup(path)
+}
+
+/// Polls a pidfd during observer cleanup, observing or reaping only that child.
+pub fn poll_child(pidfd: Fd, reap: bool) -> Result<Option<Exit>, Error> {
+    process::poll_child(pidfd, reap)
+}
+
+/// Tests a keeper's pidfd for exit, including descendants not yet adopted.
+pub fn pidfd_exited(pidfd: Fd) -> Result<bool, Error> {
+    process::pidfd_exited(pidfd)
+}
+
+/// Sends a keeper's signal through the owned pidfd, including its group.
+pub fn signal_kept_child(
+    pidfd: Fd,
+    signal: skein_io::kernel::Signal,
+    to: skein_io::kernel::Target,
+) -> Result<(), Error> {
+    signal_child(pidfd, signal, to).map(|_| ())
+}
+
+/// Closes an exclusively owned test keeper descriptor during cleanup.
+pub fn close_keeper_fd(descriptor: Fd) {
+    process::close_keeper_fd(descriptor);
+}
+
+/// Waits for a keeper's cgroup event file to change, within the given milliseconds.
+pub fn wait_cgroup_change(descriptor: Fd, millis: u32) -> Result<(), Error> {
+    process::wait_cgroup_change(descriptor, millis)
 }
 
 /// Reaps and releases an external child abandoned by a failing test. Normal
@@ -320,7 +418,6 @@ const EMPTY: &CStr = c"";
 /// `MakeDirectory`'s, both less the umask (`skein_io::kernel`, backend
 /// defaults).
 const FILE_MODE: u64 = 0o666;
-const DIRECTORY_MODE: libc::mode_t = 0o777;
 
 impl Kernel {
     /// Sets up the ring for this thread alone: one issuer, and completions
@@ -453,6 +550,7 @@ impl Kernel {
     fn start(&mut self, record: Submit) {
         let Submit { op, kind } = record;
         assert!(kind.is_valid(), "io submits only valid records (skein_io::kernel, broken invariants)");
+        check_path_access(&kind);
         assert!(!self.table.tokens.contains_key(&op), "io never reuses a token in flight (skein_io::kernel)");
         let index = self.table.free.pop().expect("a record is taken only while a slot is free");
         let Table { slots, tokens, cancelled, ready, listing, .. } = &mut self.table;
@@ -706,10 +804,16 @@ fn prepare(
             let len = u32::try_from(left.len()).expect("a valid Write's length is a count");
             opcode::Write::new(types::Fd(fd.raw()), left.as_ptr(), len).offset(*at).build()
         }
+        Op::Append { fd, bytes, from } => {
+            let from = usize::try_from(*from).expect("a u32 fits in a usize");
+            let left = bytes.get(from..).expect("a valid Append has bytes left");
+            let len = u32::try_from(left.len()).expect("a valid Append counts bytes");
+            opcode::Write::new(types::Fd(fd.raw()), left.as_ptr(), len).offset(u64::MAX).build()
+        }
         Op::Sync { fd } => opcode::Fsync::new(types::Fd(fd.raw())).build(),
         Op::Stat { fd } => opcode::Statx::new(types::Fd(fd.raw()), EMPTY.as_ptr(), statx.get().cast())
             .flags(libc::AT_EMPTY_PATH)
-            .mask(libc::STATX_TYPE | libc::STATX_SIZE | libc::STATX_MODE)
+            .mask(libc::STATX_TYPE | libc::STATX_SIZE | libc::STATX_MODE | libc::STATX_UID | libc::STATX_NLINK)
             .build(),
         Op::Rename { from_dir, from, to_dir, to } => {
             *path = c_path(from);
@@ -722,9 +826,9 @@ fn prepare(
             let flags = if *directory { libc::AT_REMOVEDIR } else { 0 };
             opcode::UnlinkAt::new(types::Fd(dir.raw()), path.as_ptr().cast()).flags(flags).build()
         }
-        Op::MakeDirectory { dir, name } => {
+        Op::MakeDirectory { dir, name, mode } => {
             *path = c_path(name);
-            opcode::MkDirAt::new(types::Fd(dir.raw()), path.as_ptr().cast()).mode(DIRECTORY_MODE).build()
+            opcode::MkDirAt::new(types::Fd(dir.raw()), path.as_ptr().cast()).mode(*mode).build()
         }
         Op::List { fd, entries, names } => {
             let listed = list(fd.raw(), entries, names, listing);
@@ -734,7 +838,8 @@ fn prepare(
             });
         }
         Op::Spawn { spawn: command } => return Prepared::Done(spawn(command)),
-        Op::Signal { pidfd, signal } => return Prepared::Done(signal_child(*pidfd, *signal)),
+        Op::Signal { pidfd, signal, to } => return Prepared::Done(signal_child(*pidfd, *signal, *to)),
+        Op::Usage => return Prepared::Done(process::usage().map(Done::Usage)),
         Op::ReadSignal { fd } => opcode::Read::new(
             types::Fd(fd.raw()),
             signal_info.get().cast(),
@@ -742,11 +847,13 @@ fn prepare(
         )
         .offset(u64::MAX)
         .build(),
-        Op::Wait { pidfd } => {
-            opcode::WaitId::new(libc::P_PIDFD, u32::try_from(pidfd.raw()).expect("a pidfd is positive"), libc::WEXITED)
-                .infop(siginfo.get().cast_const())
-                .build()
-        }
+        Op::Wait { pidfd, reap } => opcode::WaitId::new(
+            libc::P_PIDFD,
+            u32::try_from(pidfd.raw()).expect("a pidfd is positive"),
+            libc::WEXITED | if *reap { 0 } else { libc::WNOWAIT },
+        )
+        .infop(siginfo.get().cast_const())
+        .build(),
         Op::Cancel { target } => {
             let Some(target_data) = tokens.get(target) else {
                 return Prepared::Done(Err(Error::TooLate));
@@ -808,8 +915,10 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
         | Op::Send { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. } => Ok(Done::Count(u32::try_from(res).expect("a non-negative i32 fits in a u32"))),
+        Op::Open { how: OpenHow::PathNoFollow, .. } => Ok(Done::Fd(Fd::new(res))),
         Op::Open { .. } => opened(res),
         Op::Stat { .. } => Ok(Done::Stat(stat(statx.get_mut()))),
         Op::Wait { .. } => {
@@ -847,7 +956,7 @@ fn decode(flight: &mut Flight, res: i32, cancelled: bool) -> Result<Done, Error>
         | Op::Remove { .. }
         | Op::MakeDirectory { .. }
         | Op::Cancel { .. } => Ok(Done::Nothing),
-        Op::List { .. } | Op::Spawn { .. } | Op::Signal { .. } => {
+        Op::Usage | Op::List { .. } | Op::Spawn { .. } | Op::Signal { .. } => {
             unreachable!("a synchronous operation completes at its submit")
         }
     }
@@ -868,6 +977,7 @@ fn error(kind: &Op, errno: i32, cancelled: bool) -> Error {
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
@@ -879,7 +989,7 @@ fn error(kind: &Op, errno: i32, cancelled: bool) -> Error {
             libc::EINVAL => Error::InvalidArgument,
             other => file_error(kind, other),
         },
-        Op::Spawn { .. } | Op::Signal { .. } => Error::Other(errno),
+        Op::Usage | Op::Spawn { .. } | Op::Signal { .. } => Error::Other(errno),
         Op::ReadSignal { .. } => match errno {
             libc::ECANCELED => Error::Cancelled,
             libc::EINTR if cancelled => Error::Cancelled,
@@ -958,6 +1068,7 @@ fn operation_error(kind: &Op, errno: i32) -> Error {
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
@@ -967,6 +1078,7 @@ fn operation_error(kind: &Op, errno: i32) -> Error {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::Cancel { .. } => unreachable!("an operation on files' errors, and a Cancel's, are mapped apart"),
     };
@@ -998,7 +1110,7 @@ fn file_error(kind: &Op, errno: i32) -> Error {
             libc::EISDIR => Some(Error::IsADirectory),
             _ => None,
         },
-        Op::Write { .. } => match errno {
+        Op::Write { .. } | Op::Append { .. } => match errno {
             libc::ENOSPC | libc::EDQUOT => Some(Error::NoSpace),
             libc::EROFS => Some(Error::ReadOnly),
             _ => None,
@@ -1062,6 +1174,7 @@ fn file_error(kind: &Op, errno: i32) -> Error {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::Cancel { .. } => unreachable!("only an operation on files' errors are mapped here"),
     };
@@ -1080,6 +1193,38 @@ fn c_path(bytes: &[u8]) -> Box<[u8]> {
     path.extend_from_slice(bytes);
     path.push(0);
     path.into_boxed_slice()
+}
+
+/// Path-only descriptors never enter an operation other than Stat or Close (kernel.md, 6.1).
+fn check_path_access(operation: &Op) {
+    let descriptors = match operation {
+        Op::Stat { .. } | Op::Close { .. } | Op::Socket { .. } | Op::Usage | Op::Cancel { .. } => return,
+        Op::Bind { fd, .. }
+        | Op::Listen { fd, .. }
+        | Op::Accept { fd }
+        | Op::Connect { fd, .. }
+        | Op::Recv { fd, .. }
+        | Op::Send { fd, .. }
+        | Op::Shutdown { fd }
+        | Op::Read { fd, .. }
+        | Op::Write { fd, .. }
+        | Op::Append { fd, .. }
+        | Op::Sync { fd }
+        | Op::List { fd, .. }
+        | Op::ReadSignal { fd }
+        | Op::PipeRead { fd, .. }
+        | Op::PipeWrite { fd, .. } => [Some(*fd), None],
+        Op::Open { root, .. } => [Some(*root), None],
+        Op::Rename { from_dir, to_dir, .. } => [Some(*from_dir), Some(*to_dir)],
+        Op::Remove { dir, .. } | Op::MakeDirectory { dir, .. } => [Some(*dir), None],
+        Op::Spawn { spawn } => [Some(spawn.root), None],
+        Op::Wait { pidfd, .. } | Op::Signal { pidfd, .. } => [Some(*pidfd), None],
+    };
+    for descriptor in descriptors.into_iter().flatten() {
+        if let Ok(flags) = status_flags(descriptor.raw()) {
+            assert_eq!(flags & libc::O_PATH, 0, "only Stat and Close may use a path-only descriptor");
+        }
+    }
 }
 
 /// What an `Open` that the kernel answered with the descriptor `fd` comes
@@ -1135,8 +1280,12 @@ fn blocking(fd: i32) -> Result<(), Error> {
 /// without blocking or taking a controlling terminal, and resolved beneath
 /// the root, without magic links (kernel.md, 6.1).
 fn open(how: OpenHow) -> types::OpenHow {
-    let no_follow = matches!(how, OpenHow::ReadNoFollow | OpenHow::DirectoryNoFollow | OpenHow::CreateNoFollow { .. });
+    let no_follow = matches!(
+        how,
+        OpenHow::PathNoFollow | OpenHow::ReadNoFollow | OpenHow::DirectoryNoFollow | OpenHow::CreateNoFollow { .. }
+    );
     let (flags, mode) = match how {
+        OpenHow::PathNoFollow => (libc::O_PATH | libc::O_NOFOLLOW, 0),
         OpenHow::Read | OpenHow::ReadNoFollow => (libc::O_RDONLY, 0),
         OpenHow::Directory | OpenHow::DirectoryNoFollow => (libc::O_RDONLY | libc::O_DIRECTORY, 0),
         OpenHow::Create { mode } | OpenHow::CreateNoFollow { mode } => {
@@ -1147,7 +1296,11 @@ fn open(how: OpenHow) -> types::OpenHow {
             (libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, mode)
         }
     };
-    let flags = flags | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
+    let flags = if matches!(how, OpenHow::PathNoFollow) {
+        flags | libc::O_CLOEXEC
+    } else {
+        flags | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY
+    };
     let flags = u64::try_from(flags).expect("open's flags are positive");
     let resolve = if no_follow {
         libc::RESOLVE_BENEATH | libc::RESOLVE_NO_SYMLINKS
@@ -1161,7 +1314,7 @@ fn open(how: OpenHow) -> types::OpenHow {
 fn stat(raw: &libc::statx) -> Stat {
     let kind = if raw.stx_mask & libc::STATX_TYPE == 0 { Kind::Other } else { kind_of(u32::from(raw.stx_mode)) };
     let mode = if raw.stx_mask & libc::STATX_MODE == 0 { 0 } else { u32::from(raw.stx_mode) & PERMISSIONS };
-    Stat { kind, size: raw.stx_size, mode }
+    Stat { kind, size: raw.stx_size, mode, owner: raw.stx_uid, links: raw.stx_nlink }
 }
 
 /// The kind of a file whose mode is `mode`.
@@ -1451,6 +1604,33 @@ pub fn open_root(path: &Path) -> Result<Fd, i32> {
     if fd < 0 { Err(last_errno()) } else { Ok(Fd::new(fd)) }
 }
 
+/// Opens a regular file beneath `root` for append, creating it with `mode` if absent
+/// (shell.md, 6). Existing contents and mode remain; links cannot escape the root.
+pub fn open_append(root: Fd, path: &[u8], mode: u32) -> Result<Fd, Error> {
+    if mode & !PERMISSIONS != 0 || path.is_empty() {
+        return Err(Error::InvalidArgument);
+    }
+    let path_c = CString::new(path).map_err(|_| Error::InvalidArgument)?;
+    let flags = libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY;
+    // The syscall layout is three u64 fields, as Linux's struct open_how.
+    let how = [
+        u64::try_from(flags).expect("positive flags"),
+        u64::from(mode),
+        libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS,
+    ];
+    // SAFETY: both pointers remain live for the call; the kernel reads the
+    // NUL-terminated path and exactly these three initialized u64 fields.
+    let fd = unsafe { libc::syscall(libc::SYS_openat2, root.raw(), path_c.as_ptr(), how.as_ptr(), size_of_val(&how)) };
+    if fd < 0 {
+        let kind = Op::Open { root, path: Box::from(path), how: OpenHow::Create { mode: Some(mode) } };
+        return Err(file_error(&kind, last_errno()));
+    }
+    let Done::Fd(fd) = opened(i32::try_from(fd).expect("a descriptor fits i32"))? else {
+        unreachable!("opened returns a descriptor");
+    };
+    Ok(fd)
+}
+
 /// Releases a descriptor the adapter made but cannot hand up. The descriptor
 /// is released whatever `close` answers, so there is nothing to do with it.
 pub(crate) fn close(fd: i32) {
@@ -1483,6 +1663,13 @@ pub(crate) fn random() -> Result<u64, i32> {
         Ok(_) => Err(libc::EIO),
         Err(_) => Err(last_errno()),
     }
+}
+
+/// The process effective user, read once by startup for io's private files (shell.md, section 6).
+#[must_use]
+pub fn effective_user() -> u32 {
+    // SAFETY: geteuid takes no pointers and has no preconditions.
+    unsafe { libc::geteuid() }
 }
 
 #[cfg(test)]

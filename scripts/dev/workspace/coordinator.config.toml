@@ -1,0 +1,8 @@
+# The plan coordinator: `codex -p coordinator`, started in ~/src/rust
+# (skein's docs/foundation/development.md, sections 2.3 and 7).
+model = "gpt-6.1-sol"
+model_reasoning_effort = "high"
+
+[agents]
+# Sub-agent threads open at once, besides the coordinator's own.
+max_threads = 8

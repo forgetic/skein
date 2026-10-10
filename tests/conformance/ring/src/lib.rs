@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::Command;
 
 use skein_conformance::{Backend, Item, Made};
-use skein_io::kernel::{Complete, Fd, Submit};
+use skein_io::kernel::{Complete, Error, Fd, Submit};
 use skein_lib::{Duration, Queue, Time};
 use skein_scratch::Scratch;
 use skein_shell::{Clock, Config, Kernel, OpenError, Wait, open_root};
@@ -110,6 +110,10 @@ impl Backend for Ring {
         assert_eq!(kernel.in_flight(), 0, "nothing in flight on process {process}");
     }
 
+    fn append(&mut self, _process: usize, root: Fd, path: &[u8], mode: u32) -> Result<Fd, Error> {
+        skein_shell::open_append(root, path, mode)
+    }
+
     /// A scratch directory holding `root`, laid out as `tree` says, and
     /// `outside` beside it, for a link to lead out to; opened as the shell
     /// opens a root.
@@ -126,6 +130,9 @@ impl Backend for Ring {
                 Made::File(bytes) => fs::write(&path, bytes).expect("a file laid"),
                 Made::Directory => fs::create_dir(&path).expect("a directory laid"),
                 Made::Link(target) => symlink(OsStr::from_bytes(target), &path).expect("a symbolic link laid"),
+                Made::HardLink(target) => {
+                    fs::hard_link(root.join(OsStr::from_bytes(target)), &path).expect("a hard link laid");
+                }
                 // No FIFO without libc's mkfifo, which is unsafe: the
                 // program does it.
                 Made::Fifo => {
@@ -140,7 +147,7 @@ impl Backend for Ring {
                 Made::File(_) | Made::Directory | Made::Fifo => {
                     mode(&root.join(OsStr::from_bytes(&item.path)), item.mode);
                 }
-                Made::Link(_) => {}
+                Made::Link(_) | Made::HardLink(_) => {}
             }
         }
         let fd = open_root(&root).expect("a scratch directory opens as a root");

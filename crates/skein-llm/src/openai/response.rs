@@ -3,31 +3,89 @@ use crate::openai::{
 };
 use alloc::boxed::Box;
 use core::mem;
-use skein_json::{Token, writer::Encoder};
+use skein_json::{Document, Kind, writer::Encoder};
 use skein_lib::{List, Queue, Wall, bytes};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Item {
-    Message { id: Box<[u8]>, phase: Option<Box<[u8]>>, text: Box<[u8]>, refusal: bool },
-    FunctionCall { id: Box<[u8]>, call_id: Box<[u8]>, name: Box<[u8]>, arguments: Box<[u8]> },
-    Opaque { value: Json },
+    Message {
+        id: Box<[u8]>,
+        phase: Option<Box<[u8]>>,
+        text: Box<[u8]>,
+        refusal: bool,
+    },
+    FunctionCall {
+        id: Box<[u8]>,
+        call_id: Box<[u8]>,
+        name: Box<[u8]>,
+        arguments: Box<[u8]>,
+    },
+    /// The provider closed this unfinished function-call item at its output cap.
+    CutCall {
+        id: Box<[u8]>,
+        call_id: Box<[u8]>,
+        name: Box<[u8]>,
+        arguments: Box<[u8]>,
+    },
+    Opaque {
+        value: Json,
+    },
 }
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Event {
-    Created { echo: Option<Request> },
-    InProgress { echo: Option<Request> },
-    Added { index: u32, id: Box<[u8]>, kind: Box<[u8]> },
-    Done { index: u32, item: Item },
-    TextDelta { index: u32, content_index: u32, text: Box<[u8]> },
-    ArgumentsDelta { index: u32, delta: Box<[u8]> },
-    ReasoningDelta { index: u32, summary_index: u32, text: Box<[u8]> },
-    Completed { stop: Stop, usage: Usage },
-    Failed { error: ProviderError },
+    Created {
+        echo: Option<Request>,
+    },
+    InProgress {
+        echo: Option<Request>,
+    },
+    Added {
+        index: u32,
+        id: Box<[u8]>,
+        kind: Box<[u8]>,
+    },
+    /// A native function-call head retaining the identity for a possible output cut.
+    ToolAdded {
+        index: u32,
+        id: Box<[u8]>,
+        call_id: Box<[u8]>,
+        name: Box<[u8]>,
+        arguments: Box<[u8]>,
+    },
+    Done {
+        index: u32,
+        item: Item,
+    },
+    TextDelta {
+        index: u32,
+        content_index: u32,
+        text: Box<[u8]>,
+    },
+    ArgumentsDelta {
+        index: u32,
+        delta: Box<[u8]>,
+    },
+    ReasoningDelta {
+        index: u32,
+        summary_index: u32,
+        text: Box<[u8]>,
+    },
+    Completed {
+        stop: Stop,
+        usage: Usage,
+    },
+    Failed {
+        error: ProviderError,
+    },
     Progress,
     Unknown,
 }
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Part {
+    /// Reasoning beyond the opaque cap, discarded only by owner opt-in.
+    Dropped {
+        bytes: u64,
+    },
     Text {
         id: Box<[u8]>,
         phase: Option<Box<[u8]>>,
@@ -42,16 +100,20 @@ pub enum Part {
     /// admitted JSON strings, never packed into a delimiter-separated string.
     /// See `docs/design/llm.md`, Vocabulary and ownership.
     ToolCall {
-        /// Exact identity paired with the application's result, under `Limits::string_bytes`.
+        /// Exact identity paired with the application's result, under `Limits::strings`.
         call_id: Box<[u8]>,
-        /// Exact provider item identity retained for replay, under `Limits::string_bytes`.
+        /// Exact provider item identity retained for replay, under `Limits::strings`.
         item_id: Box<[u8]>,
-        /// Provider-written name under `Limits::string_bytes`; the caller checks its declaration.
+        /// Provider-written name under `Limits::strings`; the caller checks its declaration.
         name: Box<[u8]>,
-        /// Complete raw argument text under `Limits::input_bytes`, or empty when `too_large` is true.
+        /// Complete raw argument text under `Limits::input`, or empty when `too_large` is true.
         input: Box<[u8]>,
         /// Whether the raw argument text exceeded the receiving input cap.
         too_large: bool,
+        /// Total unescaped argument bytes received, including refused bytes.
+        bytes: u64,
+        /// The provider ended this unfinished call at its output cap.
+        cut: bool,
     },
 }
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -75,12 +137,20 @@ pub struct StreamDecoder {
     detail_bytes: u32,
     tools: bool,
     refusal: bool,
+    required_stop: Option<Stop>,
+    reasoning: ReasoningPolicy,
     over: bool,
     terminal: Option<Terminal>,
+}
+#[derive(Clone, Copy, Debug)]
+enum ReasoningPolicy {
+    Keep,
+    Drop,
 }
 #[derive(Debug)]
 enum Opened {
     Active { id: Box<[u8]>, kind: Box<[u8]> },
+    Tool { id: Box<[u8]>, call_id: Box<[u8]>, name: Box<[u8]>, input: List<u8>, bytes: u64, too_large: bool },
     Ready(Prepared),
     Emitted,
 }
@@ -98,8 +168,14 @@ struct Terminal {
 impl StreamDecoder {
     #[must_use]
     pub fn new(limits: &Limits) -> StreamDecoder {
+        Self::with_reasoning_drop(limits, false)
+    }
+    /// Select whether Codex reasoning past the opaque cap may be discarded.
+    #[must_use]
+    pub fn with_reasoning_drop(limits: &Limits, enabled: bool) -> StreamDecoder {
         StreamDecoder {
-            opened: List::with_capacity(limits.parts),
+            reasoning: if enabled { ReasoningPolicy::Drop } else { ReasoningPolicy::Keep },
+            opened: List::with_capacity(limits.output_items),
             next: 0,
             parts: 0,
             bytes: 0,
@@ -107,6 +183,7 @@ impl StreamDecoder {
             detail_bytes: limits.detail_bytes,
             tools: false,
             refusal: false,
+            required_stop: None,
             over: false,
             terminal: None,
         }
@@ -117,6 +194,17 @@ impl StreamDecoder {
     /// Drain `has_ready()` before delivering another event. Events following
     /// a terminal outcome are ignored.
     pub fn event(&mut self, event: Event, limits: &Limits, wall: Wall, out: &mut Queue<Output>) {
+        self.received(event, None, limits, wall, out);
+    }
+
+    pub(crate) fn received(
+        &mut self,
+        event: Event,
+        long: Option<u64>,
+        limits: &Limits,
+        wall: Wall,
+        out: &mut Queue<Output>,
+    ) {
         if self.over {
             return;
         }
@@ -125,15 +213,19 @@ impl StreamDecoder {
             return;
         }
         let before = out.len();
-        let result = self.accept(event, limits, wall, out);
+        let result = self.accept(event, long, limits, wall, out);
         match result {
             Ok(()) => {
                 if out.len() == before {
                     out.push(Output::Progress);
                 }
             }
-            Err(DecodeError::TooLarge) => {
-                self.fail(Failure::Limit, bytes::copy_of(b"ChatGPT stream exceeds configured limits"), out);
+            Err(DecodeError::TooLarge { which, bound }) => {
+                self.fail(
+                    Failure::Limit { which, bound },
+                    bytes::copy_of(b"ChatGPT stream exceeds configured limits"),
+                    out,
+                );
             }
             Err(DecodeError::Malformed | DecodeError::Missing | DecodeError::WrongType) => {
                 self.fail(Failure::Protocol, bytes::copy_of(b"malformed ChatGPT stream"), out);
@@ -149,7 +241,7 @@ impl StreamDecoder {
         }
         match self.opened.get(self.next) {
             Some(Opened::Ready(_)) => true,
-            Some(Opened::Active { .. }) => false,
+            Some(Opened::Active { .. } | Opened::Tool { .. }) => false,
             Some(Opened::Emitted) | None => self.terminal.is_some(),
         }
     }
@@ -163,7 +255,7 @@ impl StreamDecoder {
                 break;
             };
             match slot {
-                Opened::Active { .. } => break,
+                Opened::Active { .. } | Opened::Tool { .. } => break,
                 Opened::Emitted => self.next = self.next.saturating_add(1),
                 Opened::Ready(_) => {
                     let state = mem::replace(slot, Opened::Emitted);
@@ -171,7 +263,9 @@ impl StreamDecoder {
                         Opened::Ready(prepared) => {
                             out.push(Output::Part(prepared.part));
                         }
-                        Opened::Active { .. } | Opened::Emitted => unreachable!("the slot was ready"),
+                        Opened::Active { .. } | Opened::Tool { .. } | Opened::Emitted => {
+                            unreachable!("the slot was ready")
+                        }
                     }
                     self.next = self.next.saturating_add(1);
                     break;
@@ -214,6 +308,7 @@ impl StreamDecoder {
     fn accept(
         &mut self,
         event: Event,
+        long: Option<u64>,
         limits: &Limits,
         wall: Wall,
         out: &mut Queue<Output>,
@@ -223,16 +318,38 @@ impl StreamDecoder {
                 out.push(Output::Progress);
             }
             Event::Added { index, id, kind } => {
-                let limit = usize::try_from(limits.string_bytes).expect("u32 fits usize");
+                let limit = usize::try_from(limits.strings).expect("u32 fits usize");
                 if id.len() > limit || kind.len() > limit {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::Strings, limits.strings));
                 }
                 if index != self.opened.len() {
                     return Err(DecodeError::Malformed);
                 }
                 if self.opened.push(Opened::Active { id, kind }).is_err() {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::OutputItems, limits.output_items));
                 }
+                out.push(Output::Progress);
+            }
+            Event::ToolAdded { index, id, call_id, name, arguments } => {
+                if index != self.opened.len() {
+                    return Err(DecodeError::Malformed);
+                }
+                for text in [&id, &call_id, &name] {
+                    if text.len() > usize::try_from(limits.strings).expect("u32 fits usize") {
+                        return Err(DecodeError::limit(crate::Cap::Strings, limits.strings));
+                    }
+                }
+                let bytes = received_length(long, arguments.len());
+                let mut input = List::with_capacity(limits.input);
+                let too_large = bytes > u64::from(limits.input);
+                if !too_large {
+                    for &byte in &arguments {
+                        input.push(byte).expect("admitted initial arguments");
+                    }
+                }
+                self.opened
+                    .push(Opened::Tool { id, call_id, name, input, bytes, too_large })
+                    .or(Err(DecodeError::limit(crate::Cap::OutputItems, limits.output_items)))?;
                 out.push(Output::Progress);
             }
             Event::TextDelta { index, content_index, text } => {
@@ -241,6 +358,23 @@ impl StreamDecoder {
             }
             Event::ArgumentsDelta { index, delta } => {
                 self.delta(index, b"function_call", None, delta.len(), limits)?;
+                let length = received_length(long, delta.len());
+                match self.opened.get_mut(index) {
+                    Some(Opened::Tool { input, bytes, too_large, .. }) => {
+                        *bytes = bytes.checked_add(length).ok_or(DecodeError::Malformed)?;
+                        if !*too_large {
+                            if long.is_some() || delta.len() > usize::try_from(input.room()).expect("u32 fits usize") {
+                                *too_large = true;
+                                input.clear();
+                            } else {
+                                for &byte in &delta {
+                                    input.push(byte).expect("admitted argument fragment");
+                                }
+                            }
+                        }
+                    }
+                    Some(Opened::Active { .. } | Opened::Ready(_) | Opened::Emitted) | None => {}
+                }
                 out.push(Output::ArgumentsDelta { index, delta });
             }
             Event::ReasoningDelta { index, summary_index, text } => {
@@ -251,33 +385,74 @@ impl StreamDecoder {
                 let slot = self.opened.get_mut(index).ok_or(DecodeError::Malformed)?;
                 let state = mem::replace(slot, Opened::Emitted);
                 let prepared = match state {
-                    Opened::Active { id, kind } => prepare(item, &id, &kind, limits)?,
+                    Opened::Active { id, kind } => prepare(item, &id, &kind, long, limits, self.reasoning)?,
+                    Opened::Tool { id, .. } => prepare(item, &id, b"function_call", long, limits, self.reasoning)?,
                     Opened::Ready(_) | Opened::Emitted => return Err(DecodeError::Malformed),
                 };
                 self.reserve(1, part_size(&prepared.part), limits)?;
+                match &prepared.part {
+                    Part::ToolCall { cut: true, .. } => self.required_stop = Some(Stop::MaxTokens),
+                    Part::ToolCall { cut: false, .. }
+                    | Part::Text { .. }
+                    | Part::Opaque { .. }
+                    | Part::Dropped { .. } => {}
+                }
                 self.tools = self.tools || prepared.tool;
                 self.refusal = self.refusal || prepared.refusal;
                 *self.opened.get_mut(index).expect("the slot exists") = Opened::Ready(prepared);
                 self.ready(out);
             }
-            Event::Completed { stop, usage } => {
-                for index in 0..self.opened.len() {
-                    match self.opened.get_mut(index).expect("within the slots") {
-                        slot @ Opened::Active { .. } => match stop {
-                            Stop::EndTurn | Stop::ToolUse => return Err(DecodeError::Malformed),
-                            Stop::MaxTokens | Stop::Refusal => *slot = Opened::Emitted,
-                        },
-                        Opened::Ready(_) | Opened::Emitted => {}
-                    }
-                }
-                self.terminal = Some(Terminal { stop, usage });
-                self.ready(out);
-            }
+            Event::Completed { stop, usage } => self.complete(stop, usage, limits, out)?,
             Event::Failed { error } => {
                 let failure = classify(0, Some(&error), RateLimit::NONE, wall);
                 self.fail(failure, common::clipped(&error.message, limits.detail_bytes), out);
             }
         }
+        Ok(())
+    }
+    fn complete(
+        &mut self,
+        stop: Stop,
+        usage: Usage,
+        limits: &Limits,
+        out: &mut Queue<Output>,
+    ) -> Result<(), DecodeError> {
+        if let Some(expected) = self.required_stop
+            && stop != expected
+        {
+            return Err(DecodeError::Malformed);
+        }
+        for index in 0..self.opened.len() {
+            let slot = self.opened.get_mut(index).expect("within the slots");
+            let state = mem::replace(slot, Opened::Emitted);
+            let state = match state {
+                Opened::Active { .. } => match stop {
+                    Stop::EndTurn | Stop::ToolUse => return Err(DecodeError::Malformed),
+                    Stop::MaxTokens | Stop::Refusal => Opened::Emitted,
+                },
+                Opened::Tool { id, call_id, name, input, bytes, too_large } => match stop {
+                    Stop::EndTurn | Stop::ToolUse => return Err(DecodeError::Malformed),
+                    Stop::Refusal => Opened::Emitted,
+                    Stop::MaxTokens => {
+                        let part = Part::ToolCall {
+                            call_id,
+                            item_id: id,
+                            name,
+                            input: input.into_boxed(),
+                            too_large,
+                            bytes,
+                            cut: true,
+                        };
+                        self.reserve(1, part_size(&part), limits)?;
+                        Opened::Ready(Prepared { part, tool: false, refusal: false })
+                    }
+                },
+                state @ (Opened::Ready(_) | Opened::Emitted) => state,
+            };
+            *self.opened.get_mut(index).expect("within the slots") = state;
+        }
+        self.terminal = Some(Terminal { stop, usage });
+        self.ready(out);
         Ok(())
     }
     fn delta(
@@ -290,29 +465,41 @@ impl StreamDecoder {
     ) -> Result<(), DecodeError> {
         match self.opened.get(index) {
             Some(Opened::Active { kind, .. }) if kind.as_ref() == expected_kind => {}
-            Some(Opened::Active { .. } | Opened::Ready(_) | Opened::Emitted) | None => {
+            Some(Opened::Tool { .. }) if expected_kind == b"function_call" => {}
+            Some(Opened::Active { .. } | Opened::Tool { .. } | Opened::Ready(_) | Opened::Emitted) | None => {
                 return Err(DecodeError::Malformed);
             }
         }
         if let Some(sub_index) = sub_index
-            && sub_index >= limits.parts
+            && sub_index >= limits.output_items
         {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::limit(crate::Cap::OutputItems, limits.output_items));
         }
-        let bytes =
-            self.delta_bytes.checked_add(u64::try_from(size).expect("usize fits u64")).ok_or(DecodeError::TooLarge)?;
-        if bytes > u64::from(limits.answer_bytes) {
-            return Err(DecodeError::TooLarge);
+        if expected_kind == b"function_call" {
+            return Ok(());
+        }
+        let bytes = self
+            .delta_bytes
+            .checked_add(u64::try_from(size).expect("usize fits u64"))
+            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer))?;
+        if bytes > u64::from(limits.answer) {
+            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer));
         }
         self.delta_bytes = bytes;
         Ok(())
     }
     fn reserve(&mut self, parts: u32, bytes: usize, limits: &Limits) -> Result<(), DecodeError> {
-        let parts = self.parts.checked_add(parts).ok_or(DecodeError::TooLarge)?;
-        let bytes =
-            self.bytes.checked_add(u64::try_from(bytes).expect("usize fits u64")).ok_or(DecodeError::TooLarge)?;
-        if parts > limits.parts || bytes > u64::from(limits.answer_bytes) {
-            return Err(DecodeError::TooLarge);
+        let parts =
+            self.parts.checked_add(parts).ok_or(DecodeError::limit(crate::Cap::OutputItems, limits.output_items))?;
+        let bytes = self
+            .bytes
+            .checked_add(u64::try_from(bytes).expect("usize fits u64"))
+            .ok_or(DecodeError::limit(crate::Cap::Answer, limits.answer))?;
+        if parts > limits.output_items {
+            return Err(DecodeError::limit(crate::Cap::OutputItems, limits.output_items));
+        }
+        if bytes > u64::from(limits.answer) {
+            return Err(DecodeError::limit(crate::Cap::Answer, limits.answer));
         }
         self.parts = parts;
         self.bytes = bytes;
@@ -322,6 +509,17 @@ impl StreamDecoder {
         self.over = true;
         self.terminal = None;
         self.opened.clear();
+        let detail = match failure {
+            Failure::Limit { which, bound } => common::limit_detail(which, bound),
+            Failure::Protocol
+            | Failure::Unauthorized
+            | Failure::Exhausted { .. }
+            | Failure::RateLimited { .. }
+            | Failure::Overloaded
+            | Failure::Unavailable
+            | Failure::ContextTooLong
+            | Failure::Invalid => detail,
+        };
         let detail = if detail.len() > usize::try_from(self.detail_bytes).expect("u32 fits usize") {
             common::clipped(&detail, self.detail_bytes)
         } else {
@@ -340,12 +538,24 @@ fn part_size(part: &Part) -> usize {
             id.len().saturating_add(phase).saturating_add(text.len())
         }
         Part::Opaque { bytes } => bytes.len(),
-        Part::ToolCall { call_id, item_id, name, input, .. } => {
-            call_id.len().saturating_add(item_id.len()).saturating_add(name.len()).saturating_add(input.len())
+        Part::Dropped { .. } => 0,
+        Part::ToolCall { call_id, item_id, name, input, too_large, cut, .. } => {
+            if *too_large {
+                return call_id.len().saturating_add(name.len());
+            }
+            let item = if *cut { 0 } else { item_id.len() };
+            call_id.len().saturating_add(item).saturating_add(name.len()).saturating_add(input.len())
         }
     }
 }
-fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits) -> Result<Prepared, DecodeError> {
+fn prepare(
+    item: Item,
+    expected_id: &[u8],
+    expected_kind: &[u8],
+    long: Option<u64>,
+    limits: &Limits,
+    reasoning: ReasoningPolicy,
+) -> Result<Prepared, DecodeError> {
     match item {
         Item::Message { id, phase, text, refusal } => {
             if expected_id != id.as_ref() || expected_kind != b"message" {
@@ -353,32 +563,66 @@ fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits
             }
             Ok(Prepared { part: Part::Text { id, phase, text, refusal }, tool: false, refusal })
         }
-        Item::FunctionCall { id, call_id, name, arguments } => {
-            let cap = usize::try_from(limits.string_bytes).expect("u32 fits usize");
+        item @ (Item::FunctionCall { .. } | Item::CutCall { .. }) => {
+            let (id, call_id, name, arguments, cut) = match item {
+                Item::FunctionCall { id, call_id, name, arguments } => (id, call_id, name, arguments, false),
+                Item::CutCall { id, call_id, name, arguments } => (id, call_id, name, arguments, true),
+                Item::Message { .. } | Item::Opaque { .. } => unreachable!("a function-call item"),
+            };
+            let cap = usize::try_from(limits.strings).expect("u32 fits usize");
             if id.len() > cap || call_id.len() > cap || name.len() > cap {
-                return Err(DecodeError::TooLarge);
+                return Err(DecodeError::limit(crate::Cap::Strings, limits.strings));
             }
             if expected_id != id.as_ref() || expected_kind != b"function_call" {
                 return Err(DecodeError::Malformed);
             }
-            let too_large = arguments.len() > usize::try_from(limits.input_bytes).expect("u32 fits usize");
+            let bytes = received_length(long, arguments.len());
+            let too_large = bytes > u64::from(limits.input);
             let input = if too_large { bytes::copy_of(b"") } else { arguments };
             Ok(Prepared {
-                part: Part::ToolCall { call_id, item_id: id, name, input, too_large },
-                tool: true,
+                part: Part::ToolCall { call_id, item_id: id, name, input, too_large, bytes, cut },
+                tool: !cut,
                 refusal: false,
             })
         }
         Item::Opaque { value } => {
-            let tokens = value.as_tokens();
+            let tokens = value.view();
             if json::text_ref(json::value_at(tokens, json::required(tokens, b"id")?)?)? != expected_id
                 || json::text_ref(json::value_at(tokens, json::required(tokens, b"type")?)?)? != expected_kind
             {
                 return Err(DecodeError::Malformed);
             }
-            let bytes = value.to_bytes(limits)?;
-            if bytes.len() > usize::try_from(limits.opaque_bytes).expect("u32 fits usize") {
-                return Err(DecodeError::TooLarge);
+            if let Some(encrypted) = json::optional_at(tokens, json::field(tokens, b"encrypted_content")?)?
+                && let Some(length) = long_text(encrypted)
+            {
+                if expected_kind != b"reasoning" {
+                    return Err(DecodeError::WrongType);
+                }
+                match reasoning {
+                    ReasoningPolicy::Drop => {
+                        return Ok(Prepared { part: Part::Dropped { bytes: length }, tool: false, refusal: false });
+                    }
+                    ReasoningPolicy::Keep => return Err(DecodeError::limit(crate::Cap::Reasoning, limits.reasoning)),
+                }
+            }
+            let bytes = value.to_bytes(&limits.document())?;
+            let counted = if expected_kind == b"reasoning" {
+                match json::optional_at(tokens, json::field(tokens, b"encrypted_content")?)? {
+                    Some(text) => u64::try_from(json::text_ref(text)?.len()).expect("bounded reasoning"),
+                    None => 0,
+                }
+            } else {
+                u64::try_from(bytes.len()).expect("bounded opaque item")
+            };
+            if counted > u64::from(limits.reasoning) {
+                match reasoning {
+                    ReasoningPolicy::Drop if expected_kind == b"reasoning" => {
+                        return Ok(Prepared { part: Part::Dropped { bytes: counted }, tool: false, refusal: false });
+                    }
+                    ReasoningPolicy::Keep | ReasoningPolicy::Drop => {
+                        return Err(DecodeError::limit(crate::Cap::Reasoning, limits.reasoning));
+                    }
+                }
             }
             Ok(Prepared { part: Part::Opaque { bytes }, tool: false, refusal: false })
         }
@@ -386,13 +630,27 @@ fn prepare(item: Item, expected_id: &[u8], expected_kind: &[u8], limits: &Limits
 }
 
 pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError> {
-    let tokens = value.as_tokens();
+    let tokens = value.view();
     let kind = json::text_ref(json::value_at(tokens, json::required(tokens, b"type")?)?)?;
     match kind {
         b"response.created" => Ok(Event::Created { echo: None }),
         b"response.in_progress" => Ok(Event::InProgress { echo: None }),
         b"response.output_item.added" => {
             let item = json::value_at(tokens, json::required(tokens, b"item")?)?;
+            if json::text_ref(json::value_at(item, json::required(item, b"type")?)?)? == b"function_call"
+                && json::field(item, b"call_id")?.is_some()
+            {
+                return Ok(Event::ToolAdded {
+                    index: index(tokens)?,
+                    id: json::text(json::value_at(item, json::required(item, b"id")?)?)?,
+                    call_id: json::text(json::value_at(item, json::required(item, b"call_id")?)?)?,
+                    name: json::text(json::value_at(item, json::required(item, b"name")?)?)?,
+                    arguments: match json::optional_at(item, json::field(item, b"arguments")?)? {
+                        Some(value) => arguments(value)?,
+                        None => Box::new([]),
+                    },
+                });
+            }
             Ok(Event::Added {
                 index: index(tokens)?,
                 id: json::text(json::value_at(item, json::required(item, b"id")?)?)?,
@@ -428,10 +686,7 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
                 }
                 _ => return Err(DecodeError::Malformed),
             };
-            Ok(Event::Completed {
-                stop,
-                usage: read_usage(json::value_at(response, json::required(response, b"usage")?)?)?,
-            })
+            Ok(Event::Completed { stop, usage: read_usage(json::reported_field(response, b"usage")) })
         }
         b"response.failed" => {
             let response = json::value_at(tokens, json::required(tokens, b"response")?)?;
@@ -447,7 +702,7 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
         }),
         b"response.function_call_arguments.delta" => Ok(Event::ArgumentsDelta {
             index: index(tokens)?,
-            delta: json::text(json::value_at(tokens, json::required(tokens, b"delta")?)?)?,
+            delta: arguments(json::value_at(tokens, json::required(tokens, b"delta")?)?)?,
         }),
         b"response.reasoning_summary_text.delta" => Ok(Event::ReasoningDelta {
             index: index(tokens)?,
@@ -464,29 +719,35 @@ pub fn decode_event(value: &Json, limits: &Limits) -> Result<Event, DecodeError>
         _ => Ok(Event::Unknown),
     }
 }
-fn index(tokens: &[Token]) -> Result<u32, DecodeError> {
+fn index(tokens: (&Document, json::Span)) -> Result<u32, DecodeError> {
     named_index(tokens, b"output_index")
 }
-fn named_index(tokens: &[Token], field: &[u8]) -> Result<u32, DecodeError> {
+fn named_index(tokens: (&Document, json::Span), field: &[u8]) -> Result<u32, DecodeError> {
     match u32::try_from(json::unsigned(json::value_at(tokens, json::required(tokens, field)?)?)?) {
         Ok(n) => Ok(n),
-        Err(_) => Err(DecodeError::TooLarge),
+        Err(_) => Err(DecodeError::Malformed),
     }
 }
-fn read_item(tokens: &[Token], limits: &Limits) -> Result<Item, DecodeError> {
+fn read_item(tokens: (&Document, json::Span), limits: &Limits) -> Result<Item, DecodeError> {
     match json::text_ref(json::value_at(tokens, json::required(tokens, b"type")?)?)? {
-        b"function_call" => Ok(Item::FunctionCall {
-            id: json::text(json::value_at(tokens, json::required(tokens, b"id")?)?)?,
-            call_id: json::text(json::value_at(tokens, json::required(tokens, b"call_id")?)?)?,
-            name: json::text(json::value_at(tokens, json::required(tokens, b"name")?)?)?,
-            arguments: json::text(json::value_at(tokens, json::required(tokens, b"arguments")?)?)?,
-        }),
+        b"function_call" => {
+            let id = json::text(json::value_at(tokens, json::required(tokens, b"id")?)?)?;
+            let call_id = json::text(json::value_at(tokens, json::required(tokens, b"call_id")?)?)?;
+            let name = json::text(json::value_at(tokens, json::required(tokens, b"name")?)?)?;
+            let arguments = arguments(json::value_at(tokens, json::required(tokens, b"arguments")?)?)?;
+            let status = request::optional_text(tokens, b"status")?;
+            match status.as_deref() {
+                Some(b"incomplete") => Ok(Item::CutCall { id, call_id, name, arguments }),
+                Some(b"completed") | None => Ok(Item::FunctionCall { id, call_id, name, arguments }),
+                Some(_) => Err(DecodeError::Malformed),
+            }
+        }
         b"message" => {
             let values = json::value_at(tokens, json::required(tokens, b"content")?)?;
-            let mut text = List::with_capacity(limits.answer_bytes);
+            let mut text = List::with_capacity(limits.answer);
             let mut refusal = false;
             let mut content_kind: Option<bool> = None;
-            for &offset in &json::array(values, limits.parts)? {
+            for &offset in &json::array(values, limits.output_items)? {
                 let part = json::value_at(values, offset)?;
                 let kind = json::text_ref(json::value_at(part, json::required(part, b"type")?)?)?;
                 let is_refusal = kind == b"refusal";
@@ -500,12 +761,14 @@ fn read_item(tokens: &[Token], limits: &Limits) -> Result<Item, DecodeError> {
                     b"output_text" => common::append(
                         &mut text,
                         json::text_ref(json::value_at(part, json::required(part, b"text")?)?)?,
+                        crate::Cap::Answer,
                     )?,
                     b"refusal" => {
                         refusal = true;
                         common::append(
                             &mut text,
                             json::text_ref(json::value_at(part, json::required(part, b"refusal")?)?)?,
+                            crate::Cap::Answer,
                         )?;
                     }
                     _ => return Err(DecodeError::WrongType),
@@ -518,38 +781,54 @@ fn read_item(tokens: &[Token], limits: &Limits) -> Result<Item, DecodeError> {
                 refusal,
             })
         }
-        _ => Ok(Item::Opaque { value: Json::from_tokens(tokens, limits)? }),
+        b"reasoning" => Ok(Item::Opaque { value: Json::collected_view(tokens, &limits.document())? }),
+        _ => Ok(Item::Opaque { value: Json::from_view(tokens, &limits.document())? }),
     }
 }
-fn read_usage(tokens: &[Token]) -> Result<Usage, DecodeError> {
-    let input = json::unsigned(json::value_at(tokens, json::required(tokens, b"input_tokens")?)?)?;
-    let cached = match json::optional_at(tokens, json::field(tokens, b"input_tokens_details")?)? {
-        Some(value) => match json::optional_at(value, json::field(value, b"cached_tokens")?)? {
-            Some(value) => json::unsigned(value)?,
-            None => 0,
-        },
-        None => 0,
+fn read_usage(tokens: Option<(&Document, json::Span)>) -> Usage {
+    let Some(tokens) = tokens else {
+        return Usage::NONE;
     };
-    Ok(Usage {
-        input_tokens: input.checked_sub(cached).ok_or(DecodeError::Malformed)?,
-        cache_read_tokens: cached,
-        output_tokens: json::unsigned(json::value_at(tokens, json::required(tokens, b"output_tokens")?)?)?,
-        cache_write_tokens: 0,
-    })
+    let details = json::reported_field(tokens, b"input_tokens_details");
+    let cache_read = match details {
+        Some(details) => json::reported_unsigned(details, b"cached_tokens"),
+        None => None,
+    };
+    let cache_write = match details {
+        Some(details) => json::reported_unsigned(details, b"cache_write_tokens"),
+        None => None,
+    };
+    let reasoning = match json::reported_field(tokens, b"output_tokens_details") {
+        Some(details) => json::reported_unsigned(details, b"reasoning_tokens"),
+        None => None,
+    };
+    let mut input = json::reported_unsigned(tokens, b"input_tokens");
+    for part in [cache_read, cache_write].into_iter().flatten() {
+        input = match input {
+            Some(input) => input.checked_sub(part),
+            None => None,
+        };
+    }
+    Usage { input, cache_read, cache_write, output: json::reported_unsigned(tokens, b"output_tokens"), reasoning }
 }
 pub fn decode_error(value: &Json, limits: &Limits) -> Result<ProviderError, DecodeError> {
-    let tokens = value.as_tokens();
+    let tokens = value.view();
     let error = match json::optional_at(tokens, json::field(tokens, b"error")?)? {
         Some(value) => value,
         None => tokens,
     };
     read_error(error, limits)
 }
-fn read_error(tokens: &[Token], limits: &Limits) -> Result<ProviderError, DecodeError> {
+fn read_error(tokens: (&Document, json::Span), limits: &Limits) -> Result<ProviderError, DecodeError> {
     let kind = match json::optional_at(tokens, json::field(tokens, b"code")?)? {
-        Some([Token::String(code)]) => code.clone(),
-        Some([Token::Null]) | None => json::text(json::value_at(tokens, json::required(tokens, b"type")?)?)?,
-        Some(_) => return Err(DecodeError::WrongType),
+        Some(value) => {
+            if json::kind(value, 0) == Some(Kind::Null) && json::len(value) == 1 {
+                json::text(json::value_at(tokens, json::required(tokens, b"type")?)?)?
+            } else {
+                json::text(value)?
+            }
+        }
+        None => json::text(json::value_at(tokens, json::required(tokens, b"type")?)?)?,
     };
     let message = common::clipped(
         json::text_ref(json::value_at(tokens, json::required(tokens, b"message")?)?)?,
@@ -568,13 +847,41 @@ fn read_error(tokens: &[Token], limits: &Limits) -> Result<ProviderError, Decode
 pub fn encode_error(error: &ProviderError, limits: &Limits) -> Result<Box<[u8]>, DecodeError> {
     encode_event(&Event::Failed { error: error.clone() }, limits)
 }
+/// Fake-server metadata selection, bounded by the configured event document.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Echo {
+    pub instructions: bool,
+    pub tools: bool,
+    /// Payload bytes in each input attribution entry; zero omits attribution.
+    pub attribution_bytes: u32,
+}
+impl Echo {
+    pub const NONE: Echo = Echo { instructions: false, tools: false, attribution_bytes: 0 };
+    const REQUEST: Echo = Echo { instructions: true, tools: true, attribution_bytes: 0 };
+    #[must_use]
+    pub const fn enabled(self) -> bool {
+        self.instructions || self.tools || self.attribution_bytes > 0
+    }
+}
 pub fn encode_event(event: &Event, limits: &Limits) -> Result<Box<[u8]>, DecodeError> {
+    encode_peer_event(event, None, Echo::REQUEST, limits)
+}
+/// Encode a fake event with selected request echoes and sized usage attribution.
+pub fn encode_peer_event(
+    event: &Event,
+    request: Option<&Request>,
+    echo: Echo,
+    limits: &Limits,
+) -> Result<Box<[u8]>, DecodeError> {
+    if echo.attribution_bytes > limits.retained {
+        return Err(DecodeError::limit(crate::Cap::Retained, limits.retained));
+    }
     let bounded = limits.writer_limits();
     let mut measure = Encoder::measure(&bounded);
-    write_event(&mut measure, event, None);
-    let len = common::measured(measure)?;
+    write_event(&mut measure, event, request, echo);
+    let len = common::measured(measure, bounded, crate::Cap::Retained)?;
     let mut write = Encoder::write(len, &bounded);
-    write_event(&mut write, event, None);
+    write_event(&mut write, event, request, echo);
     Ok(write.finish())
 }
 fn write_error(out: &mut Encoder, error: &ProviderError) {
@@ -593,7 +900,7 @@ fn write_error(out: &mut Encoder, error: &ProviderError) {
     }
     out.object_end();
 }
-fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Request>) {
+fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Request>, selection: Echo) {
     out.object_start();
     out.key(b"type");
     match event {
@@ -602,6 +909,7 @@ fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Reques
                 Event::Created { .. } => b"response.created",
                 Event::InProgress { .. } => b"response.in_progress",
                 Event::Added { .. }
+                | Event::ToolAdded { .. }
                 | Event::Done { .. }
                 | Event::TextDelta { .. }
                 | Event::ArgumentsDelta { .. }
@@ -615,13 +923,25 @@ fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Reques
             out.object_start();
             out.key(b"status");
             out.string(b"in_progress");
-            if let Some(request) = echo {
-                out.key(b"instructions");
-                out.string(&request.instructions);
-                out.key(b"tools");
-                request::write_tools(out, &request.tools);
+            if let Some(request) = echo.as_ref().or(completion_echo) {
+                write_echo(out, request, selection);
             }
             out.object_end();
+        }
+        Event::ToolAdded { index, id, call_id, name, arguments } => {
+            out.string(b"response.output_item.added");
+            out.key(b"output_index");
+            out.unsigned(u64::from(*index));
+            out.key(b"item");
+            write_item(
+                out,
+                &Item::FunctionCall {
+                    id: id.clone(),
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                },
+            );
         }
         Event::Added { index, id, kind } => {
             out.string(b"response.output_item.added");
@@ -667,7 +987,7 @@ fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Reques
             out.key(b"item");
             write_item(out, item);
         }
-        Event::Completed { stop, usage } => write_terminal(out, *stop, *usage, completion_echo),
+        Event::Completed { stop, usage } => write_terminal(out, *stop, *usage, completion_echo, selection),
         Event::Failed { error } => {
             out.string(b"error");
             out.key(b"error");
@@ -678,7 +998,7 @@ fn write_event(out: &mut Encoder, event: &Event, completion_echo: Option<&Reques
     }
     out.object_end();
 }
-fn write_terminal(out: &mut Encoder, stop: Stop, usage: Usage, completion_echo: Option<&Request>) {
+fn write_terminal(out: &mut Encoder, stop: Stop, usage: Usage, completion_echo: Option<&Request>, selection: Echo) {
     out.string(match stop {
         Stop::MaxTokens | Stop::Refusal => b"response.incomplete",
         Stop::EndTurn | Stop::ToolUse => b"response.completed",
@@ -705,29 +1025,26 @@ fn write_terminal(out: &mut Encoder, stop: Stop, usage: Usage, completion_echo: 
         Stop::EndTurn | Stop::ToolUse => {}
     }
     if let Some(request) = completion_echo {
-        out.key(b"instructions");
-        out.string(&request.instructions);
-        out.key(b"tools");
-        request::write_tools(out, &request.tools);
+        write_echo(out, request, selection);
     }
     out.key(b"usage");
     out.object_start();
-    out.key(b"input_tokens");
-    out.unsigned(usage.input_tokens.saturating_add(usage.cache_read_tokens));
-    out.key(b"output_tokens");
-    out.unsigned(usage.output_tokens);
-    out.key(b"input_tokens_details");
-    out.object_start();
-    out.key(b"cached_tokens");
-    out.unsigned(usage.cache_read_tokens);
-    out.object_end();
+    if let Some(request) = completion_echo {
+        write_attribution(out, request.input.len(), selection.attribution_bytes);
+    }
+    write_usage(out, usage);
     out.object_end();
     out.object_end();
 }
 fn write_item(out: &mut Encoder, item: &Item) {
     match item {
         Item::Opaque { value } => value.write(out),
-        Item::FunctionCall { id, call_id, name, arguments } => {
+        Item::FunctionCall { id, call_id, name, arguments } | Item::CutCall { id, call_id, name, arguments } => {
+            let cut = match item {
+                Item::CutCall { .. } => true,
+                Item::FunctionCall { .. } => false,
+                Item::Message { .. } | Item::Opaque { .. } => unreachable!("a function-call item"),
+            };
             out.object_start();
             out.key(b"type");
             out.string(b"function_call");
@@ -739,6 +1056,10 @@ fn write_item(out: &mut Encoder, item: &Item) {
             out.string(name);
             out.key(b"arguments");
             out.string(arguments);
+            if cut {
+                out.key(b"status");
+                out.string(b"incomplete");
+            }
             out.object_end();
         }
         Item::Message { id, phase, text, refusal } => {
@@ -765,12 +1086,17 @@ fn write_item(out: &mut Encoder, item: &Item) {
     }
 }
 
+/// Fixed slot and argument-buffer capacities, excluding admitted answer bytes.
+pub(crate) fn decoder_fixed_worst_case(limits: &Limits) -> Option<u64> {
+    let slots = List::<Opened>::worst_case(limits.output_items)?;
+    let identifiers =
+        u64::from(limits.output_items).checked_mul(u64::from(limits.strings.min(limits.retained)))?.checked_mul(3)?;
+    let inputs = u64::from(limits.output_items).checked_mul(u64::from(limits.input))?;
+    slots.checked_add(identifiers)?.checked_add(inputs)
+}
+
 pub(crate) fn decoder_worst_case(limits: &Limits) -> Option<u64> {
-    let slots = List::<Opened>::worst_case(limits.parts)?;
-    let identifiers = u64::from(limits.parts)
-        .checked_mul(u64::from(limits.string_bytes.min(limits.document_bytes)))?
-        .checked_mul(2)?;
-    slots.checked_add(identifiers)?.checked_add(u64::from(limits.answer_bytes))
+    decoder_fixed_worst_case(limits)?.checked_add(u64::from(limits.answer))
 }
 
 /// Fake-server completion with the instructions/tools echo that the real Codex
@@ -781,12 +1107,106 @@ pub fn encode_completion(
     request: &Request,
     limits: &Limits,
 ) -> Result<Box<[u8]>, DecodeError> {
-    let event = Event::Completed { stop, usage };
-    let bounded = limits.writer_limits();
-    let mut measure = Encoder::measure(&bounded);
-    write_event(&mut measure, &event, Some(request));
-    let len = common::measured(measure)?;
-    let mut write = Encoder::write(len, &bounded);
-    write_event(&mut write, &event, Some(request));
-    Ok(write.finish())
+    encode_peer_event(&Event::Completed { stop, usage }, Some(request), Echo::REQUEST, limits)
+}
+
+fn write_echo(out: &mut Encoder, request: &Request, selection: Echo) {
+    if selection.instructions {
+        out.key(b"instructions");
+        out.string(&request.instructions);
+    }
+    if selection.tools {
+        out.key(b"tools");
+        request::write_tools(out, &request.tools);
+    }
+}
+fn write_attribution(out: &mut Encoder, items: usize, entry_bytes: u32) {
+    if entry_bytes == 0 {
+        return;
+    }
+    let mut payload = List::with_capacity(entry_bytes);
+    for _byte in 0..entry_bytes {
+        payload.push(b'x').expect("configured bounded entry");
+    }
+    out.key(b"attribution");
+    out.object_start();
+    out.key(b"items");
+    out.array_start();
+    for index in 0..items {
+        out.object_start();
+        out.key(b"input_index");
+        out.unsigned(u64::try_from(index).expect("slice index fits u64"));
+        out.key(b"payload");
+        out.string(payload.as_slice());
+        for field in [b"input_tokens".as_slice(), b"cached_tokens".as_slice(), b"cache_write_tokens".as_slice()] {
+            out.key(field);
+            out.unsigned(0);
+        }
+        out.key(b"model");
+        out.string(b"fake-codex");
+        out.key(b"kind");
+        out.string(b"input");
+        out.key(b"reasoning");
+        out.boolean(false);
+        out.object_end();
+    }
+    out.array_end();
+    out.object_end();
+}
+
+fn write_usage(out: &mut Encoder, usage: Usage) {
+    let mut input = usage.input;
+    for part in [usage.cache_read, usage.cache_write].into_iter().flatten() {
+        input = match input {
+            Some(input) => input.checked_add(part),
+            None => None,
+        };
+    }
+    for (name, value) in [(b"input_tokens".as_slice(), input), (b"output_tokens".as_slice(), usage.output)] {
+        if let Some(value) = value {
+            out.key(name);
+            out.unsigned(value);
+        }
+    }
+    if usage.cache_read.is_some() || usage.cache_write.is_some() {
+        out.key(b"input_tokens_details");
+        out.object_start();
+        for (name, value) in
+            [(b"cached_tokens".as_slice(), usage.cache_read), (b"cache_write_tokens".as_slice(), usage.cache_write)]
+        {
+            if let Some(value) = value {
+                out.key(name);
+                out.unsigned(value);
+            }
+        }
+        out.object_end();
+    }
+    if let Some(reasoning) = usage.reasoning {
+        out.key(b"output_tokens_details");
+        out.object_start();
+        out.key(b"reasoning_tokens");
+        out.unsigned(reasoning);
+        out.object_end();
+    }
+}
+
+fn received_length(long: Option<u64>, stored: usize) -> u64 {
+    match long {
+        Some(length) => length,
+        None => u64::try_from(stored).expect("slice length fits u64"),
+    }
+}
+
+pub(crate) fn long_text(value: (&Document, json::Span)) -> Option<u64> {
+    match json::record(value, 0) {
+        Some(record) if record.kind == Kind::Long && json::len(value) == 1 => Some(u64::from(record.len)),
+        Some(_) | None => None,
+    }
+}
+
+fn arguments(value: (&Document, json::Span)) -> Result<Box<[u8]>, DecodeError> {
+    match long_text(value) {
+        Some(_) => Ok(bytes::copy_of(b"")),
+        None => json::text(value),
+    }
 }

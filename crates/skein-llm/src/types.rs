@@ -1,4 +1,7 @@
-//! Owned vocabulary shared by LLM providers. Replay data remains opaque to callers.
+//! Owned LLM vocabulary and typed refusals (llm.md, sections 2 and 2.5).
+//! Prompts and completions keep caller-owned bytes; replay remains opaque.
+//! These values know no transport, timer or retry policy; Client admission
+//! and terminals carry the cap and bound unchanged.
 use crate::Json;
 use alloc::boxed::Box;
 use skein_http::Header;
@@ -49,6 +52,12 @@ pub enum Block {
     /// flag, so `is_error` prefixes the wire text with `Error: ` when true;
     /// successful text is sent unchanged.
     ToolResult { id: Box<[u8]>, text: Box<[u8]>, is_error: bool },
+    /// A received call past the argument cap; the caller replaces it before replay.
+    Oversize { id: Box<[u8]>, name: Box<[u8]>, bytes: u64 },
+    /// A call cut at the provider's output cap; the caller replaces it before replay.
+    Cut { id: Box<[u8]>, name: Box<[u8]>, arguments: Box<[u8]> },
+    /// Codex reasoning discarded by owner opt-in; history emits no native item for it.
+    Dropped { bytes: u64 },
     /// Provider-owned assistant replay, including encrypted/signed reasoning
     /// and unknown bounded native content-block envelopes.
     /// The payload is opaque; visible reasoning summaries arrive as deltas.
@@ -68,6 +77,24 @@ pub struct Tool {
     /// A JSON Schema object describing the tool's argument object.
     pub schema: Json,
 }
+/// The caller's tool policy for one call (llm.md, section 2.2).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum ToolChoice {
+    /// The provider may select any offered tool.
+    Auto,
+    /// The caller asks the provider for an answer without tools.
+    None,
+    /// The caller permits these distinct offered names; native wires use Auto.
+    Only(Box<[Box<[u8]>]>),
+}
+
+/// Caller-owned cache routing identity, repeated unchanged through a conversation (llm.md, section 2.1).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Affinity {
+    pub key: [u8; 16],
+    pub thread: u32,
+}
+
 /// Owned input to one call. Admission validates counts, bytes and replay data.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Prompt {
@@ -76,13 +103,15 @@ pub struct Prompt {
     /// System-level instructions, separate from user/assistant history.
     pub instructions: Box<[u8]>,
     pub tools: Box<[Tool]>,
+    pub choice: ToolChoice,
     /// Chronological conversation history, including prior replay metadata.
     pub messages: Box<[Message]>,
     /// An optional provider-supported reasoning effort value.
     pub reasoning_effort: Option<Box<[u8]>>,
-    /// Optional provider prompt-cache affinity key; it does not enable storage.
-    pub cache_key: Option<Box<[u8]>>,
-    /// Anthropic's `max_tokens`; `None` uses 4096. Codex subscription calls
+    /// Conversation routing identity; Anthropic accepts it without a wire field.
+    pub affinity: Option<Affinity>,
+    /// Anthropic's `max_tokens`; `None` uses the endpoint's declared output.
+    /// A cap above the declaration is refused. Codex subscription calls
     /// require `None` because that route does not support token caps.
     pub max_output_tokens: Option<u32>,
 }
@@ -110,21 +139,22 @@ pub enum Stop {
     MaxTokens,
     Refusal,
 }
-/// Provider-reported token accounting. Absent usage and optional cache counts are zero.
+/// Provider-reported token accounting; None is unreported and Some(0) is a report of zero.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Usage {
-    /// Uncached input tokens; excludes both cache fields below.
-    pub input_tokens: u64,
-    /// Output tokens, including provider-counted reasoning tokens.
-    pub output_tokens: u64,
-    /// Input tokens read from an existing prompt cache.
-    pub cache_read_tokens: u64,
-    /// Input tokens written to a prompt cache, when the provider reports them.
-    pub cache_write_tokens: u64,
+    pub input: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    /// Completion tokens, including reasoning.
+    pub output: Option<u64>,
+    /// The part of output spent on reasoning, never added to output.
+    pub reasoning: Option<u64>,
 }
 impl Usage {
-    pub const ZERO: Usage = Usage { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
+    /// All counts are unreported until the provider supplies them.
+    pub const NONE: Usage = Usage { input: None, cache_read: None, cache_write: None, output: None, reasoning: None };
 }
+
 /// A terminal successful response. Its blocks can be appended to history.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Completion {
@@ -142,13 +172,114 @@ pub enum Delta {
     ToolArguments { index: u32, delta: Box<[u8]> },
     Reasoning { index: u32, summary_index: u32, text: Box<[u8]> },
 }
+/// A local admission or receiving cap named in a failure (llm.md, section 2.5).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Cap {
+    /// The configured bound on encoded request body.
+    Request,
+    /// The configured bound on encoded request head.
+    RequestHead,
+    /// The configured bound on response head.
+    ResponseHead,
+    /// The configured bound on HTTP header field count.
+    ResponseFields,
+    /// Scanned wire bytes of one event.
+    Skip,
+    /// The configured bound on an SSE event type or identifier.
+    Field,
+    /// The configured bound on retained decoded text.
+    Retained,
+    /// The configured bound on retained JSON tokens.
+    Tokens,
+    /// The configured bound on JSON nesting depth.
+    Depth,
+    /// The configured bound on retained string.
+    Strings,
+    /// The fixed tokenizer bound on a numeral.
+    Number,
+    /// The configured bound on provider reasoning replay.
+    Reasoning,
+    /// The configured bound on completion items.
+    OutputItems,
+    /// The configured bound on other replay metadata.
+    Metadata,
+    /// The configured bound on offered tools.
+    Tools,
+    /// The configured bound on history messages and blocks.
+    HistoryItems,
+    /// The endpoint model's declared completion ceiling in tokens.
+    Output,
+    /// The configured bound on completion answer.
+    Answer,
+    /// The configured bound on provider error body.
+    ErrorBody,
+    /// The configured bound on access token.
+    AccessToken,
+    /// The configured bound on account identifier.
+    AccountId,
+}
+
+impl Cap {
+    pub(crate) const fn name(self) -> &'static [u8] {
+        match self {
+            Cap::Request => b"encoded request body",
+            Cap::RequestHead => b"encoded request head",
+            Cap::ResponseHead => b"response head",
+            Cap::ResponseFields => b"HTTP header field count",
+            Cap::Skip => b"scanned event bytes",
+            Cap::Field => b"SSE field",
+            Cap::Retained => b"retained text",
+            Cap::Tokens => b"retained JSON tokens",
+            Cap::Depth => b"JSON nesting depth",
+            Cap::Strings => b"retained strings",
+            Cap::Number => b"JSON numeral",
+            Cap::Reasoning => b"reasoning item",
+            Cap::OutputItems => b"completion items",
+            Cap::Tools => b"offered tools",
+            Cap::HistoryItems => b"history items",
+            Cap::Metadata => b"replay metadata",
+            Cap::Output => b"declared output tokens",
+            Cap::Answer => b"completion answer",
+            Cap::ErrorBody => b"provider error body",
+            Cap::AccessToken => b"access token",
+            Cap::AccountId => b"account identifier",
+        }
+    }
+}
+
+impl Error {
+    pub(crate) fn limit(which: Cap, bound: u32) -> Error {
+        Error::Limit { which, bound: u64::from(bound) }
+    }
+}
+
 /// A rejected call has produced no traffic and no terminal event.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Error {
     Invalid,
-    Limit,
+    /// A configured local cap refused admission.
+    Limit {
+        which: Cap,
+        bound: u64,
+    },
     Unsupported,
 }
+
+/// The owner's deadline that passed (llm.md, section 2.5; llm-connection.md, section 6).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Phase {
+    /// The socket did not connect in time.
+    Connect,
+    /// The TLS handshake did not finish in time.
+    Handshake,
+    /// No response head arrived before the peer's head deadline.
+    Head,
+    /// No response event, including pings, arrived before the idle deadline.
+    Idle,
+    /// The whole call, including its wait, exceeded the owner's deadline.
+    Whole,
+}
+
 /// The terminal outcome of an accepted call. Retry policy belongs to its owner.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Failure {
@@ -163,11 +294,17 @@ pub enum Failure {
     Unavailable,
     ContextTooLong,
     Invalid,
-    Limit,
+    /// A configured local cap ended the accepted call.
+    Limit {
+        which: Cap,
+        bound: u64,
+    },
     Protocol,
     Cancelled,
-    /// The caller's timer expired and it aborted the call.
-    TimedOut,
+    /// The owner's named deadline passed and ended the accepted call.
+    TimedOut {
+        phase: Phase,
+    },
 }
 /// The wire dialect and HTTP destination; transport/TLS are caller-owned.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]

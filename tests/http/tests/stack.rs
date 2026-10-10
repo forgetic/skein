@@ -14,7 +14,7 @@
 
 use skein_http::Header;
 use skein_http::client::{self, Body, Call, Client, Method, Reuse};
-use skein_http::sse::{self, Data, Reader};
+use skein_http::sse::{self, Reader};
 use skein_http_world::transcript::{self, Transcript};
 use skein_json::Token;
 use skein_json::tokenizer::{self as json, Tokenizer};
@@ -76,7 +76,11 @@ struct Stack {
     json_env: Env<json::Limits>,
     /// The tokenizer of the document being read, and the data it reads
     /// from, or the client's body when the response is not events.
-    tokenizer: Option<(Tokenizer, Option<Data>)>,
+    tokenizer: Option<(Tokenizer, bool)>,
+    event_data: Vec<u8>,
+    pending_document: Option<Decoded>,
+    dispatched: bool,
+    cut: bool,
     tokens: Vec<Token>,
     client_up: Queue<client::Event>,
     client_down: Queue<Down>,
@@ -99,6 +103,10 @@ fn run(transcript: &Transcript, seed: u64) -> Stacked {
         reader: None,
         json_env: Env { now: Time::ZERO, wall: Wall::EPOCH, limits: JSON },
         tokenizer: None,
+        event_data: Vec::new(),
+        pending_document: None,
+        dispatched: false,
+        cut: false,
         tokens: Vec::new(),
         client_up: Queue::with_capacity(8),
         client_down: Queue::with_capacity(8),
@@ -110,7 +118,10 @@ fn run(transcript: &Transcript, seed: u64) -> Stacked {
     // The startup checks: each machine's largest demand within its side
     // below's.
     assert!(sse::largest_demand(&transcript.sse) <= limits.read, "the reader's scans within the client's reads");
-    assert!(json::largest_demand(&JSON) <= limits.read, "the tokenizer's demands within the client's reads");
+    assert!(
+        json::largest_demand(&JSON) <= transcript.sse.chunk,
+        "the tokenizer's demands within the reader's data face"
+    );
 
     let body = request_body();
     let call = Call {
@@ -232,16 +243,16 @@ impl Stack {
                     self.reader = Some(Reader::new(&self.sse_env.limits));
                     self.sse_call(sse::Request::Next);
                 } else {
-                    self.tokenizer = Some((Tokenizer::new(&JSON), None));
+                    self.tokenizer = Some((Tokenizer::new(&JSON), false));
                     self.json_call(json::Request::Next);
                 }
             }
             client::Event::Body(up) => match (&mut self.reader, &mut self.tokenizer) {
                 (Some(reader), _) => sse::up(reader, &self.sse_env, up, &mut self.sse_up, &mut self.sse_down),
-                (None, Some((tokenizer, None))) => {
+                (None, Some((tokenizer, false))) => {
                     json::up(tokenizer, &self.json_env, up, &mut self.json_up, &mut self.json_down);
                 }
-                (None, Some((_, Some(_))) | None) => panic!("the body has a machine above it"),
+                (None, Some((_, true)) | None) => panic!("the body has a machine above it"),
             },
             other @ (client::Event::Upload(_)
             | client::Event::Done(_)
@@ -258,21 +269,50 @@ impl Stack {
     /// An event from the reader: a document to tokenize, or the end.
     fn sse_event(&mut self, event: sse::Event, out: &mut Stacked) {
         match event {
-            sse::Event::Message(message) => {
-                out.events.push((message.name.to_vec(), message.data.to_vec()));
-                if &*message.data == b"[DONE]" {
-                    // Not JSON: the end of an OpenAI stream.
-                    self.sse_call(sse::Request::Next);
-                    return;
-                }
-                self.tokenizer = Some((Tokenizer::new(&JSON), Some(Data::new(message.data))));
+            sse::Event::Opened => {
+                self.event_data.clear();
+                self.pending_document = None;
+                self.dispatched = false;
+                self.cut = false;
+                self.tokenizer = Some((Tokenizer::new(&JSON), true));
                 self.json_call(json::Request::Next);
+            }
+            sse::Event::Data(data) => self.data_event(data),
+            sse::Event::Dispatched(dispatch) => {
+                self.dispatched = true;
+                let document = self.pending_document.take();
+                if self.event_data != b"[DONE]"
+                    && let Some(document) = document
+                {
+                    out.documents.push(document);
+                }
+                out.events.push((dispatch.name.to_vec(), std::mem::take(&mut self.event_data)));
+                if self.tokenizer.is_none() && self.reader.as_ref().expect("a reader").waiting() == sse::Waiting::Next {
+                    self.sse_call(sse::Request::Next);
+                }
             }
             sse::Event::Ended | sse::Event::Failed(_) => {
                 out.sse_outcome = Some(event);
                 self.sse_call(sse::Request::Close);
             }
             sse::Event::Closed => self.reader = None,
+        }
+    }
+
+    fn data_event(&mut self, data: Up) {
+        if let Up::Bytes(bytes) = &data {
+            self.event_data.extend_from_slice(bytes);
+        }
+        if matches!(data, Up::Failed(_)) {
+            self.cut = true;
+            self.pending_document = None;
+        }
+        if let Some((tokenizer, _)) = self.tokenizer.as_mut() {
+            json::up(tokenizer, &self.json_env, data, &mut self.json_up, &mut self.json_down);
+        } else if matches!(data, Up::Bytes(_)) {
+            self.sse_call(sse::Request::Data(Down::Demand { read: Read::Fill(1), room: 0 }));
+        } else if matches!(data, Up::Failed(_)) {
+            self.sse_call(sse::Request::Next);
         }
     }
 
@@ -284,15 +324,11 @@ impl Stack {
     /// A demand from the tokenizer: met by the event's data at once, or
     /// passed to the client.
     fn json_request(&mut self, request: Down) {
-        let (tokenizer, data) = self.tokenizer.as_mut().expect("a tokenizer");
-        match data {
-            Some(data) => {
-                let Down::Demand { read, room: 0 } = request else { panic!("the tokenizer reads") };
-                if let Some(answer) = data.answer(read) {
-                    json::up(tokenizer, &self.json_env, answer, &mut self.json_up, &mut self.json_down);
-                }
-            }
-            None => self.client_call(client::Request::Body(request)),
+        let (_, streaming) = self.tokenizer.as_mut().expect("a tokenizer");
+        if *streaming {
+            self.sse_call(sse::Request::Data(request));
+        } else {
+            self.client_call(client::Request::Body(request));
         }
     }
 
@@ -306,15 +342,31 @@ impl Stack {
             json::Event::Done | json::Event::Failed(_) => {
                 let outcome = match event {
                     json::Event::Failed(error) => Outcome::Failed(error),
-                    json::Event::Done | json::Event::Token(_) | json::Event::Closed => Outcome::Done,
+                    json::Event::Done
+                    | json::Event::Token(_)
+                    | json::Event::Long(_)
+                    | json::Event::Skipped(_)
+                    | json::Event::Closed => Outcome::Done,
                 };
-                out.documents.push(Decoded { tokens: std::mem::take(&mut self.tokens), outcome });
+                let document = Decoded { tokens: std::mem::take(&mut self.tokens), outcome };
+                let (_, streaming) = self.tokenizer.as_ref().expect("a tokenizer");
+                if !*streaming || self.dispatched {
+                    out.documents.push(document);
+                } else if !self.cut {
+                    self.pending_document = Some(document);
+                }
                 self.json_call(json::Request::Close);
             }
+            json::Event::Long(_) | json::Event::Skipped(_) => unreachable!("only Next is demanded"),
             json::Event::Closed => {
-                let (_, data) = self.tokenizer.take().expect("a tokenizer");
-                if data.is_some() {
-                    self.sse_call(sse::Request::Next);
+                let (_, streaming) = self.tokenizer.take().expect("a tokenizer");
+                if streaming {
+                    let reader = self.reader.as_ref().expect("a reader");
+                    if reader.waiting() == sse::Waiting::Above {
+                        self.sse_call(sse::Request::Data(Down::Demand { read: Read::Fill(1), room: 0 }));
+                    } else if reader.waiting() == sse::Waiting::Next {
+                        self.sse_call(sse::Request::Next);
+                    }
                 }
             }
         }
@@ -359,4 +411,49 @@ fn an_llm_s_stream_goes_up_the_stack_event_by_event_and_document_by_document() {
         }
     }
     assert!(streams >= 4 * 6, "every stream of both providers, chunked and by length");
+}
+
+#[test]
+fn an_event_cut_before_dispatch_drops_its_document_even_when_json_was_whole() {
+    for body in ["data: {\"ok\":1}\n", "data: {\"ok\":"] {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let transcript = Transcript {
+            name: "cut-event".into(),
+            bytes: response.into_bytes(),
+            limits: transcript::LIMITS,
+            sse: transcript::SSE,
+            method: Method::Get,
+            expected: None,
+        };
+        for seed in 0..6 {
+            let stacked = run(&transcript, seed);
+            assert!(stacked.events.is_empty());
+            assert!(stacked.documents.is_empty(), "the JSON result waits for dispatch");
+            assert_eq!(stacked.sse_outcome, Some(sse::Event::Ended));
+        }
+    }
+}
+
+#[test]
+fn arrays_and_empty_events_also_flow_directly_into_the_tokenizer() {
+    let body = b"data: [1,true]\n\ndata:\n\n";
+    let head = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n", body.len());
+    let mut bytes = head.into_bytes();
+    bytes.extend_from_slice(body);
+    let transcript = Transcript {
+        name: "array-event".into(),
+        bytes,
+        limits: transcript::LIMITS,
+        sse: transcript::SSE,
+        method: Method::Get,
+        expected: None,
+    };
+    for seed in 0..6 {
+        let stacked = run(&transcript, seed);
+        assert_eq!(stacked.documents, [reference::parse(b"[1,true]", &JSON), reference::parse(b"", &JSON)]);
+        assert_eq!(stacked.events.len(), 2);
+    }
 }

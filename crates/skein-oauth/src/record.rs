@@ -1,8 +1,13 @@
+//! Versioned kept token records and refresh state (oauth.md, sections 1 and 2).
+//! A record owns access and optional refresh bytes, expiry and selected metadata;
+//! it knows no credential source or store. The codecs enforce bounds and version,
+//! and `rotate` prepares a candidate the caller keeps before lending.
+
 use crate::{DecodeError, Limits, TokenResponse, common, documents, jwt};
 use alloc::boxed::Box;
 use skein_lib::{Duration, Reader, Wall, Writer, bytes};
 
-pub const RECORD_VERSION: u16 = 1;
+pub const RECORD_VERSION: u16 = 2;
 const MAGIC: &[u8] = b"SKOT";
 const FIXED_BYTES: u32 = 38;
 /// Caller-selected nested JWT claim to keep as opaque metadata.
@@ -20,7 +25,7 @@ pub struct RefreshState {
     pub generation: u64,
     pub refresh_token: Box<[u8]>,
 }
-/// Kept as one versioned record before `Refreshed` crosses a domain boundary.
+/// Token record its owner keeps before lending; access-only records cannot refresh.
 /// `expires_at` is restart metadata, never a cross-host grant deadline.
 #[derive(Clone, PartialEq, Eq, Hash)]
 #[expect(missing_debug_implementations, reason = "credential values must never occur in traces")]
@@ -28,14 +33,21 @@ pub struct SavedToken {
     pub key: u32,
     pub generation: u64,
     pub access_token: Box<[u8]>,
-    pub refresh_token: Box<[u8]>,
+    pub refresh_token: Option<Box<[u8]>>,
     pub metadata: Option<Box<[u8]>>,
     pub expires_at: Wall,
 }
 impl SavedToken {
+    /// Returns refresh state only for a record that holds a refresh token.
     #[must_use]
-    pub fn refresh_state(&self) -> RefreshState {
-        RefreshState { key: self.key, generation: self.generation, refresh_token: self.refresh_token.clone() }
+    #[expect(clippy::manual_map, reason = "programming-model.md, 10.3 forbids closures in step code")]
+    pub fn refresh_state(&self) -> Option<RefreshState> {
+        match &self.refresh_token {
+            Some(refresh_token) => {
+                Some(RefreshState { key: self.key, generation: self.generation, refresh_token: refresh_token.clone() })
+            }
+            None => None,
+        }
     }
     /// Call at grant encoding or durability completion, not at refresh start.
     #[must_use]
@@ -76,7 +88,7 @@ pub fn rotate(
         key: previous.key,
         generation,
         access_token: response.access_token.clone(),
-        refresh_token,
+        refresh_token: Some(refresh_token),
         metadata,
         expires_at,
     };
@@ -85,8 +97,10 @@ pub fn rotate(
 }
 fn validate(record: &SavedToken, limits: &Limits) -> Result<(), DecodeError> {
     common::bearer(&record.access_token, limits)?;
-    common::bounded(&record.refresh_token, limits.token_bytes)?;
-    common::text(&record.refresh_token)?;
+    if let Some(refresh_token) = &record.refresh_token {
+        common::bounded(refresh_token, limits.token_bytes)?;
+        common::text(refresh_token)?;
+    }
     if let Some(id) = &record.metadata {
         jwt::check_metadata(id, limits)?;
     }
@@ -99,7 +113,10 @@ fn measured(record: &SavedToken, limits: &Limits) -> Result<u32, DecodeError> {
         None => 0,
     };
     let access_len = u32::try_from(record.access_token.len()).or(Err(DecodeError::TooLarge))?;
-    let refresh_len = u32::try_from(record.refresh_token.len()).or(Err(DecodeError::TooLarge))?;
+    let refresh_len = match &record.refresh_token {
+        Some(refresh_token) => u32::try_from(refresh_token.len()).or(Err(DecodeError::TooLarge))?,
+        None => 0,
+    };
     let len = FIXED_BYTES
         .checked_add(access_len)
         .ok_or(DecodeError::TooLarge)?
@@ -122,7 +139,10 @@ pub fn encode_record(record: &SavedToken, limits: &Limits) -> Result<Box<[u8]>, 
     out.put(&record.generation.to_be_bytes()).expect("record measured");
     out.put(&record.expires_at.as_nanos().to_be_bytes()).expect("record measured");
     write_field(&mut out, &record.access_token);
-    write_field(&mut out, &record.refresh_token);
+    match &record.refresh_token {
+        Some(refresh_token) => write_field(&mut out, refresh_token),
+        None => write_field(&mut out, b""),
+    }
     match &record.metadata {
         Some(id) => write_field(&mut out, id),
         None => write_field(&mut out, b""),
@@ -148,7 +168,8 @@ pub fn decode_record(input: &[u8], limits: &Limits) -> Result<SavedToken, Decode
     let generation = reader.u64().ok_or(DecodeError::Malformed)?;
     let expires_at = Wall::from_nanos(reader.u64().ok_or(DecodeError::Malformed)?);
     let access_token = read_field(&mut reader, limits.token_bytes)?;
-    let refresh_token = read_field(&mut reader, limits.token_bytes)?;
+    let refresh = read_field(&mut reader, limits.token_bytes)?;
+    let refresh_token = if refresh.is_empty() { None } else { Some(refresh) };
     let id = read_field(&mut reader, limits.token_bytes)?;
     let metadata = if id.is_empty() { None } else { Some(id) };
     if !reader.is_empty() {

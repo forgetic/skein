@@ -234,7 +234,8 @@ impl Service {
     /// blocks only when there is none.
     #[must_use]
     pub fn work_pending(&self, now: Time) -> bool {
-        self.io.is_ready()
+        (self.protocol.is_empty() && !self.signals_closing && self.signals.is_some())
+            || self.io.is_ready()
             || self.io.is_due(now)
             || self.protocol.is_ready()
             || self.protocol.is_due(now)
@@ -257,6 +258,12 @@ impl Service {
             },
             None => protocol,
         }
+    }
+
+    /// The protocol layer's idle and listen-backoff deadlines, excluding io.
+    #[must_use]
+    pub fn next_policy_deadline(&self) -> Option<Time> {
+        self.protocol.next_deadline()
     }
 
     /// Shuts the service down: the domain is told `Shutdown` in the next
@@ -417,6 +424,7 @@ fn protocol_up(svc: &mut Service, now: Time) {
             | io::Event::Output { .. }
             | io::Event::Spawned { .. }
             | io::Event::Exited { .. }
+            | io::Event::Usage { .. }
             | io::Event::Shutdown { .. }
             | io::Event::Failed { .. }
             | io::Event::Closed { .. } => {

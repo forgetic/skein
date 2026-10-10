@@ -102,7 +102,8 @@ fn a_process_past_its_worst_case_fails() {
 #[test]
 #[should_panic(expected = "a leak")]
 fn a_process_that_leaks_fails_once_settled() {
-    let _outcome = world(Config::calm(), Vec::new(), || server().leaking(100), sender).run();
+    let _outcome =
+        world(Config::calm(), vec![Expect::Receives { at: 0, by: ms(1_000) }], || server().leaking(100), sender).run();
 }
 
 #[test]
@@ -113,8 +114,45 @@ fn the_same_seed_replays_to_the_same_trace() {
     let second = exchange(config);
     assert!(first.trace == second.trace, "the same records, at the same times");
     assert!(first.trace.iter().any(|entry| entry.event == Event::Fault(Fault::Latency)), "faults fell");
-    let mut other = World::new(SEED + 1, config, Judge::new(SEED + 1, Vec::new()), Memory::Checked);
+    let mut other = World::new(
+        SEED + 1,
+        config,
+        Judge::new(SEED + 1, vec![Expect::Receives { at: 0, by: ms(1_000) }]),
+        Memory::Checked,
+    );
     other.spawn(server);
     other.spawn(sender);
     assert!(other.run().trace != first.trace, "another seed, another run");
+}
+
+#[test]
+#[should_panic(expected = "process 0 requires policy deadline 10000000 ns")]
+fn a_keep_time_after_the_last_word_fails_the_world_naming_the_process() {
+    let mut world = World::new(SEED, Config::calm(), Judge::new(SEED, Vec::new()), Memory::Checked);
+    world.spawn(|| Script::new(ms(10), &[]));
+    let _outcome = world.run();
+}
+
+#[test]
+fn a_world_that_ends_by_itself_passes() {
+    let mut world = World::new(SEED, Config::calm(), Judge::new(SEED, Vec::new()), Memory::Checked);
+    world.spawn(|| Script::new(skein_lib::Time::ZERO, &[]));
+    assert_eq!(world.run().end, skein_lib::Time::ZERO);
+}
+
+#[test]
+fn a_scenario_that_names_a_later_last_word_may_wait_for_it() {
+    let referee = skein_world_tests::Later(skein_world::LastWord::After(ms(10)));
+    let mut world = World::new(SEED, Config::calm(), referee, Memory::Checked);
+    world.spawn(|| Script::new(ms(10), &[]));
+    assert_eq!(world.run().end, ms(10));
+}
+
+#[test]
+#[should_panic(expected = "process 0 requires policy deadline 10000000 ns")]
+fn a_named_later_last_word_still_rejects_policy_deadlines_after_it() {
+    let referee = skein_world_tests::Later(skein_world::LastWord::After(ms(5)));
+    let mut world = World::new(SEED, Config::calm(), referee, Memory::Checked);
+    world.spawn(|| Script::new(ms(10), &[]));
+    let _outcome = world.run();
 }

@@ -104,6 +104,7 @@ impl Driver {
                 | Event::Accepted { .. }
                 | Event::Connecting { .. }
                 | Event::Connected { .. }
+                | Event::Usage { .. }
                 | Event::Shutdown { .. } => panic!("unexpected event in {what}: {event:?}"),
             }
         }
@@ -268,7 +269,24 @@ fn native_pipe_output_and_staged_close_terminals_fit_the_same_checked_bound_unti
             .expect("each actual maximal pipe write");
         driver.complete(write, Done::Count(limits.output));
     }
-    for _ in 0..PIPES.checked_add(1).expect("pipes and child descriptor") {
+    for _ in 0..PIPES {
+        let close =
+            driver.flights.iter().position(|submit| matches!(submit.kind, Op::Close { .. })).expect("a pipe close");
+        driver.complete(close, Done::Nothing);
+    }
+    let killing = driver
+        .flights
+        .iter()
+        .position(|submit| matches!(submit.kind, Op::Signal { .. }))
+        .expect("the group's closing kill");
+    driver.complete(killing, Done::Nothing);
+    let reap = driver
+        .flights
+        .iter()
+        .position(|submit| matches!(submit.kind, Op::Wait { reap: true, .. }))
+        .expect("the final child reap");
+    driver.complete(reap, Done::Exit(Exit::Code(0)));
+    for _ in 0..1 {
         let close = driver
             .flights
             .iter()
@@ -280,4 +298,100 @@ fn native_pipe_output_and_staged_close_terminals_fit_the_same_checked_bound_unti
     assert!(driver.child_closed && driver.pipe_closed.iter().all(|closed| *closed));
     assert!(driver.flights.is_empty() && driver.io.is_empty());
     assert!(driver.most > 0 && driver.most <= driver.bound);
+}
+
+#[test]
+fn a_slab_full_of_children_and_pipes_with_each_signal_in_flight_fits_the_bound() {
+    use skein_io::kernel::{Signal, Target};
+    let limits = Limits { sockets: 8, ..skein_io_world::scenarios::limits(8) };
+    let bound = worst_case(&limits).expect("small limits");
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
+    let mut events = Queue::with_capacity(32);
+    let mut submissions = Queue::with_capacity(32);
+    let mut flights = Vec::with_capacity(32);
+    let meter = Meter::new();
+    meter.start();
+    let mut io = Io::new(&limits);
+    let mut most = meter.check(meter.end(), bound, &"new");
+    for index in 0..4_u32 {
+        let request = Request::Spawn {
+            owner: Token::new(u64::from(index)),
+            spawn: Spawn {
+                root: Fd::new(3),
+                dir: Box::from(b".".as_slice()),
+                program: Box::from(b"fork-live".as_slice()),
+                args: Box::new([]),
+                env: Box::new([]),
+                pipes: Box::from([Pipe { child: 1, way: Way::Out, parent: None }]),
+            },
+        };
+        meter.start();
+        skein_io::down(&mut io, &env, request, &mut submissions);
+        most = most.max(meter.check(meter.end(), bound, &"spawn"));
+        let Submit { op, mut kind } = submissions.pop().expect("a spawn");
+        let Op::Spawn { spawn } = &mut kind else { panic!("a spawn") };
+        spawn.pipes[0].parent = Some(Fd::new(41 + i32::try_from(index * 2).expect("four children")));
+        meter.start();
+        skein_io::up(
+            &mut io,
+            &env,
+            Complete {
+                op,
+                kind,
+                result: Ok(Done::Spawned { pidfd: Fd::new(40 + i32::try_from(index * 2).expect("four children")) }),
+            },
+            &mut events,
+            &mut submissions,
+        );
+        most = most.max(meter.check(meter.end(), bound, &"spawned"));
+        let Event::Spawned { child, pipes, .. } = events.pop().expect("the spawn event") else { panic!("spawned") };
+        let pipe = pipes[0];
+        // Hand back the temporary event allocation before metering the next call.
+        drop(pipes);
+        meter.start();
+        skein_io::down(
+            &mut io,
+            &env,
+            Request::Stream {
+                stream: pipe,
+                down: skein_lib::stream::Down::Demand { read: skein_lib::stream::Read::Fill(1), room: 0 },
+            },
+            &mut submissions,
+        );
+        most = most.max(meter.check(meter.end(), bound, &"demand"));
+        meter.start();
+        skein_io::down(
+            &mut io,
+            &env,
+            Request::Signal { child, signal: Signal::Terminate, to: Target::Group },
+            &mut submissions,
+        );
+        most = most.max(meter.check(meter.end(), bound, &"signal"));
+        while let Some(submit) = submissions.pop() {
+            flights.push(submit);
+        }
+    }
+    meter.start();
+    io.reclaim();
+    most = most.max(meter.check(meter.end(), bound, &"reclaim"));
+    while io.is_ready() {
+        meter.start();
+        skein_io::resume(&mut io, &env, &mut events, &mut submissions);
+        most = most.max(meter.check(meter.end(), bound, &"pipe resume"));
+        while let Some(submit) = submissions.pop() {
+            flights.push(submit);
+        }
+    }
+    meter.start();
+    skein_io::down(&mut io, &env, Request::Usage { owner: Token::new(99) }, &mut submissions);
+    most = most.max(meter.check(meter.end(), bound, &"process usage beside full entity slab"));
+    while let Some(submit) = submissions.pop() {
+        flights.push(submit);
+    }
+    assert_eq!(flights.iter().filter(|submit| matches!(submit.kind, Op::Usage)).count(), 1);
+    assert_eq!(io.sockets(), limits.sockets, "every child and pipe occupies an actual entity slot");
+    assert_eq!(flights.iter().filter(|submit| matches!(submit.kind, Op::Signal { .. })).count(), 4);
+    assert_eq!(flights.iter().filter(|submit| matches!(submit.kind, Op::Wait { .. })).count(), 4);
+    assert_eq!(flights.iter().filter(|submit| matches!(submit.kind, Op::PipeRead { .. })).count(), 4);
+    assert!(most > 0 && most <= bound);
 }

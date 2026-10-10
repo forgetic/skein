@@ -24,7 +24,7 @@ pub fn step(machine: &mut Machine, call: Call, answers: &mut Queue<Answer>) {
                 match machine.open(opened(root), &dir, How::Directory) {
                     Ok(directory) => machine.close(directory),
                     Err(refusal) => {
-                        answers.push(Answer { ticket, result: Err(error(refusal)) });
+                        answers.push(Answer { ticket, result: Err(kernel_error(refusal)) });
                         return;
                     }
                 }
@@ -33,16 +33,17 @@ pub fn step(machine: &mut Machine, call: Call, answers: &mut Queue<Answer>) {
         }
         Ask::Open { root, path, how } => match machine.open(opened(root), &path, how_of(how)) {
             Ok(file) => Ok(Reply::Opened(Handle::new(file.raw()))),
-            Err(refusal) => Err(error(refusal)),
+            Err(refusal) => Err(kernel_error(refusal)),
         },
         Ask::Read { file, at, len } => match machine.read(opened(file), at, len) {
             Ok(bytes) => Ok(Reply::Read(bytes.into_boxed_slice())),
-            Err(refusal) => Err(error(refusal)),
+            Err(refusal) => Err(kernel_error(refusal)),
         },
         Ask::Write { file, at, bytes } => match machine.write(opened(file), at, &bytes) {
             Ok(()) => Ok(Reply::Done),
-            Err(refusal) => Err(error(refusal)),
+            Err(refusal) => Err(kernel_error(refusal)),
         },
+        Ask::Append { file, bytes } => done(machine.append(opened(file), &bytes)),
         Ask::Sync { file } => {
             machine.sync(opened(file));
             Ok(Reply::Done)
@@ -52,7 +53,7 @@ pub fn step(machine: &mut Machine, call: Call, answers: &mut Queue<Answer>) {
             done(machine.rename(opened(from_dir), &from, opened(to_dir), &to))
         }
         Ask::Remove { dir, name, directory } => done(machine.remove(opened(dir), &name, directory)),
-        Ask::MakeDirectory { dir, name } => done(machine.make_directory(opened(dir), &name)),
+        Ask::MakeDirectory { dir, name, mode } => done(machine.make_directory(opened(dir), &name, mode)),
         Ask::List { dir, most, room } => match machine.list(opened(dir), most, room) {
             Ok(listed) => {
                 let mut entries = Vec::with_capacity(listed.len());
@@ -61,7 +62,7 @@ pub fn step(machine: &mut Machine, call: Call, answers: &mut Queue<Answer>) {
                 }
                 Ok(Reply::Listed(entries))
             }
-            Err(refusal) => Err(error(refusal)),
+            Err(refusal) => Err(kernel_error(refusal)),
         },
         Ask::Close { file } => {
             machine.close(opened(file));
@@ -95,6 +96,8 @@ fn program_of(program: &[u8], args: &[Box<[u8]>], pipes: &[Pipe]) -> Result<Prog
             };
             Ok(Program::Exit(code))
         }
+        b"fork-exit" => Ok(Program::Fork { exit_leader: true }),
+        b"fork-live" => Ok(Program::Fork { exit_leader: false }),
         b"never" | b"skein-never" => Ok(Program::Never),
         _ => Err(Error::NotFound),
     }
@@ -125,7 +128,7 @@ fn opened(handle: Handle) -> Opened {
 fn done(result: Result<(), Refusal>) -> Result<Reply, Error> {
     match result {
         Ok(()) => Ok(Reply::Done),
-        Err(refusal) => Err(error(refusal)),
+        Err(refusal) => Err(kernel_error(refusal)),
     }
 }
 
@@ -133,6 +136,7 @@ fn done(result: Result<(), Refusal>) -> Result<Reply, Error> {
 /// one the kernel's contract gives when none is.
 const fn how_of(how: OpenHow) -> How {
     match how {
+        OpenHow::PathNoFollow => How::PathNoFollow,
         OpenHow::Read => How::Read,
         OpenHow::ReadNoFollow => How::ReadNoFollow,
         OpenHow::Directory => How::Directory,
@@ -154,11 +158,12 @@ const fn kind(is: Is) -> Kind {
 }
 
 const fn stat(facts: Facts) -> Stat {
-    Stat { kind: kind(facts.is), size: facts.size, mode: facts.mode }
+    Stat { kind: kind(facts.is), size: facts.size, mode: facts.mode, owner: facts.owner, links: facts.links }
 }
 
-/// A refusal as the kernel names it (`skein_io::kernel::Error`).
-const fn error(refusal: Refusal) -> Error {
+/// Translates a filesystem refusal into the kernel boundary's named error.
+#[must_use]
+pub const fn kernel_error(refusal: Refusal) -> Error {
     match refusal {
         Refusal::NotFound => Error::NotFound,
         Refusal::Exists => Error::Exists,

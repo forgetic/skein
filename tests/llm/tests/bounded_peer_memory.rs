@@ -29,12 +29,14 @@ fn bytes(value: &[u8]) -> u64 {
 
 fn observations(bounds: &client::Limits) -> ObservationLimits {
     ObservationLimits {
+        heads: 1,
+        head_bytes: 8192,
         events: client::MAX_OUT.above,
         event_bytes: 32768,
         queries: 1,
         query_bytes: 32768,
         pending: 0,
-        request_bytes: bounds.http.request.checked_add(bounds.dialect.request_bytes).expect("whole HTTP request"),
+        request: bounds.http.request.checked_add(bounds.request).expect("whole HTTP request"),
         response_bytes: 4096,
     }
 }
@@ -42,12 +44,12 @@ fn observations(bounds: &client::Limits) -> ObservationLimits {
 fn limits() -> client::Limits {
     let mut bounds = skein_llm_world::limits();
     bounds.http.request = 32768;
-    bounds.dialect.request_bytes = 32768;
-    bounds.dialect.document_bytes = 32768;
-    bounds.dialect.string_bytes = 16384;
-    bounds.dialect.parts = 32;
-    bounds.dialect.tokens = 4096;
-    bounds.dialect.answer_bytes = 1024;
+    bounds.request = 32768;
+    bounds.retained = 32768;
+    bounds.strings = 16384;
+    bounds.output_items = 32;
+    bounds.tokens = 4096;
+    bounds.answer = 1024;
     bounds
 }
 
@@ -56,7 +58,7 @@ fn input(owner: u64, provider: Provider) -> Call {
     if provider == Provider::Anthropic {
         input.endpoint = Endpoint::anthropic();
         input.credential = Credential::anthropic(b"fixture-token".as_slice().into());
-        input.prompt.cache_key = None;
+        input.prompt.affinity = None;
     }
     input.prompt.output_ceiling(provider, 4096).expect("caller output configuration");
     input.prompt.instructions = CUE.into();
@@ -93,7 +95,6 @@ fn input_bytes(input: &Call) -> u64 {
         + bytes(&input.credential.account_id)
         + bytes(&input.prompt.model)
         + bytes(&input.prompt.instructions)
-        + input.prompt.cache_key.as_ref().map_or(0, |key| bytes(key))
         + u64::try_from(input.prompt.messages.len()).expect("bounded messages") * size::<skein_llm::Message>();
     for message in &input.prompt.messages {
         let [Block::Text { text, replay: None }] = message.content.as_ref() else { panic!("literal fixture text") };
@@ -106,22 +107,8 @@ fn terminal_bytes(completion: &Completion) -> u64 {
     let [Block::Text { text, replay }] = completion.content.as_ref() else { panic!("one real native text") };
     let mut owned = size::<Block>() + bytes(text);
     if let Some(replay) = replay {
-        owned +=
-            u64::try_from(replay.value.as_tokens().len()).expect("bounded replay tokens") * size::<skein_json::Token>();
-        for token in replay.value.as_tokens() {
-            owned += match token {
-                skein_json::Token::Key(value) | skein_json::Token::String(value) | skein_json::Token::Number(value) => {
-                    bytes(value)
-                }
-                skein_json::Token::ObjectStart
-                | skein_json::Token::ObjectEnd
-                | skein_json::Token::ArrayStart
-                | skein_json::Token::ArrayEnd
-                | skein_json::Token::True
-                | skein_json::Token::False
-                | skein_json::Token::Null => 0,
-            };
-        }
+        let document = replay.value.document();
+        owned += u64::from(document.len()) * size::<skein_json::Compact>() + u64::from(document.text_len());
     }
     owned
 }
@@ -197,7 +184,7 @@ fn assert_native_payloads(world: &Exchange, seen: &Seen, caps: &ObservationLimit
     assert!(text.iter().all(|byte| *byte == b'x'));
     assert!(world.requests.windows(LARGE).any(|text| text.iter().all(|byte| *byte == b'x')));
     assert_reference_response(&world.responses, bounds);
-    assert!(world.requests.len() <= usize::try_from(caps.request_bytes).expect("declared trace cap"));
+    assert!(world.requests.len() <= usize::try_from(caps.request).expect("declared trace cap"));
     assert!(world.responses.len() <= 4096);
     let completion = seen.terminal.as_ref().expect("actual native terminal");
     assert_eq!(completion.stop, Stop::EndTurn);
@@ -218,7 +205,7 @@ fn actual_native_peer_and_client_fit_checked_prices_until_every_owner_drops() {
         // and target; its other cloned endpoint fields exist during adoption.
         let caller = input_bytes(&input) + endpoint_bytes(&input.endpoint);
         let extra = extra_worst_case(&bounds, &caps, &input.endpoint, &input.credential).expect("checked peer price");
-        let client_price = client::worst_case(&bounds).expect("one Client price");
+        let client_price = client::call_worst_case(&bounds).expect("one Client price");
         let bound = client_price
             .checked_add(extra)
             .expect("composition")
@@ -230,7 +217,7 @@ fn actual_native_peer_and_client_fit_checked_prices_until_every_owner_drops() {
         world.observe(caps);
         assert_eq!(world.seen.capacity(), usize::try_from(caps.events).expect("event reservation"));
         assert_eq!(world.queries.capacity(), 1);
-        assert_eq!(world.requests.capacity(), usize::try_from(caps.request_bytes).expect("request reservation"));
+        assert_eq!(world.requests.capacity(), usize::try_from(caps.request).expect("request reservation"));
         assert_eq!(world.responses.capacity(), 4096);
         assert_eq!(world.service.calls(), 0);
         let constructed = meter.end();
@@ -305,6 +292,7 @@ fn actual_connections_reuse_reclaimed_service_routes_past_its_capacity() {
             world.server = provider::Server::new(Token::new(2), &skein_llm_world::fake::limits(&bounds))
                 .expect("next actual physical peer");
             world.queries.clear();
+            world.heads.clear();
             world.requests.clear();
             world.responses.clear();
         }
@@ -361,7 +349,8 @@ fn exact_query_observation_capacity_copies_the_whole_query_and_one_less_copies_n
         + bytes(CUE)
         + u64::try_from(LARGE).expect("bounded text")
         + size::<skein_fake_llm_domain::api::Message>()
-        + size::<skein_fake_llm_domain::api::Part>();
+        + size::<skein_fake_llm_domain::api::Part>()
+        + 2 * size::<skein_fake_llm_domain::api::Mark>();
     let mut caps = observations(&bounds);
     caps.query_bytes = exact;
     let mut positive = Exchange::new(input(1, Provider::Anthropic), bounds, scripts());
@@ -420,4 +409,58 @@ fn exact_query_observation_capacity_copies_the_whole_query_and_one_less_copies_n
     assert!(negative.seen.is_empty());
     assert_eq!(negative.service.calls(), 0, "refused observation still settles its real route");
     assert_eq!(negative.machine.waiting(), client::Waiting::Nothing);
+}
+
+#[test]
+fn exact_head_observation_capacity_retains_actual_fields_and_one_less_retains_nothing() {
+    for provider in [Provider::OpenAiCodex, Provider::Anthropic] {
+        let bounds = limits();
+        let mut baseline = Exchange::new(input(1, provider), bounds, scripts());
+        baseline.start();
+        baseline.run();
+        let [head] = baseline.heads.as_slice() else { panic!("one baseline actual head") };
+        let exact = u64::try_from(head.len()).expect("bounded wrappers") * size::<skein_http::Header>()
+            + head.iter().map(|field| bytes(&field.name) + bytes(&field.value)).sum::<u64>();
+        drop(baseline);
+        let mut caps = observations(&bounds);
+        caps.events = 64;
+        caps.head_bytes = exact;
+        let meter = Meter::new();
+        meter.start();
+        let call_input = input(1, provider);
+        let caller = input_bytes(&call_input) + endpoint_bytes(&call_input.endpoint);
+        let bound = client::call_worst_case(&bounds).expect("client price")
+            + extra_worst_case(&bounds, &caps, &call_input.endpoint, &call_input.credential).expect("peer price")
+            + caller;
+        let mut positive = Exchange::new(call_input, bounds, scripts());
+        positive.observe(caps);
+        positive.start();
+        positive.run();
+        let measured = meter.end();
+        assert!(measured.peak() <= bound, "actual head ownership {} exceeds {bound}", measured.peak());
+        let [head] = positive.heads.as_slice() else { panic!("exact head observation fits") };
+        let actual = u64::try_from(head.len()).expect("bounded wrappers") * size::<skein_http::Header>()
+            + head.iter().map(|field| bytes(&field.name) + bytes(&field.value)).sum::<u64>();
+        assert_eq!(actual, exact);
+        assert_eq!(positive.queries.len(), 1);
+        drop(positive);
+        assert_eq!(meter.held(), 0, "all exact-head owners released");
+
+        caps.head_bytes = exact - 1;
+        let mut negative = Exchange::new(input(1, provider), bounds, scripts());
+        negative.observe(caps);
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            negative.start();
+            negative.run();
+        }));
+        assert!(refused.is_err(), "one byte below actual head ownership refuses retention");
+        assert!(negative.heads.is_empty());
+        assert!(negative.queries.is_empty(), "the script never received the request");
+        assert!(negative.responses.is_empty());
+        negative.request(client::Request::Close);
+        negative.seen.clear();
+        negative.settle();
+        assert_eq!(negative.machine.waiting(), client::Waiting::Nothing);
+        assert_eq!(negative.service.calls(), 0);
+    }
 }

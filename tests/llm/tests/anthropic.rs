@@ -5,7 +5,11 @@ use skein_lib::{Duration, Token};
 use skein_llm::{
     Block, Completion, Credential, Delta, Endpoint, Error, Failure, Message, Provider, Role, Stop, client,
 };
-use skein_llm_world::{World, call, limits, response};
+use skein_llm_world::{World, call, limits_for, response};
+
+fn limits() -> client::Limits {
+    limits_for(Provider::Anthropic)
+}
 
 const START: &str = r#"{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"fixture-model","content":[],"stop_reason":null,"usage":{"input_tokens":7,"cache_read_input_tokens":11,"cache_creation_input_tokens":13,"output_tokens":1}}}"#;
 const TEXT_START: &str = r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
@@ -19,7 +23,7 @@ fn anthropic_call(owner: u64) -> skein_llm::Call {
     let mut input = call(owner);
     input.endpoint = Endpoint::anthropic();
     input.credential = Credential::anthropic(b"synthetic-oauth-token".to_vec().into());
-    input.prompt.cache_key = None;
+    input.prompt.affinity = None;
     input.prompt.max_output_tokens = Some(1024);
     input
 }
@@ -104,10 +108,10 @@ fn oauth_request_text_usage_and_http_fragmentation() {
             assert!(world.seen.iter().any(|event| matches!(event, client::Event::Delta { owner, delta: Delta::Text { index: 0, text, .. } } if *owner == Token::new(7) && text.as_ref() == "Hello 🌍".as_bytes())));
             let answer = completion(&world);
             assert_eq!(answer.stop, Stop::EndTurn);
-            assert_eq!(answer.usage.input_tokens, 7);
-            assert_eq!(answer.usage.cache_read_tokens, 11);
-            assert_eq!(answer.usage.cache_write_tokens, 13);
-            assert_eq!(answer.usage.output_tokens, 9);
+            assert_eq!(answer.usage.input, Some(7));
+            assert_eq!(answer.usage.cache_read, Some(11));
+            assert_eq!(answer.usage.cache_write, Some(13));
+            assert_eq!(answer.usage.output, Some(9));
             assert!(matches!(&answer.content[0], Block::Text { text, .. } if text.as_ref() == "Hello 🌍".as_bytes()));
         }
     }
@@ -245,10 +249,10 @@ fn usage_updates_are_snapshots_and_token_limit_is_successful() {
     world.assert_once();
     let answer = completion(&world);
     assert_eq!(answer.stop, Stop::MaxTokens);
-    assert_eq!(answer.usage.output_tokens, 9);
-    assert_eq!(answer.usage.input_tokens, 7);
-    assert_eq!(answer.usage.cache_read_tokens, 11);
-    assert_eq!(answer.usage.cache_write_tokens, 13);
+    assert_eq!(answer.usage.output, Some(9));
+    assert_eq!(answer.usage.input, Some(7));
+    assert_eq!(answer.usage.cache_read, Some(11));
+    assert_eq!(answer.usage.cache_write, Some(13));
 }
 
 #[test]
@@ -328,7 +332,7 @@ fn nested_provider_errors_classify_http_and_sse_with_retry_headers() {
         world.request(client::Request::Start);
         world.run();
         world.assert_once();
-        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure, evidence: client::Evidence::Response, .. } if *failure == expected)), "{:?}", world.seen);
+        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure, evidence: client::Evidence::Response { .. }, .. } if *failure == expected)), "{:?}", world.seen);
         world.settle();
         world.settle();
         world.assert_once();
@@ -419,9 +423,9 @@ fn cancellation_settles_once_and_reuse_keeps_provider_binding() {
 }
 
 #[test]
-fn bounded_arguments_and_truncated_http_fail_once() {
+fn oversized_arguments_complete_and_truncated_http_fails_once() {
     let mut bounded = limits();
-    bounded.dialect.input_bytes = 2;
+    bounded.input = 2;
     let documents = [
         START,
         r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool","name":"read","input":{}}}"#,
@@ -435,7 +439,8 @@ fn bounded_arguments_and_truncated_http_fail_once() {
     world.run();
     world.assert_once();
     assert!(
-        world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Limit, .. })),
+        world.seen.iter().any(|event| matches!(event, client::Event::Completed { completion, .. }
+            if matches!(completion.content.as_ref(), [Block::Oversize { bytes: 12, .. }]))),
         "{:?}",
         world.seen
     );
@@ -445,4 +450,91 @@ fn bounded_arguments_and_truncated_http_fail_once() {
     world.run();
     world.assert_once();
     assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Protocol, .. })));
+}
+
+#[test]
+fn owner_reasoning_drop_never_discards_anthropic_thinking_past_the_cap() {
+    let block = r#"{"type":"thinking","thinking":"","signature":"signed"}"#;
+    let added = format!(r#"{{"type":"content_block_start","index":0,"content_block":{block}}}"#);
+    for enabled in [false, true] {
+        let mut bounds = limits();
+        bounds.drop_reasoning = enabled;
+        bounds.reasoning = u32::try_from(block.len() - 1).unwrap();
+        let documents = [START, added.as_str(), BLOCK_STOP, END_TURN, STOP];
+        let mut world = World::new(anthropic_call(1), bounds, stream(&documents, true), 18);
+        world.fragmentation(1, 2);
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Failed { failure: Failure::Limit { which: skein_llm::Cap::Reasoning, bound }, .. } if *bound == u64::from(bounds.reasoning))));
+    }
+}
+
+#[test]
+fn actual_anthropic_peer_reads_the_declared_output_default_and_the_admission_edge() {
+    let mut bounds = limits();
+    bounds.declared_output_tokens = 37;
+    for cap in [None, Some(37)] {
+        let mut input = anthropic_call(1);
+        input.prompt.max_output_tokens = cap;
+        let cue = input.prompt.instructions.clone();
+        let scripts = Box::new([skein_fake_llm_domain::api::Script {
+            cue,
+            turns: Box::new([skein_fake_llm_domain::api::Turn {
+                lines: Box::new([skein_fake_llm_domain::api::Line::Text { text: b"ok".as_slice().into() }]),
+                finish: skein_fake_llm_domain::api::Finish::Stop,
+                tokens: 1,
+            }]),
+        }]);
+        let mut world = skein_llm_world::fake::Exchange::new(input, bounds, scripts);
+        world.start();
+        world.run();
+        assert_eq!(world.queries[0].max_tokens, 37);
+        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Completed { .. })));
+    }
+    let mut input = anthropic_call(1);
+    input.prompt.max_output_tokens = Some(38);
+    assert!(matches!(
+        client::Client::prepare(input, &bounds),
+        Err(Error::Limit { which: skein_llm::Cap::Output, bound: 37 })
+    ));
+}
+
+#[test]
+fn explicit_call_reasoning_policy_never_drops_anthropic_thinking() {
+    let docs = [
+        r#"{"type":"message_start","message":{"type":"message","role":"assistant","content":[],"usage":{}}}"#,
+        r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"visible","signature":"signed"}}"#,
+        r#"{"type":"content_block_stop","index":0}"#,
+        r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{}}"#,
+        r#"{"type":"message_stop"}"#,
+    ];
+    for enabled in [false, true] {
+        let mut bounds = limits();
+        bounds.drop_reasoning = !enabled;
+        bounds.reasoning = 24;
+        let mut input = skein_llm_world::call(78);
+        input.endpoint = skein_llm::Endpoint::anthropic();
+        input.credential = skein_llm::Credential::anthropic(b"fake-token".as_slice().into());
+        input.prompt.affinity = None;
+        input.prompt.output_ceiling(skein_llm::Provider::Anthropic, 4096).expect("configured output");
+        let machine = client::Client::prepare_with_reasoning_drop(input, &bounds, enabled).expect("explicit policy");
+        let source = skein_llm_world::response(
+            200,
+            "Content-Type: text/event-stream\r\n",
+            &skein_llm_world::events(&docs),
+            false,
+        );
+        let mut world = skein_llm_world::World::prepared(machine, bounds, source, 43);
+        world.request(client::Request::Start);
+        world.run();
+        world.assert_once();
+        assert!(world.seen.iter().any(|event| matches!(
+            event,
+            client::Event::Failed {
+                failure: skein_llm::Failure::Limit { which: skein_llm::Cap::Reasoning, bound: 24 },
+                ..
+            }
+        )));
+    }
 }

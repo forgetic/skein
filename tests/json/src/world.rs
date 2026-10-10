@@ -29,6 +29,8 @@ use crate::{Decoded, Outcome, reference};
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub limits: Limits,
+    /// Optional legal demand script from the independent reference.
+    pub demands: Option<Vec<Request>>,
     /// The side below's cap: its intake holds this many bytes, at least the
     /// tokenizer's largest demand.
     pub cap: u32,
@@ -65,6 +67,7 @@ impl Settings {
         let largest = json::largest_demand(&limits);
         Settings {
             limits,
+            demands: None,
             cap: largest + draw(rng, 0, 64),
             piece: draw(rng, 1, 96),
             arrival: draw(rng, 100, 1000),
@@ -143,6 +146,8 @@ fn draw(rng: &mut Rng, low: u32, high: u32) -> u32 {
 /// What a run came to.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Run {
+    /// Demand answers in order, including lengths for text and skipped values.
+    pub answers: Vec<Event>,
     /// The tokens the side above received, in order.
     pub tokens: Vec<Token>,
     /// The outcome it received, unless it closed first.
@@ -212,7 +217,14 @@ pub fn run(document: &[u8], settings: &Settings, seed: u64) -> Run {
             fell: Fell::default(),
             withdrawn: None,
         },
-        above: Above { pending: false, tokens: Vec::new(), outcome: None, closing: None, closed: false },
+        above: Above {
+            answers: Vec::new(),
+            pending: false,
+            tokens: Vec::new(),
+            outcome: None,
+            closing: None,
+            closed: false,
+        },
         iteration: 0,
         held_back: 0,
         held_byte: false,
@@ -237,6 +249,7 @@ pub fn run(document: &[u8], settings: &Settings, seed: u64) -> Run {
         if world.above.closed {
             world.late();
             return Run {
+                answers: world.above.answers,
                 tokens: world.above.tokens,
                 outcome: world.above.outcome,
                 closed_while: world.above.closing.expect("closed after a close"),
@@ -328,6 +341,7 @@ enum Life {
 
 /// The side above.
 struct Above {
+    answers: Vec<Event>,
     /// A `Next` not yet answered.
     pending: bool,
     tokens: Vec<Token>,
@@ -457,7 +471,9 @@ impl World<'_> {
         }
         if above.outcome.is_none() && !above.pending && self.rng.chance(self.settings.eagerness) {
             above.pending = true;
-            self.down(Request::Next);
+            let request =
+                self.settings.demands.as_ref().map_or(Request::Next, |demands| demands[self.above.answers.len()]);
+            self.down(request);
         }
     }
 
@@ -476,7 +492,7 @@ impl World<'_> {
     }
 
     fn down(&mut self, rq: Request) {
-        if rq == Request::Next {
+        if rq != Request::Close {
             self.held_byte = false;
         }
         json::down(&mut self.tokenizer, &self.env, rq, &mut self.events, &mut self.requests);
@@ -516,6 +532,9 @@ impl World<'_> {
 impl Above {
     fn receive(&mut self, event: Event) {
         assert!(!self.closed, "nothing follows Closed: {event:?}");
+        if event != Event::Closed {
+            self.answers.push(event.clone());
+        }
         match event {
             Event::Token(token) => {
                 assert!(self.pending, "a token answers a Next: {token:?}");
@@ -528,8 +547,12 @@ impl Above {
                 self.pending = false;
                 self.outcome = Some(match event {
                     Event::Failed(error) => Outcome::Failed(error),
-                    Event::Done | Event::Token(_) | Event::Closed => Outcome::Done,
+                    Event::Done | Event::Token(_) | Event::Long(_) | Event::Skipped(_) | Event::Closed => Outcome::Done,
                 });
+            }
+            Event::Long(_) | Event::Skipped(_) => {
+                assert!(self.pending, "one answer per demand");
+                self.pending = false;
             }
             Event::Closed => {
                 assert!(self.closing.is_some(), "Closed answers a Close");
@@ -581,5 +604,152 @@ fn read_len(read: Read, bytes: &[u8]) -> usize {
             assert!(bytes.len() <= usize::try_from(max).expect("fits a usize"), "a scan delivers at most its maximum");
             bytes.len()
         }
+    }
+}
+
+/// Runs drawn `Next`, `Text` and `Skip` demands through both delayed neighbours,
+/// judging each answer against independently recorded reference value spans.
+#[must_use]
+pub fn check_demands(document: &[u8], settings: &Settings, seed: u64) -> Run {
+    let (demands, expected) = reference::demands(document, &settings.limits, seed);
+    let settings = Settings { demands: Some(demands), ..settings.clone() };
+    let run = run(document, &settings, seed);
+    assert_eq!(run.answers, expected, "seed {seed}: {}", document.escape_ascii());
+    run
+}
+
+/// One selective collector between the same delayed byte source and owner.
+/// The byte neighbour uses the tokenizer world's demand referee and intake.
+#[derive(Clone, Debug)]
+pub struct CollectedRun {
+    pub outcome: Option<skein_json::collector::Event>,
+    pub counts: skein_json::collector::Counts,
+    pub closed_while: skein_json::collector::Waiting,
+    pub failed: Option<Fault>,
+}
+
+/// Collects with random arrivals, stalls, end/fault crossings and close timing.
+#[must_use]
+pub fn collect(
+    document: &[u8],
+    filter: skein_json::collector::Filter,
+    limits: skein_json::collector::Limits,
+    settings: &Settings,
+    seed: u64,
+) -> CollectedRun {
+    use skein_json::collector::{self, Collector, Event, Request, Waiting};
+    assert_eq!(limits.tokenizer, settings.limits);
+    let mut rng = Rng::new(seed);
+    let mut below = Below {
+        unsent: settings.sent(document),
+        intake: Intake::with_capacity(settings.cap),
+        demand: None,
+        life: Life::Open,
+        failed: None,
+        fell: Fell::default(),
+        withdrawn: None,
+    };
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
+    let mut collector = Collector::new(filter, &limits, crate::COLLECTOR_CAPS).expect("valid filter");
+    let mut events = Queue::with_capacity(8);
+    let mut requests = Queue::with_capacity(8);
+    let mut outcome = None;
+    let mut pending = false;
+    for iteration in 0..64 * (document.len() as u64 + 16) + settings.stall.map_or(0, |(_, n)| n) {
+        let stalled = settings.stall.is_some_and(|(from, n)| (from..from + n).contains(&iteration));
+        let closing = !stalled
+            && (settings.close.is_some_and(|at| iteration >= at)
+                || outcome.is_some() && rng.chance(settings.eagerness));
+        let before = collector.waiting();
+        let counts = collector.counts();
+        if closing {
+            collector::down(&mut collector, &env, Request::Close, &mut events, &mut requests);
+        } else if !pending && !stalled && rng.chance(settings.eagerness) {
+            pending = true;
+            collector::down(&mut collector, &env, Request::Collect, &mut events, &mut requests);
+        } else {
+            let delivery = collector_delivery(&mut below, settings, &mut rng, iteration);
+            if let Some(delivery) = delivery {
+                collector::up(&mut collector, &env, delivery, &mut events, &mut requests);
+            }
+        }
+        assert!(events.len() <= 1 && requests.len() <= 1, "collector MAX_OUT");
+        while let Some(event) = events.pop() {
+            match event {
+                Event::Collected(_) | Event::Failed(_) => {
+                    assert!(pending && outcome.is_none());
+                    outcome = Some(event);
+                }
+                Event::Closed => {
+                    assert!(closing);
+                    while let Some(request) = requests.pop() {
+                        below.receive(&request, true, &limits.tokenizer);
+                    }
+                    if let Some(read) = below.withdrawn.take()
+                        && let Some(bytes) = below.intake.meet(read)
+                    {
+                        collector::up(&mut collector, &env, Up::Bytes(bytes), &mut events, &mut requests);
+                    }
+                    collector::up(&mut collector, &env, Up::End, &mut events, &mut requests);
+                    assert!(events.is_empty() && requests.is_empty());
+                    return CollectedRun { outcome, counts, closed_while: before, failed: below.failed };
+                }
+            }
+        }
+        while let Some(request) = requests.pop() {
+            let withdrawal = matches!(request, Down::Demand { read: Read::Nothing, .. });
+            below.receive(&request, withdrawal, &limits.tokenizer);
+        }
+        let observed = if outcome.is_some() {
+            Waiting::Close
+        } else if pending {
+            Waiting::Bytes
+        } else {
+            Waiting::Collect
+        };
+        assert_eq!(collector.waiting(), observed);
+        assert_eq!(below.demand.is_some(), observed == Waiting::Bytes);
+    }
+    panic!("seed {seed}: collector world settles: {settings:?}");
+}
+
+fn collector_delivery(below: &mut Below<'_>, settings: &Settings, rng: &mut Rng, iteration: u64) -> Option<Up> {
+    if !below.unsent.is_empty() && below.intake.room() > 0 && rng.chance(settings.arrival) {
+        let count = usize::try_from(rng.between(1, u64::from(settings.piece)))
+            .expect("a bounded arrival")
+            .min(below.intake.room() as usize)
+            .min(below.unsent.len());
+        let (piece, rest) = below.unsent.split_at(count);
+        below.intake.append(piece).expect("test value fits its admitted bounds");
+        below.unsent = rest;
+    }
+    if let Some((at, fault)) = settings.failure.filter(|(at, _)| iteration >= *at && below.failed.is_none()) {
+        let _ = at;
+        below.failed = Some(fault);
+        below.life = Life::Over;
+        below.demand = None;
+        Some(Up::Failed(fault))
+    } else if below.life == Life::Over {
+        None
+    } else if below.life == Life::Ending {
+        below.life = Life::Over;
+        below.demand = None;
+        Some(Up::End)
+    } else if let Some(read) = below.demand {
+        if let Some(bytes) = below.intake.meet(read) {
+            below.demand = None;
+            Some(Up::Bytes(bytes))
+        } else if below.unsent.is_empty() {
+            below.life = Life::Over;
+            below.demand = None;
+            Some(Up::End)
+        } else {
+            None
+        }
+    } else if below.unsent.is_empty() && below.intake.is_empty() && rng.chance(settings.idle_end) {
+        below.life = Life::Ending;
+        None
+    } else {
+        None
     }
 }

@@ -1,64 +1,101 @@
 use crate::openai::{Input, Tool};
 use alloc::boxed::Box;
-use skein_json::{Token, tokenizer, writer};
+use skein_json::{Compact, collector, document, tokenizer, writer};
 use skein_lib::{Duration, List, Wall, bytes};
 
+/// Native codec bounds for one endpoint; each dialect receives its own value.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Limits {
-    pub request_bytes: u32,
-    pub document_bytes: u32,
-    pub string_bytes: u32,
+    pub request: u32,
+    pub retained: u32,
+    pub strings: u32,
     pub depth: u32,
     pub tokens: u32,
-    pub parts: u32,
-    pub input_bytes: u32,
-    pub opaque_bytes: u32,
-    pub answer_bytes: u32,
+    pub output_items: u32,
+    pub tools: u32,
+    pub history_items: u32,
+    pub metadata: u32,
+    pub receiving: u32,
+    pub skip: u32,
+    pub input: u32,
+    pub reasoning: u32,
+    pub answer: u32,
     pub detail_bytes: u32,
 }
 impl Limits {
+    /// Neutral admission for a request or standalone native fixture.
+    #[must_use]
+    pub const fn document(&self) -> crate::DocumentLimits {
+        crate::DocumentLimits { bytes: self.skip, strings: self.strings, depth: self.depth, tokens: self.tokens }
+    }
+    /// Caller input is bounded by the whole request, without a sent-string cap.
+    #[must_use]
+    pub const fn request_document(&self) -> crate::DocumentLimits {
+        crate::DocumentLimits { bytes: self.request, strings: self.request, depth: self.depth, tokens: self.request }
+    }
+    #[must_use]
+    pub const fn metadata_document(&self) -> crate::DocumentLimits {
+        crate::DocumentLimits { bytes: self.metadata, strings: self.strings, depth: self.depth, tokens: self.tokens }
+    }
+    #[must_use]
+    pub const fn reasoning_document(&self) -> crate::DocumentLimits {
+        crate::DocumentLimits { bytes: self.reasoning, strings: self.strings, depth: self.depth, tokens: self.tokens }
+    }
     #[must_use]
     pub const fn writer_limits(&self) -> writer::Limits {
-        writer::Limits { depth: self.depth, length: self.document_bytes }
+        writer::Limits { depth: self.depth, length: self.skip }
     }
     #[must_use]
     pub const fn tokenizer_limits(&self) -> tokenizer::Limits {
-        tokenizer::Limits {
-            depth: self.depth,
-            string: self.string_bytes,
-            number: 32,
-            chunk: 256,
-            length: self.document_bytes,
-        }
+        tokenizer::Limits { depth: self.depth, string: self.strings, number: 32, chunk: 256, length: self.skip }
     }
 }
-/// A conservative per-exchange bound including one event's tokens, temporary
-/// tokenizer/writer storage and a completion being handed to its owner.
+/// A conservative bound for native admission, request encoding and decoded
+/// output. The client's selective collector prices streamed events separately.
 #[must_use]
 pub fn worst_case(limits: &Limits) -> Option<u64> {
-    let tokens = List::<Token>::worst_case(limits.tokens)?;
+    // Native temporary values belong to the request, answer or replay
+    // budgets. A discarded wire event contributes no document-sized buffer.
+    let temporary = limits.request.max(limits.answer).max(limits.input).max(limits.reasoning).max(limits.metadata);
+    let tokens = document::worst_case(&document::Limits { tokens: limits.tokens, text: temporary })?;
     // Translation validates the aggregate request before it clones it.
     // Every JSON token costs at least one byte in that request budget.
     // The caller's prompt and its translated copy may coexist until encoding.
-    let request_count = u64::from(limits.tokens)
-        .checked_mul(u64::from(limits.parts))?
-        .checked_mul(2)?
-        .min(u64::from(limits.request_bytes));
-    let request_tokens = request_count.checked_mul(u64::try_from(size_of::<Token>()).ok()?)?.checked_mul(2)?;
-    let request_slots = List::<Input>::worst_case(limits.parts)?
-        .checked_add(List::<Tool>::worst_case(limits.parts)?)?
+    let request_count = u64::from(limits.request);
+    let request_tokens = request_count.checked_mul(u64::try_from(size_of::<Compact>()).ok()?)?.checked_mul(2)?;
+    let answer_records = u64::from(limits.output_items)
+        .checked_mul(u64::from(limits.tokens))?
+        .min(u64::from(limits.answer))
+        .checked_mul(u64::try_from(size_of::<Compact>()).ok()?)?
         .checked_mul(2)?;
-    let documents = u64::from(limits.document_bytes).checked_mul(8)?;
-    let answer = u64::from(limits.answer_bytes).checked_mul(4)?;
+    // Whole-value collection remains a neutral JSON admission entrance for
+    // schemas and replay metadata. The client prices its error body separately.
+    let admission = collector::worst_case(
+        &collector::Limits {
+            tokenizer: limits.tokenizer_limits(),
+            tokens: limits.tokens,
+            text: temporary,
+            skip: u64::from(temporary),
+        },
+        &[],
+        &collector::Filter { root: collector::Keep::Value },
+    )?;
+    let request_slots = List::<Input>::worst_case(limits.history_items)?
+        .checked_add(List::<Tool>::worst_case(limits.tools)?)?
+        .checked_mul(2)?;
+    let documents = u64::from(temporary).checked_mul(8)?;
+    let answer = u64::from(limits.answer).checked_mul(4)?;
     tokens
         .checked_mul(4)?
         .checked_add(request_tokens)?
+        .checked_add(answer_records)?
+        .checked_add(admission)?
         .checked_add(request_slots)?
         .checked_add(documents)?
         .checked_add(answer)?
-        .checked_add(u64::from(limits.request_bytes))?
+        .checked_add(u64::from(limits.request))?
         .checked_add(tokenizer::worst_case(&limits.tokenizer_limits())?)?
-        .checked_add(writer::worst_case(&limits.writer_limits())?)?
+        .checked_add(writer::worst_case(&writer::Limits { depth: limits.depth, length: temporary })?)?
         .checked_add(crate::openai::response::decoder_worst_case(limits)?)
 }
 /// A bounded document entrance refused its grammar, shape or receiving limits.
@@ -73,8 +110,14 @@ pub enum DecodeError {
     /// A field or root value has a type the entrance cannot accept.
     WrongType,
     /// Input, tokens, nesting or measured output exceed caller-supplied limits.
-    TooLarge,
+    TooLarge { which: crate::Cap, bound: u64 },
 }
+impl DecodeError {
+    pub(crate) fn limit(which: crate::Cap, bound: u32) -> DecodeError {
+        DecodeError::TooLarge { which, bound: u64::from(bound) }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Stop {
     EndTurn,
@@ -82,22 +125,31 @@ pub enum Stop {
     MaxTokens,
     Refusal,
 }
+/// Optional native token reports; absent accounting never becomes a report of zero.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Usage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
+    pub input: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    /// Completion tokens, including reasoning.
+    pub output: Option<u64>,
+    /// The part of output spent on reasoning, never added to output.
+    pub reasoning: Option<u64>,
 }
 impl Usage {
-    pub const ZERO: Usage = Usage { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
+    /// All counts are unreported until the provider supplies them.
+    pub const NONE: Usage = Usage { input: None, cache_read: None, cache_write: None, output: None, reasoning: None };
 }
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Failure {
     /// Provider bytes violate the dialect or end before its terminal event.
     Protocol,
     /// A caller-configured local resource limit was exceeded.
-    Limit,
+    Limit {
+        which: crate::Cap,
+        bound: u64,
+    },
     Unauthorized,
     Exhausted {
         retry_after: Duration,
@@ -165,40 +217,65 @@ pub fn classify(status: u16, error: Option<&ProviderError>, rate: RateLimit, wal
         None => b"",
     };
     let delay = rate.delay(error, wall);
-    if status == 401 || kind == b"authentication_error" || kind == b"invalid_api_key" {
-        return Failure::Unauthorized;
+    // An HTTP status decides retryability. A parsed body may refine that
+    // class. Zero or a successful head carries a native SSE error event.
+    match status {
+        401 => Failure::Unauthorized,
+        403 | 404 | 422 => Failure::Invalid,
+        429 => limited(kind, rate.exhausted, delay),
+        529 => Failure::Overloaded,
+        500..=599 => {
+            if kind == b"overloaded_error" {
+                Failure::Overloaded
+            } else {
+                Failure::Unavailable
+            }
+        }
+        400 | 413 => {
+            if context(kind, error) {
+                Failure::ContextTooLong
+            } else {
+                Failure::Invalid
+            }
+        }
+        0 | 200..=299 => native_failure(kind, error, rate.exhausted, delay),
+        _ => Failure::Unavailable,
     }
-    if status == 403 {
-        return Failure::Invalid;
+}
+
+fn limited(kind: &[u8], exhausted: bool, delay: Duration) -> Failure {
+    if exhausted || kind == b"usage_limit_reached" {
+        Failure::Exhausted { retry_after: delay }
+    } else {
+        Failure::RateLimited { retry_after: delay }
     }
-    if status == 429 || kind == b"rate_limit_error" || kind == b"rate_limit_exceeded" || kind == b"usage_limit_reached"
-    {
-        return if rate.exhausted || kind == b"usage_limit_reached" {
-            Failure::Exhausted { retry_after: delay }
-        } else {
-            Failure::RateLimited { retry_after: delay }
-        };
-    }
-    if status == 529 || status == 503 || kind == b"overloaded_error" {
-        return Failure::Overloaded;
-    }
-    if status == 500 || status == 502 || status == 504 || kind == b"api_error" || kind == b"server_error" {
-        return Failure::Unavailable;
-    }
-    let context = kind == b"context_length_exceeded"
+}
+
+fn context(kind: &[u8], error: Option<&ProviderError>) -> bool {
+    kind == b"context_length_exceeded"
         || kind == b"request_too_large"
         || match error {
             Some(error) => bytes::find(&error.message, b"prompt is too long").is_some(),
             None => false,
-        };
-    if (status == 400 || status == 413 || status == 0) && context {
+        }
+}
+
+fn native_failure(kind: &[u8], error: Option<&ProviderError>, exhausted: bool, delay: Duration) -> Failure {
+    if kind == b"authentication_error" || kind == b"invalid_api_key" {
+        return Failure::Unauthorized;
+    }
+    if kind == b"rate_limit_error" || kind == b"rate_limit_exceeded" || kind == b"usage_limit_reached" {
+        return limited(kind, exhausted, delay);
+    }
+    if kind == b"overloaded_error" {
+        return Failure::Overloaded;
+    }
+    if context(kind, error) {
         return Failure::ContextTooLong;
     }
-    match status {
-        400 | 404 | 413 | 422 => Failure::Invalid,
-        _ => Failure::Unavailable,
-    }
+    Failure::Unavailable
 }
+
 pub(crate) fn decimal(bytes: &[u8]) -> Option<u64> {
     let mut n: u64 = 0;
     if bytes.is_empty() {
@@ -212,13 +289,13 @@ pub(crate) fn decimal(bytes: &[u8]) -> Option<u64> {
     }
     Some(n)
 }
-pub(crate) fn append(out: &mut List<u8>, bytes: &[u8]) -> Result<(), DecodeError> {
+pub(crate) fn append(out: &mut List<u8>, bytes: &[u8], cap: crate::Cap) -> Result<(), DecodeError> {
     if bytes.len() > usize::try_from(out.room()).expect("u32 fits usize") {
-        return Err(DecodeError::TooLarge);
+        return Err(DecodeError::limit(cap, out.capacity()));
     }
     for &b in bytes {
         if out.push(b).is_err() {
-            return Err(DecodeError::TooLarge);
+            return Err(DecodeError::limit(cap, out.capacity()));
         }
     }
     Ok(())
@@ -236,10 +313,28 @@ pub(crate) fn clipped(bytes: &[u8], limit: u32) -> Box<[u8]> {
     bytes::copy_of(bytes.get(..count).expect("within bytes"))
 }
 
-pub(crate) fn measured(encoder: writer::Encoder) -> Result<u32, DecodeError> {
+pub(crate) fn measured(encoder: writer::Encoder, limits: writer::Limits, cap: crate::Cap) -> Result<u32, DecodeError> {
     match encoder.measured() {
         Ok(len) => Ok(len),
-        Err(writer::Refusal::TooLong | writer::Refusal::TooDeep) => Err(DecodeError::TooLarge),
+        Err(writer::Refusal::TooLong) => Err(DecodeError::limit(cap, limits.length)),
+        Err(writer::Refusal::TooDeep) => Err(DecodeError::limit(crate::Cap::Depth, limits.depth)),
         Err(writer::Refusal::Text | writer::Refusal::Number) => Err(DecodeError::Malformed),
     }
+}
+
+/// The typed cap is the source of a local limit's diagnostic.
+pub(crate) fn limit_detail(which: crate::Cap, bound: u64) -> Box<[u8]> {
+    let digits = skein_lib::Decimal::of(bound);
+    let length = which
+        .name()
+        .len()
+        .checked_add(digits.as_bytes().len())
+        .expect("fixed diagnostic prefix fits usize")
+        .checked_add(b" exceeds bound ".len())
+        .expect("fixed diagnostic fits usize");
+    let mut out = skein_lib::Writer::new(length);
+    out.put(which.name()).expect("measured cap name");
+    out.put(b" exceeds bound ").expect("measured separator");
+    out.put(digits.as_bytes()).expect("measured bound");
+    out.finish()
 }

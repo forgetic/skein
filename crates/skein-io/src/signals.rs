@@ -73,8 +73,14 @@ pub(crate) fn landed(
                 }
             }
         }
-        Purpose::Cancel(_) => {
+        Purpose::Cancel(target) => {
             signals.cancels = signals.cancels.checked_sub(1).expect("one signal cancel in flight");
+            // A cancel that never submitted leaves the read waiting. Ask
+            // again only while that original flight remains (kernel.md, 5).
+            if crate::layer::unsubmitted(landed.result) && signals.read == Some(target) {
+                tables.cancel(subs, id, target);
+                signals.cancels = signals.cancels.checked_add(1).expect("one signal cancel per target");
+            }
         }
         Purpose::Close => {
             assert!(signals.close.take() == Some(landed.flight), "the signal close flight matches");
@@ -93,6 +99,7 @@ pub(crate) fn landed(
         | Purpose::Spawn
         | Purpose::Wait
         | Purpose::Signal
+        | Purpose::Usage { .. }
         | Purpose::PipeRead
         | Purpose::PipeWrite => unreachable!("a signal source only reads, cancels and closes"),
     }

@@ -68,7 +68,7 @@ impl Seen {
     }
 }
 
-const EVERY: [&str; 24] = [
+const EVERY: [&str; 26] = [
     "Ended",
     "Failed(LineTooLong)",
     "Failed(EventTooLong)",
@@ -77,6 +77,7 @@ const EVERY: [&str; 24] = [
     "closed before the outcome",
     "closed while waiting for Next",
     "closed while waiting for Bytes",
+    "closed while waiting for Above",
     "closed while waiting for Close",
     "an end with nothing demanded",
     "a demand crossed the end",
@@ -86,6 +87,7 @@ const EVERY: [&str; 24] = [
     "a line longer than a chunk",
     "failed while waiting for Next",
     "failed while waiting for Bytes",
+    "failed while waiting for Above",
     "failed while waiting for Close",
     "failed while waiting for Nothing",
     "failed with Reset",

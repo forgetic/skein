@@ -36,11 +36,13 @@ fn menu() -> Menu {
 
 fn query() -> Query {
     Query {
+        caching: skein_fake_llm_domain::api::Caching::Unscoped,
         model: Box::new([]),
         system: b"cue".as_slice().into(),
         tools: Box::new([]),
         messages: Box::new([Message { role: Role::User, parts: Box::new([Part::Text { text: Box::new([]) }]) }]),
         max_tokens: 10,
+        choice: skein_fake_llm_domain::api::ToolChoice::Auto,
     }
 }
 
@@ -239,11 +241,11 @@ fn random_and_scripted_full_and_truncated_tool_scratch_stays_within_the_bound() 
                 if scripted {
                     assert_eq!(answer.parts.len(), 2, "both complete scripted calls were generated");
                 }
-                assert!(answer.usage.completion_tokens > 0);
+                assert!(answer.usage.output.is_some_and(|count| count > 0));
             } else {
                 assert_eq!(answer.finish, Finish::Length);
                 assert_eq!(answer.parts.len(), 1, "the cut answer retains just its first call");
-                assert_eq!(answer.usage.completion_tokens, 0);
+                assert_eq!(answer.usage.output, Some(0));
             }
             for part in &answer.parts {
                 let Part::ToolCall { id, name, arguments } = part else {
@@ -270,4 +272,101 @@ fn random_and_scripted_full_and_truncated_tool_scratch_stays_within_the_bound() 
         drop(domain);
         assert_eq!(meter.held(), 0, "caller scripts, menus, scratch and transferred tools are all released");
     }
+}
+
+#[test]
+fn configured_codex_echo_request_and_entry_scratch_fit_the_peer_price() {
+    let mut bounds = skein_llm_world::limits();
+    bounds.output_items = 32;
+    bounds.retained = 32768;
+    bounds.skip = 32768;
+    let observations = skein_llm_world::fake::ObservationLimits {
+        heads: 1,
+        head_bytes: 8192,
+        events: 64,
+        event_bytes: 65536,
+        queries: 1,
+        query_bytes: 65536,
+        pending: 0,
+        request: 32768,
+        response_bytes: 65536,
+    };
+    let echo = skein_llm::openai::Echo { instructions: true, tools: true, attribution_bytes: 256 };
+    let meter = Meter::new();
+    meter.start();
+    let mut input = skein_llm_world::call(1);
+    input.prompt.instructions = vec![b'i'; 2048].into_boxed_slice();
+    input.prompt.messages = (0..16)
+        .map(|_| skein_llm::Message {
+            role: skein_llm::Role::User,
+            content: Box::new([skein_llm::Block::Text { text: vec![b'h'; 64].into_boxed_slice(), replay: None }]),
+        })
+        .collect();
+    let extra =
+        skein_llm_world::fake::extra_worst_case(&bounds, &observations, &input.endpoint, &input.credential).unwrap();
+    let bound = extra + skein_llm::client::call_worst_case(&bounds).unwrap() + 32768;
+    let scripts = Box::new([Script {
+        cue: input.prompt.instructions.clone(),
+        turns: Box::new([Turn {
+            lines: Box::new([Line::Text { text: b"done".as_slice().into() }]),
+            finish: Finish::Stop,
+            tokens: 1,
+        }]),
+    }]);
+    let mut world = skein_llm_world::fake::Exchange::new_with_codex_echo(input, bounds, scripts, echo);
+    world.observe(observations);
+    let constructed = meter.end();
+    meter.check(constructed, bound, &"bounded echo peer construction");
+    meter.start();
+    world.start();
+    world.run();
+    let receiving = meter.end();
+    meter.check(receiving, bound, &"actual retained request and repeated native echo scratch");
+    assert!(world.seen.iter().any(|event| matches!(event, skein_llm::client::Event::Completed { .. })));
+    assert!(world.responses.len() > 8192, "configured attribution reaches the actual wire");
+    meter.start();
+    world.request(skein_llm::client::Request::Close);
+    world.settle();
+    drop(world);
+    let settled = meter.end();
+    meter.check(settled, bound, &"closed echo peer reclamation");
+    assert_eq!(meter.held(), 0, "every echo/request owner releases its bounded storage");
+}
+
+#[test]
+fn the_cache_table_reaches_its_bound_under_the_counted_domain_footprint() {
+    use skein_fake_llm_domain::api::Caching;
+    let config = Config { cache_entries: 3, query_bytes: caps().query_bytes + 4, ..caps() };
+    let bound = worst_case(&config).unwrap();
+    let mut out = Queue::with_capacity(MAX_OUT);
+    let meter = Meter::new();
+    meter.start();
+    let mut domain = Domain::new(&config, 5);
+    let measured = meter.end();
+    meter.check(measured, bound, &"fixed cache capacity at construction");
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: config };
+    for scope in 1..=4 {
+        let mut query = query();
+        query.caching = Caching::Scope([scope; 16]);
+        query.messages[0].parts = Box::new([Part::Text { text: b"abcd".as_slice().into() }]);
+        let env = Env { now: Time::from_nanos(u64::from(scope) * 2_000_000_000), ..env };
+        meter.start();
+        step(&mut domain, &env, Event::Call { reply_to: ReplyTo::new(Token::new(u64::from(scope))), query }, &mut out);
+        let measured = meter.end();
+        meter.check(measured, bound, &"full prefix table and oldest replacement");
+        let later = Env { now: env.now.saturating_add(Duration::from_secs(1)), ..env };
+        meter.start();
+        fire(&mut domain, &later, &mut out);
+        let measured = meter.end();
+        let Request::Reply { result, .. } = out.pop().unwrap();
+        let answer = result.unwrap();
+        assert_eq!(answer.usage.cache_read, Some(0));
+        drop(answer);
+        domain.reclaim();
+        meter.check(measured, bound, &"real delayed answer and retained full cache");
+    }
+    meter.start();
+    drop(domain);
+    let measured = meter.end();
+    assert_eq!(measured.held(), 0, "the cache retains no ownership after its domain is dropped");
 }

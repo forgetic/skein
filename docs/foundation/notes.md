@@ -1,8 +1,9 @@
 # Notes
 
-Provisional, 2026-10-03. What belongs with programming-model.md and
-testing-strategy.md but is not a rule: the questions still open, and why
-the memory strategy is what it is.
+Provisional, 2026-10-03, revised 2026-10-09. What belongs with
+programming-model.md and testing-strategy.md but is not a rule: the
+questions still open, why the memory strategy is what it is, and why facts
+hold the step.
 
 ## Open questions
 
@@ -33,17 +34,54 @@ the memory strategy is what it is.
   pressure turns into the ordinary backpressure chain rather than a new
   kind of refusal; the domain already answers "full" against its
   stored-data limit. Do not add it before a worst case demands it.
-- **The trace queue.** Trace records are enum values pushed into a
-  bounded queue the shell writes out (programming-model.md, section 3).
-  Not settled: where the queue lives, whether it is one of a step's
-  output queues with room reserved by `MAX_OUT`, and what happens when it
-  is full (drop and count, or hold the step).
+- **Operations the kernel cannot interrupt.** A process's end is bounded
+  by io's deadlines (programming-model.md, 5.2), but a cancelled
+  operation keeps its entity settling until the kernel completes it, and
+  a write to a filesystem in uninterruptible sleep (a hard-mounted NFS
+  whose server went away) may never complete. The process then cannot
+  end, and its supervisor's kill waits on the same kernel. Whether to
+  refuse roots on such filesystems at startup, or only to say that they
+  hold a process's end.
+- **Who names the last word.** The teardown invariant starts at the last
+  word (testing-strategy.md, 6), which a scenario's referee names today.
+  A service could mark its own, as a fact the harness reads, so that
+  every scenario checks the same moment without saying so. Decide when a
+  second service's worlds use the invariant.
 - **A deterministic TLS.** A test-only crypto provider that draws from the
   seed would let TLS join the replaying tiers (testing-strategy.md, 4.4).
   Whether rustls's unbuffered connection allows it, and whether it tests
   enough of the real provider to be worth it.
 - **Where transcripts come from** (testing-strategy.md, 4.1), and how they
   are kept current when a peer's protocol changes.
+
+## Why facts hold the step
+
+The trace queue was an open question: where the queue lives, and what
+happens when it is full. It is one of the step's output queues, with room
+reserved by `MAX_OUT`, and a full one holds the step
+(programming-model.md, section 3). Each sink downstream then drops and
+counts, or backpressures through its stream, by its declared policy.
+
+- **Loss belongs at the edge.** A queue that dropped inside the process
+  would lose facts before any sink could say so, and a reader could not
+  tell a quiet run from a lossy one. Holding the step keeps every fact
+  until a sink has decided, and the sink that decided counts what it
+  lost. Each loss is then counted once, where it happened.
+- **Each sink has its own reason.** A projection to a peer that falls
+  behind must not slow the service, so it drops and counts. A trace read
+  later as the record of what happened must be complete or say it is
+  not, so it backpressures by default: a local disk is fast next to most
+  peers a service waits on, so holding the step for it costs little. One
+  policy for both would be wrong for one of them.
+- **Holding the step is the ordinary backpressure.** It is room first
+  (programming-model.md, section 2) applied to one more output, not a new
+  mechanism: a step that cannot emit waits, as it waits for a full queue
+  of requests.
+
+What it gives up: a sink that backpressures can slow the service down to
+its own pace, and a stalled one would hold it for good, so a stream that
+can stall has a deadline that abandons it (io.md, 5.1), and the sink
+records that it was abandoned.
 
 ## Why counted entities and owned bytes
 

@@ -58,7 +58,7 @@ pub(crate) fn respond(
             return Err(error);
         }
     }
-    if !valid(&query.messages) {
+    if !valid(&query.messages) || !valid_choice(query) {
         return Err(Error::InvalidRequest);
     }
     let roll = rng.below(1000);
@@ -86,14 +86,18 @@ pub(crate) fn respond(
         }
         return Ok(answer(query, Box::new([Part::Text { text: copy_of(b"done") }]), Finish::Stop, 1, cut_text()));
     }
-    if tool_rounds(&query.messages) < config.tool_rounds && !query.tools.is_empty() && !menu.arguments.is_empty() {
+    let outside = rng.chance(config.outside_choice) && tool_count(query, true) != 0;
+    if tool_rounds(&query.messages) < config.tool_rounds
+        && tool_count(query, outside) != 0
+        && !menu.arguments.is_empty()
+    {
         let count = u32::try_from(rng.between(1, config.calls_per_answer.max(1).into())).expect("drawn below a u32");
         if !limits::fits(limits::random_answer(query, menu, count), config.answer_bytes) {
             return Err(Error::ContextTooLong);
         }
         let mut calls = List::with_capacity(count);
         for _ in 0..count {
-            calls.push(call(rng, minted, config, menu, query)?).expect("room for every call");
+            calls.push(call(rng, minted, config, menu, query, outside)?).expect("room for every call");
         }
         // Cut short, the answer ends partway into its first call.
         let first = match calls.get(0) {
@@ -111,6 +115,58 @@ pub(crate) fn respond(
     Ok(answer(query, Box::new([Part::Text { text: copy_of(b"done") }]), Finish::Stop, tokens, cut_text()))
 }
 
+/// Only names offered distinct tools; the independent domain validates its inputs.
+fn valid_choice(query: &Query) -> bool {
+    match &query.choice {
+        crate::api::ToolChoice::Auto | crate::api::ToolChoice::None => true,
+        crate::api::ToolChoice::Only(names) => {
+            if names.is_empty() {
+                return false;
+            }
+            for (index, name) in names.iter().enumerate() {
+                let mut offered = false;
+                for tool in &query.tools {
+                    offered |= tool.name == *name;
+                }
+                if !offered {
+                    return false;
+                }
+                for previous in names.get(..index).expect("an index through the names") {
+                    if previous == name {
+                        return false;
+                    }
+                }
+            }
+            true
+        }
+    }
+}
+
+fn allowed(choice: &crate::api::ToolChoice, name: &[u8]) -> bool {
+    match choice {
+        crate::api::ToolChoice::Auto => true,
+        crate::api::ToolChoice::None => false,
+        crate::api::ToolChoice::Only(names) => {
+            for offered in names {
+                if offered.as_ref() == name {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+fn tool_count(query: &Query, outside: bool) -> u64 {
+    let mut count: u64 = 0;
+    for tool in &query.tools {
+        if allowed(&query.choice, &tool.name) != outside {
+            count = count.checked_add(1).expect("a count through a bounded tool array");
+        }
+    }
+    count
+}
+
 /// What a text answer cut short says.
 ///
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -125,10 +181,20 @@ fn call(
     config: &Config,
     menu: &crate::api::Menu,
     query: &Query,
+    outside: bool,
 ) -> Result<Part, Error> {
-    let tools = u64::try_from(query.tools.len()).expect("a usize fits in a u64");
-    let index = usize::try_from(rng.below(tools)).expect("an index below a usize fits in one");
-    let tool = query.tools.get(index).expect("picked below the tool count");
+    let mut pick = rng.below(tool_count(query, outside));
+    let mut selected = None;
+    for tool in &query.tools {
+        if allowed(&query.choice, &tool.name) != outside {
+            if pick == 0 {
+                selected = Some(tool);
+                break;
+            }
+            pick = pick.checked_sub(1).expect("a nonzero remaining tool index");
+        }
+    }
+    let tool = selected.expect("picked below the eligible tool count");
     *minted = minted.checked_add(1).ok_or(Error::InvalidRequest)?;
     let id = call_id(*minted);
     if rng.chance(config.malformed) && !menu.invalid.is_empty() {
@@ -228,26 +294,9 @@ fn said(messages: &[Message]) -> usize {
     said
 }
 
-/// What a call with `completion_tokens` in its answer took: all of the prompt
-/// but its last message from the cache, which the call before wrote, and the
-/// last message afresh, which this call writes for the next.
-///
-/// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
-fn usage(query: &Query, completion_tokens: u64) -> Usage {
-    let mut cached = 0;
-    let mut fresh = len(&query.system);
-    if let Some((last, earlier)) = query.messages.split_last() {
-        // The first call has nothing cached, the system text included.
-        if !earlier.is_empty() {
-            cached = fresh;
-            fresh = 0;
-        }
-        for message in earlier {
-            cached = cached.saturating_add(text_of(message));
-        }
-        fresh = fresh.saturating_add(text_of(last));
-    }
-    Usage { prompt_tokens: fresh / 4, cached_tokens: cached / 4, cache_creation_tokens: fresh / 4, completion_tokens }
+/// Output accounting; the domain fills prompt accounting from its actual cache table.
+fn usage(_query: &Query, output: u64) -> Usage {
+    Usage { input: None, cache_read: None, cache_write: None, output: Some(output), reasoning: Some(0) }
 }
 
 /// Whether the conversation ends with a user message, and every user message's
@@ -397,27 +446,6 @@ fn calls_any(parts: &[Part]) -> bool {
     false
 }
 
-/// The bytes of text in a message, which a rough count turns into tokens.
-///
-/// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
-fn text_of(message: &Message) -> u64 {
-    let mut bytes: u64 = 0;
-    for part in &message.parts {
-        let size = match part {
-            Part::Text { text } => len(text),
-            Part::Opaque { bytes } => len(bytes),
-            Part::ToolCall { id: _, name, arguments } => len(name).saturating_add(len(arguments)),
-            Part::ToolOutput { id: _, output, is_error: _ } => len(output),
-        };
-        bytes = bytes.saturating_add(size);
-    }
-    bytes
-}
-
-fn len(bytes: &[u8]) -> u64 {
-    u64::try_from(bytes.len()).expect("a usize fits in a u64")
-}
-
 /// "call_" and sixteen hex digits of `n`.
 ///
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -462,7 +490,11 @@ mod tests {
         answer_tokens: 1,
         calls_per_answer: 1,
         malformed: 0,
+        outside_choice: 0,
         tool_rounds: 1,
+        cache_lifetime: Duration::from_secs(300),
+        cache_entries: 8,
+        unscoped_reads: 0,
     };
 
     fn menu() -> crate::api::Menu {
@@ -497,7 +529,15 @@ mod tests {
 
     fn query(messages: Box<[Message]>) -> Query {
         let tool = ToolSpec { name: copy_of(b"ls"), description: copy_of(b""), parameters: copy_of(b"{}") };
-        Query { model: copy_of(b"fake"), system: copy_of(b""), tools: Box::new([tool]), messages, max_tokens: 100 }
+        Query {
+            caching: crate::api::Caching::Unscoped,
+            model: copy_of(b"fake"),
+            system: copy_of(b""),
+            tools: Box::new([tool]),
+            messages,
+            max_tokens: 100,
+            choice: crate::api::ToolChoice::Auto,
+        }
     }
 
     #[test]
@@ -608,33 +648,14 @@ mod tests {
         let mut first = query(Box::new([user(Box::new([text()]))]));
         first.max_tokens = 3;
         let answer = respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &first).expect("a valid query");
-        assert_eq!((answer.finish, answer.usage.completion_tokens), (Finish::Length, 3));
+        assert_eq!((answer.finish, answer.usage.output), (Finish::Length, Some(3)));
         // It was to call a tool, and stops partway into the call.
         assert_eq!(answer.parts.len(), 1);
         assert_eq!(called(answer.parts.first()), (&b"call_0000000000000001"[..], &b"ls"[..], &br#"{"a"#[..]));
         let config = Config { tool_rounds: 0, answer_tokens: 2, ..CONFIG };
         let answer = respond(&mut rng, &mut minted, &config, &[], &menu(), &first).expect("a valid query");
         assert_eq!(answer.finish, Finish::Stop);
-        assert!(answer.usage.completion_tokens <= 2, "within the configured answer");
-    }
-
-    #[test]
-    fn all_but_the_last_message_is_read_from_the_cache() {
-        let mut rng = Rng::new(1);
-        let mut minted = 0;
-        let asked = || user(Box::new([Part::Text { text: copy_of(b"12345678") }]));
-        let answer =
-            respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &query(Box::new([asked()]))).expect("a valid query");
-        let usage = answer.usage;
-        assert_eq!((usage.prompt_tokens, usage.cached_tokens, usage.cache_creation_tokens), (2, 0, 2));
-        let id = b"call_0000000000000001";
-        drop(answer);
-        let messages = Box::new([asked(), assistant(Box::new([call(id)])), user(Box::new([output(id)]))]);
-        let usage =
-            respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &query(messages)).expect("a valid query").usage;
-        // The prompt and the call ("ls", "{}") from the cache; the output "ok"
-        // afresh.
-        assert_eq!((usage.prompt_tokens, usage.cached_tokens, usage.cache_creation_tokens), (0, 3, 0));
+        assert!(answer.usage.output.expect("fake reports output") <= 2, "within the configured answer");
     }
 
     #[test]
@@ -685,7 +706,7 @@ mod tests {
         let mut first = query(Box::new([user(Box::new([text()]))]));
         first.system = copy_of(b"Do it. @main");
         let answer = respond(&mut rng, &mut minted, &CONFIG, &scripts, &menu(), &first).expect("a valid query");
-        assert_eq!((answer.finish, answer.usage.completion_tokens), (Finish::ToolCalls, 5));
+        assert_eq!((answer.finish, answer.usage.output), (Finish::ToolCalls, Some(5)));
         let [Part::Text { .. }, Part::ToolCall { id, name, .. }, Part::ToolCall { arguments, .. }] = &*answer.parts
         else {
             panic!("expected the scripted calls, got {:?}", answer.parts);
@@ -724,7 +745,7 @@ mod tests {
         let mut first = query(Box::new([user(Box::new([text()]))]));
         first.system = copy_of(b"@main");
         let answer = respond(&mut rng, &mut minted, &CONFIG, &scripts, &menu(), &first).expect("a valid query");
-        assert_eq!((answer.finish, answer.usage.completion_tokens), (Finish::Length, 100));
+        assert_eq!((answer.finish, answer.usage.output), (Finish::Length, Some(100)));
         assert_eq!(called(answer.parts.first()), (&b"call_0000000000000001"[..], &b"ls"[..], &b"{}"[..]));
     }
 
@@ -732,5 +753,29 @@ mod tests {
     fn call_ids_are_hex() {
         assert_eq!(&*call_id(0xAB), b"call_00000000000000ab");
         assert_eq!(&*call_id(u64::MAX), b"call_ffffffffffffffff");
+    }
+    #[test]
+    fn random_tool_choices_honour_none_only_and_the_breach_chance() {
+        for seed in 0..64 {
+            let mut query = query(Box::new([user(Box::new([text()]))]));
+            let other = ToolSpec { name: copy_of(b"other"), description: Box::new([]), parameters: copy_of(b"{}") };
+            query.tools = Box::new([query.tools.first().expect("offered tool").clone(), other]);
+            query.choice = crate::api::ToolChoice::None;
+            let mut rng = Rng::new(seed);
+            let mut minted = 0;
+            let answer = respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &query).expect("valid choice");
+            assert_eq!(answer.finish, Finish::Stop);
+            assert!(!super::calls_any(&answer.parts), "None calls no tool");
+            query.choice = crate::api::ToolChoice::Only(Box::new([copy_of(b"other")]));
+            let answer = respond(&mut rng, &mut minted, &CONFIG, &[], &menu(), &query).expect("valid choice");
+            assert_eq!(called(answer.parts.first()).1, b"other");
+            let config = Config { outside_choice: 1000, ..CONFIG };
+            let answer = respond(&mut rng, &mut minted, &config, &[], &menu(), &query).expect("configured breach");
+            assert_eq!(called(answer.parts.first()).1, b"ls");
+            query.choice = crate::api::ToolChoice::None;
+            let answer = respond(&mut rng, &mut minted, &config, &[], &menu(), &query).expect("configured breach");
+            assert_eq!(answer.finish, Finish::ToolCalls);
+            assert!(super::calls_any(&answer.parts), "None breach still calls an offered tool");
+        }
     }
 }

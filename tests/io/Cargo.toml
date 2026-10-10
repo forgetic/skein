@@ -10,11 +10,14 @@ publish.workspace = true
 skein-lib.workspace = true
 skein-io.workspace = true
 skein-sim.workspace = true
+skein-world.workspace = true
+skein-fake-machine.workspace = true
 
 # The ring, for tests/ring.rs; the counting allocator, for tests/memory.rs.
 [dev-dependencies]
 skein-shell.workspace = true
 skein-heap.workspace = true
+skein-scratch.workspace = true
 
 # Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.
 # tests/clippy.toml bans what would make a run unrepeatable.
@@ -34,3 +37,7 @@ allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 disallowed_types = "deny"
 disallowed_methods = "deny"
+
+[[bin]]
+name = "io_process_fixture"
+path = "../conformance/ring/src/bin/process_fixture.rs"

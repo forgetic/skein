@@ -1,10 +1,10 @@
 # The kernel boundary
 
-Provisional, 2026-10-03. The design of the boundary below io: the records
-io submits to a backend, the completions the backend hands back, and what
-every backend promises. The records live in `skein-io`'s `kernel` module,
-whose module documentation states each rule of the contract exactly; this
-document is the design behind it.
+Provisional, 2026-10-03, revised 2026-10-09. The design of the boundary
+below io: the records io submits to a backend, the completions the
+backend hands back, and what every backend promises. The records live in
+`skein-io`'s `kernel` module, whose module documentation states each rule
+of the contract exactly; this document is the design behind it.
 
 ## 1. In one page
 
@@ -53,7 +53,12 @@ pub struct Submit   { pub op: Token, pub kind: Op }
 pub struct Complete { pub op: Token, pub kind: Op, pub result: Result<Done, Error> }
 
 // one success shape per operation
-pub enum Done { Nothing, Count(u32), Fd(Fd), Accepted { fd: Fd, peer: Addr }, Bound(Addr), Stat(Stat) }
+pub enum Done {
+    Nothing, Count(u32), Fd(Fd), Accepted { fd: Fd, peer: Addr }, Bound(Addr),
+    Stat(Stat),                       // kind, size, mode, owner, links (6.1)
+    Spawned { pidfd: Fd }, Exit(Exit), ServiceSignal(ServiceSignal),
+    Usage(Usage), Window(Window),     // the process's own (6.3)
+}
 
 pub enum Op {
     // sockets
@@ -70,16 +75,24 @@ pub enum Op {
     Open          { root: Fd, path: Box<[u8]>, how: OpenHow },   // Read, Directory, Create
     Read          { fd: Fd, buf: Box<[u8]>, at: u64 },
     Write         { fd: Fd, bytes: Box<[u8]>, from: u32, at: u64 },
+    Append        { fd: Fd, bytes: Box<[u8]>, from: u32 },       // at the end (6.1)
     Sync          { fd: Fd },
     Stat          { fd: Fd },
     Rename        { from_dir: Fd, from: Box<[u8]>, to_dir: Fd, to: Box<[u8]> },
     Remove        { dir: Fd, name: Box<[u8]>, directory: bool },
-    MakeDirectory { dir: Fd, name: Box<[u8]> },
+    MakeDirectory { dir: Fd, name: Box<[u8]>, mode: u32 },     // less the umask (io.md, 5.3)
     List          { fd: Fd, entries: Box<[Entry]>, names: Box<[u8]> },  // synchronous
-    // processes
-    Wait     { pidfd: Fd },
-    // ... spawn, signal, make a pipe: synchronous (section 6)
-    Cancel   { target: Token },
+    // processes (section 6.2)
+    Spawn     { spawn: Box<Spawn> },                         // synchronous
+    Wait      { pidfd: Fd, reap: bool },
+    Signal    { pidfd: Fd, signal: Signal, to: Target },     // synchronous
+    PipeRead  { fd: Fd, buf: Box<[u8]> },
+    PipeWrite { fd: Fd, bytes: Box<[u8]>, from: u32 },
+    // the process's own (section 6.3)
+    ReadSignal { fd: Fd },
+    Usage,                                                   // synchronous
+    Window     { fd: Fd },                                   // synchronous
+    Cancel     { target: Token },
 }
 ```
 
@@ -107,10 +120,10 @@ error means the operation did nothing usable: a failed `Socket` or
     What a process owns is then always allocated within its own calls
     (simulator.md, 5).
 - **Kernel structures belong to the backend.** A socket address, a
-  `statx` buffer, a `siginfo` and an `open_how` live in the backend's
-  in-flight table, beside the record. They are decoded into plain values
-  (`Addr`, `Stat`, `Exit`) before they go up. A backend for another
-  kernel translates.
+  `statx` buffer, a `siginfo`, an `rusage` and an `open_how` live in the
+  backend's in-flight table, beside the record. They are decoded into
+  plain values (`Addr`, `Stat`, `Exit`, `Usage`) before they go up. A
+  backend for another kernel translates.
 - **A path or a name is bytes,** a `Box<[u8]>` in the record with no NUL
   in it. The NUL-terminated string the kernel reads is the backend's own
   copy, held beside the record until its completion.
@@ -169,11 +182,12 @@ error means the operation did nothing usable: a failed `Socket` or
   - a descriptor is closed only by a close. Closing with unread data
     resets the peer; closing a listener resets the connections waiting on
     it.
-- **Some operations are synchronous:** spawning, signalling, making a
-  pipe, listing a directory. None of these is a ring operation at the
-  kernel floor (shell.md), and some are not ring operations at all. The
-  backend performs them when they are submitted and completes them at the
-  next reap, in the same records, so io cannot tell the difference.
+- **Some operations are synchronous:** spawning, signalling, listing a
+  directory, reading the process's resource usage and its terminal's
+  size. None of these is a ring operation at the kernel floor (shell.md),
+  and some are not ring operations at all. The backend performs them when
+  they are submitted and completes them at the next reap, in the same
+  records, so io cannot tell the difference.
 - **Timers are not operations.** The shell waits for completions with one
   timeout: the earliest deadline over every layer.
 
@@ -220,8 +234,19 @@ documentation, with each operation's errors; the decisions behind it:
   existing file or directory), `Directory` (an existing directory: a
   root, or one to list) or `Create` (a new file, exclusively, to write).
   Each is one well-defined case for the simulator and the suite to hold,
-  and more come when a user pulls them: opening a path only to stat it
-  (`O_PATH`), say, which `Read` cannot when the file is unreadable.
+  and more come when a user pulls them.
+- **A path-only open, to stat what cannot be read.** `PathNoFollow` is
+  `O_PATH | O_NOFOLLOW`, beneath the root with links refused in every
+  parent, as the other no-follow cases. It answers a descriptor for the
+  entry itself, a symbolic link included, and needs search permission on
+  the directories above it and none on the entry, so it opens another
+  user's `0o700` directory or `0o600` file that `Read` cannot (io.md,
+  5.3). Only `Stat` and `Close` take it; any other operation on it is an
+  invalid record. Its `Stat` may answer `Symlink` and `Other`, which
+  otherwise only `List` shows. It does no I/O, so the ring keeps whatever
+  it opened, without the `NotAFile` check, and leaves it as it is (a
+  path-only descriptor takes no `fcntl` flags). The simulator holds the
+  same permission rule: search on the parents, nothing on the entry.
 - **Reads and writes are at an offset,** never at the descriptor's
   position, so concurrent ones need no order. Both may be short: a `Read`
   at the end of the file, and whenever the backend says (POSIX allows it;
@@ -230,6 +255,22 @@ documentation, with each operation's errors; the decisions behind it:
   stopped, as a `Send` is. An offset that would pass `i64::MAX` is an
   invalid record: the kernel's offsets are signed, and the ring would read
   `u64::MAX` as the descriptor's position.
+- **`Append` is the one write at the descriptor's position.** It is for a
+  file written as a stream (io.md, 5.1): a descriptor the shell opened at
+  startup to write at its end (`O_WRONLY | O_APPEND`, created with the
+  mode its configuration gives), or a standard output that is a regular
+  file. The ring writes at the position (offset −1): with `O_APPEND` the
+  kernel moves it to the file's end before each write, so each `Append`
+  lands at the end, after whatever another process appended meanwhile;
+  without it, after the last write. It may be short, and io continues
+  from its count, as a `Write`. One is in flight on a descriptor at a
+  time, so the pieces of one stream land in order. No `Open` makes such
+  a descriptor yet: opening one beneath a root while the service runs
+  comes when a user needs it.
+- **`Stat` answers five values:** the kind, the size, the permission
+  bits, the owner (its user ID) and the number of links, from one
+  `statx`. The checks of a private file need the last two: one link, and
+  the owner of the directory it lies in (io.md, 5.3).
 - **`Rename` is the atomic step.** It replaces its target whole, so the
   idiom that replaces a file is: `Stat` the old file for its permission
   bits, `Create` a temporary in the same directory with them, `Write` it,
@@ -238,7 +279,8 @@ documentation, with each operation's errors; the decisions behind it:
   `Sync` the new one survives a crash. Its pieces are io's decisions
   (io.md, 5): the temporary's name drawn from the seed, drawn again on
   `Exists`; the old file's bits kept, which is why `Create` takes a mode
-  and `Stat` answers one; a symbolic link at the target replaced by the
+  and `Stat` answers one (and why `MakeDirectory` takes one too: a private
+  directory is made `0o700`, io.md, 5.3); a symbolic link at the target replaced by the
   file, as `Rename` replaces a link and does not follow it, since writing
   through links is not offered.
 - **`List` hands back entries as plain values,** `getdents64`'s structures
@@ -253,10 +295,10 @@ documentation, with each operation's errors; the decisions behind it:
   name fits in none of `names`, rather than answer the end; entries a
   `List` took are handed back even if the directory's position could not
   be set back after them.
-- **An `Open`, `Read`, `Write` or `Sync` may be cancelled.** None waits
-  on a peer, but on a filesystem that can stall (NFS whose server went
-  away, a FUSE daemon that hangs) one may wait for good, and io must be
-  able to give up on it. So a `Cancel` may target one, with a socket's
+- **An `Open`, `Read`, `Write`, `Append` or `Sync` may be cancelled.**
+  None waits on a peer, but on a filesystem that can stall (NFS whose
+  server went away, a FUSE daemon that hangs) one may wait for good, and
+  io must be able to give up on it. So a `Cancel` may target one, with a socket's
   outcomes (section 5): it stops one still queued for io_uring's worker,
   or interrupts one running, or comes too late, the target answering its
   own result. Even on tmpfs a `Read` goes to the worker, and the ring's
@@ -292,6 +334,48 @@ documentation, with each operation's errors; the decisions behind it:
   is close-on-exec. The fake machine keeps a umask of `0o022`; the suite
   compares a created file's owner bits, which no usual umask takes.
 
+### 6.2 Processes
+
+- **A child is a pidfd from its spawn,** and the leader of a process
+  group of its own (io.md, 6). `Spawn` is synchronous: glibc's
+  `pidfd_spawn`, with the group set in its attributes.
+- **`Wait` observes an exit, or reaps it.** Both are the ring's `waitid`
+  on the pidfd. A `Wait` that does not reap (`WEXITED | WNOWAIT`)
+  completes with the child's exit and leaves it a zombie, which keeps its
+  PID, and so its group's ID, from being given to another process. A
+  `Wait` that reaps (`WEXITED`) follows one that observed the exit, at
+  io's close of the child, and completes at once. Until it is reaped, a
+  child's resource usage is not among the process's children's (6.3).
+- **`Signal` goes to the child, or to its group,** both through the
+  child's pidfd: `pidfd_send_signal`, with no flag for the child, and
+  with `PIDFD_SIGNAL_PROCESS_GROUP` for the group the child leads, which
+  the kernel floor has. No record carries a PID: the pidfd names the
+  child, and through it the group the child leads, so no signal reaches a
+  stranger. The unreaped leader is still a member of its group, so a
+  signal to a group whose other members are gone succeeds and changes
+  nothing.
+- **Pipes** are the parent's ends of what `Spawn` made, read and written
+  through the ring, as sockets are, with a pipe's errors.
+
+### 6.3 The process's own
+
+- **`ReadSignal`** reads one blocked signal from the signalfd the shell
+  opened at startup: `SIGINT`, `SIGTERM`, and `SIGWINCH` for a service at
+  a terminal (io.md, 7; shell.md, 6.3).
+- **`Usage` reads what the process has used,** in one synchronous call:
+  `getrusage` for the process itself (`RUSAGE_SELF`) and for its reaped
+  children (`RUSAGE_CHILDREN`). Each part answers user and system CPU
+  time, as `Duration`s, and the peak resident size, in bytes (the kernel
+  counts it in KiB, which the backend multiplies, checked). The
+  children's CPU is the sum over every child reaped so far, and over what
+  each of them reaped in turn; their peak is the largest any one of them
+  reached. A child that has exited but is not yet reaped is in neither
+  part.
+- **`Window` reads a terminal's size,** rows and columns, from the
+  descriptor it names (`TIOCGWINSZ`). The shell found at startup that the
+  descriptor is a terminal (shell.md, 6.3); one that has since hung up
+  fails with the kernel's error, as `Other`.
+
 ## 7. Broken invariants
 
 Some mistakes io never makes, so a backend may assume they never happen:
@@ -309,7 +393,13 @@ Some mistakes io never makes, so a backend may assume they never happen:
   opened to create, a list on one opened to create;
 - a cancel of a stat, a rename, a removal, a new directory or a listing;
 - a close with anything else in flight on its descriptor, an operation on
-  files being on every descriptor it names.
+  files being on every descriptor it names;
+- an `Append` beside another in flight on its descriptor, or on one not
+  open to write;
+- a `Wait` beside another on the same pidfd, or one that reaps before a
+  `Wait` has reported the exit; any operation on a pidfd after its reap
+  but its close;
+- a cancel of a spawn, a signal, a usage or a window.
 
 The simulator fails the world on each; the ring checks the first two at
 submit.
@@ -348,7 +438,10 @@ for its backend.
   with a directory beside it for a link to lead out to, and removed with
   the backend; in the simulator, the minimal fake machine (testing.md, 4).
   The scenarios: a file made, written at offsets over itself and past its
-  end, synced, read back and stated; renames over a file, across
+  end, synced, read back and stated; a `0o000` file and directory of the
+  scenario's own user that `Read` is denied and `PathNoFollow` opens and
+  stats (on the ring, the denial is checked only without
+  `CAP_DAC_OVERRIDE`, which skips it), and a link it opens as a link; renames over a file, across
   directories, of a file over a directory and the other way, over a full
   and an empty directory, beneath itself, over itself, and the idiom that
   replaces a file whole; removals of files, directories, a link and a file
@@ -379,6 +472,23 @@ for its backend.
   reads and writes are an outcome the simulator draws and the ring never
   gives on a regular file: the fuzzy suite asserts both counts appear over its
   seeds, and a calm world counts every byte, as the ring does.
+- **Appending.** A scenario opens a file to append as the shell does, in
+  its own root: `Append`s land at the end in order, after bytes another
+  descriptor appended between them, and a file that was not empty keeps
+  what it held; a short `Append` is continued from its count; a `Cancel`
+  stops one or comes too late, as for a `Write`. The suite's tree gains a
+  second name for a file (a hard link), so that `Stat` answers two links
+  for it, one for the rest, and the owner every scenario's files have.
+- **Processes,** with the fixture program of both backends (echo its
+  input, exit with a status, never exit): pipes through chosen
+  descriptors, an exit status kept, a `Wait` that waits while the child
+  lives, a signal, a kill. To these the groups add: the fixture starting
+  a child of its own in its group and exiting; a `Wait` that observes the
+  exit, then a signal to the group, which ends the grandchild and its
+  hold on a pipe; then the reaping `Wait`. Usage, in a process that has
+  reaped no child before: the children's part zero, still zero after the
+  observing `Wait`, and with a peak above zero after the reap; and the
+  process's own CPU and peak never falling between two reads.
 
 ## 9. Open questions
 
@@ -390,3 +500,8 @@ for its backend.
 - **The descriptor limit on the ring.** The simulator checks it; lowering
   a process's limit on the real kernel takes `unsafe` outside the ring
   adapter, or a child process, and neither is allowed.
+- **The records io's next parts pull** (io.md, 9): `Append`; `Stat`'s
+  owner and links; the path-only open (`PathNoFollow`); a `Wait` that does not reap, and `Signal`'s target,
+  the group; `Usage` and `Window`. Today a `Wait` reaps, and a `Signal`
+  reaches the child alone. Each comes with its conformance scenario
+  (section 8) on both backends.

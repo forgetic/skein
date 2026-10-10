@@ -473,3 +473,15 @@ fn a_scan_shorter_than_its_delimiter_is_a_bug() {
     let mut intake = Intake::with_capacity(4);
     drop(intake.meet(scan(Delimiter::CRLF, 1)));
 }
+
+#[test]
+fn clearing_an_intake_keeps_its_capacity_and_resets_the_scan_cache() {
+    let mut intake = Intake::with_capacity(8);
+    intake.append(b"abcd").unwrap();
+    assert_eq!(intake.meet(scan(Delimiter::LF, 8)), None);
+    intake.clear();
+    assert_eq!(intake.capacity(), 8);
+    assert!(intake.is_empty());
+    intake.append(b"x\n").unwrap();
+    assert_eq!(intake.meet(scan(Delimiter::LF, 8)), Some(boxed(b"x\n")));
+}

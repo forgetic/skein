@@ -35,15 +35,16 @@ mod scenarios;
 
 use alloc::vec::Vec;
 
-use skein_io::kernel::{Complete, Fd, Submit};
+use skein_io::kernel::{Complete, Error, Fd, Submit};
 use skein_lib::{Duration, Queue, Time};
 
 pub use files::{
-    Entries, Escapes, FileLifecycle, Listing, MakeDirectories, Nested, OpenLimit, Permissions, Removes, Renames,
-    Shortness, cancel_read, escapes, file_lifecycle, list, make_directory, nested_roots,
-    open_past_the_descriptor_limit, permissions, remove, rename,
+    Appending, Entries, Escapes, FileLifecycle, FileMetadata, Listing, MakeDirectories, Nested, OpenLimit,
+    PathMetadata, Permissions, Removes, Renames, Shortness, appending, cancel_append, cancel_read, escapes,
+    file_lifecycle, file_metadata, list, make_directory, nested_roots, open_past_the_descriptor_limit, path_metadata,
+    permissions, remove, rename,
 };
-pub use processes::{Processes, processes};
+pub use processes::{Groups, Processes, ResourcesCheck, groups, processes, usage};
 
 pub use scenarios::{
     AddressInUse, Backpressure, Cancelling, ClosedBeforeAccept, DescriptorLimit, FullQueue, GracefulClose, Ipv6Only,
@@ -95,6 +96,9 @@ pub trait Backend {
     /// shell opens a root at startup (kernel.md, 6.1): a descriptor the
     /// scenario closes with a `Close`.
     fn root(&mut self, process: Self::Process, tree: &[Item]) -> Fd;
+
+    /// A startup descriptor for appending beneath a root, released by a `Close`.
+    fn append(&mut self, process: Self::Process, root: Fd, path: &[u8], mode: u32) -> Result<Fd, Error>;
 }
 
 /// One thing a scenario's root holds when it starts: its path, relative to
@@ -114,6 +118,8 @@ pub enum Made {
     Directory,
     /// A symbolic link, to the path it holds.
     Link(Vec<u8>),
+    /// Another name for a regular file already laid beneath this root.
+    HardLink(Vec<u8>),
     /// A FIFO.
     Fifo,
 }
@@ -135,6 +141,12 @@ impl Item {
     #[must_use]
     pub fn link(path: &[u8], target: &[u8]) -> Item {
         Item { path: path.to_vec(), made: Made::Link(target.to_vec()), mode: 0o777 }
+    }
+
+    /// A second name for the file already laid at `target`, relative to the root.
+    #[must_use]
+    pub fn hard_link(path: &[u8], target: &[u8]) -> Item {
+        Item { path: path.to_vec(), made: Made::HardLink(target.to_vec()), mode: 0 }
     }
 
     /// A FIFO, mode `0o644`.

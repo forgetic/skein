@@ -6,7 +6,50 @@ use skein_lib::stream::Fault;
 
 use super::{LIMITS, roots};
 use crate::client::{self, Certificate, Error, Limits};
-use crate::{ALPN, Config, Name, Refusal};
+use crate::{ALPN, Config, Name, Parsed, Refusal, roots_worst_case};
+
+#[test]
+fn der_roots_count_supported_certificates_and_skip_the_rest() {
+    let root = std::fs::read("../../tests/tls/fixtures/root.der").expect("actual fixture root");
+    // Change only the SPKI algorithm OID: still valid DER for rustls's
+    // anchor parser, but absent from ring's supported key algorithms.
+    let mut unsupported = Vec::from(root.as_slice());
+    let oid = [0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+    let mut offset = None;
+    for (index, bytes) in unsupported.windows(oid.len()).enumerate() {
+        if bytes == oid {
+            offset = Some(index);
+            break;
+        }
+    }
+    let offset = offset.expect("fixture's EC key OID");
+    unsupported[offset + oid.len() - 1] = 0x7f;
+    let mut parser = RootCertStore::empty();
+    parser.add(crate::CertificateDer::from(unsupported.as_slice())).expect("unknown key still parses as an anchor");
+    let certificates = [root.as_slice().into(), b"garbage".as_slice().into(), unsupported.into_boxed_slice()];
+    let (_, parsed) = Config::from_der(&certificates, &[b"h2", b"http/1.1"]).expect("one supported root");
+    assert_eq!(parsed, Parsed { taken: 1, skipped: 2 });
+    assert_eq!(Config::from_der(&certificates[1..], &[]).expect_err("none supported"), Refusal::Roots);
+    assert_eq!(Config::from_der(&[], &[]).expect_err("none supplied"), Refusal::Roots);
+}
+
+#[test]
+fn der_configuration_keeps_the_alpn_refusals() {
+    let root = std::fs::read("../../tests/tls/fixtures/root.der").expect("actual fixture root");
+    let certificates = [root.into_boxed_slice()];
+    assert_eq!(Config::from_der(&certificates, &[b""]).expect_err("empty ALPN"), Refusal::Alpn);
+    assert_eq!(Config::from_der(&certificates, &[&[b'a'; 256]]).expect_err("long ALPN"), Refusal::Alpn);
+    let name = [b'a'; 127];
+    assert!(Config::from_der(&certificates, &[&name, &name]).is_ok(), "exact ALPN bound");
+    assert_eq!(Config::from_der(&certificates, &[&name, &[b'a'; 128]]).expect_err("past ALPN bound"), Refusal::Alpn);
+}
+
+#[test]
+fn the_shared_roots_bound_uses_checked_arithmetic() {
+    assert!(roots_worst_case(128, 16_384).is_some(), "startup-sized roots fit");
+    assert!(roots_worst_case(0, 0).is_some(), "an empty store still prices configuration");
+    assert_eq!(roots_worst_case(u32::MAX, u32::MAX), None, "multiplication cannot wrap");
+}
 
 #[test]
 fn room_for_a_send_counts_its_records_and_rustlss_slack() {

@@ -177,7 +177,10 @@ fn child_pipes_echo_at_chosen_descriptors_and_exit() {
     let Op::PipeRead { buf, .. } = read.kind else { panic!("pipe read") };
     assert_eq!(&buf[..5], b"hello");
     assert_eq!(run(&mut machine, &mut sim, pid, 4, Op::Close { fd: pipes[0] }).result, Ok(Done::Nothing));
-    assert_eq!(run(&mut machine, &mut sim, pid, 5, Op::Wait { pidfd }).result, Ok(Done::Exit(Exit::Code(0))));
+    assert_eq!(
+        run(&mut machine, &mut sim, pid, 5, Op::Wait { pidfd, reap: false }).result,
+        Ok(Done::Exit(Exit::Code(0)))
+    );
     assert_eq!(
         run(&mut machine, &mut sim, pid, 6, Op::PipeRead { fd: pipes[1], buf: Box::new([0; 8]) }).result,
         Ok(Done::Count(0))
@@ -219,10 +222,13 @@ fn never_child_waits_until_killed() {
     let mut out = Queue::with_capacity(1);
     sim.reap(pid, &mut out);
     let Done::Spawned { pidfd, .. } = out.pop().unwrap().result.unwrap() else { panic!("spawn") };
-    q.push(Submit { op: Token::new(2), kind: Op::Wait { pidfd } });
+    q.push(Submit { op: Token::new(2), kind: Op::Wait { pidfd, reap: false } });
     sim.submit(pid, &mut q);
     assert_eq!(sim.ready(pid), 0);
-    q.push(Submit { op: Token::new(3), kind: Op::Signal { pidfd, signal: Signal::Kill } });
+    q.push(Submit {
+        op: Token::new(3),
+        kind: Op::Signal { pidfd, signal: Signal::Kill, to: skein_io::kernel::Target::Child },
+    });
     sim.submit(pid, &mut q);
     let mut out = Queue::with_capacity(2);
     sim.reap(pid, &mut out);
@@ -237,4 +243,86 @@ fn never_child_waits_until_killed() {
     sim.assert_quiescent(pid);
     sim.assert_no_open_fds(pid);
     assert_eq!(machine.open_handles(), 0);
+}
+
+#[test]
+fn hard_link_names_share_bytes_and_owner_and_keep_the_node_until_all_names_and_handles_end() {
+    let (mut machine, root) = machine(&[Item::file(b"file", b"shared"), Item::hard_link(b"alias", b"file")]);
+    let original = machine.open(root, b"file", How::Read).unwrap();
+    let alias = machine.open(root, b"alias", How::Read).unwrap();
+    let laid = machine.nodes.len();
+    assert_eq!(machine.stat(original), machine.stat(alias));
+    assert_eq!(machine.stat(original).links, 2);
+    assert_eq!(machine.stat(original).owner, 1000);
+    assert_eq!(machine.stat(root).owner, 1000);
+    machine.remove(root, b"file", false).unwrap();
+    assert_eq!(machine.stat(original).links, 1);
+    machine.close(original);
+    assert_eq!(machine.nodes.len(), laid, "the other name and handle retain the node");
+    assert_eq!(machine.read(alias, 0, 16).unwrap(), b"shared");
+    machine.remove(root, b"alias", false).unwrap();
+    assert_eq!(machine.stat(alias).links, 0);
+    assert_eq!(machine.nodes.len(), laid, "the final handle retains the unlinked node");
+    machine.close(alias);
+    assert_eq!(machine.nodes.len(), laid - 1);
+    machine.close(root);
+    assert_eq!(machine.open_handles(), 0);
+}
+
+#[test]
+fn replacing_one_hard_link_leaves_the_other_name_and_open_descriptor_intact() {
+    let (mut machine, root) = machine(&[
+        Item::file(b"old", b"old bytes"),
+        Item::hard_link(b"alias", b"old"),
+        Item::file(b"new", b"new bytes"),
+    ]);
+    let old = machine.open(root, b"old", How::Read).unwrap();
+    machine.rename(root, b"new", root, b"old").unwrap();
+    assert_eq!(machine.stat(old).links, 1);
+    let alias = machine.open(root, b"alias", How::Read).unwrap();
+    assert_eq!(machine.read(alias, 0, 16).unwrap(), b"old bytes");
+    let new = machine.open(root, b"old", How::Read).unwrap();
+    assert_eq!(machine.read(new, 0, 16).unwrap(), b"new bytes");
+    assert_eq!(machine.stat(new).links, 1);
+    for file in [old, alias, new, root] {
+        machine.close(file);
+    }
+}
+
+#[test]
+fn recovered_hard_link_counts_follow_the_synced_namespace() {
+    for seed in 0..16 {
+        let (mut machine, root) = machine(&[Item::file(b"file", b"shared"), Item::hard_link(b"alias", b"file")]);
+        machine.remove(root, b"file", false).unwrap();
+        machine.sync(root);
+        machine.crash(seed);
+        let root = machine.reopen_root(0);
+        let file = machine.open(root, b"alias", How::Read).unwrap();
+        assert_eq!(machine.stat(file).links, 1);
+        assert_eq!(machine.read(file, 0, 16).unwrap(), b"shared");
+        assert_eq!(machine.open(root, b"file", How::Read), Err(Refusal::NotFound));
+        machine.close(file);
+        machine.close(root);
+    }
+}
+
+#[test]
+fn directory_links_count_children_across_moves_and_removal() {
+    let (mut machine, root) = machine(&[Item::directory(b"d"), Item::directory(b"d/child")]);
+    let dir = machine.open(root, b"d", How::Directory).unwrap();
+    let child = machine.open(root, b"d/child", How::Directory).unwrap();
+    assert_eq!(machine.stat(root).links, 3);
+    assert_eq!(machine.stat(dir).links, 3);
+    assert_eq!(machine.stat(child).links, 2);
+    machine.rename(dir, b"child", root, b"child").unwrap();
+    assert_eq!(machine.stat(root).links, 4);
+    assert_eq!(machine.stat(dir).links, 2);
+    machine.remove(root, b"child", true).unwrap();
+    assert_eq!(machine.stat(root).links, 3);
+    assert_eq!(machine.stat(child).links, 0);
+    machine.remove(root, b"d", true).unwrap();
+    assert_eq!(machine.stat(root).links, 2);
+    for file in [child, dir, root] {
+        machine.close(file);
+    }
 }

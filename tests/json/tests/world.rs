@@ -166,3 +166,47 @@ fn the_reference_parser_reads_what_the_writer_of_the_generator_meant() {
         assert_eq!(decoded.tokens, tokens, "seed {seed}");
     }
 }
+
+#[test]
+fn drawn_text_and_skip_demands_are_judged_by_the_reference() {
+    let document = br#"{"key": [true, false, null, 1.25, "longer string with \uD83D\uDE00", {"inner": [1, 2, 3]}]}"#;
+    for seed in 0..128 {
+        let mut rng = Rng::new(seed);
+        let settings = Settings::calm(&mut rng, LIMITS);
+        let run = world::check_demands(document, &settings, seed);
+        assert_eq!(run, world::check_demands(document, &settings, seed));
+    }
+}
+
+#[test]
+fn collector_paths_counts_and_neighbor_interruptions() {
+    use skein_json::collector::{Cap, Event, Filter, Keep, Key, Limits as CollectorLimits, Node};
+    const FILTER: Filter = Filter {
+        root: Keep::Into(&[
+            Node { key: Key::Field(b"a"), keep: Keep::Into(&[Node { key: Key::Each, keep: Keep::Text(Cap::new(3)) }]) },
+            Node { key: Key::Field(b"missing"), keep: Keep::Value },
+        ]),
+    };
+    let filter = FILTER;
+    let limits = CollectorLimits { tokenizer: LIMITS, tokens: 128, text: 256, skip: 1 << 16 };
+    for seed in 0..200 {
+        let mut rng = Rng::new(seed);
+        let mut tokens = generate::tokens(&mut rng, SHAPE);
+        for token in &mut tokens {
+            if matches!(token, Token::Key(_)) {
+                *token = Token::Key(if rng.chance(500) { b"a".as_slice() } else { b"z".as_slice() }.into());
+            }
+        }
+        let document = generate::render(&mut rng, &tokens);
+        let settings = Settings::calm(&mut rng, LIMITS);
+        let run = world::collect(&document, filter, limits, &settings, seed);
+        let (expected, skipped, _) = reference::prune(&document, filter, &limits).expect("valid generated document");
+        assert_eq!(run.outcome, Some(expected.clone()), "seed {seed}");
+        if matches!(expected, Event::Collected(_)) {
+            assert_eq!(run.counts.skipped, skipped);
+        }
+        let settings = Settings::chaotic(&mut rng, LIMITS, document.len());
+        let run = world::collect(&document, filter, limits, &settings, seed);
+        assert!(run.outcome.is_some() || settings.close.is_some());
+    }
+}

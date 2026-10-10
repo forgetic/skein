@@ -135,11 +135,45 @@ pub struct ToolSpec {
     pub parameters: Box<[u8]>,
 }
 
+/// Caller tool policy, supplied in a query independently of client vocabulary.
+/// Contract: docs/design/fake-llm.md, section 2.1.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum ToolChoice {
+    /// Random answers may call any offered tool.
+    Auto,
+    /// Random answers use no tools, unless the configured breach chance fires.
+    None,
+    /// Random answers may call only these offered names.
+    Only(Box<[Box<[u8]>]>),
+}
+
+/// Cache routing read by the byte peer and supplied with a domain query.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Caching {
+    /// Automatic prefix caching within the caller's shared conversation scope.
+    Scope([u8; 16]),
+    /// Automatic writes; reads require the configured seeded routing chance.
+    Unscoped,
+    /// Only prefixes bounded by these native request positions, at most four.
+    Marks(Box<[Mark]>),
+}
+
+/// A cache boundary supplied by the peer in prompt order.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Mark {
+    /// After the tools and system text.
+    System,
+    /// After one part of a conversation message.
+    Part { message: u32, part: u32 },
+}
+
 /// A request for the next assistant message.
 ///
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Query {
+    /// Cache instructions in the fake's own terms, independent of wire headers.
+    pub caching: Caching,
     /// Provider model name, treated as bytes by the domain.
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -152,6 +186,7 @@ pub struct Query {
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
     pub tools: Box<[ToolSpec]>,
+    pub choice: ToolChoice,
     /// Oldest-first conversation messages, with provider call/result pairing preserved.
     ///
     /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
@@ -210,22 +245,17 @@ pub enum Finish {
 /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Usage {
-    /// Fresh provider prompt tokens reported for this completion.
-    ///
-    /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
-    pub prompt_tokens: u64,
-    /// Provider prompt tokens served from cache.
-    ///
-    /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
-    pub cached_tokens: u64,
-    /// Provider prompt tokens written to cache.
-    ///
-    /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
-    pub cache_creation_tokens: u64,
-    /// Provider output tokens reported for this completion.
-    ///
-    /// Contract: docs/design/fake-llm.md, sections 2–5; programming-model.md, section 4.4.
-    pub completion_tokens: u64,
+    pub input: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    /// Completion tokens, including reasoning.
+    pub output: Option<u64>,
+    /// The part of output spent on reasoning, never added to output.
+    pub reasoning: Option<u64>,
+}
+impl Usage {
+    /// All counts are unreported until the provider supplies them.
+    pub const NONE: Usage = Usage { input: None, cache_read: None, cache_write: None, output: None, reasoning: None };
 }
 
 /// Typed refusal or terminal failure of the fake peer, independent of the agent's policy.

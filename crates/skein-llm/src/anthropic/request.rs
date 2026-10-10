@@ -1,41 +1,56 @@
-//! Bounded native Messages requests using the provider-neutral vocabulary.
+//! Measured native Messages requests and shape-derived cache markers.
+//! Keeps no state; replay is never modified. Entrances validate, measure and encode.
+//! Contract: llm.md, sections 4.5 and 4.7.
 use super::identity::CLAUDE_CODE_SYSTEM_IDENTITY;
 use crate::{Block, Error, Json, Prompt, Provider, Replay, Role, Tool, openai};
 use alloc::boxed::Box;
-use skein_json::{Token, writer};
+use skein_json::{Document, Kind, writer};
 
-/// Default output cap when the caller leaves `Prompt::max_output_tokens` unset.
-pub const DEFAULT_MAX_TOKENS: u32 = 4096;
-
-pub fn encode_request(prompt: &Prompt, limits: &openai::Limits) -> Result<Box<[u8]>, Error> {
-    let length = measure_request(prompt, limits)?;
-    let bounded = writer::Limits { depth: limits.depth, length: limits.request_bytes };
+/// Encode the request under the endpoint's nonzero declared output ceiling.
+pub fn encode_request(prompt: &Prompt, declared_output: u32, limits: &openai::Limits) -> Result<Box<[u8]>, Error> {
+    let length = measure_request(prompt, declared_output, limits)?;
+    let bounded = writer::Limits { depth: limits.depth, length: limits.request };
     let mut out = writer::Encoder::write(length, &bounded);
-    write_request(&mut out, prompt, limits)?;
+    write_request(&mut out, prompt, declared_output, limits)?;
     Ok(out.finish())
 }
 
 /// Validates the prompt and measures its escaped wire representation before allocating it.
-pub fn measure_request(prompt: &Prompt, limits: &openai::Limits) -> Result<u32, Error> {
-    validate(prompt, limits)?;
-    let bounded = writer::Limits { depth: limits.depth, length: limits.request_bytes };
+pub fn measure_request(prompt: &Prompt, declared_output: u32, limits: &openai::Limits) -> Result<u32, Error> {
+    validate(prompt, declared_output, limits)?;
+    let bounded = writer::Limits { depth: limits.depth, length: limits.request };
     let mut out = writer::Encoder::measure(&bounded);
-    write_request(&mut out, prompt, limits)?;
-    measured(out)
+    write_request(&mut out, prompt, declared_output, limits)?;
+    measured(out, bounded, crate::Cap::Request)
 }
 
-pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), Error> {
-    let count = usize::try_from(limits.parts).expect("u32 fits usize");
+pub(super) fn validate(prompt: &Prompt, declared_output: u32, limits: &openai::Limits) -> Result<(), Error> {
+    if declared_output == 0 {
+        return Err(Error::Invalid);
+    }
+    if prompt.max_output_tokens.unwrap_or(declared_output) > declared_output {
+        return Err(Error::limit(crate::Cap::Output, declared_output));
+    }
+    let count = usize::try_from(limits.history_items).expect("u32 fits usize");
     if prompt.model.is_empty() || prompt.messages.is_empty() || prompt.max_output_tokens == Some(0) {
         return Err(Error::Invalid);
     }
-    if prompt.tools.len() > count || prompt.messages.len() > count {
-        return Err(Error::Limit);
+    if prompt.tools.len() > usize::try_from(limits.tools).expect("bounded tools") {
+        return Err(Error::limit(crate::Cap::Tools, limits.tools));
     }
-    if prompt.cache_key.is_some() {
-        return Err(Error::Unsupported);
+    if prompt.messages.len() > count {
+        return Err(Error::limit(crate::Cap::HistoryItems, limits.history_items));
     }
+    crate::translate::validate_choice(&prompt.choice, &prompt.tools)?;
     let mut budget: u64 = 0;
+    match &prompt.choice {
+        crate::ToolChoice::Auto | crate::ToolChoice::None => {}
+        crate::ToolChoice::Only(names) => {
+            for name in names {
+                text(name, &mut budget, limits)?;
+            }
+        }
+    }
     text(&prompt.model, &mut budget, limits)?;
     text(&prompt.instructions, &mut budget, limits)?;
     if let Some(effort) = &prompt.reasoning_effort {
@@ -50,7 +65,7 @@ pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), E
         text(&tool.name, &mut budget, limits)?;
         text(&tool.description, &mut budget, limits)?;
         json(&tool.schema, &mut budget, limits)?;
-        if tool.schema.as_tokens().first() != Some(&Token::ObjectStart) {
+        if openai::json::kind(tool.schema.view(), 0) != Some(Kind::ObjectStart) {
             return Err(Error::Invalid);
         }
     }
@@ -59,9 +74,11 @@ pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), E
         if message.content.is_empty() {
             return Err(Error::Invalid);
         }
-        blocks = blocks.checked_add(message.content.len()).ok_or(Error::Limit)?;
+        blocks = blocks
+            .checked_add(message.content.len())
+            .ok_or(Error::limit(crate::Cap::HistoryItems, limits.history_items))?;
         if blocks > count {
-            return Err(Error::Limit);
+            return Err(Error::limit(crate::Cap::HistoryItems, limits.history_items));
         }
         for block in &message.content {
             validate_block(block, message.role, &mut budget, limits)?;
@@ -72,6 +89,8 @@ pub(super) fn validate(prompt: &Prompt, limits: &openai::Limits) -> Result<(), E
 
 fn validate_block(block: &Block, role: Role, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
     match block {
+        Block::Oversize { .. } | Block::Cut { .. } => Err(Error::Invalid),
+        Block::Dropped { .. } => Ok(()),
         Block::Text { text: value, replay } => {
             if role == Role::User && replay.is_some() {
                 return Err(Error::Invalid);
@@ -95,9 +114,6 @@ fn validate_block(block: &Block, role: Role, budget: &mut u64, limits: &openai::
             identifier(name, 128)?;
             text(id, budget, limits)?;
             text(name, budget, limits)?;
-            if arguments.len() > usize::try_from(limits.input_bytes).expect("u32 fits usize") {
-                return Err(Error::Limit);
-            }
             charge(arguments.len(), budget, limits)
         }
         Block::ToolResult { id, text: value, is_error: _ } => {
@@ -116,10 +132,10 @@ fn validate_block(block: &Block, role: Role, budget: &mut u64, limits: &openai::
                 return Err(Error::Unsupported);
             }
             json(&replay.value, budget, limits)?;
-            let bounded = writer::Limits { depth: limits.depth, length: limits.opaque_bytes };
+            let bounded = writer::Limits { depth: limits.depth, length: limits.reasoning };
             let mut measure = writer::Encoder::measure(&bounded);
             replay.value.write(&mut measure);
-            let _length = measured(measure)?;
+            let _length = measured(measure, bounded, crate::Cap::Reasoning)?;
             validate_reasoning(&replay.value)
         }
     }
@@ -142,7 +158,7 @@ fn identifier(value: &[u8], maximum: usize) -> Result<(), Error> {
 }
 
 fn validate_reasoning(value: &Json) -> Result<(), Error> {
-    let tokens = value.as_tokens();
+    let tokens = value.view();
     let kind = field_text(tokens, b"type")?;
     match kind {
         b"thinking" => {
@@ -163,7 +179,7 @@ fn validate_reasoning(value: &Json) -> Result<(), Error> {
     Ok(())
 }
 
-fn field_text<'a>(tokens: &'a [Token], key: &[u8]) -> Result<&'a [u8], Error> {
+fn field_text<'a>(tokens: (&'a Document, openai::json::Span), key: &[u8]) -> Result<&'a [u8], Error> {
     let at = match openai::json::required(tokens, key) {
         Ok(at) => at,
         Err(error) => return Err(crate::translate::decode(error)),
@@ -179,70 +195,92 @@ fn field_text<'a>(tokens: &'a [Token], key: &[u8]) -> Result<&'a [u8], Error> {
 }
 
 fn charge(size: usize, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
-    *budget = budget.checked_add(u64::try_from(size).expect("usize fits u64")).ok_or(Error::Limit)?;
-    if *budget > u64::from(limits.request_bytes) { Err(Error::Limit) } else { Ok(()) }
+    *budget = budget
+        .checked_add(u64::try_from(size).expect("usize fits u64"))
+        .ok_or(Error::limit(crate::Cap::Request, limits.request))?;
+    if *budget > u64::from(limits.request) { Err(Error::limit(crate::Cap::Request, limits.request)) } else { Ok(()) }
 }
 
 fn text(value: &[u8], budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
-    if value.len() > usize::try_from(limits.string_bytes).expect("u32 fits usize") {
-        return Err(Error::Limit);
-    }
-    let mut measure = writer::Encoder::measure(&writer::Limits { depth: limits.depth, length: limits.request_bytes });
+    let mut measure = writer::Encoder::measure(&writer::Limits { depth: limits.depth, length: limits.request });
     measure.string(value);
-    let _length = measured(measure)?;
+    let _length =
+        measured(measure, writer::Limits { depth: limits.depth, length: limits.request }, crate::Cap::Request)?;
     charge(value.len(), budget, limits)
 }
 
 fn json(value: &Json, budget: &mut u64, limits: &openai::Limits) -> Result<(), Error> {
-    if value.as_tokens().len() > usize::try_from(limits.tokens).expect("u32 fits usize") {
-        return Err(Error::Limit);
-    }
-    for token in value.as_tokens() {
+    let view = value.view();
+    for index in 0..openai::json::len(view) {
         charge(1, budget, limits)?;
-        match token {
-            Token::Key(value) | Token::String(value) | Token::Number(value) => text(value, budget, limits)?,
-            Token::ObjectStart
-            | Token::ObjectEnd
-            | Token::ArrayStart
-            | Token::ArrayEnd
-            | Token::True
-            | Token::False
-            | Token::Null => {}
+        match openai::json::kind(view, index).expect("admitted record") {
+            Kind::Key | Kind::String | Kind::Number => {
+                text(openai::json::record_text(view, index).expect("admitted text"), budget, limits)?;
+            }
+            Kind::ObjectStart
+            | Kind::ObjectEnd
+            | Kind::ArrayStart
+            | Kind::ArrayEnd
+            | Kind::True
+            | Kind::False
+            | Kind::Null => {}
+            Kind::Long => unreachable!("admitted Json contains no Long"),
         }
     }
-    let mut measure = writer::Encoder::measure(&limits.writer_limits());
+    let bounded = writer::Limits { depth: limits.depth, length: limits.request };
+    let mut measure = writer::Encoder::measure(&bounded);
     value.write(&mut measure);
-    let _length = measured(measure)?;
+    let _length = measured(measure, bounded, crate::Cap::Request)?;
     Ok(())
 }
 
-fn measured(out: writer::Encoder) -> Result<u32, Error> {
+fn measured(out: writer::Encoder, limits: writer::Limits, cap: crate::Cap) -> Result<u32, Error> {
     match out.measured() {
         Ok(length) => Ok(length),
-        Err(writer::Refusal::TooLong | writer::Refusal::TooDeep) => Err(Error::Limit),
+        Err(writer::Refusal::TooLong) => Err(Error::limit(cap, limits.length)),
+        Err(writer::Refusal::TooDeep) => Err(Error::limit(crate::Cap::Depth, limits.depth)),
         Err(writer::Refusal::Text | writer::Refusal::Number) => Err(Error::Invalid),
     }
 }
 
-fn write_request(out: &mut writer::Encoder, prompt: &Prompt, limits: &openai::Limits) -> Result<(), Error> {
+fn write_request(
+    out: &mut writer::Encoder,
+    prompt: &Prompt,
+    declared_output: u32,
+    limits: &openai::Limits,
+) -> Result<(), Error> {
+    let marks = breakpoints(prompt);
     out.object_start();
     out.key(b"model");
     out.string(&prompt.model);
     out.key(b"max_tokens");
-    out.unsigned(u64::from(prompt.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS)));
+    out.unsigned(u64::from(prompt.max_output_tokens.unwrap_or(declared_output)));
     out.key(b"stream");
     out.boolean(true);
     if !prompt.instructions.is_empty() {
         out.key(b"system");
-        write_system(out, &prompt.instructions);
+        write_system(out, &prompt.instructions, marks.system);
     }
     if !prompt.tools.is_empty() {
         out.key(b"tools");
         write_tools(out, &prompt.tools);
     }
+    match &prompt.choice {
+        crate::ToolChoice::Auto | crate::ToolChoice::Only(_) => {}
+        crate::ToolChoice::None => {
+            out.key(b"tool_choice");
+            out.object_start();
+            out.key(b"type");
+            out.string(b"none");
+            out.object_end();
+        }
+    }
     out.key(b"messages");
     out.array_start();
-    for message in &prompt.messages {
+    for (message_index, message) in prompt.messages.iter().enumerate() {
+        if !has_native_block(&message.content) {
+            continue;
+        }
         out.object_start();
         out.key(b"role");
         out.string(match message.role {
@@ -251,8 +289,12 @@ fn write_request(out: &mut writer::Encoder, prompt: &Prompt, limits: &openai::Li
         });
         out.key(b"content");
         out.array_start();
-        for block in &message.content {
-            write_block(out, block, limits)?;
+        for (block_index, block) in message.content.iter().enumerate() {
+            let marked = match &marks.tail {
+                Some(tail) => tail.message == message_index && tail.block == block_index,
+                None => false,
+            };
+            write_block(out, block, marked, limits)?;
         }
         out.array_end();
         out.object_end();
@@ -276,7 +318,35 @@ fn write_request(out: &mut writer::Encoder, prompt: &Prompt, limits: &openai::Li
     Ok(())
 }
 
-fn write_system(out: &mut writer::Encoder, instructions: &[u8]) {
+struct Breakpoints {
+    system: bool,
+    tail: Option<Tail>,
+}
+
+struct Tail {
+    message: usize,
+    block: usize,
+}
+
+fn breakpoints(prompt: &Prompt) -> Breakpoints {
+    let mut tail = None;
+    if let Some(message) = prompt.messages.last() {
+        for (index, block) in message.content.iter().enumerate() {
+            match block {
+                Block::Text { .. } | Block::Refusal { .. } | Block::ToolCall { .. } | Block::ToolResult { .. } => {
+                    tail = Some(Tail {
+                        message: prompt.messages.len().checked_sub(1).expect("last message"),
+                        block: index,
+                    });
+                }
+                Block::Reasoning { .. } | Block::Dropped { .. } | Block::Oversize { .. } | Block::Cut { .. } => {}
+            }
+        }
+    }
+    Breakpoints { system: !prompt.instructions.is_empty(), tail }
+}
+
+fn write_system(out: &mut writer::Encoder, instructions: &[u8], marked: bool) {
     let extra = if instructions == CLAUDE_CODE_SYSTEM_IDENTITY {
         Some(b"".as_slice())
     } else {
@@ -285,26 +355,37 @@ fn write_system(out: &mut writer::Encoder, instructions: &[u8]) {
             None => None,
         }
     };
+    out.array_start();
     match extra {
         Some(extra) => {
-            out.array_start();
-            write_system_text(out, CLAUDE_CODE_SYSTEM_IDENTITY);
+            write_system_text(out, CLAUDE_CODE_SYSTEM_IDENTITY, marked && extra.is_empty());
             if !extra.is_empty() {
-                write_system_text(out, extra);
+                write_system_text(out, extra, marked);
             }
-            out.array_end();
         }
-        None => out.string(instructions),
+        None => write_system_text(out, instructions, marked),
     }
+    out.array_end();
 }
 
-fn write_system_text(out: &mut writer::Encoder, text: &[u8]) {
+fn write_system_text(out: &mut writer::Encoder, text: &[u8], marked: bool) {
     out.object_start();
     out.key(b"type");
     out.string(b"text");
     out.key(b"text");
     out.string(text);
+    cache_control(out, marked);
     out.object_end();
+}
+
+fn cache_control(out: &mut writer::Encoder, marked: bool) {
+    if marked {
+        out.key(b"cache_control");
+        out.object_start();
+        out.key(b"type");
+        out.string(b"ephemeral");
+        out.object_end();
+    }
 }
 
 fn write_tools(out: &mut writer::Encoder, tools: &[Tool]) {
@@ -322,8 +403,10 @@ fn write_tools(out: &mut writer::Encoder, tools: &[Tool]) {
     out.array_end();
 }
 
-fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits) -> Result<(), Error> {
+fn write_block(out: &mut writer::Encoder, block: &Block, marked: bool, limits: &openai::Limits) -> Result<(), Error> {
     match block {
+        Block::Oversize { .. } | Block::Cut { .. } => return Err(Error::Invalid),
+        Block::Dropped { .. } => {}
         Block::Reasoning { replay } => replay.value.write(out),
         Block::Text { text, replay: _ } | Block::Refusal { text, replay: _ } => {
             out.object_start();
@@ -331,14 +414,15 @@ fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits
             out.string(b"text");
             out.key(b"text");
             out.string(text);
+            cache_control(out, marked);
             out.object_end();
         }
         Block::ToolCall { id, name, arguments, replay: _ } => {
-            let value = match Json::from_bytes(arguments, limits) {
+            let value = match Json::from_bytes(arguments, &limits.request_document()) {
                 Ok(value) => value,
                 Err(error) => return Err(crate::translate::decode(error)),
             };
-            if value.as_tokens().first() != Some(&Token::ObjectStart) {
+            if openai::json::kind(value.view(), 0) != Some(Kind::ObjectStart) {
                 return Err(Error::Invalid);
             }
             out.object_start();
@@ -350,6 +434,7 @@ fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits
             out.string(name);
             out.key(b"input");
             value.write(out);
+            cache_control(out, marked);
             out.object_end();
         }
         Block::ToolResult { id, text, is_error } => {
@@ -362,8 +447,25 @@ fn write_block(out: &mut writer::Encoder, block: &Block, limits: &openai::Limits
             out.string(text);
             out.key(b"is_error");
             out.boolean(*is_error);
+            cache_control(out, marked);
             out.object_end();
         }
     }
     Ok(())
+}
+
+fn has_native_block(content: &[Block]) -> bool {
+    for block in content {
+        match block {
+            Block::Dropped { .. } => {}
+            Block::Text { .. }
+            | Block::Refusal { .. }
+            | Block::ToolCall { .. }
+            | Block::ToolResult { .. }
+            | Block::Reasoning { .. }
+            | Block::Oversize { .. }
+            | Block::Cut { .. } => return true,
+        }
+    }
+    false
 }

@@ -13,7 +13,8 @@ effect expectations, and interpret the answers themselves.
 ## 2. Script domain
 
 `Config` supplies fixed pending-call and owned-byte limits, seeded failure
-chances, injected latency and output limits. `Domain::configured` consumes
+chances, injected latency and output limits, and the cache, usage and
+tool-choice settings of section 2.1. `Domain::configured` consumes
 scripts and `Menu` together under `script_bytes`. The menu supplies complete
 argument bodies and deliberately invalid names/bodies. An empty menu produces
 no random tool calls. No application body or unknown tool name is invented.
@@ -27,6 +28,40 @@ call ID; tool calls belong to assistant messages and results to user messages.
 Generated provider-call names use checked counters; exhaustion
 refuses rather than reusing an identity. Query, script/menu and generated
 answer ownership is checked before effects or payload copies.
+
+### 2.1 The cache, usage and tool choice
+
+- **A query says how it may be cached,** in the domain's own terms, which
+  the byte peer fills from the wire (section 3.1): automatically, by
+  prefix, within a scope, the opaque key a provider routes by, or none;
+  or only up to marks, the positions the request asked to cache.
+- **The domain keeps what calls wrote:** a bounded table of prefixes, each
+  with its scope, its length in tokens and a digest of its content,
+  written at injected time and expired after the configured lifetime. The
+  oldest entry gives way when the table is full.
+- **Reads.** An automatic query reads the longest prefix written in its
+  scope that it begins with. A query without a scope reads only with the
+  configured chance, as a provider's random routing does, so a world can
+  tell an affinity that reaches the wire from one that does not. A marked
+  query reads the longest prefix, ending at one of its marks, that an
+  earlier call wrote, and never past its last mark.
+- **Writes.** An automatic query writes its whole prompt. A marked query
+  writes the prefix at each of its marks; what it writes past what it
+  read is its cache write.
+- **Usage is optional, field by field.** The domain's usage has the same
+  five fields as skein-llm's `Usage` (llm.md, section 2.3), each present
+  or not. The
+  configuration says which the wire reports, per dialect; the peer omits
+  the rest, so worlds meet usage not reported as well as usage of zero.
+- **Tool choice.** A query carries its choice: with `None` the domain's
+  random answer calls no tool, and with `Only` it calls only the tools
+  named. With the configured chance it calls outside the choice anyway,
+  as a provider may, so a world sees its caller answer such a call as not
+  run. Scripted turns are the application's, and call what they name.
+- **Cut and oversized calls** need nothing new: an answer longer than the
+  query's output cap is cut short inside its first tool call, which the
+  peer sends as its dialect's own truncation, and a menu body longer than
+  the client's input limit is an oversized call.
 
 ## 3. Byte peer
 
@@ -56,6 +91,24 @@ a simulated world and the real loop host it as they host a service
 (testing-strategy.md, 4 and 4.1). The fake issuer runs the same way
 (oauth.md, 5).
 
+### 3.1 Request heads, affinity and echoes
+
+- **The peer records each request's head:** its fields, names and values,
+  within the observation caps, beside the decoded query, so a world can
+  assert what reached the wire: that every request of a conversation
+  carries the same affinity, and that two conversations' threads differ.
+- **It reads the dialect's cache instructions into the query.** Codex:
+  `prompt_cache_key` and the `session-id` header must be the same key in
+  its rendered form, and `thread-id` must be well formed; the key becomes
+  the query's scope. Anthropic: each `cache_control` marker becomes a
+  mark; there may be at most four, never on thinking or redacted
+  thinking. A request that breaks a rule the dialect promises is refused
+  as invalid: the fake checks its client (testing-strategy.md, section 6).
+- **It echoes as a provider does.** Its Codex events can carry, as the
+  backend's do, the request's instructions and tools and a usage
+  attribution entry per input item, sized by configuration, so worlds
+  exercise a client that keeps only what it reads (llm.md, section 4.4).
+
 ## 4. Shared codec and replay
 
 `skein-llm::DocumentLimits` is the neutral document-bound vocabulary. Native
@@ -64,6 +117,9 @@ application's adapter. Tool schemas remain whole bounded JSON values.
 Signed/redacted thinking preserves unknown extension fields. Required known
 fields and complete JSON shape/bounds are checked; thinking/signature deltas
 replace only their own values in the retained provider head.
+The native request decoders read the dialects' cache instructions and
+tool choice into the neutral query (section 3.1), and the usage encoders
+write only the fields the configuration reports (section 2.1).
 Unknown nonempty assistant-native block kinds keep their complete object,
 including nested proof fields, without inferred effects or deltas. Known
 text/tool/thinking kinds cannot bypass their admission rules by masquerading
@@ -95,10 +151,10 @@ expect literal bytes, never the peer's response encoder's output, and
 establish no live provider admission.
 
 `skein-llm-world::fake::Exchange` connects the actual shared Client to the
-independent byte peer and real script domain. It records requests, queries,
-response bytes and actual terminals. Its transport uses bounded intakes and
-checks every read/room/send; it owns no provider parser. Its stories carry
-whole schemas, literal argument bytes, exact paired feedback and
+independent byte peer and real script domain. It records requests and
+their heads, queries, response bytes and actual terminals. Its transport uses bounded intakes and
+checks every read/room/send; it owns no provider parser. Its stories
+carry whole schemas, literal argument bytes, exact paired feedback and
 continuation through both wire configurations, then corrupt provider IDs.
 Cancellation has no terminal before actual lower settlement; repeated close
 settlement produces no second terminal.
@@ -122,7 +178,8 @@ allowance.
 
 `Exchange::observe(ObservationLimits)` opts a fresh, unstarted exchange into
 fixed observation counts and whole-record byte caps. Events, decoded queries,
-manual pending calls and both wire tapes reserve their exact wrapper capacity.
+request heads, manual pending calls and both wire tapes reserve their exact
+wrapper capacity.
 Payload ownership is checked before cloning or appending, including public
 native replay token wrappers and their owning bytes. Drained records become
 caller ownership; a moved vector's replacement capacity is reserved at the next

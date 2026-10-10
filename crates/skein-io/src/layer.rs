@@ -1,17 +1,18 @@
 //! io's state and its entry points (io.md, 2): the slab of sockets, the
 //! operations in flight, the close deadlines, the ready list and the
-//! refusals; `resume`, `up`, `fire` and `down`, which the loop calls in that
-//! order within an iteration, and `Io::reclaim` at its end.
+//! refusals and one independent process usage flight (io.md, section 6.1).
+//! `resume`, `up`, `fire` and `down` run in that order within an iteration,
+//! and `Io::reclaim` runs at its end. The layer never interprets CPU use.
 
 use skein_lib::stream::{Down, OutputDown};
-use skein_lib::{Deadlines, Env, Id, Queue, Set, Slab, Time, Token};
+use skein_lib::{Deadlines, Duration, Env, Id, Queue, Set, Slab, Time, Token};
 
 use crate::kernel::{self, Addr, Complete, Done, Family, Fd, Op, Submit, Way};
 use crate::limits::{self, Limits};
 use crate::listener::{self, Listener};
 use crate::pipe::{self, Pipe};
 use crate::process::{self, Child};
-use crate::records::{Error, Event, Request};
+use crate::records::{Error, Event, Measured, Request};
 use crate::signals::{self, Signals};
 use crate::stream::{self, Stream};
 
@@ -38,7 +39,7 @@ pub(crate) enum Entity {
 pub(crate) struct Tables {
     /// The operations in flight, each for its entity.
     pub(crate) flights: Slab<Flight>,
-    /// Each entity's deadlines: a graceful close's, and a retry's.
+    /// Each entity's deadlines: a close or append write, and a retry.
     pub(crate) deadlines: Deadlines<(Id<Entity>, Timer)>,
     pub(crate) ready: Ready,
     /// The owners of the `Listen`s and `Connect`s refused for want of a
@@ -46,12 +47,14 @@ pub(crate) struct Tables {
     pub(crate) refused: Queue<Token>,
     /// Accepts armed in this iteration, against `Limits::accepts`.
     pub(crate) armed: u32,
+    /// The process resource read, independently of entity admission.
+    usage: Option<Id<Flight>>,
 }
 
-/// An operation in flight: the entity it is for, and what for.
+/// An operation in flight: its purpose and its entity, absent for process usage.
 #[derive(Debug)]
 pub(crate) struct Flight {
-    pub(crate) entity: Id<Entity>,
+    pub(crate) entity: Option<Id<Entity>>,
     pub(crate) purpose: Purpose,
 }
 
@@ -72,13 +75,14 @@ pub(crate) enum Purpose {
     Spawn,
     Wait,
     Signal,
+    Usage { owner: Token },
     ReadSignal,
     PipeRead,
     PipeWrite,
     Cancel(Id<Flight>),
 }
 
-/// What an entity's deadline is for: a stream's graceful close (io.md, 3), or
+/// What an entity's deadline is for: a close or append write (io.md, 3 and 5.1), or
 /// a retry of what found the kernel out of buffers or descriptors (io.md,
 /// 3.2 and 3.3). An entity has at most one of each.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -126,6 +130,7 @@ impl Io {
                 ready: Ready::with_capacity(limits.sockets),
                 refused: Queue::with_capacity(limits.refusals),
                 armed: 0,
+                usage: None,
             },
         }
     }
@@ -142,6 +147,19 @@ impl Io {
     /// stream and ownership contract as [`Io::adopt_read_pipe`].
     pub fn adopt_write_pipe(&mut self, fd: Fd) -> Result<Token, Fd> {
         self.adopt_pipe(fd, Way::In)
+    }
+
+    /// Takes an output-only append file at startup. Each Append has the owner's
+    /// `write_timeout`; Close instead flushes under io's close timeout (io.md, 5.1).
+    /// A full slab returns the descriptor to its caller without closing it.
+    pub fn adopt_append(&mut self, fd: Fd, write_timeout: Duration) -> Result<Token, Fd> {
+        match self.entities.insert(Entity::Pipe(Pipe::append(fd, write_timeout))) {
+            Ok(id) => {
+                self.tables.ready.mark(id);
+                Ok(id.token())
+            }
+            Err(_) => Err(fd),
+        }
     }
 
     fn adopt_pipe(&mut self, fd: Fd, way: Way) -> Result<Token, Fd> {
@@ -259,7 +277,7 @@ impl Tables {
     ) -> Id<Flight> {
         let flight = self
             .flights
-            .insert(Flight { entity, purpose })
+            .insert(Flight { entity: Some(entity), purpose })
             .expect("the operation table holds twice the most an iteration has in flight");
         subs.push(Submit { op: flight.token(), kind: op });
         flight
@@ -364,6 +382,73 @@ pub fn up(io: &mut Io, env: &Env<Limits>, complete: Complete, up: &mut Queue<Eve
     let flight = Id::<Flight>::from_token(op);
     let Flight { entity, purpose } = *io.tables.flights.get(flight).expect("a completion names an operation in flight");
     io.tables.flights.retire(flight);
+    match purpose {
+        Purpose::Usage { owner } => {
+            assert_eq!(io.tables.usage.take(), Some(flight), "one process usage operation");
+            let usage = match result {
+                Ok(Done::Usage(usage)) => Measured::Read(usage),
+                Err(kernel::Error::Other(_)) => Measured::Unread,
+                Ok(
+                    Done::Nothing
+                    | Done::Count(_)
+                    | Done::Fd(_)
+                    | Done::Accepted { .. }
+                    | Done::Bound(_)
+                    | Done::Stat(_)
+                    | Done::Spawned { .. }
+                    | Done::Exit(_)
+                    | Done::ServiceSignal(_),
+                ) => unreachable!("Usage answers its record (kernel.md, section 6.3)"),
+                Err(
+                    kernel::Error::Refused
+                    | kernel::Error::Reset
+                    | kernel::Error::BrokenPipe
+                    | kernel::Error::NotConnected
+                    | kernel::Error::AddressInUse
+                    | kernel::Error::AddressNotAvailable
+                    | kernel::Error::Unreachable
+                    | kernel::Error::TimedOut
+                    | kernel::Error::TooManyOpenFiles
+                    | kernel::Error::NoBufferSpace
+                    | kernel::Error::InvalidArgument
+                    | kernel::Error::Cancelled
+                    | kernel::Error::TooLate
+                    | kernel::Error::NotFound
+                    | kernel::Error::Exists
+                    | kernel::Error::NotADirectory
+                    | kernel::Error::IsADirectory
+                    | kernel::Error::NotEmpty
+                    | kernel::Error::Permission
+                    | kernel::Error::NoSpace
+                    | kernel::Error::ReadOnly
+                    | kernel::Error::TooManyLinks
+                    | kernel::Error::NameTooLong
+                    | kernel::Error::Escape
+                    | kernel::Error::NotAFile,
+                ) => unreachable!("Usage fails only Other (kernel.md, section 6.3)"),
+            };
+            up.push(Event::Usage { owner, usage });
+            return;
+        }
+        Purpose::Socket
+        | Purpose::Bind
+        | Purpose::Listen
+        | Purpose::Accept
+        | Purpose::Connect
+        | Purpose::Recv
+        | Purpose::Send
+        | Purpose::Shutdown
+        | Purpose::Close
+        | Purpose::Discard
+        | Purpose::Spawn
+        | Purpose::Wait
+        | Purpose::Signal
+        | Purpose::ReadSignal
+        | Purpose::PipeRead
+        | Purpose::PipeWrite
+        | Purpose::Cancel(_) => {}
+    }
+    let entity = entity.expect("every entity operation has its entity");
     let landed = Landed { entity, flight, purpose, kind, result };
     match io.entities.get(entity).expect("an entity outlives its operations") {
         Entity::Stream(_) => {
@@ -401,7 +486,11 @@ pub fn fire(io: &mut Io, env: &Env<Limits>, up: &mut Queue<Event>, subs: &mut Qu
             Timer::Retry => listener::retried(listener, id, room, env, &mut io.tables, subs),
             Timer::Close => unreachable!("only a stream closes gracefully"),
         },
-        Entity::Pipe(_) | Entity::Child(_) | Entity::Signals(_) => {
+        Entity::Pipe(pipe) => match timer {
+            Timer::Close => pipe::expired(pipe, id, env, &mut io.tables, up, subs),
+            Timer::Retry => unreachable!("append writes have no retry timer"),
+        },
+        Entity::Child(_) | Entity::Signals(_) => {
             unreachable!("processes and signals have no io deadline")
         }
     }
@@ -423,7 +512,17 @@ pub fn down(io: &mut Io, env: &Env<Limits>, request: Request, subs: &mut Queue<S
         Request::Stream { stream, down } => stream_request(io, env, stream, down, subs),
         Request::Output { stream, down } => output_request(io, env, stream, down, subs),
         Request::Spawn { owner, spawn } => process::spawn(io, owner, spawn, subs),
-        Request::Signal { child, signal } => process::signal(io, child, signal, subs),
+        Request::Signal { child, signal, to } => process::signal(io, child, signal, to, subs),
+        Request::Usage { owner } => {
+            assert!(io.tables.usage.is_none(), "one Usage request in flight (io.md, section 6.1)");
+            let flight = io
+                .tables
+                .flights
+                .insert(Flight { entity: None, purpose: Purpose::Usage { owner } })
+                .expect("one operation slot reserved for process usage");
+            io.tables.usage = Some(flight);
+            subs.push(Submit { op: flight.token(), kind: Op::Usage });
+        }
         Request::Close { entity } => close(io, env, entity, false, subs),
         Request::Abort { entity } => close(io, env, entity, true, subs),
     }
@@ -508,7 +607,7 @@ fn close(io: &mut Io, env: &Env<Limits>, token: Token, abort: bool, subs: &mut Q
     match entity {
         Entity::Listener(listener) => listener::close(listener, id, &mut io.tables, subs),
         Entity::Stream(stream) => stream::close(stream, id, abort, env, &mut io.tables, subs),
-        Entity::Pipe(pipe) => pipe::close(pipe, id, abort, &mut io.tables, subs),
+        Entity::Pipe(pipe) => pipe::close(pipe, id, abort, env, &mut io.tables, subs),
         Entity::Child(_) => unreachable!("handled above"),
         Entity::Signals(signals) => signals::close(signals, id, &mut io.tables, subs),
     }
@@ -556,6 +655,7 @@ pub(crate) fn unsubmitted(result: Result<Done, kernel::Error>) -> bool {
             | Done::Stat(_)
             | Done::Spawned { .. }
             | Done::Exit(_)
+            | Done::Usage(_)
             | Done::ServiceSignal(_),
         ) => {
             unreachable!("a cancel answers with nothing")

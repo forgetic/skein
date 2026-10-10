@@ -21,6 +21,27 @@ pub struct Endpoint {
     pub address: Addr,
     pub transport: Transport,
     pub llm: LlmEndpoint,
+    pub limits: skein_llm::client::Limits,
+    pub credential: skein_llm::client::CredentialLimits,
+}
+
+impl Endpoint {
+    /// Apply the transport's native pieces before any test cuts lower them
+    /// (llm-connection.md, section 7).
+    pub fn pieces(&mut self, limits: &crate::Limits) {
+        let read = match self.transport {
+            Transport::Tls { .. } => {
+                self.limits.http.send = skein_tls::client::MAX_PLAINTEXT;
+                limits.tls.read
+            }
+            Transport::Plaintext => {
+                self.limits.http.send = limits.io.output;
+                limits.io.intake
+            }
+        };
+        self.limits.http.read = read;
+        self.limits.sse.chunk = read;
+    }
 }
 
 /// Why the component cannot use its configured endpoints or bounds.
@@ -30,8 +51,28 @@ pub enum EndpointError {
     TooMany,
     /// A limit is zero, inconsistent or cannot be measured.
     Limits,
-    /// A child machine's demand cannot fit the stream below it.
-    Stream,
+    /// The physical connection bound is smaller than the declared conversations.
+    ConnectionsCalls { connections: u32, calls: u32 },
+    /// Endpoint request-head configuration was rejected by the LLM client.
+    Client(skein_llm::Error),
+    /// An LLM read demand exceeds TLS's delivered plaintext cap.
+    HttpReadTlsRead { demand: u32, cap: u32 },
+    /// An LLM upload demand exceeds TLS's plaintext room cap.
+    HttpSendTlsSend { demand: u32, cap: u32 },
+    /// A TLS read demand exceeds io's intake cap.
+    TlsReadIoIntake { demand: u32, cap: u32 },
+    /// A TLS write demand exceeds io's output cap.
+    TlsSendIoOutput { demand: u32, cap: u32 },
+    /// A plaintext HTTP read demand exceeds io's intake cap.
+    HttpReadIoIntake { demand: u32, cap: u32 },
+    /// A plaintext HTTP upload demand exceeds io's output cap.
+    HttpSendIoOutput { demand: u32, cap: u32 },
+    /// An SSE read demand exceeds the HTTP body's delivery cap.
+    SseChunkHttpRead { demand: u32, cap: u32 },
+    /// A tokenizer demand exceeds the SSE data face's delivery cap.
+    TokenizerDemandSseChunk { demand: u32, cap: u32 },
+    /// The pool cannot admit one largest call to this endpoint.
+    MemoryLargestCall { memory: u64, call: u64 },
     /// Plaintext was configured for an address outside loopback.
     PlaintextAddress,
 }

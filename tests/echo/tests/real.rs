@@ -27,8 +27,9 @@ fn the_echo_serves_refuses_and_idles_out_its_clients_on_the_real_ring() {
     let start = clock.now().now;
     let at = |ms: u64| start.saturating_add(Duration::from_millis(ms));
     let mut rng = Rng::new(7);
-    let mut limits = server(Duration::from_millis(20));
+    let mut limits = server();
     limits.protocol.idle = IDLE;
+    limits.protocol.spread = Duration::from_millis(20);
     let listen: Addr = "127.0.0.1:0".parse().expect("an address");
 
     // Three connections at once against two sessions, each of eight lines
@@ -68,15 +69,52 @@ fn the_echo_serves_refuses_and_idles_out_its_clients_on_the_real_ring() {
     expect.push(Expect::Finished { at: 2, conn: 0, by });
     expect.push(Expect::Finished { at: 2, conn: 1, by });
 
-    let procs = vec![
-        Proc::echo(limits, listen, rng.next_u64()),
-        Proc::client(client_limits(3), &first),
-        Proc::client(client_limits(2), &second),
-    ];
-    let referee = EchoReferee::new(7, expect, Shutdown::WhenDone);
-    let outcome = real::run(procs, referee, &clock, Duration::from_secs(10));
+    let mut world = real::World::new_controlled(|controls| EchoReferee::new(7, expect, Shutdown::WhenDone, controls));
+    world.spawn_signals(|signal| {
+        let mut proc = Proc::echo(limits, listen, rng.next_u64());
+        match &mut proc {
+            Proc::Echo { svc, .. } => svc.svc.adopt_signals(signal).expect("signal slot"),
+            Proc::Client { .. } => unreachable!("echo"),
+        }
+        proc
+    });
+    world.spawn(|| Proc::client(client_limits(3), &first));
+    world.spawn(|| Proc::client(client_limits(2), &second));
+    let outcome = world.run(&clock, Duration::from_secs(10));
     let took = outcome.end.saturating_since(outcome.start);
     assert!(took < Duration::from_secs(5), "over within five seconds: {} ms", took.as_nanos() / 1_000_000);
     let seen = outcome.procs[2].as_client().expect("a fake client").seen(0);
     assert_eq!(seen.answered, 2, "the lines before the long one were answered");
+}
+
+#[test]
+fn the_shipped_idle_time_does_not_delay_the_real_echo_shutdown() {
+    let clock = Clock::new();
+    let start = clock.now().now;
+    let at = |ms| start.saturating_add(Duration::from_millis(ms));
+    let expect = vec![
+        Expect::Served { at: 1, conn: 0, by: at(100) },
+        Expect::Ends { at: 1, conn: 0, by: at(500) },
+        Expect::Finished { at: 1, conn: 0, by: at(500) },
+    ];
+    let limits = server();
+    assert_eq!(limits.protocol.idle, skein_echo_shell::limits().protocol.idle);
+    assert_eq!(limits.protocol.spread, skein_echo_shell::limits().protocol.spread);
+    let mut world =
+        real::World::new_controlled(|controls| EchoReferee::new(19, expect, Shutdown::At(at(100)), controls));
+    world.spawn_signals(|signal| {
+        let mut proc = Proc::echo(limits, "127.0.0.1:0".parse().expect("loopback"), 19);
+        match &mut proc {
+            Proc::Echo { svc, .. } => svc.svc.adopt_signals(signal).expect("signal slot"),
+            Proc::Client { .. } => unreachable!("echo"),
+        }
+        proc
+    });
+    let plans = [Plan { lines: 1, then: Then::Linger, ..plan(start, 19) }];
+    world.spawn(|| Proc::client(client_limits(1), &plans));
+    let outcome = world.run(&clock, Duration::from_secs(1));
+    assert!(
+        outcome.end.saturating_since(outcome.start) < Duration::from_millis(500),
+        "the owner drain, rather than the shipped idle time, ends the echo"
+    );
 }

@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use skein_lib::Token;
 use skein_lib::stream::{self, Fault};
 
-use crate::kernel::{self, Addr, Exit, ServiceSignal, Signal, Spawn};
+use crate::kernel::{self, Addr, Exit, ServiceSignal, Signal, Spawn, Target};
 
 /// What the layer above asks of io. Each names an entity by a token: its
 /// owner's, for an entity it asks io to make, and io's (from `Listening`,
@@ -40,11 +40,13 @@ pub enum Request {
     },
     /// Start a child, returning its pidfd-backed token and pipe tokens.
     Spawn { owner: Token, spawn: Spawn },
-    /// Send a signal to a child by its token.
-    Signal { child: Token, signal: Signal },
+    /// An owner signals its child or group, before closing the child.
+    Signal { child: Token, signal: Signal, to: Target },
+    /// Reads this process and its reaped children at submit: exactly one `Usage` terminal.
+    Usage { owner: Token },
     // Files, processes and signals (io.md, 5 to 7) go here when a user pulls
     // them: File { owner, root, op }, Spawn { owner, spawn },
-    // Signal { child, signal }.
+    // Signal { child, signal, to }.
     /// A graceful close (io.md, 3): the output flushed and half-closed, the
     /// input discarded until the peer ends or the close deadline passes. On
     /// the classic face only `Closed` follows; a pending native output right
@@ -107,6 +109,11 @@ pub enum Event {
         owner: Token,
         exit: Exit,
     },
+    /// The resource record requested by the owner; a `Usage` request's terminal.
+    Usage {
+        owner: Token,
+        usage: Measured,
+    },
     /// A blocked termination signal delivered through the service's signalfd
     /// (io.md, section 7). It names no entity owner: the service itself
     /// handles the shutdown request.
@@ -149,6 +156,15 @@ pub enum Error {
     /// Anything else the kernel answered, which the layer above cannot act on:
     /// an address in use, or not this host's, among others.
     Other,
+}
+
+/// What a process resource read returned (io.md, section 6.1).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Measured {
+    /// The kernel read the process's own usage and its reaped children's.
+    Read(kernel::Usage),
+    /// The kernel could not read usage, answering its permitted `Other` error.
+    Unread,
 }
 
 /// The `Error` of a `Socket`, `Bind` or `Listen` that failed.

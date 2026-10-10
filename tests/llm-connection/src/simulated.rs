@@ -22,8 +22,10 @@ fn limits(calls: u32) -> Limits {
     Limits {
         endpoints: 1,
         connections: calls,
+        calls,
         per_endpoint: calls,
-        idle_keep: Duration::from_secs(1),
+        memory: 16 * 1024 * 1024,
+        idle_keep: Duration::from_secs(300),
         io: io::Limits {
             sockets: calls,
             refusals: 1,
@@ -37,7 +39,6 @@ fn limits(calls: u32) -> Limits {
             retry: Duration::from_millis(1),
         },
         tls: skein_tls::client::Limits { read: 4096, send: 4096, records: skein_tls::client::MAX_RECORD },
-        llm: skein_llm_world::limits(),
     }
 }
 
@@ -55,12 +56,26 @@ pub struct Client {
     completions: Queue<kernel::Complete>,
     received: Vec<Event>,
     calls: u32,
-    input_bytes: usize,
+    input: usize,
+    completed: u32,
+    closed: bool,
+    bound: u64,
 }
 
 impl Client {
-    fn new(transport: Transport, calls: u32, input_bytes: usize) -> Self {
+    fn new(transport: Transport, calls: u32, input: usize) -> Self {
         let limits = limits(calls);
+        let mut endpoints = List::with_capacity(1);
+        endpoints
+            .push(Endpoint {
+                address: (Ipv4Addr::LOCALHOST, 80).into(),
+                transport: skein_llm_connection::Transport::Plaintext,
+                llm: skein_llm::Endpoint::codex(),
+                limits: skein_llm_world::limits(),
+                credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
+            })
+            .expect("endpoint bound");
+        let bound = skein_llm_connection::worst_case(&limits, &endpoints).expect("component bound");
         Self {
             io: io::Io::new(&limits.io),
             limits,
@@ -74,7 +89,10 @@ impl Client {
             completions: Queue::with_capacity(ROOM),
             received: Vec::with_capacity(32),
             calls,
-            input_bytes,
+            input,
+            completed: 0,
+            closed: false,
+            bound,
         }
     }
 
@@ -92,6 +110,8 @@ impl Client {
                     },
                 },
                 llm: call.endpoint,
+                limits: skein_llm_world::limits(),
+                credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
             })
             .expect("one endpoint");
         let mut component = Component::new(endpoints, &self.limits).expect("configured component");
@@ -101,11 +121,11 @@ impl Client {
             let call = skein_llm_world::call(token.raw());
             let mut prompt = call.prompt;
             prompt.instructions = CUE.into();
-            if self.input_bytes > 0 {
+            if self.input > 0 {
                 prompt.messages = Box::new([skein_llm::Message {
                     role: skein_llm::Role::User,
                     content: Box::new([skein_llm::Block::Text {
-                        text: vec![b'x'; self.input_bytes].into_boxed_slice(),
+                        text: vec![b'x'; self.input].into_boxed_slice(),
                         replay: None,
                     }]),
                 }]);
@@ -113,6 +133,7 @@ impl Client {
             component.down(
                 &env,
                 Request::Start {
+                    drop_reasoning: false,
                     call: token,
                     endpoint: 0,
                     prompt,
@@ -184,7 +205,22 @@ impl Host for Client {
                         &mut self.requests,
                     );
                 }
-                Event::Completed { .. } => {}
+                Event::Completed { .. } => {
+                    self.completed += 1;
+                    if self.completed == self.calls {
+                        self.component.as_mut().expect("started").down(
+                            &env,
+                            Request::Close,
+                            &mut self.events,
+                            &mut self.requests,
+                        );
+                    }
+                }
+                Event::Closed => {
+                    assert!(!self.closed, "one component Closed");
+                    assert_eq!(self.completed, self.calls);
+                    self.closed = true;
+                }
                 Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
                     panic!("positive call failed: {event:?}")
                 }
@@ -227,6 +263,11 @@ impl Host for Client {
             .flatten()
             .min()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.component.as_ref().and_then(Component::next_deadline)
+    }
+
     fn is_empty(&self) -> bool {
         self.io.is_empty()
             && self.io_events.is_empty()
@@ -234,11 +275,11 @@ impl Host for Client {
             && self.requests.is_empty()
             && self.submissions.is_empty()
             && self.completions.is_empty()
+            && self.closed
             && !self.component.as_ref().is_some_and(Component::has_work)
     }
     fn worst_case(&self) -> u64 {
-        skein_llm_connection::worst_case(&self.limits)
-            .expect("component bound")
+        self.bound
             .checked_add(io::worst_case(&self.limits.io).expect("io bound"))
             .expect("combined bound")
             .checked_add(u64::from(ROOM) * 256 + 32 * 131_072)
@@ -288,6 +329,14 @@ impl Host for Process {
             Self::Peer(peer) => peer.next_deadline(),
         }
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        match self {
+            Self::Client(client) => client.next_policy_deadline(),
+            Self::Peer(peer) => peer.next_policy_deadline(),
+        }
+    }
+
     fn is_empty(&self) -> bool {
         match self {
             Self::Client(client) => client.is_empty(),
@@ -315,8 +364,9 @@ struct Judge {
     calls: u32,
     answer: Vec<u8>,
     passed: bool,
+    teardown_started: bool,
     query_times: std::collections::BTreeMap<Token, Time>,
-    input_bytes: usize,
+    input: usize,
 }
 
 impl Referee<Process> for Judge {
@@ -334,6 +384,7 @@ impl Referee<Process> for Judge {
                 Process::Peer(peer) => {
                     if self.passed {
                         peer.shutdown();
+                        self.teardown_started = true;
                     }
                 }
             }
@@ -341,11 +392,13 @@ impl Referee<Process> for Judge {
     }
     fn observe(&mut self, now: Time, processes: &[Process]) {
         let mut completed = 0;
+        let mut client_closed = false;
         let mut queries = 0;
         let mut answers = 0;
         for process in processes {
             match process {
                 Process::Client(client) => {
+                    client_closed = client.closed;
                     for event in &client.received {
                         if let Event::Completed { completion, .. } = event {
                             assert_eq!(completion.content.len(), 1, "one literal scripted block");
@@ -358,7 +411,10 @@ impl Referee<Process> for Judge {
                                 block @ (skein_llm::Block::Refusal { .. }
                                 | skein_llm::Block::ToolCall { .. }
                                 | skein_llm::Block::ToolResult { .. }
-                                | skein_llm::Block::Reasoning { .. }) => {
+                                | skein_llm::Block::Reasoning { .. }
+                                | skein_llm::Block::Oversize { .. }
+                                | skein_llm::Block::Cut { .. }
+                                | skein_llm::Block::Dropped { .. }) => {
                                     panic!("expected scripted text, got {block:?}")
                                 }
                             }
@@ -372,12 +428,12 @@ impl Referee<Process> for Judge {
                             llm::Observation::Query { connection, query } => {
                                 assert_eq!(query.system.as_ref(), CUE);
                                 self.query_times.entry(*connection).or_insert(now);
-                                if self.input_bytes > 0 {
+                                if self.input > 0 {
                                     assert_eq!(query.messages.len(), 1);
                                     assert_eq!(query.messages[0].parts.len(), 1);
                                     match &query.messages[0].parts[0] {
                                         api::Part::Text { text } => {
-                                            assert_eq!(text.len(), self.input_bytes);
+                                            assert_eq!(text.len(), self.input);
                                             assert!(text.iter().all(|byte| *byte == b'x'));
                                         }
                                         part @ (api::Part::Opaque { .. }
@@ -398,6 +454,13 @@ impl Referee<Process> for Judge {
                                 );
                                 answers += 1;
                             }
+                            llm::Observation::Head { headers, .. } => {
+                                assert!(
+                                    headers.iter().any(|field| field.is(b"content-type")
+                                        && field.value.as_ref() == b"application/json")
+                                );
+                                assert!(headers.iter().any(|field| field.is(b"authorization")));
+                            }
                             llm::Observation::Accepted { .. } | llm::Observation::Closed { .. } => {}
                         }
                     }
@@ -408,10 +471,10 @@ impl Referee<Process> for Judge {
             completed <= self.calls && queries <= self.calls && answers <= self.calls,
             "unique calls and terminals"
         );
-        self.passed = completed == self.calls && queries == self.calls && answers == self.calls;
+        self.passed = client_closed && completed == self.calls && queries == self.calls && answers == self.calls;
     }
     fn next_deadline(&self) -> Option<Time> {
-        if !self.activated {
+        if !self.activated || (self.passed && !self.teardown_started) {
             Some(Time::ZERO)
         } else if self.passed {
             None
@@ -442,7 +505,21 @@ pub fn run_with_input(
     transport: Transport,
     large: bool,
     memory: Memory,
-    input_bytes: usize,
+    input: usize,
+) -> Outcome<Process> {
+    run_with_shutdown(seed, faulted, transport, large, memory, input, false)
+}
+
+/// A live peer that ignores half-close waits for io to settle the client.
+#[must_use]
+pub fn run_with_shutdown(
+    seed: u64,
+    faulted: bool,
+    transport: Transport,
+    large: bool,
+    memory: Memory,
+    input: usize,
+    ignore_half_close: bool,
 ) -> Outcome<Process> {
     let calls = if large { 2 } else { 1 };
     let answer = if large { vec![b'x'; 2048] } else { b"simulated answer".to_vec() };
@@ -451,8 +528,9 @@ pub fn run_with_input(
         calls,
         answer: answer.clone(),
         passed: false,
+        teardown_started: false,
         query_times: std::collections::BTreeMap::new(),
-        input_bytes,
+        input,
     };
     let mut config = Config::calm();
     config.wall = skein_tls_world::pki::VALID;
@@ -464,7 +542,7 @@ pub fn run_with_input(
     let mut world = World::new(seed, config, judge, memory);
     world.spawn(|| {
         let client_limits = limits(calls);
-        let protocol_limits = skein_llm_world::fake::limits(&client_limits.llm);
+        let protocol_limits = skein_llm_world::fake::limits(&skein_llm_world::limits());
         let mut domain_limits = skein_llm_world::fake::config();
         domain_limits.calls = calls;
         domain_limits.answer_bytes =
@@ -496,14 +574,16 @@ pub fn run_with_input(
             queue: 64,
             plaintext: 32_768,
             ciphertext: 32_768,
-            observations: calls * 4,
+            observations: calls * 5,
             observation_bytes: calls * 32_768,
         };
-        let peer = llm::Peer::new(
+        let mut peer = llm::Peer::new(
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             transport,
             limits,
             provider::Config {
+                usage_fields: skein_fake_llm_protocol::documents::UsageFields::ALL,
+                echo: skein_llm::openai::Echo::NONE,
                 provider: documents::Provider::OpenAi,
                 path: skein_llm::Endpoint::codex().target,
                 headers: Box::new([]),
@@ -514,9 +594,12 @@ pub fn run_with_input(
             domain_limits,
         )
         .expect("bounded independent process");
+        if ignore_half_close {
+            peer.ignore_half_close();
+        }
         Process::Peer(Box::new(peer))
     });
-    world.spawn(|| Process::Client(Box::new(Client::new(transport, calls, input_bytes))));
+    world.spawn(|| Process::Client(Box::new(Client::new(transport, calls, input))));
     world.run()
 }
 

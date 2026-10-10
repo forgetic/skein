@@ -38,17 +38,17 @@ fn live_limits() -> client::Limits {
     limits.http.headers = 64;
     limits.http.read = 4096;
     limits.http.send = 4096;
-    limits.sse.line = 262_144;
-    limits.sse.event = 524_288;
+    limits.skip = 262_144;
+    limits.skip = 524_288;
     limits.sse.chunk = 4096;
-    limits.dialect.request_bytes = 524_288;
-    limits.dialect.document_bytes = 524_288;
-    limits.dialect.string_bytes = 262_144;
-    limits.dialect.tokens = 32_768;
-    limits.dialect.parts = 64;
-    limits.dialect.input_bytes = 262_144;
-    limits.dialect.opaque_bytes = 262_144;
-    limits.dialect.answer_bytes = 524_288;
+    limits.request = 524_288;
+    limits.retained = 524_288;
+    limits.strings = 262_144;
+    limits.tokens = 32_768;
+    limits.output_items = 64;
+    limits.input = 262_144;
+    limits.reasoning = 262_144;
+    limits.answer = 524_288;
     limits.error_bytes = 8192;
     limits
 }
@@ -103,7 +103,8 @@ fn input(provider: Provider, owner: u64) -> Call {
             tools: Box::new([]),
             messages: Box::new([text_message("Reply with exactly: skein-live-ok")]),
             reasoning_effort: effort,
-            cache_key: None,
+            affinity: None,
+            choice: skein_llm::ToolChoice::Auto,
             max_output_tokens: max_tokens,
         },
     }
@@ -283,7 +284,10 @@ fn completion(events: &[client::Event]) -> Completion {
         })
         .collect();
     assert_eq!(blocks.as_slice(), completion.content.as_ref(), "completed blocks preserve stream order");
-    assert!(completion.usage.input_tokens > 0 && completion.usage.output_tokens > 0, "real token usage");
+    assert!(
+        completion.usage.input.is_some_and(|count| count > 0) && completion.usage.output.is_some_and(|count| count > 0),
+        "real token usage"
+    );
     assert_eq!(events.iter().filter(|event| matches!(event, client::Event::Reusable)).count(), 1);
     completion.clone()
 }
@@ -295,9 +299,13 @@ fn assert_text(events: &[client::Event], expected: &str) -> Completion {
         .iter()
         .flat_map(|block| match block {
             Block::Text { text, .. } => text.to_vec(),
-            Block::Refusal { .. } | Block::ToolCall { .. } | Block::ToolResult { .. } | Block::Reasoning { .. } => {
-                Vec::new()
-            }
+            Block::Refusal { .. }
+            | Block::ToolCall { .. }
+            | Block::ToolResult { .. }
+            | Block::Reasoning { .. }
+            | Block::Oversize { .. }
+            | Block::Cut { .. }
+            | Block::Dropped { .. } => Vec::new(),
         })
         .collect();
     let deltas: Vec<u8> = events
@@ -345,7 +353,7 @@ fn tool_round_trip(provider: Provider) {
     first.prompt.tools = Box::new([Tool {
         name: bytes("skein_lookup"),
         description: bytes("Returns the secret test value for a key. You must call this to discover the value."),
-        schema: Json::from_bytes(br#"{"type":"object","properties":{"key":{"type":"string","enum":["live"]}},"required":["key"],"additionalProperties":false}"#, &live_limits().dialect).expect("valid tool schema or arguments"),
+        schema: Json::from_bytes(br#"{"type":"object","properties":{"key":{"type":"string","enum":["live"]}},"required":["key"],"additionalProperties":false}"#, &(live_limits().native()).document()).expect("valid tool schema or arguments"),
     }]);
     let tools = first.prompt.tools.clone();
     let mut history = first.prompt.messages.to_vec();
@@ -358,16 +366,22 @@ fn tool_round_trip(provider: Provider) {
         .iter()
         .filter_map(|block| match block {
             Block::ToolCall { id, name, arguments, .. } => Some((id, name, arguments)),
-            Block::Text { .. } | Block::Refusal { .. } | Block::ToolResult { .. } | Block::Reasoning { .. } => None,
+            Block::Text { .. }
+            | Block::Refusal { .. }
+            | Block::ToolResult { .. }
+            | Block::Reasoning { .. }
+            | Block::Oversize { .. }
+            | Block::Cut { .. }
+            | Block::Dropped { .. } => None,
         })
         .collect();
     assert_eq!(calls.len(), 1, "one requested tool call");
     let (id, name, arguments) = calls[0];
     assert!(!id.is_empty());
     assert_eq!(name.as_ref(), b"skein_lookup");
-    let parsed = Json::from_bytes(arguments, &live_limits().dialect).expect("complete tool JSON");
-    let expected =
-        Json::from_bytes(br#"{"key":"live"}"#, &live_limits().dialect).expect("valid tool schema or arguments");
+    let parsed = Json::from_bytes(arguments, &(live_limits().native()).document()).expect("complete tool JSON");
+    let expected = Json::from_bytes(br#"{"key":"live"}"#, &(live_limits().native()).document())
+        .expect("valid tool schema or arguments");
     assert_eq!(parsed, expected);
     let argument_deltas: Vec<u8> = events
         .iter()
@@ -414,7 +428,11 @@ fn unauthorized(provider: Provider) {
             | client::Event::Closed => None,
         })
         .collect();
-    assert_eq!(failures, [(Failure::Unauthorized, client::Evidence::Response)], "real auth failure: {events:?}");
+    assert_eq!(
+        failures,
+        [(Failure::Unauthorized, client::Evidence::Response { status: 401 })],
+        "real auth failure: {events:?}"
+    );
     assert!(!events.iter().any(|event| matches!(event, client::Event::Completed { .. })));
 }
 #[test]

@@ -44,7 +44,7 @@ fn a_file_is_made_written_read_listed_renamed_and_removed_through_the_machine() 
     assert_eq!(world.write(pid, file, 0, b"abcdef"), Ok(Done::Count(6)));
     assert_eq!(world.write(pid, file, 8, b"Z"), Ok(Done::Count(1)), "past the end: zeros fill the gap");
     assert_eq!(world.call(pid, Op::Sync { fd: file }).result, Ok(Done::Nothing));
-    assert_eq!(world.stat(pid, file), Ok(Stat { kind: Kind::File, size: 9, mode: 0o644 }));
+    assert_eq!(world.stat(pid, file), Ok(Stat { kind: Kind::File, size: 9, mode: 0o644, owner: 1000, links: 1 }));
     world.close(pid, file);
     let file = world.open(pid, root, b"new", OpenHow::Read).unwrap();
     assert_eq!(world.read(pid, file, 2, 64), Ok(b"cdef\0\0Z".to_vec()));
@@ -117,7 +117,7 @@ fn each_failure_falls_on_the_operations_that_may_answer_it() {
     let (mut world, pid, root) = faulty(every);
     assert_eq!(world.open(pid, root, b"new", OpenHow::Create { mode: None }), Err(Error::NoSpace));
     assert_eq!(world.open(pid, root, b"a.txt", OpenHow::Read).map(|_| ()).err(), None, "not on a read");
-    let make = Op::MakeDirectory { dir: root, name: Box::from(&b"m"[..]) };
+    let make = Op::MakeDirectory { dir: root, name: Box::from(&b"m"[..]), mode: 0o777 };
     assert_eq!(world.call(pid, make).result, Err(Error::NoSpace));
     let fds = world.sim.open_fds(pid);
     assert_eq!(fds, 2, "the root and the file read");
@@ -353,7 +353,7 @@ fn a_close_of_either_directory_of_a_rename_in_flight() {
 #[should_panic(expected = "an invalid record")]
 fn a_name_that_could_leave_its_directory() {
     let (mut world, pid, root) = rooted();
-    world.submit(pid, Op::MakeDirectory { dir: root, name: Box::from(&b"../out"[..]) });
+    world.submit(pid, Op::MakeDirectory { dir: root, name: Box::from(&b"../out"[..]), mode: 0o777 });
 }
 
 #[test]
@@ -432,4 +432,89 @@ fn a_ticket_and_a_handle_are_plain_values() {
     assert_eq!(Handle::new(7).raw(), 7);
     let _ = Token::new(1);
     let _: Option<Ticket> = None;
+}
+
+#[test]
+fn two_append_descriptors_select_the_end_when_the_machine_receives_each_piece() {
+    let (mut world, pid, root) = rooted();
+    let a = world.append(pid, root, b"a.txt", 0o600);
+    let b = world.append(pid, root, b"a.txt", 0o600);
+    world.serving = false;
+    let first = world.submit(pid, Op::append(a, Box::from(&b"-first"[..]), 0).unwrap());
+    let second = world.submit(pid, Op::append(b, Box::from(&b"-second"[..]), 0).unwrap());
+    let mut calls = Queue::with_capacity(2);
+    world.sim.calls(&mut calls);
+    let first_call = calls.pop().unwrap();
+    let second_call = calls.pop().unwrap();
+    assert!(matches!(first_call.ask, Ask::Append { .. }));
+    assert!(matches!(second_call.ask, Ask::Append { .. }));
+    // Deliver in reverse order: the end is selected at execution, not submission.
+    let mut answers = Queue::with_capacity(2);
+    skein_fake_machine::step(&mut world.machine, second_call, &mut answers);
+    skein_fake_machine::step(&mut world.machine, first_call, &mut answers);
+    world.sim.answer(&mut answers);
+    let completed = world.reap(pid);
+    assert_eq!(completed.len(), 2);
+    assert!(completed.iter().any(|complete| complete.op == first && complete.result == Ok(Done::Count(6))));
+    assert!(completed.iter().any(|complete| complete.op == second && complete.result == Ok(Done::Count(7))));
+    world.serving = true;
+    let reader = world.open(pid, root, b"a.txt", OpenHow::Read).unwrap();
+    assert_eq!(world.read(pid, reader, 0, 64).unwrap(), b"hello-second-first");
+    close_all(&mut world, pid, &[a, b, reader, root]);
+}
+
+#[test]
+fn a_hung_append_asks_the_machine_nothing_and_is_stopped_by_cancel() {
+    let (mut world, pid, root) = faulty(Faults { hung: 1000, ..Faults::NONE });
+    let file = world.append(pid, root, b"a.txt", 0o600);
+    let target = world.submit(pid, Op::append(file, Box::from(&b"unwritten"[..]), 0).unwrap());
+    assert_eq!(world.sim.calls_waiting(), 0);
+    assert!(world.reap(pid).is_empty());
+    let cancel = world.submit(pid, Op::Cancel { target });
+    let completed = world.reap(pid);
+    assert_eq!(completed.len(), 2);
+    assert!(completed.iter().any(|complete| complete.op == target && complete.result == Err(Error::Cancelled)));
+    assert!(completed.iter().any(|complete| complete.op == cancel && complete.result == Ok(Done::Nothing)));
+    close_all(&mut world, pid, &[file, root]);
+}
+
+#[test]
+#[should_panic(expected = "a second Append in flight")]
+fn a_second_append_in_flight_breaks_the_contract() {
+    let (mut world, pid, root) = faulty(Faults { hung: 1000, ..Faults::NONE });
+    let file = world.append(pid, root, b"a.txt", 0o600);
+    world.submit(pid, Op::append(file, Box::from(&b"a"[..]), 0).unwrap());
+    world.submit(pid, Op::append(file, Box::from(&b"b"[..]), 0).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "an Append on a descriptor not opened to write")]
+fn an_append_on_a_read_descriptor_breaks_the_contract() {
+    let (mut world, pid, root) = rooted();
+    let file = world.open(pid, root, b"a.txt", OpenHow::Read).unwrap();
+    world.submit(pid, Op::append(file, Box::from(&b"a"[..]), 0).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "only Stat and Close may use a path-only descriptor")]
+fn path_only_descriptors_cannot_read() {
+    let (mut world, pid, root) = rooted();
+    let path = world.open(pid, root, b"a.txt", OpenHow::PathNoFollow).unwrap();
+    world.submit(pid, Op::Read { fd: path, buf: Box::from([0; 1]), at: 0 });
+}
+
+#[test]
+#[should_panic(expected = "only Stat and Close may use a path-only descriptor")]
+fn path_only_descriptors_cannot_sync() {
+    let (mut world, pid, root) = rooted();
+    let path = world.open(pid, root, b"a.txt", OpenHow::PathNoFollow).unwrap();
+    world.submit(pid, Op::Sync { fd: path });
+}
+
+#[test]
+#[should_panic(expected = "only Stat and Close may use a path-only descriptor")]
+fn path_only_descriptors_cannot_be_roots() {
+    let (mut world, pid, root) = rooted();
+    let path = world.open(pid, root, b"d", OpenHow::PathNoFollow).unwrap();
+    world.submit(pid, Op::Open { root: path, path: Box::from(&b"inner"[..]), how: OpenHow::Read });
 }

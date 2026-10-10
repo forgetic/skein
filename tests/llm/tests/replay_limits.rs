@@ -42,7 +42,7 @@ fn raw(kind: Kind) -> &'static [u8] {
 
 fn admitted(kind: Kind, owner: u64) {
     let mut bounds = limits();
-    bounds.dialect.opaque_bytes = u32::try_from(raw(kind).len()).expect("tiny expected metadata");
+    bounds.metadata = u32::try_from(raw(kind).len()).expect("tiny expected metadata");
     let mut world = World::new(call(owner), bounds, source(kind), 1);
     world.fragmentation(1, 1);
     world.request(client::Request::Start);
@@ -83,10 +83,20 @@ fn admitted(kind: Kind, owner: u64) {
             assert_eq!(arguments.as_ref(), b"{}");
             replay.as_ref().expect("complete actual item ID")
         }
-        Block::ToolResult { .. } | Block::Reasoning { .. } => panic!("expected native item metadata"),
+        Block::ToolResult { .. }
+        | Block::Reasoning { .. }
+        | Block::Oversize { .. }
+        | Block::Cut { .. }
+        | Block::Dropped { .. } => {
+            panic!("expected native item metadata")
+        }
     };
-    assert_eq!(replay.value.to_bytes(&bounds.dialect).expect("actual replay serialization").as_ref(), raw(kind));
-    let envelope = replay.to_bytes(&bounds.dialect).expect("every admitted actual replay fits its envelope");
+    assert_eq!(
+        replay.value.to_bytes(&bounds.native().document()).expect("actual replay serialization").as_ref(),
+        raw(kind)
+    );
+    let envelope =
+        replay.to_bytes(&bounds.native().document()).expect("every admitted actual replay fits its envelope");
     assert_eq!(envelope.len(), raw(kind).len() + usize::try_from(skein_llm::REPLAY_HEADER_BYTES).expect("tiny header"));
     assert_eq!(world.machine.waiting(), client::Waiting::Idle);
     assert!(world.seen.iter().any(|event| matches!(event, client::Event::Reusable)));
@@ -99,7 +109,7 @@ fn admitted(kind: Kind, owner: u64) {
 
 fn refused(kind: Kind, owner: u64) {
     let mut bounds = limits();
-    bounds.dialect.opaque_bytes = u32::try_from(raw(kind).len() - 1).expect("positive tiny cap");
+    bounds.metadata = u32::try_from(raw(kind).len() - 1).expect("positive tiny cap");
     let mut world = World::new(call(owner), bounds, source(kind), 1);
     world.fragmentation(1, 1);
     world.request(client::Request::Start);
@@ -119,8 +129,8 @@ fn refused(kind: Kind, owner: u64) {
         panic!("one-over raw metadata produces actual Limit, never a completed value");
     };
     assert_eq!(*actual, Token::new(owner));
-    assert_eq!(*failure, Failure::Limit);
-    assert_eq!(*evidence, client::Evidence::Response);
+    assert_eq!(*failure, Failure::Limit { which: skein_llm::Cap::Metadata, bound: u64::from(bounds.metadata) });
+    assert_eq!(*evidence, client::Evidence::Response { status: 200 });
     assert!(
         !world.seen.iter().any(|event| matches!(event, client::Event::Block { .. })),
         "over-cap metadata cannot escape in a completed block"

@@ -7,14 +7,25 @@ use skein_lib::Time;
 
 use crate::boundary::Deadlines;
 
-/// Which configured wait expired. All produce the client's timed-out failure.
+/// The call or connection phase, selecting all armed deadlines in one place.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Phase {
+    Waiting,
+    Connecting,
+    Handshaking,
+    Head,
+    Streaming,
+    Draining,
+    Idle,
+    Closing,
+    Closed,
+}
+
+/// Which deadline passed: a call deadline or an idle connection keep.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Due {
-    Connect,
-    Handshake,
-    Head,
-    Idle,
-    Whole,
+    Call(skein_llm::Phase),
+    Keep,
 }
 
 /// One call's absolute deadlines and arming state.
@@ -26,8 +37,7 @@ pub(crate) struct Table {
     head: Option<Time>,
     idle: Option<Time>,
     whole: Option<Time>,
-    request_started: bool,
-    response_seen: bool,
+    keep: Option<Time>,
 }
 
 impl Table {
@@ -39,48 +49,40 @@ impl Table {
             head: None,
             idle: None,
             whole: at(now, config.whole),
-            request_started: false,
-            response_seen: false,
+            keep: None,
         }
     }
 
-    pub(crate) fn connected(&mut self, now: Time) {
-        self.connect = None;
-        self.handshake = at(now, self.config.handshake);
-    }
-
-    pub(crate) fn ready(&mut self) {
-        self.connect = None;
-        self.handshake = None;
+    /// Reconcile the complete deadline set after every phase transition.
+    pub(crate) fn arm(&mut self, phase: Phase, now: Time, idle_keep: skein_lib::Duration) {
+        let (connect, handshake, head, idle, whole, keep) = match phase {
+            Phase::Waiting => (false, false, false, false, true, false),
+            Phase::Connecting => (true, false, false, false, true, false),
+            Phase::Handshaking => (false, true, false, false, true, false),
+            Phase::Head => (false, false, true, false, true, false),
+            Phase::Streaming => (false, false, false, true, true, false),
+            Phase::Draining => (false, false, false, true, false, false),
+            Phase::Idle => (false, false, false, false, false, true),
+            Phase::Closing | Phase::Closed => (false, false, false, false, false, false),
+        };
+        self.connect = selected(self.connect, connect, now, self.config.connect);
+        self.handshake = selected(self.handshake, handshake, now, self.config.handshake);
+        if !head {
+            self.head = None;
+        }
+        self.idle = selected(self.idle, idle, now, self.config.idle);
+        if !whole {
+            self.whole = None;
+        }
+        self.keep = selected(self.keep, keep, now, Some(idle_keep));
     }
 
     pub(crate) fn sent(&mut self, now: Time) {
-        if !self.request_started {
-            self.request_started = true;
-            self.head = at(now, self.config.head);
-        }
-    }
-
-    pub(crate) fn response(&mut self, now: Time) {
-        if !self.response_seen {
-            self.response_seen = true;
-            self.head = None;
-            self.idle = at(now, self.config.idle);
-        }
+        self.head = at(now, self.config.head);
     }
 
     pub(crate) fn activity(&mut self, now: Time) {
-        if self.response_seen {
-            self.idle = at(now, self.config.idle);
-        }
-    }
-
-    pub(crate) fn terminal(&mut self) {
-        self.connect = None;
-        self.handshake = None;
-        self.head = None;
-        self.idle = None;
-        self.whole = None;
+        self.idle = at(now, self.config.idle);
     }
 
     pub(crate) fn next(&self) -> Option<Time> {
@@ -88,20 +90,23 @@ impl Table {
         earliest = earlier(earliest, self.handshake);
         earliest = earlier(earliest, self.head);
         earliest = earlier(earliest, self.idle);
-        earlier(earliest, self.whole)
+        earliest = earlier(earliest, self.whole);
+        earlier(earliest, self.keep)
     }
 
     pub(crate) fn due(&self, now: Time) -> Option<Due> {
         if expired(self.connect, now) {
-            Some(Due::Connect)
+            Some(Due::Call(skein_llm::Phase::Connect))
         } else if expired(self.handshake, now) {
-            Some(Due::Handshake)
+            Some(Due::Call(skein_llm::Phase::Handshake))
         } else if expired(self.head, now) {
-            Some(Due::Head)
+            Some(Due::Call(skein_llm::Phase::Head))
         } else if expired(self.idle, now) {
-            Some(Due::Idle)
+            Some(Due::Call(skein_llm::Phase::Idle))
         } else if expired(self.whole, now) {
-            Some(Due::Whole)
+            Some(Due::Call(skein_llm::Phase::Whole))
+        } else if expired(self.keep, now) {
+            Some(Due::Keep)
         } else {
             None
         }
@@ -130,5 +135,87 @@ fn expired(deadline: Option<Time>, now: Time) -> bool {
     match deadline {
         Some(deadline) => now >= deadline,
         None => false,
+    }
+}
+
+fn selected(previous: Option<Time>, enabled: bool, now: Time, duration: Option<skein_lib::Duration>) -> Option<Time> {
+    if enabled {
+        match previous {
+            Some(previous) => Some(previous),
+            None => at(now, duration),
+        }
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skein_lib::Duration;
+
+    #[test]
+    fn every_phase_selects_its_complete_deadline_set() {
+        let duration = Some(Duration::from_secs(1));
+        let config =
+            Deadlines { connect: duration, handshake: duration, head: duration, idle: duration, whole: duration };
+        for (phase, expected) in [
+            (Phase::Waiting, [false, false, false, false, true, false]),
+            (Phase::Connecting, [true, false, false, false, true, false]),
+            (Phase::Handshaking, [false, true, false, false, true, false]),
+            (Phase::Head, [false, false, true, false, true, false]),
+            (Phase::Streaming, [false, false, false, true, true, false]),
+            (Phase::Draining, [false, false, false, true, false, false]),
+            (Phase::Idle, [false, false, false, false, false, true]),
+            (Phase::Closing, [false; 6]),
+            (Phase::Closed, [false; 6]),
+        ] {
+            let mut table = Table::new(config, Time::ZERO);
+            table.sent(Time::ZERO);
+            table.arm(phase, Time::ZERO, Duration::from_secs(10));
+            assert_eq!(
+                [
+                    table.connect.is_some(),
+                    table.handshake.is_some(),
+                    table.head.is_some(),
+                    table.idle.is_some(),
+                    table.whole.is_some(),
+                    table.keep.is_some()
+                ],
+                expected,
+                "{phase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_terminal_keeps_drain_idleness_and_closing_disarms_even_past_due_times() {
+        let mut table = Table::new(
+            Deadlines { idle: Some(Duration::from_secs(1)), whole: Some(Duration::from_secs(2)), ..Deadlines::none() },
+            Time::ZERO,
+        );
+        table.arm(Phase::Streaming, Time::ZERO, Duration::from_secs(10));
+        table.arm(Phase::Draining, Time::ZERO, Duration::from_secs(10));
+        let later = Time::from_nanos(3_000_000_000);
+        assert_eq!(table.due(later), Some(Due::Call(skein_llm::Phase::Idle)));
+        table.arm(Phase::Closing, later, Duration::from_secs(10));
+        assert_eq!(table.next(), None);
+        assert_eq!(table.due(later), None);
+    }
+    #[test]
+    fn connecting_after_waiting_arms_connect_now_and_retains_the_original_whole() {
+        let mut table = Table::new(
+            Deadlines {
+                connect: Some(Duration::from_secs(1)),
+                whole: Some(Duration::from_secs(5)),
+                ..Deadlines::none()
+            },
+            Time::ZERO,
+        );
+        table.arm(Phase::Waiting, Time::ZERO, Duration::from_secs(10));
+        assert_eq!(table.next(), Some(Time::from_nanos(5_000_000_000)));
+        table.arm(Phase::Connecting, Time::from_nanos(3_000_000_000), Duration::from_secs(10));
+        assert_eq!(table.connect, Some(Time::from_nanos(4_000_000_000)));
+        assert_eq!(table.whole, Some(Time::from_nanos(5_000_000_000)));
     }
 }

@@ -12,13 +12,14 @@
 //! chaos, and count the outcomes each race shows over them
 //! (testing-strategy.md, 8).
 
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use skein_conformance::{
     Backend, Cancelling, Check, Item, Made, Race, cancel_accept_racing_a_connect, cancel_recv_racing_bytes,
 };
-use skein_fake_machine::{Machine, serve};
-use skein_io::kernel::{Complete, Fd, Submit};
+use skein_fake_machine::{How, Machine, Opened, serve};
+use skein_io::kernel::{Complete, Error, Fd, Submit};
 use skein_lib::{Duration, Queue, Time};
 use skein_sim::{Config, Faults, Handle, Pid, Sim};
 
@@ -39,12 +40,18 @@ pub struct Simulated {
     sim: Sim,
     machine: Machine,
     processes: Vec<Pid>,
+    roots: BTreeMap<(Pid, Fd), Opened>,
 }
 
 impl Simulated {
     #[must_use]
     pub fn new(seed: u64, config: Config) -> Simulated {
-        Simulated { sim: Sim::new(seed, config), machine: Machine::new(), processes: Vec::new() }
+        Simulated {
+            sim: Sim::new(seed, config),
+            machine: Machine::new(),
+            processes: Vec::new(),
+            roots: BTreeMap::new(),
+        }
     }
 
     #[must_use]
@@ -71,6 +78,19 @@ impl Backend for Simulated {
 
     fn reap(&mut self, process: Pid, completions: &mut Queue<Complete>) {
         self.sim.reap(process, completions);
+        for complete in completions.iter() {
+            if let Ok(skein_io::kernel::Done::Spawned { pidfd }) = complete.result {
+                self.sim.set_child_usage(
+                    process,
+                    pidfd,
+                    skein_io::kernel::Resources {
+                        user: Duration::from_millis(1),
+                        system: Duration::from_millis(1),
+                        peak_rss_bytes: 4096,
+                    },
+                );
+            }
+        }
     }
 
     fn now(&self) -> Time {
@@ -109,6 +129,15 @@ impl Backend for Simulated {
         assert_eq!(self.machine.open_handles(), 0, "the machine has nothing open once every descriptor closed");
     }
 
+    fn append(&mut self, process: Pid, root: Fd, path: &[u8], mode: u32) -> Result<Fd, Error> {
+        if mode & !0o7777 != 0 || path.is_empty() || path.contains(&0) {
+            return Err(Error::InvalidArgument);
+        }
+        let root = *self.roots.get(&(process, root)).expect("a startup root");
+        let opened = self.machine.open(root, path, How::Append { mode }).map_err(skein_fake_machine::kernel_error)?;
+        Ok(self.sim.append(process, Handle::new(opened.raw())))
+    }
+
     /// A root laid in the machine, its handle given to the process.
     fn root(&mut self, process: Pid, tree: &[Item]) -> Fd {
         let mut items = Vec::new();
@@ -117,12 +146,15 @@ impl Backend for Simulated {
                 Made::File(bytes) => skein_fake_machine::Made::File(bytes.clone()),
                 Made::Directory => skein_fake_machine::Made::Directory,
                 Made::Link(target) => skein_fake_machine::Made::Link(target.clone()),
+                Made::HardLink(target) => skein_fake_machine::Made::HardLink(target.clone()),
                 Made::Fifo => skein_fake_machine::Made::Fifo,
             };
-            items.push(skein_fake_machine::Item { path: item.path.clone(), made, mode: item.mode });
+            items.push(skein_fake_machine::Item { owner: None, path: item.path.clone(), made, mode: item.mode });
         }
         let opened = self.machine.lay(&items);
-        self.sim.root(process, Handle::new(opened.raw()))
+        let fd = self.sim.root(process, Handle::new(opened.raw()));
+        self.roots.insert((process, fd), opened);
+        fd
     }
 }
 

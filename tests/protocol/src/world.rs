@@ -190,6 +190,10 @@ pub struct Fell {
 /// A process of the world: an end, the client's or the server's. The
 /// world holds the client's first.
 #[derive(Debug)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the test process directly owns each endpoint and its differently sized stack"
+)]
 pub enum Proc {
     Client(client_end::End),
     Server(server_end::End),

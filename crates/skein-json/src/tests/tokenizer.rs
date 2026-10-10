@@ -502,3 +502,116 @@ fn a_scan_past_its_maximum_is_the_side_belows_bug() {
     drop(machine.bytes(b"\""));
     drop(machine.bytes(b"bcdefghij\""));
 }
+
+/// Reads scripted demands through the same stream contract as the ordinary driver.
+fn scripted(document: &[u8], limits: Limits, requests: &[Request]) -> Vec<Event> {
+    let mut machine = Machine::new(limits);
+    let mut intake = skein_lib::Intake::with_capacity(document.len().try_into().unwrap());
+    intake.append(document).unwrap();
+    let mut events = Vec::new();
+    for &request in requests {
+        let (mut event, mut demanded) = machine.down(request);
+        for _ in 0..document.len().checked_mul(4).unwrap().checked_add(8).unwrap() {
+            if let Some(answer) = event.take() {
+                events.push(answer);
+                break;
+            }
+            let Some(skein_lib::stream::Down::Demand { read, room: 0 }) = demanded.take() else {
+                panic!("a pending demand reads below");
+            };
+            (event, demanded) = machine.up(match intake.meet(read) {
+                Some(bytes) => Up::Bytes(bytes),
+                None => Up::End,
+            });
+        }
+    }
+    events
+}
+
+#[test]
+fn text_keeps_only_strings_that_fit_and_counts_decoded_bytes() {
+    for cap in 0..=6 {
+        let events = scripted(
+            br#"["abc", "\u0041\n\uD83D\uDE00", true]"#,
+            LIMITS,
+            &[Request::Next, Request::Text(cap), Request::Text(cap), Request::Text(cap), Request::Next, Request::Next],
+        );
+        assert_eq!(events[1], if cap < 3 { Event::Long(3) } else { Event::Token(string(b"abc")) });
+        assert_eq!(events[2], if cap < 6 { Event::Long(6) } else { Event::Token(string("A\n😀".as_bytes())) });
+        assert_eq!(events[3..], [Event::Token(Token::True), Event::Token(Token::ArrayEnd), Event::Done]);
+    }
+    assert_eq!(
+        scripted(b"\"abc\"", Limits { string: 2, ..LIMITS }, &[Request::Text(20), Request::Next]),
+        [Event::Long(3), Event::Done]
+    );
+}
+
+#[test]
+fn skip_checks_every_value_and_counts_only_its_bytes() {
+    let values: &[&[u8]] = &[
+        b"{}",
+        b"[]",
+        b"true",
+        b"false",
+        b"null",
+        b"-1.25e+2",
+        br#""\uD83D\uDE00""#,
+        br#"{"a": [123, "longer than the retained string cap", {"b": false}]}"#,
+    ];
+    let limits = Limits { string: 0, ..LIMITS };
+    for &value in values {
+        assert_eq!(
+            scripted(value, limits, &[Request::Skip, Request::Next]),
+            [Event::Skipped(u64::try_from(value.len()).unwrap()), Event::Done]
+        );
+        let mut array = vec![b'[', b' ', b'\n'];
+        array.extend(value);
+        array.extend(b" , null ]");
+        assert_eq!(
+            scripted(&array, limits, &[Request::Next, Request::Skip, Request::Skip, Request::Skip, Request::Next]),
+            [
+                Event::Token(Token::ArrayStart),
+                Event::Skipped(u64::try_from(value.len()).unwrap()),
+                Event::Skipped(4),
+                Event::Token(Token::ArrayEnd),
+                Event::Done
+            ]
+        );
+        let mut object = vec![b'{', b'"', b'"', b':', b' '];
+        object.extend(value);
+        object.extend(b"}");
+        assert_eq!(
+            scripted(&object, limits, &[Request::Next, Request::Next, Request::Skip, Request::Next, Request::Next]),
+            [
+                Event::Token(Token::ObjectStart),
+                Event::Token(key(b"")),
+                Event::Skipped(u64::try_from(value.len()).unwrap()),
+                Event::Token(Token::ObjectEnd),
+                Event::Done
+            ]
+        );
+    }
+}
+
+#[test]
+fn skipped_and_long_strings_still_check_all_of_their_text() {
+    for request in [Request::Skip, Request::Text(0)] {
+        for (document, error) in [
+            (b"\"abcdef\\x\"".as_slice(), Error::Escape),
+            (b"\"abcdef\xFF\"", Error::Utf8),
+            (b"\"abcdef\\uD800\"", Error::Surrogate),
+            (b"\"abcdef\x01\"", Error::Control),
+        ] {
+            assert_eq!(scripted(document, LIMITS, &[request]), [Event::Failed(error)]);
+        }
+    }
+    assert_eq!(scripted(b"[1,]", LIMITS, &[Request::Skip]), [Event::Failed(Error::Unexpected)]);
+    assert_eq!(scripted(b"[[[]]]", Limits { depth: 2, ..LIMITS }, &[Request::Skip]), [Event::Failed(Error::TooDeep)]);
+    assert_eq!(scripted(b"\"abc\"", Limits { length: 3, ..LIMITS }, &[Request::Skip]), [Event::Failed(Error::TooLong)]);
+}
+
+#[test]
+#[should_panic(expected = "Skip where a key comes")]
+fn skip_is_not_a_demand_for_an_object_key() {
+    drop(scripted(b"{}", LIMITS, &[Request::Next, Request::Skip]));
+}

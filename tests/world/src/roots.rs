@@ -51,6 +51,13 @@ impl Machine for RootFiles {
         self.files.close(Opened::new(root.raw()));
     }
 
+    fn open_append(&mut self, root: Handle, path: &[u8], mode: u32) -> Result<Handle, Error> {
+        self.files
+            .open(Opened::new(root.raw()), path, How::Append { mode })
+            .map(|opened| Handle::new(opened.raw()))
+            .map_err(skein_fake_machine::kernel_error)
+    }
+
     fn step(&mut self, call: Call, answers: &mut Queue<Answer>) {
         skein_fake_machine::step(&mut self.files, call, answers);
     }
@@ -149,4 +156,49 @@ pub fn simulated(seed: u64, kill: bool, missing: bool) -> skein_world::Outcome<S
         }
     });
     world.run()
+}
+
+/// Two separately owned append descriptors selected from the child's launch.
+#[must_use]
+pub fn appends(spawn: &Spawn) -> Vec<skein_world::StartupAppend> {
+    vec![
+        skein_world::StartupAppend {
+            name: Box::from(&b"trace"[..]),
+            root: spawn.args[0].clone(),
+            path: Box::from(&b"trace"[..]),
+            mode: 0o600,
+        },
+        skein_world::StartupAppend {
+            name: Box::from(&b"side"[..]),
+            root: spawn.args[0].clone(),
+            path: Box::from(&b"side"[..]),
+            mode: 0o600,
+        },
+    ]
+}
+
+/// The later file's missing parent checks rollback of the earlier file and roots.
+#[must_use]
+pub fn missing_appends(spawn: &Spawn) -> Vec<skein_world::StartupAppend> {
+    let mut selected = appends(spawn);
+    selected[1].path = Box::from(&b"missing/side"[..]);
+    selected
+}
+
+/// The child writes through its actual startup descriptors after parent-root close.
+#[must_use]
+pub fn append_child(_spawn: &Spawn, inherited: &Inherited) -> Script {
+    assert_eq!(inherited.appends.len(), 2);
+    assert_eq!(inherited.appends[0].0.as_ref(), b"trace");
+    assert_ne!(inherited.appends[0].1, inherited.appends[1].1);
+    Script::child(
+        inherited,
+        &[
+            Act::Read(0),
+            Act::AppendFile(2, b"one"),
+            Act::AppendFile(2, b"two"),
+            Act::AppendFile(3, b"side"),
+            Act::Write(1, b"ready"),
+        ],
+    )
 }

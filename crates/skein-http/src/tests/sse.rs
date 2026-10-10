@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 use skein_lib::Intake;
 use skein_lib::stream::{Down, Fault, Read, Up};
 
-use super::{Events, boxed, stream};
-use crate::sse::{Error, Event, Limits, Message, Request, Waiting};
+use super::{Events, Gathered as Event, Message, boxed, stream};
+use crate::sse::{Error, Limits, Request, Waiting};
 
 const LIMITS: Limits = Limits { line: 64, event: 128, field: 16, chunk: 8 };
 
@@ -347,7 +347,7 @@ fn what_the_reader_waits_for_follows_its_state() {
 }
 
 #[test]
-#[should_panic(expected = "a Next before the last one was answered")]
+#[should_panic(expected = "Next is asked between events")]
 fn one_next_at_a_time() {
     let mut events = Events::new(LIMITS);
     events.down(Request::Next);
@@ -355,7 +355,7 @@ fn one_next_at_a_time() {
 }
 
 #[test]
-#[should_panic(expected = "a Next after the stream's outcome")]
+#[should_panic(expected = "Next is asked between events")]
 fn no_next_after_the_outcome() {
     let mut events = Events::new(LIMITS);
     events.down(Request::Next);
@@ -364,8 +364,250 @@ fn no_next_after_the_outcome() {
 }
 
 #[test]
-#[should_panic(expected = "bytes delivered without a read demand")]
+#[should_panic(expected = "a delivery meets the body's one demand")]
 fn no_bytes_without_a_demand() {
     let mut events = Events::new(LIMITS);
     events.bytes(b"data\n\n");
+}
+
+/// The native face, keeping every output so stream order is asserted.
+struct Face {
+    reader: crate::sse::Reader,
+    env: skein_lib::Env<Limits>,
+    above: skein_lib::Queue<crate::sse::Event>,
+    below: skein_lib::Queue<Down>,
+}
+
+impl Face {
+    fn new() -> Face {
+        Face {
+            reader: crate::sse::Reader::new(&LIMITS),
+            env: super::env(LIMITS),
+            above: skein_lib::Queue::with_capacity(crate::sse::UP_MAX_OUT.above),
+            below: skein_lib::Queue::with_capacity(1),
+        }
+    }
+
+    fn down(&mut self, request: Request) -> (Vec<crate::sse::Event>, Option<Down>) {
+        crate::sse::down(&mut self.reader, &self.env, request, &mut self.above, &mut self.below);
+        assert!(self.above.len() <= crate::sse::DOWN_MAX_OUT.above);
+        self.take()
+    }
+
+    fn up(&mut self, event: Up) -> (Vec<crate::sse::Event>, Option<Down>) {
+        crate::sse::up(&mut self.reader, &self.env, event, &mut self.above, &mut self.below);
+        assert!(self.above.len() <= crate::sse::UP_MAX_OUT.above);
+        self.take()
+    }
+
+    fn take(&mut self) -> (Vec<crate::sse::Event>, Option<Down>) {
+        let mut events = Vec::new();
+        for _ in 0..crate::sse::UP_MAX_OUT.above {
+            match self.above.pop() {
+                Some(event) => events.push(event),
+                None => break,
+            }
+        }
+        assert!(self.below.len() <= 1);
+        (events, self.below.pop())
+    }
+}
+
+fn face_request(read: Read) -> Request {
+    Request::Data(Down::Demand { read, room: 0 })
+}
+
+/// Each byte delivery is held until its owner asks; a tail shorter than a
+/// fill is discarded by stream End, as in lib.md, 7.
+fn native_read(bytes: &[u8], read: Read) -> (Vec<u8>, Vec<crate::sse::Event>) {
+    let mut face = Face::new();
+    let mut intake = Intake::with_capacity(u32::try_from(bytes.len()).unwrap().max(LIMITS.chunk));
+    intake.append(bytes).unwrap();
+    let (mut events, mut below) = face.down(Request::Next);
+    let mut data = Vec::new();
+    let mut seen = Vec::new();
+    for _ in 0..bytes.len().saturating_mul(4).saturating_add(32) {
+        let mut next = None;
+        for event in events {
+            match &event {
+                crate::sse::Event::Opened | crate::sse::Event::Data(Up::Bytes(_)) => next = Some(face_request(read)),
+                crate::sse::Event::Data(Up::End) => {}
+                crate::sse::Event::Data(Up::Failed(_)) | crate::sse::Event::Dispatched(_) => next = Some(Request::Next),
+                crate::sse::Event::Ended | crate::sse::Event::Failed(_) => {
+                    seen.push(event);
+                    return (data, seen);
+                }
+                crate::sse::Event::Data(Up::Room) | crate::sse::Event::Closed => panic!("read-only live face"),
+            }
+            if let crate::sse::Event::Data(Up::Bytes(bytes)) = &event {
+                data.extend_from_slice(bytes);
+            }
+            seen.push(event);
+        }
+        if let Some(request) = next {
+            assert!(below.is_none());
+            (events, below) = face.down(request);
+        } else {
+            let Some(Down::Demand { read, room: 0 }) = below else { panic!("the body is demanded") };
+            let delivery = match intake.meet(read) {
+                Some(piece) => Up::Bytes(piece),
+                None => Up::End,
+            };
+            (events, below) = face.up(delivery);
+        }
+    }
+    panic!("bounded steps per byte");
+}
+
+#[test]
+fn data_streams_under_fills_scans_and_line_reads_with_final_metadata() {
+    use crate::sse::Event as Native;
+    use skein_lib::stream::Delimiter;
+    let input = b": comment\r\ndata: abcdef\r\ndata: ghijkl\r\nevent: late\r\nid: 9\r\n\r\n";
+    let expected = b"abcdef\nghijkl";
+    for count in 1..=LIMITS.chunk {
+        let (data, events) = native_read(input, Read::Fill(count));
+        let length =
+            expected.len().checked_sub(expected.len().checked_rem(usize::try_from(count).unwrap()).unwrap()).unwrap();
+        assert_eq!(data, &expected[..length]);
+        let dispatch = dispatch_index(&events).expect("an event dispatch");
+        assert_eq!(events[dispatch.checked_sub(1).unwrap()], Native::Data(Up::End));
+        assert_eq!(
+            events[dispatch],
+            Native::Dispatched(crate::sse::Dispatch { name: boxed(b"late"), id: boxed(b"9") })
+        );
+        for read in [Read::Scan { until: Delimiter::LF, max: count }, Read::Line { max: count }] {
+            let (data, _) = native_read(input, read);
+            let first = count.min(7);
+            let tail = 6_u32.checked_rem(count).unwrap();
+            assert_eq!(
+                data,
+                &expected[..expected.len().checked_sub(usize::try_from(tail).unwrap()).unwrap()],
+                "{read:?} first span {first}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_open_event_holds_its_piece_without_a_body_demand_and_can_withdraw() {
+    use crate::sse::Event as Native;
+    let mut face = Face::new();
+    assert_eq!(face.down(Request::Next), (Vec::new(), line(8)));
+    assert_eq!(face.up(Up::Bytes(boxed(b"data: ab"))), (Vec::from([Native::Opened]), None));
+    assert_eq!(face.reader.waiting(), Waiting::Above);
+    assert_eq!(face.down(face_request(Read::Fill(1))), (Vec::from([Native::Data(Up::Bytes(boxed(b"a")))]), None));
+    assert_eq!(face.down(face_request(Read::Nothing)), (Vec::new(), line(8)));
+    assert_eq!(face.up(Up::Bytes(boxed(b"cd\n"))), (Vec::new(), line(8)));
+    let (events, below) = face.up(Up::Bytes(boxed(b"\n")));
+    assert!(below.is_none());
+    assert_eq!(
+        events,
+        [Native::Data(Up::End), Native::Dispatched(crate::sse::Dispatch { name: boxed(b"message"), id: boxed(b"") })]
+    );
+}
+
+#[test]
+fn an_open_event_cut_before_its_blank_line_fails_data_and_never_dispatches() {
+    use crate::sse::Event as Native;
+    for ending in [Up::End, Up::Failed(Fault::Invalid)] {
+        let mut face = Face::new();
+        drop(face.down(Request::Next));
+        assert_eq!(face.up(Up::Bytes(boxed(b"data: x\n"))), (Vec::from([Native::Opened]), None));
+        let (events, _) = face.down(face_request(Read::Fill(8)));
+        assert!(events.is_empty());
+        let (events, below) = face.up(ending);
+        assert!(below.is_none());
+        match events.as_slice() {
+            [Native::Data(Up::Failed(_))] => {}
+            other => panic!("the cut fails only the data: {other:?}"),
+        }
+        let (events, below) = face.down(Request::Next);
+        assert!(below.is_none());
+        match events.as_slice() {
+            [Native::Ended | Native::Failed(_)] => {}
+            other => panic!("Next receives the reader terminal: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn closing_an_open_face_drops_its_held_piece_and_crossed_data() {
+    use crate::sse::Event as Native;
+    let mut face = Face::new();
+    drop(face.down(Request::Next));
+    drop(face.up(Up::Bytes(boxed(b"data: x\n"))));
+    drop(face.down(face_request(Read::Fill(8))));
+    assert_eq!(
+        face.down(Request::Close),
+        (Vec::from([Native::Closed]), Some(Down::Demand { read: Read::Nothing, room: 0 }))
+    );
+    assert_eq!(face.up(Up::Bytes(boxed(b"\n"))), (Vec::new(), None));
+    assert_eq!(face.reader.waiting(), Waiting::Nothing);
+}
+
+#[test]
+fn a_two_byte_scan_spans_joined_lines_and_comments() {
+    use skein_lib::stream::Delimiter;
+    let read = Read::Scan { until: Delimiter::CRLF, max: 8 };
+    let (data, events) = native_read(b"data: ab\r: ignored\rdata: cd\r\r", read);
+    assert!(data.is_empty(), "the unmatched five-byte tail ends a read of eight");
+    assert!(dispatch_index(&events).is_some());
+    let (data, _) = native_read(b"data: abc\r: ignored\rdata: defg\r\r", read);
+    assert_eq!(data, b"abc\ndefg", "the synthesized LF belongs to the data, with CRs removed");
+}
+
+#[test]
+fn a_limit_passed_in_open_data_fails_the_face_before_the_reader() {
+    use crate::sse::Event as Native;
+    for (line, event, expected) in [(7, 128, Error::LineTooLong), (64, 7, Error::EventTooLong)] {
+        let mut face = Face::new();
+        face.env.limits.line = line;
+        face.env.limits.event = event;
+        drop(face.down(Request::Next));
+        assert_eq!(face.up(Up::Bytes(boxed(b"data: ab"))), (Vec::from([Native::Opened]), None));
+        assert_eq!(
+            face.down(face_request(Read::Fill(8))),
+            (Vec::from([Native::Data(Up::Failed(Fault::Invalid))]), None)
+        );
+        assert_eq!(face.down(Request::Next), (Vec::from([Native::Failed(expected)]), None));
+    }
+}
+
+#[test]
+fn withdrawing_an_outstanding_read_discards_its_crossed_delivery() {
+    use crate::sse::Event as Native;
+    let mut face = Face::new();
+    drop(face.down(Request::Next));
+    drop(face.up(Up::Bytes(boxed(b"data: a\n"))));
+    assert_eq!(face.down(face_request(Read::Fill(8))), (Vec::new(), line(8)));
+    assert_eq!(face.down(face_request(Read::Nothing)), (Vec::new(), None));
+    let (events, below) = face.up(Up::Bytes(boxed(b"\n")));
+    assert!(below.is_none());
+    match events.as_slice() {
+        [Native::Data(Up::End), Native::Dispatched(_)] => {}
+        other => panic!("withdrawal still dispatches: {other:?}"),
+    }
+}
+
+fn dispatch_index(events: &[crate::sse::Event]) -> Option<usize> {
+    use crate::sse::Event as Native;
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            Native::Dispatched(_) => return Some(index),
+            Native::Opened | Native::Data(_) | Native::Ended | Native::Failed(_) | Native::Closed => {}
+        }
+    }
+    None
+}
+
+#[test]
+fn an_undemanded_body_end_checks_the_held_line_tail_before_its_outcome() {
+    use crate::sse::Event as Native;
+    let mut face = Face::new();
+    face.env.limits.line = 5;
+    drop(face.down(Request::Next));
+    assert_eq!(face.up(Up::Bytes(boxed(b"data: "))), (Vec::from([Native::Opened]), None));
+    assert_eq!(face.up(Up::End), (Vec::from([Native::Data(Up::Failed(Fault::Invalid))]), None));
+    assert_eq!(face.down(Request::Next), (Vec::from([Native::Failed(Error::LineTooLong)]), None));
 }

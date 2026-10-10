@@ -99,6 +99,7 @@ impl Face {
         self.io.reclaim();
     }
 
+    /// The scenario ends admission after its clients settle, or names a peer hang-up.
     pub fn shutdown(&mut self) {
         self.stopping = true;
     }

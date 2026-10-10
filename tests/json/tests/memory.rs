@@ -45,6 +45,10 @@ struct Ran {
 /// holds all of it and meets each demand from it, each call a step of the
 /// meter checked against `worst_case`, and closes it.
 fn read(document: &[u8], limits: Limits, interrupt: Interrupt) -> Ran {
+    read_demand(document, limits, interrupt, Request::Next)
+}
+
+fn read_demand(document: &[u8], limits: Limits, interrupt: Interrupt, first: Request) -> Ran {
     let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
     let mut above = Queue::with_capacity(json::UP_MAX_OUT.above.max(json::DOWN_MAX_OUT.above));
     let mut below = Queue::with_capacity(json::UP_MAX_OUT.below.max(json::DOWN_MAX_OUT.below));
@@ -71,7 +75,7 @@ fn read(document: &[u8], limits: Limits, interrupt: Interrupt) -> Ran {
                 None => (Some(Up::End), Request::Next),
             },
             (_, None) if run.outcome.is_some() => (None, Request::Close),
-            (_, None) => (None, Request::Next),
+            (_, None) => (None, if steps == 0 { first } else { Request::Next }),
         };
         let closing = ev.is_none() && rq == Request::Close;
         meter.start();
@@ -90,7 +94,7 @@ fn read(document: &[u8], limits: Limits, interrupt: Interrupt) -> Ran {
                 drop(token);
             }
             Some(outcome @ (Event::Done | Event::Failed(_))) => run.outcome = Some(outcome),
-            Some(Event::Closed) | None => {}
+            Some(Event::Long(_) | Event::Skipped(_) | Event::Closed) | None => {}
         }
         match request {
             Some(Down::Demand { read: Read::Nothing, .. }) => assert!(closing, "only a close withdraws"),
@@ -225,4 +229,155 @@ fn the_writer_holds_no_more_than_its_worst_case_at_its_limits() {
         let most = write(&tokens, limits);
         assert_eq!(most, writer::worst_case(&limits).unwrap(), "seed {seed}: the writing pass holds all of it");
     }
+}
+
+#[test]
+fn skipped_megabytes_and_long_text_keep_the_same_bounded_buffer() {
+    let limits = Limits { depth: 4, string: 8, number: 8, chunk: 32, length: 2 << 20 };
+    let mut large = vec![b'a'; 1 << 20];
+    large.insert(0, b'"');
+    large.push(b'"');
+    for request in [Request::Skip, Request::Text(4)] {
+        let small_document = format!("\"{}\"", "a".repeat(64));
+        let small = read_demand(small_document.as_bytes(), limits, Interrupt::Nothing, request);
+        let large = read_demand(&large, limits, Interrupt::Nothing, request);
+        assert_eq!(small.outcome, Some(Event::Done));
+        assert_eq!(large.outcome, Some(Event::Done));
+        assert_eq!(small.tokens, 0);
+        assert_eq!(large.tokens, 0);
+        assert_eq!(large.most, small.most, "discarded text adds no retained memory");
+    }
+}
+
+#[test]
+fn a_compact_document_at_its_counts_costs_its_text_and_one_record_per_token() {
+    use skein_json::document::{self, Limits};
+    for seed in 0..100 {
+        let mut rng = Rng::new(seed);
+        let tokens = generate::tokens(&mut rng, Shape { depth: 5, width: 5, string: 12 });
+        let text = tokens
+            .iter()
+            .map(|token| match token {
+                Token::Key(bytes) | Token::String(bytes) | Token::Number(bytes) => bytes.len(),
+                Token::ObjectStart
+                | Token::ObjectEnd
+                | Token::ArrayStart
+                | Token::ArrayEnd
+                | Token::True
+                | Token::False
+                | Token::Null => 0,
+            })
+            .sum::<usize>();
+        let limits = Limits { tokens: tokens.len().try_into().unwrap(), text: text.try_into().unwrap() };
+        let bound = document::worst_case(&limits).unwrap();
+        let meter = Meter::new();
+        meter.start();
+        let document = skein_json::Document::from_tokens(&tokens, &limits).unwrap();
+        let measured = meter.end();
+        assert_eq!(meter.check(measured, bound, &"compact document at both counts"), bound);
+        drop(document);
+    }
+}
+
+/// Collector entry points met by the existing intake, measured separately
+/// from the neighbour and its queues. The returned document is handed out.
+fn collect_memory(
+    document: &[u8],
+    filter: skein_json::collector::Filter,
+    limits: skein_json::collector::Limits,
+) -> (u64, u64) {
+    collect_memory_caps(document, filter, limits, &[])
+}
+
+fn collect_memory_caps(
+    document: &[u8],
+    filter: skein_json::collector::Filter,
+    limits: skein_json::collector::Limits,
+    caps: &[u32],
+) -> (u64, u64) {
+    use skein_json::collector::{self, Collector, Event, Request};
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits };
+    let mut above = Queue::with_capacity(1);
+    let mut below = Queue::with_capacity(1);
+    let mut intake = Intake::with_capacity(
+        (u32::try_from(document.len()).expect("bounded document")).max(json::largest_demand(&limits.tokenizer)),
+    );
+    intake.append(document).expect("all bytes fit");
+    let bound = collector::worst_case(&limits, caps, &filter).expect("priced limits");
+    let meter = Meter::new();
+    meter.start();
+    let mut collector = Collector::new(filter, &limits, caps).expect("valid filter");
+    let mut most = meter.end().peak();
+    let mut demand = None;
+    for step in 0..8 * document.len() + 64 {
+        let delivery = demand.take().map(|read| intake.meet(read).map_or(Up::End, Up::Bytes));
+        meter.start();
+        if let Some(event) = delivery {
+            collector::up(&mut collector, &env, event, &mut above, &mut below);
+        } else {
+            assert_eq!(step, 0);
+            collector::down(&mut collector, &env, Request::Collect, &mut above, &mut below);
+        }
+        let measured = meter.end();
+        most = most.max(measured.peak());
+        assert!(most <= bound, "{most} <= {bound}");
+        if let Some(event) = above.pop() {
+            assert!(matches!(event, Event::Collected(_)), "{event:?}");
+            drop(event);
+            let span = skein_heap::Span::start();
+            collector.restart();
+            assert_eq!(span.end(), skein_heap::Grown { peak: 0, net: 0 }, "restart keeps every buffer");
+            return (most, bound);
+        }
+        match below.pop().expect("unfinished collect demands bytes") {
+            Down::Demand { read, room: 0 } => demand = Some(read),
+            other @ (Down::Demand { .. } | Down::Send(_) | Down::Finish) => panic!("{other:?}"),
+        }
+    }
+    panic!("bounded progress")
+}
+#[test]
+fn collector_skipped_megabytes_add_no_memory_and_full_counts_reach_the_bound() {
+    use skein_json::collector::{Filter, Keep, Key, Limits, Node};
+    let limits = Limits {
+        tokenizer: json::Limits { depth: 4, string: 8, number: 8, chunk: 32, length: 2 << 20 },
+        tokens: 4,
+        text: 5,
+        skip: 2 << 20,
+    };
+    let filter = Filter { root: Keep::Into(&[Node { key: Key::Field(b"keep"), keep: Keep::Value }]) };
+    let small = format!("{{\"keep\":1,\"omit\":\"{}\"}}", "a".repeat(64));
+    let large = format!("{{\"keep\":1,\"omit\":\"{}\"}}", "a".repeat(1 << 20));
+    assert_eq!(collect_memory(small.as_bytes(), filter, limits).0, collect_memory(large.as_bytes(), filter, limits).0);
+    let exact = Limits { tokenizer: json::Limits { chunk: 4, ..limits.tokenizer }, tokens: 4, text: 5, ..limits };
+    let (peak, bound) = collect_memory(br#"{"keep":1}"#, filter, exact);
+    assert_eq!(peak, bound, "one full reusable document and its full emitted copy");
+}
+
+#[test]
+fn tagged_losing_candidates_hold_no_memory_after_their_counts() {
+    use skein_json::collector::{Cap, Filter, Keep, Key, Limits, Node, Tagged, Variant};
+    const TAG: Tagged = Tagged {
+        tag: b"type",
+        known: &[
+            Variant { value: b"small", children: &[Node { key: Key::Field(b"id"), keep: Keep::Value }] },
+            Variant { value: b"large", children: &[Node { key: Key::Field(b"body"), keep: Keep::Value }] },
+        ],
+        unknown: Cap::new(0),
+    };
+    let filter = Filter { root: Keep::Tagged(&TAG) };
+    let limits = Limits {
+        tokenizer: json::Limits { depth: 4, string: 32, number: 8, chunk: 8, length: 2 << 20 },
+        tokens: 6,
+        text: 12,
+        skip: 2 << 20,
+    };
+    let small = format!("{{\"body\":\"{}\",\"id\":1,\"type\":\"small\"}}", "a".repeat(64));
+    let large = format!("{{\"body\":\"{}\",\"id\":1,\"type\":\"small\"}}", "a".repeat(1 << 20));
+    let (peak, bound) = collect_memory_caps(small.as_bytes(), filter, limits, &[2]);
+    assert_eq!(peak, bound, "the selected variant attains the retained document bound");
+    assert_eq!(
+        collect_memory_caps(small.as_bytes(), filter, limits, &[2]).0,
+        collect_memory_caps(large.as_bytes(), filter, limits, &[2]).0
+    );
 }

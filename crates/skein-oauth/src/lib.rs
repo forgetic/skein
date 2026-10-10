@@ -20,7 +20,7 @@ pub use json::{Collector, Json};
 pub use jwt::{Claims, read_claims};
 pub use machine::{
     Client, ClientLimits, Event, HttpEvidence, HttpRequest, HttpResponse, MAX_OUT, Registration, Request, WireFormat,
-    client_worst_case,
+    client_worst_case, redirect_address, validate_registration,
 };
 pub use pkce::challenge;
 pub use record::{ClaimSelector, RECORD_VERSION, RefreshState, SavedToken, decode_record, encode_record, rotate};

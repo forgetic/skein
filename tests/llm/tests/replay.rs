@@ -9,30 +9,42 @@ fn replay_envelopes_keep_tag_fields_and_exact_bounds_before_negative_mutations()
     for provider in [Provider::OpenAiCodex, Provider::Anthropic] {
         let replay = Replay {
             provider,
-            value: Json::from_bytes(br#"{"opaque":{"signed":[true,1,null]},"text":"literal"}"#, &bounds.dialect)
-                .expect("whole opaque document"),
+            value: Json::from_bytes(
+                br#"{"opaque":{"signed":[true,1,null]},"text":"literal"}"#,
+                &bounds.native().document(),
+            )
+            .expect("whole opaque document"),
         };
-        let encoded = replay.to_bytes(&bounds.dialect).expect("bounded envelope");
-        assert_eq!(Replay::from_bytes(&encoded, &bounds.dialect), Ok(replay.clone()));
+        let encoded = replay.to_bytes(&bounds.native().document()).expect("bounded envelope");
+        assert_eq!(Replay::from_bytes(&encoded, &bounds.native().document()), Ok(replay.clone()));
         let exact = skein_llm::DocumentLimits {
-            opaque_bytes: u32::try_from(encoded.len()).expect("bounded bytes") - skein_llm::REPLAY_HEADER_BYTES,
-            ..bounds.dialect
+            bytes: u32::try_from(encoded.len()).expect("bounded bytes") - skein_llm::REPLAY_HEADER_BYTES,
+            ..bounds.native().document()
         };
         assert_eq!(replay.to_bytes(&exact), Ok(encoded.clone()));
         assert_eq!(skein_llm::replay_bytes(&exact), Some(u32::try_from(encoded.len()).expect("bounded envelope")));
-        let tight = skein_llm::DocumentLimits { opaque_bytes: exact.opaque_bytes - 1, ..exact };
-        assert_eq!(replay.to_bytes(&tight), Err(Error::Limit));
-        assert_eq!(Replay::from_bytes(&encoded, &tight), Err(Error::Limit));
+        let tight = skein_llm::DocumentLimits { bytes: exact.bytes - 1, ..exact };
+        assert_eq!(
+            replay.to_bytes(&tight),
+            Err(Error::Limit { which: skein_llm::Cap::Retained, bound: u64::from(tight.bytes) })
+        );
+        assert_eq!(
+            Replay::from_bytes(&encoded, &tight),
+            Err(Error::Limit { which: skein_llm::Cap::Retained, bound: u64::from(tight.bytes) })
+        );
         for at in 0..encoded.len() {
-            assert!(Replay::from_bytes(&encoded[..at], &bounds.dialect).is_err(), "truncation has no complete replay");
+            assert!(
+                Replay::from_bytes(&encoded[..at], &bounds.native().document()).is_err(),
+                "truncation has no complete replay"
+            );
         }
         let mut trailing = encoded.to_vec();
         trailing.push(0);
-        assert_eq!(Replay::from_bytes(&trailing, &bounds.dialect), Err(Error::Invalid));
+        assert_eq!(Replay::from_bytes(&trailing, &bounds.native().document()), Err(Error::Invalid));
         for (offset, replacement) in [(0_usize, 7_u8), (2, 99)] {
             let mut corrupted = encoded.to_vec();
             corrupted[offset] = replacement;
-            assert_eq!(Replay::from_bytes(&corrupted, &bounds.dialect), Err(Error::Unsupported));
+            assert_eq!(Replay::from_bytes(&corrupted, &bounds.native().document()), Err(Error::Unsupported));
         }
     }
 }
@@ -43,10 +55,11 @@ fn provider_mismatch_is_rejected_by_actual_client_after_positive_control() {
     let mut input = call(1);
     let replay = Replay {
         provider: Provider::OpenAiCodex,
-        value: Json::from_bytes(br#"{"id":"message-id","phase":"final_answer"}"#, &bounds.dialect).expect("metadata"),
+        value: Json::from_bytes(br#"{"id":"message-id","phase":"final_answer"}"#, &bounds.native().document())
+            .expect("metadata"),
     };
-    let encoded = replay.to_bytes(&bounds.dialect).expect("opaque seam");
-    let replay = Replay::from_bytes(&encoded, &bounds.dialect).expect("restore envelope");
+    let encoded = replay.to_bytes(&bounds.native().document()).expect("opaque seam");
+    let replay = Replay::from_bytes(&encoded, &bounds.native().document()).expect("restore envelope");
     input.prompt.messages = Box::new([Message {
         role: Role::Assistant,
         content: Box::new([Block::Text { text: b"prior".as_slice().into(), replay: Some(replay) }]),
@@ -55,12 +68,12 @@ fn provider_mismatch_is_rejected_by_actual_client_after_positive_control() {
     let mut input = call(2);
     input.endpoint = skein_llm::Endpoint::anthropic();
     input.credential = skein_llm::Credential::anthropic(b"fake-token".as_slice().into());
-    input.prompt.cache_key = None;
+    input.prompt.affinity = None;
     input.prompt.messages = Box::new([Message {
         role: Role::Assistant,
         content: Box::new([Block::Text {
             text: b"prior".as_slice().into(),
-            replay: Some(Replay::from_bytes(&encoded, &bounds.dialect).expect("same immutable replay")),
+            replay: Some(Replay::from_bytes(&encoded, &bounds.native().document()).expect("same immutable replay")),
         }]),
     }]);
     match client::Client::prepare(input, &bounds) {

@@ -11,6 +11,8 @@ use skein_world::{Host, Inherited, Machine};
 pub enum Act {
     /// The parent asks to start the hosted program.
     Spawn,
+    /// The parent starts a hosted program with a separate stderr pipe too.
+    SpawnStderr,
     /// The script writes these bytes to one inherited pipe.
     Write(usize, &'static [u8]),
     /// The script reads from one inherited pipe, possibly its end.
@@ -23,6 +25,8 @@ pub enum Act {
     OpenRoot(usize, &'static [u8], OpenHow),
     /// The script writes a regular file at offset zero.
     WriteFile(usize, &'static [u8]),
+    /// Appends these bytes to an inherited startup file.
+    AppendFile(usize, &'static [u8]),
     /// The script reads a regular file at offset zero.
     ReadFile(usize),
     /// The parent closes its launch root while the child retains its own roots.
@@ -59,6 +63,8 @@ pub struct Script {
     pub held: Box<[u8]>,
     pub leak: bool,
     pub terminal: Option<Exit>,
+    pub iterations: u32,
+    pub drains: u32,
 }
 
 impl Script {
@@ -86,6 +92,8 @@ impl Script {
             held: Box::new([]),
             leak: false,
             terminal: Some(Exit::Code(0)),
+            iterations: 0,
+            drains: 0,
         }
     }
 
@@ -99,7 +107,8 @@ impl Script {
     #[must_use]
     pub fn child(inherited: &Inherited, acts: &[Act]) -> Self {
         let mut script = Self::new(acts);
-        script.fds = inherited.pipes.iter().map(|(_, fd)| *fd).collect();
+        script.fds =
+            inherited.pipes.iter().map(|(_, fd)| *fd).chain(inherited.appends.iter().map(|(_, fd)| *fd)).collect();
         script.signal = Some(inherited.signal);
         script.roots = inherited.roots.iter().map(|(_, fd)| *fd).collect();
         script
@@ -121,17 +130,23 @@ impl Script {
 
     fn start(&mut self, act: Act) {
         let kind = match act {
-            Act::Spawn => Op::Spawn {
+            Act::Spawn | Act::SpawnStderr => Op::Spawn {
                 spawn: Box::new(Spawn {
                     program: Box::from(&b"hosted"[..]),
                     args: self.args.clone(),
                     env: Box::new([Box::from(&b"KEY=value"[..])]),
                     root: self.root.expect("parent root"),
                     dir: Box::new([]),
-                    pipes: Box::new([
-                        Pipe { child: 0, way: Way::In, parent: None },
-                        Pipe { child: 1, way: Way::Out, parent: None },
-                    ]),
+                    pipes: {
+                        let mut pipes = vec![
+                            Pipe { child: 0, way: Way::In, parent: None },
+                            Pipe { child: 1, way: Way::Out, parent: None },
+                        ];
+                        if matches!(act, Act::SpawnStderr) {
+                            pipes.push(Pipe { child: 2, way: Way::Out, parent: None });
+                        }
+                        pipes.into_boxed_slice()
+                    },
                 }),
             },
             Act::Write(at, bytes) => Op::PipeWrite { fd: self.fds[at], bytes: Box::from(bytes), from: 0 },
@@ -139,10 +154,13 @@ impl Script {
             Act::Close(at) => Op::Close { fd: self.fds.remove(at) },
             Act::OpenRoot(index, path, how) => Op::Open { root: self.roots[index], path: Box::from(path), how },
             Act::WriteFile(index, bytes) => Op::Write { fd: self.fds[index], bytes: Box::from(bytes), at: 0, from: 0 },
+            Act::AppendFile(index, bytes) => Op::Append { fd: self.fds[index], bytes: Box::from(bytes), from: 0 },
             Act::ReadFile(index) => Op::Read { fd: self.fds[index], buf: Box::new([0; 32]), at: 0 },
             Act::CloseLaunch => Op::Close { fd: self.root.take().expect("launch root") },
-            Act::Wait => Op::Wait { pidfd: self.pidfd.expect("spawned child") },
-            Act::Signal(signal) => Op::Signal { pidfd: self.pidfd.expect("spawned child"), signal },
+            Act::Wait => Op::Wait { pidfd: self.pidfd.expect("spawned child"), reap: false },
+            Act::Signal(signal) => {
+                Op::Signal { pidfd: self.pidfd.expect("spawned child"), signal, to: skein_io::kernel::Target::Child }
+            }
             Act::ReadSignal => Op::ReadSignal { fd: self.signal.expect("child signal source") },
             Act::Pause(until) => {
                 self.pause = Some(until);
@@ -154,7 +172,14 @@ impl Script {
 }
 
 impl Host for Script {
+    fn drain(&mut self) {
+        self.drains += 1;
+        assert_eq!(self.iterations, self.drains, "one drain follows each iteration");
+    }
+
     fn iterate(&mut self, now: Time, _wall: Wall) {
+        assert_eq!(self.iterations, self.drains, "last iteration drained before the next");
+        self.iterations += 1;
         if self.hog > 0 {
             self.held = vec![0; self.hog].into_boxed_slice();
             self.hog = 0;
@@ -175,7 +200,8 @@ impl Host for Script {
                 Ok(Done::ServiceSignal(signal)) => self.signals.push(signal),
                 Ok(Done::Exit(exit)) => self.child_exit = Some(exit),
                 Ok(Done::Fd(fd)) => self.fds.push(fd),
-                Ok(Done::Nothing | Done::Bound(_) | Done::Accepted { .. } | Done::Stat(_)) | Err(_) => {}
+                Ok(Done::Usage(_) | Done::Nothing | Done::Bound(_) | Done::Accepted { .. } | Done::Stat(_))
+                | Err(_) => {}
             }
             self.results.push(complete.result);
         }
@@ -217,6 +243,11 @@ impl Host for Script {
     fn next_deadline(&self) -> Option<Time> {
         self.pause
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.pause
+    }
+
     fn is_empty(&self) -> bool {
         self.done && self.completions.is_empty() && self.submissions.is_empty()
     }
@@ -308,10 +339,15 @@ pub fn story(seed: u64, story: Story) -> skein_world::Outcome<Script, RootMachin
         latency_max: skein_lib::Duration::from_millis(1),
         ..skein_sim::Faults::NONE
     };
+    // EarlyExit deliberately pauses before writing to an already-ended child.
+    let last_word = match story {
+        Story::EarlyExit => skein_world::LastWord::After(Time::from_nanos(10_000_000)),
+        Story::Exchange | Story::Kill | Story::Terminate | Story::Memory => skein_world::LastWord::LastExpectation,
+    };
     let mut world = skein_world::World::new(
         seed,
         skein_sim::Config { faults, ..skein_sim::Config::calm() },
-        Judge,
+        crate::Later(last_word),
         skein_world::Memory::Checked,
     )
     .with_machine(RootMachine);

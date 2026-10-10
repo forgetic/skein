@@ -1,13 +1,27 @@
-//! A bounded owned JSON value, using skein's tokenizer and measured writer.
-use crate::openai::{DecodeError, Limits};
+//! Neutral compact JSON admission (llm.md, section 2; json.md, sections 5.1–5.2).
+//! The value owns one text buffer and fixed records. Admission checks grammar,
+//! counts and measured writing; indexed ranges borrow only during the current
+//! step and retain no references in machine state. Provider meaning stays in
+//! the native codecs. `from_bytes` collects a complete value; `from_document`
+//! admits a producer's owned document; the writer emits the document whole.
+use crate::DocumentLimits as Limits;
+use crate::openai::DecodeError;
 use alloc::boxed::Box;
-use skein_json::{Token, tokenizer, writer};
+use skein_json::{Compact, Document, Kind, collector, document, tokenizer, writer};
 use skein_lib::stream::{Down, Read, Up};
 use skein_lib::{Env, List, Queue, Stack, Time, Wall, bytes};
 
+/// A neutral admitted value, owned by a prompt, replay or native codec.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Json {
-    tokens: Box<[Token]>,
+    document: Document,
+}
+
+/// An indexed value range, used only while borrowing its document in a step.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Span {
+    start: u32,
+    end: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -18,191 +32,272 @@ enum Frame {
 }
 
 impl Json {
-    /// Parses a whole bounded document. The connection may instead collect
-    /// tokenizer tokens with `Collector` to keep tokenization incremental.
+    /// Parses and admits a complete bounded value with the generic collector.
     pub fn from_bytes(input: &[u8], limits: &Limits) -> Result<Json, DecodeError> {
-        if input.len() > usize::try_from(limits.document_bytes).expect("u32 fits usize") {
-            return Err(DecodeError::TooLarge);
+        if input.len() > usize::try_from(limits.bytes).expect("u32 fits usize") {
+            return Err(DecodeError::limit(crate::Cap::Retained, limits.bytes));
         }
-        let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits.tokenizer_limits() };
-        let mut machine = tokenizer::Tokenizer::new(&env.limits);
+        let bounded = collector::Limits {
+            tokenizer: limits.tokenizer_limits(),
+            tokens: limits.tokens,
+            text: limits.bytes,
+            skip: u64::from(limits.bytes),
+        };
+        let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: bounded };
+        let mut machine = collector::Collector::new(collector::Filter { root: collector::Keep::Value }, &bounded, &[])
+            .expect("valid filter");
         let mut above = Queue::with_capacity(1);
         let mut below = Queue::with_capacity(1);
-        let mut collector = Collector::new(limits);
+        collector::down(&mut machine, &env, collector::Request::Collect, &mut above, &mut below);
         let mut at: usize = 0;
         let ticks = input.len().saturating_mul(4).saturating_add(16);
         for _tick in 0..ticks {
-            match machine.waiting() {
-                tokenizer::Waiting::Next => {
-                    tokenizer::down(&mut machine, &env, tokenizer::Request::Next, &mut above, &mut below);
-                }
-                tokenizer::Waiting::Bytes => {
-                    let demand = below.pop().ok_or(DecodeError::Malformed)?;
-                    let read = match demand {
-                        Down::Demand { read, .. } => read,
-                        Down::Send(_) | Down::Finish => return Err(DecodeError::Malformed),
-                    };
-                    let remaining = input.get(at..).ok_or(DecodeError::Malformed)?;
-                    let count = match read {
-                        Read::Fill(n) => usize::try_from(n).expect("u32 fits usize"),
-                        Read::Scan { until, max } => {
-                            let max = usize::try_from(max).expect("u32 fits usize");
-                            let scanned = remaining.get(..remaining.len().min(max)).ok_or(DecodeError::Malformed)?;
-                            match bytes::find(scanned, until.as_bytes()) {
-                                Some(pos) => pos.saturating_add(until.as_bytes().len()),
-                                None => max,
-                            }
-                        }
-                        Read::Nothing | Read::Line { .. } => return Err(DecodeError::Malformed),
-                    };
-                    if count <= remaining.len() {
-                        let delivery = bytes::copy_of(remaining.get(..count).ok_or(DecodeError::Malformed)?);
-                        at = at.checked_add(count).ok_or(DecodeError::TooLarge)?;
-                        tokenizer::up(&mut machine, &env, Up::Bytes(delivery), &mut above, &mut below);
-                    } else {
-                        tokenizer::up(&mut machine, &env, Up::End, &mut above, &mut below);
+            match above.pop() {
+                Some(collector::Event::Collected(document)) => return Json::from_document(document, limits),
+                Some(collector::Event::Failed(error)) => return Err(collector_error(error, limits)),
+                Some(collector::Event::Closed) => return Err(DecodeError::Malformed),
+                None => {}
+            }
+            let demand = below.pop().ok_or(DecodeError::Malformed)?;
+            let read = match demand {
+                Down::Demand { read, .. } => read,
+                Down::Send(_) | Down::Finish => return Err(DecodeError::Malformed),
+            };
+            let remaining = input.get(at..).ok_or(DecodeError::Malformed)?;
+            let count = match read {
+                Read::Fill(n) => usize::try_from(n).expect("u32 fits usize"),
+                Read::Scan { until, max } => {
+                    let max = usize::try_from(max).expect("u32 fits usize");
+                    let scanned = remaining.get(..remaining.len().min(max)).ok_or(DecodeError::Malformed)?;
+                    match bytes::find(scanned, until.as_bytes()) {
+                        Some(pos) => pos.saturating_add(until.as_bytes().len()),
+                        None => max,
                     }
                 }
-                tokenizer::Waiting::Close | tokenizer::Waiting::Nothing => return Err(DecodeError::Malformed),
-            }
-            if let Some(event) = above.pop() {
-                match event {
-                    tokenizer::Event::Token(token) => collector.push(token)?,
-                    tokenizer::Event::Done => return collector.finish(limits),
-                    tokenizer::Event::Failed(error) => return Err(tokenizer_error(error)),
-                    tokenizer::Event::Closed => return Err(DecodeError::Malformed),
-                }
-            }
+                Read::Nothing | Read::Line { .. } => return Err(DecodeError::Malformed),
+            };
+            let delivery = if count <= remaining.len() {
+                let delivery = bytes::copy_of(remaining.get(..count).ok_or(DecodeError::Malformed)?);
+                at = at.checked_add(count).ok_or(DecodeError::Malformed)?;
+                Up::Bytes(delivery)
+            } else {
+                Up::End
+            };
+            collector::up(&mut machine, &env, delivery, &mut above, &mut below);
         }
         Err(DecodeError::Malformed)
     }
 
-    pub fn from_tokens(tokens: &[Token], limits: &Limits) -> Result<Json, DecodeError> {
-        let mut collector = Collector::new(limits);
-        for token in tokens {
-            collector.check(token)?;
-            collector.push(token.clone())?;
+    /// Admits owned compact records, checking their grammar and measured bytes.
+    pub fn from_document(document: Document, limits: &Limits) -> Result<Json, DecodeError> {
+        if document.len() > limits.tokens {
+            return Err(DecodeError::limit(crate::Cap::Tokens, limits.tokens));
         }
-        collector.finish(limits)
+        if document.text_len() > limits.bytes {
+            return Err(DecodeError::limit(crate::Cap::Retained, limits.bytes));
+        }
+        for index in 0..document.len() {
+            let record = document.token(index).expect("index within document");
+            match record.kind {
+                Kind::Key | Kind::String | Kind::Number => {
+                    if record.len > limits.strings {
+                        return Err(DecodeError::limit(crate::Cap::Strings, limits.strings));
+                    }
+                }
+                Kind::Long => return Err(DecodeError::Malformed),
+                Kind::ObjectStart
+                | Kind::ObjectEnd
+                | Kind::ArrayStart
+                | Kind::ArrayEnd
+                | Kind::True
+                | Kind::False
+                | Kind::Null => {}
+            }
+        }
+        validate((&document, whole(&document)), limits.depth)?;
+        let value = Json { document };
+        let mut measure = writer::Encoder::measure(&limits.writer_limits());
+        value.write(&mut measure);
+        match measure.measured() {
+            Ok(_) => Ok(value),
+            Err(writer::Refusal::TooLong) => Err(DecodeError::limit(crate::Cap::Retained, limits.bytes)),
+            Err(writer::Refusal::TooDeep) => Err(DecodeError::limit(crate::Cap::Depth, limits.depth)),
+            Err(writer::Refusal::Text | writer::Refusal::Number) => Err(DecodeError::Malformed),
+        }
     }
 
+    /// The admitted compact records and their shared decoded text.
     #[must_use]
-    pub fn as_tokens(&self) -> &[Token] {
-        &self.tokens
+    pub fn document(&self) -> &Document {
+        &self.document
     }
 
     pub fn to_bytes(&self, limits: &Limits) -> Result<Box<[u8]>, DecodeError> {
         let bounded = limits.writer_limits();
         let mut measure = writer::Encoder::measure(&bounded);
         self.write(&mut measure);
-        let len = crate::openai::common::measured(measure)?;
+        let len = crate::openai::common::measured(measure, bounded, crate::Cap::Retained)?;
         let mut write = writer::Encoder::write(len, &bounded);
         self.write(&mut write);
         Ok(write.finish())
     }
 
-    pub(crate) fn into_tokens(self) -> Box<[Token]> {
-        self.tokens
+    pub(crate) fn view(&self) -> (&Document, Span) {
+        (&self.document, whole(&self.document))
+    }
+
+    /// Takes the collector's checked document for immediate native decoding.
+    /// Long records are consumed by the decoder and never admitted as replay.
+    pub(crate) fn collected(document: Document) -> Json {
+        Json { document }
+    }
+
+    pub(crate) fn from_view(view: (&Document, Span), limits: &Limits) -> Result<Json, DecodeError> {
+        let value = Self::collected_view(view, limits)?;
+        Self::from_document(value.document, limits)
+    }
+
+    pub(crate) fn collected_view(view: (&Document, Span), limits: &Limits) -> Result<Json, DecodeError> {
+        let count = len(view);
+        if count > limits.tokens {
+            return Err(DecodeError::limit(crate::Cap::Tokens, limits.tokens));
+        }
+        let mut size = 0_u32;
+        for index in 0..count {
+            size = size
+                .checked_add(u32::try_from(record_text(view, index)?.len()).or(Err(DecodeError::Malformed))?)
+                .ok_or(DecodeError::limit(crate::Cap::Retained, limits.bytes))?;
+        }
+        if size > limits.bytes {
+            return Err(DecodeError::limit(crate::Cap::Retained, limits.bytes));
+        }
+        let mut text = List::with_capacity(size);
+        let mut records = List::with_capacity(count);
+        for index in 0..count {
+            let source = record(view, index).ok_or(DecodeError::Malformed)?;
+            let bytes = record_text(view, index)?;
+            let copied = match source.kind {
+                Kind::Key | Kind::String | Kind::Number => {
+                    Compact { kind: source.kind, start: text.len(), len: source.len }
+                }
+                Kind::ObjectStart
+                | Kind::ObjectEnd
+                | Kind::ArrayStart
+                | Kind::ArrayEnd
+                | Kind::True
+                | Kind::False
+                | Kind::Null
+                | Kind::Long => *source,
+            };
+            for &byte in bytes {
+                text.push(byte).expect("measured selected text");
+            }
+            records.push(copied).expect("measured selected records");
+        }
+        let document = Document::from_parts(
+            text.into_boxed(),
+            records.into_boxed(),
+            &document::Limits { tokens: count, text: size },
+        )
+        .or(Err(DecodeError::Malformed))?;
+        Ok(Json { document })
     }
 
     pub(crate) fn write(&self, out: &mut writer::Encoder) {
-        for token in &self.tokens {
-            out.token(token);
+        out.document(&self.document);
+    }
+}
+
+pub(crate) fn whole(document: &Document) -> Span {
+    Span { start: 0, end: document.len() }
+}
+
+pub(crate) fn offset(view: (&Document, Span)) -> u32 {
+    view.1.start
+}
+
+pub(crate) fn len(view: (&Document, Span)) -> u32 {
+    view.1.end.checked_sub(view.1.start).expect("ordered admitted range")
+}
+
+pub(crate) fn record(view: (&Document, Span), index: u32) -> Option<&Compact> {
+    if index >= len(view) {
+        return None;
+    }
+    view.0.token(view.1.start.checked_add(index)?)
+}
+
+#[expect(clippy::manual_map, reason = "the strict subset excludes closure-taking maps")]
+pub(crate) fn kind(view: (&Document, Span), index: u32) -> Option<Kind> {
+    match record(view, index) {
+        Some(record) => Some(record.kind),
+        None => None,
+    }
+}
+
+pub(crate) fn record_text(view: (&Document, Span), index: u32) -> Result<&[u8], DecodeError> {
+    view.0.text(record(view, index).ok_or(DecodeError::Malformed)?).ok_or(DecodeError::Malformed)
+}
+
+/// Writes a complete selected value without allocating token payloads.
+pub(crate) fn write_view(out: &mut writer::Encoder, view: (&Document, Span)) {
+    for index in 0..len(view) {
+        let record = record(view, index).expect("admitted record");
+        let text = view.0.text(record).expect("admitted record text");
+        match record.kind {
+            Kind::ObjectStart => out.object_start(),
+            Kind::ObjectEnd => out.object_end(),
+            Kind::ArrayStart => out.array_start(),
+            Kind::ArrayEnd => out.array_end(),
+            Kind::Key => out.key(text),
+            Kind::String => out.string(text),
+            Kind::Number => out.number(text),
+            Kind::True => out.boolean(true),
+            Kind::False => out.boolean(false),
+            Kind::Null => out.null(),
+            Kind::Long => unreachable!("admitted Json contains no Long"),
         }
     }
 }
 
-/// Incremental ownership of tokens from skein-json, under explicit count and
-/// byte bounds. Finish checks grammar before the writer can see them.
-#[derive(Debug)]
-pub struct Collector {
-    tokens: List<Token>,
-    bytes: u64,
-    byte_limit: u32,
-    string_limit: u32,
-}
-impl Collector {
-    #[must_use]
-    pub fn new(limits: &Limits) -> Collector {
-        Collector {
-            tokens: List::with_capacity(limits.tokens),
-            bytes: 0,
-            byte_limit: limits.document_bytes,
-            string_limit: limits.string_bytes,
-        }
-    }
-    fn check(&self, token: &Token) -> Result<u64, DecodeError> {
-        let size = match token {
-            Token::Key(b) | Token::String(b) | Token::Number(b) => b.len(),
-            Token::ObjectStart
-            | Token::ObjectEnd
-            | Token::ArrayStart
-            | Token::ArrayEnd
-            | Token::True
-            | Token::False
-            | Token::Null => 1,
-        };
-        if size > usize::try_from(self.string_limit).expect("u32 fits usize") {
-            return Err(DecodeError::TooLarge);
-        }
-        let bytes =
-            self.bytes.checked_add(u64::try_from(size).expect("usize fits u64")).ok_or(DecodeError::TooLarge)?;
-        if bytes > u64::from(self.byte_limit) || self.tokens.room() == 0 {
-            return Err(DecodeError::TooLarge);
-        }
-        Ok(bytes)
-    }
-    pub fn push(&mut self, token: Token) -> Result<(), DecodeError> {
-        let bytes = self.check(&token)?;
-        match self.tokens.push(token) {
-            Ok(()) => {
-                self.bytes = bytes;
-                Ok(())
-            }
-            Err(_) => Err(DecodeError::TooLarge),
-        }
-    }
-    pub fn finish(self, limits: &Limits) -> Result<Json, DecodeError> {
-        validate(self.tokens.as_slice(), limits.depth)?;
-        let value = Json { tokens: self.tokens.into_boxed() };
-        let mut measure = writer::Encoder::measure(&limits.writer_limits());
-        value.write(&mut measure);
-        match measure.measured() {
-            Ok(_) => Ok(value),
-            Err(writer::Refusal::TooLong | writer::Refusal::TooDeep) => Err(DecodeError::TooLarge),
-            Err(writer::Refusal::Text | writer::Refusal::Number) => Err(DecodeError::Malformed),
-        }
+fn collector_error(error: collector::Error, limits: &Limits) -> DecodeError {
+    match error {
+        collector::Error::Tokenizer(error) => tokenizer_error(error, limits),
+        collector::Error::TooManyTokens => DecodeError::limit(crate::Cap::Tokens, limits.tokens),
+        collector::Error::TooMuchText { cap: _ } => DecodeError::limit(crate::Cap::Retained, limits.bytes),
+        collector::Error::SkippedTooLong => unreachable!("Value skips no fields"),
+        collector::Error::Duplicate | collector::Error::NotTagged => unreachable!("Value interprets no fields"),
     }
 }
 
-fn validate(tokens: &[Token], depth: u32) -> Result<(), DecodeError> {
+fn validate(view: (&Document, Span), depth: u32) -> Result<(), DecodeError> {
     let mut open = Stack::with_capacity(depth);
     let mut root = false;
-    for token in tokens {
+    for index in 0..len(view) {
+        let token = kind(view, index).ok_or(DecodeError::Malformed)?;
         match token {
-            Token::Key(_) => match open.top_mut() {
-                Some(Frame::ObjectKey) => {
-                    *open.top_mut().expect("object present") = Frame::ObjectValue;
-                }
+            Kind::Key => match open.top_mut() {
+                Some(Frame::ObjectKey) => *open.top_mut().expect("object present") = Frame::ObjectValue,
                 Some(Frame::ObjectValue | Frame::Array) | None => return Err(DecodeError::Malformed),
             },
-            Token::ObjectEnd => {
+            Kind::ObjectEnd => {
                 if open.pop() != Some(Frame::ObjectKey) {
                     return Err(DecodeError::Malformed);
                 }
             }
-            Token::ArrayEnd => {
+            Kind::ArrayEnd => {
                 if open.pop() != Some(Frame::Array) {
                     return Err(DecodeError::Malformed);
                 }
             }
-            Token::ObjectStart
-            | Token::ArrayStart
-            | Token::String(_)
-            | Token::Number(_)
-            | Token::True
-            | Token::False
-            | Token::Null => {
+            Kind::Long => return Err(DecodeError::Malformed),
+            Kind::ObjectStart
+            | Kind::ArrayStart
+            | Kind::String
+            | Kind::Number
+            | Kind::True
+            | Kind::False
+            | Kind::Null => {
                 match open.top_mut() {
                     Some(Frame::ObjectValue) => *open.top_mut().expect("object present") = Frame::ObjectKey,
                     Some(Frame::ObjectKey) => return Err(DecodeError::Malformed),
@@ -215,21 +310,22 @@ fn validate(tokens: &[Token], depth: u32) -> Result<(), DecodeError> {
                     }
                 }
                 let frame = match token {
-                    Token::ObjectStart => Some(Frame::ObjectKey),
-                    Token::ArrayStart => Some(Frame::Array),
-                    Token::ObjectEnd
-                    | Token::ArrayEnd
-                    | Token::Key(_)
-                    | Token::String(_)
-                    | Token::Number(_)
-                    | Token::True
-                    | Token::False
-                    | Token::Null => None,
+                    Kind::ObjectStart => Some(Frame::ObjectKey),
+                    Kind::ArrayStart => Some(Frame::Array),
+                    Kind::ObjectEnd
+                    | Kind::ArrayEnd
+                    | Kind::Key
+                    | Kind::String
+                    | Kind::Number
+                    | Kind::True
+                    | Kind::False
+                    | Kind::Null
+                    | Kind::Long => None,
                 };
                 if let Some(frame) = frame
                     && open.push(frame).is_err()
                 {
-                    return Err(DecodeError::TooLarge);
+                    return Err(DecodeError::limit(crate::Cap::Depth, depth));
                 }
             }
         }
@@ -240,100 +336,102 @@ fn validate(tokens: &[Token], depth: u32) -> Result<(), DecodeError> {
     Ok(())
 }
 
-pub(crate) fn span(tokens: &[Token], at: usize) -> Result<usize, DecodeError> {
-    let first = tokens.get(at).ok_or(DecodeError::Malformed)?;
+pub(crate) fn span(view: (&Document, Span), at: u32) -> Result<u32, DecodeError> {
+    let first = kind(view, at).ok_or(DecodeError::Malformed)?;
     match first {
-        Token::ObjectStart | Token::ArrayStart => {
-            let mut depth: u32 = 0;
-            for (offset, token) in tokens.get(at..).ok_or(DecodeError::Malformed)?.iter().enumerate() {
-                match token {
-                    Token::ObjectStart | Token::ArrayStart => {
-                        depth = depth.checked_add(1).ok_or(DecodeError::TooLarge)?;
+        Kind::ObjectStart | Kind::ArrayStart => {
+            let mut depth = 0_u32;
+            for index in at..len(view) {
+                match kind(view, index).ok_or(DecodeError::Malformed)? {
+                    Kind::ObjectStart | Kind::ArrayStart => {
+                        depth = depth.checked_add(1).ok_or(DecodeError::Malformed)?;
                     }
-                    Token::ObjectEnd | Token::ArrayEnd => {
+                    Kind::ObjectEnd | Kind::ArrayEnd => {
                         depth = depth.checked_sub(1).ok_or(DecodeError::Malformed)?;
                         if depth == 0 {
-                            return at
-                                .checked_add(offset)
-                                .ok_or(DecodeError::TooLarge)?
-                                .checked_add(1)
-                                .ok_or(DecodeError::TooLarge);
+                            return index.checked_add(1).ok_or(DecodeError::Malformed);
                         }
                     }
-                    Token::Key(_) | Token::String(_) | Token::Number(_) | Token::True | Token::False | Token::Null => {}
+                    Kind::Key | Kind::String | Kind::Number | Kind::True | Kind::False | Kind::Null | Kind::Long => {}
                 }
             }
             Err(DecodeError::Malformed)
         }
-        Token::String(_) | Token::Number(_) | Token::True | Token::False | Token::Null => {
-            at.checked_add(1).ok_or(DecodeError::TooLarge)
+        Kind::String | Kind::Number | Kind::True | Kind::False | Kind::Null | Kind::Long => {
+            at.checked_add(1).ok_or(DecodeError::Malformed)
         }
-        Token::ObjectEnd | Token::ArrayEnd | Token::Key(_) => Err(DecodeError::Malformed),
+        Kind::ObjectEnd | Kind::ArrayEnd | Kind::Key => Err(DecodeError::Malformed),
     }
 }
 
-pub(crate) fn field(tokens: &[Token], name: &[u8]) -> Result<Option<u32>, DecodeError> {
-    if tokens.first() != Some(&Token::ObjectStart) {
+pub(crate) fn field(view: (&Document, Span), name: &[u8]) -> Result<Option<u32>, DecodeError> {
+    if kind(view, 0) != Some(Kind::ObjectStart) {
         return Err(DecodeError::WrongType);
     }
-    let mut at: usize = 1;
+    let mut at = 1_u32;
     let mut found = None;
-    for _step in 0..tokens.len() {
-        match tokens.get(at) {
-            Some(Token::ObjectEnd) => return Ok(found),
-            Some(Token::Key(key)) => {
-                let start = at.checked_add(1).ok_or(DecodeError::TooLarge)?;
-                at = span(tokens, start)?;
-                if key.as_ref() == name {
+    for _step in 0..len(view) {
+        match kind(view, at) {
+            Some(Kind::ObjectEnd) => return Ok(found),
+            Some(Kind::Key) => {
+                let key = record_text(view, at)?;
+                let start = at.checked_add(1).ok_or(DecodeError::Malformed)?;
+                at = span(view, start)?;
+                if key == name {
                     if found.is_some() {
                         return Err(DecodeError::Malformed);
                     }
-                    found = Some(u32::try_from(start).or(Err(DecodeError::TooLarge))?);
+                    found = Some(start);
                 }
             }
             Some(
-                Token::ObjectStart
-                | Token::ArrayStart
-                | Token::ArrayEnd
-                | Token::String(_)
-                | Token::Number(_)
-                | Token::True
-                | Token::False
-                | Token::Null,
+                Kind::ObjectStart
+                | Kind::ArrayStart
+                | Kind::ArrayEnd
+                | Kind::String
+                | Kind::Number
+                | Kind::True
+                | Kind::False
+                | Kind::Null
+                | Kind::Long,
             )
             | None => return Err(DecodeError::Malformed),
         }
     }
     Err(DecodeError::Malformed)
 }
-pub(crate) fn required(tokens: &[Token], name: &[u8]) -> Result<u32, DecodeError> {
-    field(tokens, name)?.ok_or(DecodeError::Missing)
+
+pub(crate) fn required(view: (&Document, Span), name: &[u8]) -> Result<u32, DecodeError> {
+    field(view, name)?.ok_or(DecodeError::Missing)
 }
-pub(crate) fn optional_at(tokens: &[Token], offset: Option<u32>) -> Result<Option<&[Token]>, DecodeError> {
+
+pub(crate) fn optional_at(
+    view: (&Document, Span),
+    offset: Option<u32>,
+) -> Result<Option<(&Document, Span)>, DecodeError> {
     match offset {
-        Some(offset) => Ok(Some(value_at(tokens, offset)?)),
+        Some(offset) => Ok(Some(value_at(view, offset)?)),
         None => Ok(None),
     }
 }
-pub(crate) fn text(tokens: &[Token]) -> Result<Box<[u8]>, DecodeError> {
-    match tokens {
-        [Token::String(b)] => Ok(b.clone()),
-        _ => Err(DecodeError::WrongType),
-    }
+
+pub(crate) fn text(view: (&Document, Span)) -> Result<Box<[u8]>, DecodeError> {
+    Ok(bytes::copy_of(text_ref(view)?))
 }
-pub(crate) fn text_ref(tokens: &[Token]) -> Result<&[u8], DecodeError> {
-    match tokens {
-        [Token::String(b)] => Ok(b),
-        _ => Err(DecodeError::WrongType),
+
+pub(crate) fn text_ref(view: (&Document, Span)) -> Result<&[u8], DecodeError> {
+    if len(view) != 1 || kind(view, 0) != Some(Kind::String) {
+        return Err(DecodeError::WrongType);
     }
+    record_text(view, 0)
 }
-#[expect(clippy::manual_let_else, reason = "token matching stays explicit in the strict subset")]
-pub(crate) fn unsigned(tokens: &[Token]) -> Result<u64, DecodeError> {
-    let digits = match tokens {
-        [Token::Number(b)] => b,
-        _ => return Err(DecodeError::WrongType),
-    };
-    let mut n: u64 = 0;
+
+pub(crate) fn unsigned(view: (&Document, Span)) -> Result<u64, DecodeError> {
+    if len(view) != 1 || kind(view, 0) != Some(Kind::Number) {
+        return Err(DecodeError::WrongType);
+    }
+    let digits = record_text(view, 0)?;
+    let mut n = 0_u64;
     if digits.is_empty() {
         return Err(DecodeError::Malformed);
     }
@@ -343,51 +441,74 @@ pub(crate) fn unsigned(tokens: &[Token]) -> Result<u64, DecodeError> {
         }
         n = n
             .checked_mul(10)
-            .ok_or(DecodeError::TooLarge)?
+            .ok_or(DecodeError::Malformed)?
             .checked_add(u64::from(byte.wrapping_sub(b'0')))
-            .ok_or(DecodeError::TooLarge)?;
+            .ok_or(DecodeError::Malformed)?;
     }
     Ok(n)
 }
-pub(crate) fn boolean(tokens: &[Token]) -> Result<bool, DecodeError> {
-    match tokens {
-        [Token::True] => Ok(true),
-        [Token::False] => Ok(false),
-        _ => Err(DecodeError::WrongType),
+
+pub(crate) fn boolean(view: (&Document, Span)) -> Result<bool, DecodeError> {
+    if len(view) != 1 {
+        return Err(DecodeError::WrongType);
+    }
+    match kind(view, 0) {
+        Some(Kind::True) => Ok(true),
+        Some(Kind::False) => Ok(false),
+        Some(
+            Kind::ObjectStart
+            | Kind::ObjectEnd
+            | Kind::ArrayStart
+            | Kind::ArrayEnd
+            | Kind::Key
+            | Kind::String
+            | Kind::Number
+            | Kind::Null
+            | Kind::Long,
+        )
+        | None => Err(DecodeError::WrongType),
     }
 }
-pub(crate) fn array(tokens: &[Token], count: u32) -> Result<List<u32>, DecodeError> {
-    if tokens.first() != Some(&Token::ArrayStart) {
+
+pub(crate) fn array(view: (&Document, Span), count: u32) -> Result<List<u32>, DecodeError> {
+    array_limit(view, count, crate::Cap::OutputItems)
+}
+
+pub(crate) fn array_limit(view: (&Document, Span), count: u32, cap: crate::Cap) -> Result<List<u32>, DecodeError> {
+    if kind(view, 0) != Some(Kind::ArrayStart) {
         return Err(DecodeError::WrongType);
     }
     let mut offsets = List::with_capacity(count);
-    let mut at: usize = 1;
-    for _step in 0..tokens.len() {
-        if tokens.get(at) == Some(&Token::ArrayEnd) {
+    let mut at = 1_u32;
+    for _step in 0..len(view) {
+        if kind(view, at) == Some(Kind::ArrayEnd) {
             return Ok(offsets);
         }
-        let Ok(offset) = u32::try_from(at) else {
-            return Err(DecodeError::TooLarge);
-        };
-        if offsets.push(offset).is_err() {
-            return Err(DecodeError::TooLarge);
+        if offsets.push(at).is_err() {
+            return Err(DecodeError::limit(cap, count));
         }
-        at = span(tokens, at)?;
+        at = span(view, at)?;
     }
     Err(DecodeError::Malformed)
 }
-pub(crate) fn value_at(tokens: &[Token], offset: u32) -> Result<&[Token], DecodeError> {
-    let start = usize::try_from(offset).expect("u32 fits usize");
-    let end = span(tokens, start)?;
-    tokens.get(start..end).ok_or(DecodeError::Malformed)
+
+pub(crate) fn value_at(view: (&Document, Span), offset: u32) -> Result<(&Document, Span), DecodeError> {
+    let end = span(view, offset)?;
+    Ok((
+        view.0,
+        Span {
+            start: view.1.start.checked_add(offset).ok_or(DecodeError::Malformed)?,
+            end: view.1.start.checked_add(end).ok_or(DecodeError::Malformed)?,
+        },
+    ))
 }
 
-fn tokenizer_error(error: tokenizer::Error) -> DecodeError {
+fn tokenizer_error(error: tokenizer::Error, limits: &Limits) -> DecodeError {
     match error {
-        tokenizer::Error::TooLong
-        | tokenizer::Error::TooDeep
-        | tokenizer::Error::StringTooLong
-        | tokenizer::Error::NumberTooLong => DecodeError::TooLarge,
+        tokenizer::Error::TooLong => DecodeError::limit(crate::Cap::Retained, limits.bytes),
+        tokenizer::Error::TooDeep => DecodeError::limit(crate::Cap::Depth, limits.depth),
+        tokenizer::Error::StringTooLong => DecodeError::limit(crate::Cap::Strings, limits.strings),
+        tokenizer::Error::NumberTooLong => DecodeError::limit(crate::Cap::Number, limits.tokenizer_limits().number),
         tokenizer::Error::Unexpected
         | tokenizer::Error::Trailing
         | tokenizer::Error::Number
@@ -398,4 +519,14 @@ fn tokenizer_error(error: tokenizer::Error) -> DecodeError {
         | tokenizer::Error::Truncated
         | tokenizer::Error::Stream(_) => DecodeError::Malformed,
     }
+}
+
+/// Usage is accounting: an absent or unusable report never changes a terminal.
+pub(crate) fn reported_field<'a>(view: (&'a Document, Span), name: &[u8]) -> Option<(&'a Document, Span)> {
+    let at = field(view, name).ok().flatten()?;
+    value_at(view, at).ok()
+}
+
+pub(crate) fn reported_unsigned(view: (&Document, Span), name: &[u8]) -> Option<u64> {
+    unsigned(reported_field(view, name)?).ok()
 }

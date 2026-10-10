@@ -113,6 +113,7 @@ impl<'b, B: Backend> Run<'b, B> {
             | Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }
@@ -121,6 +122,7 @@ impl<'b, B: Backend> Run<'b, B> {
             | Op::List { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
@@ -307,6 +309,7 @@ impl<'b, B: Backend> Run<'b, B> {
                     | Done::Bound(_)
                     | Done::Stat(_)
                     | Done::Exit(_)
+                    | Done::Usage(_)
                     | Done::ServiceSignal(_)
                     | Done::Spawned { .. },
                 )
@@ -502,6 +505,12 @@ impl<B: Backend> Run<'_, B> {
         fd
     }
 
+    pub(crate) fn append(&mut self, process: B::Process, root: Fd, path: &[u8], mode: u32) -> Result<Fd, Error> {
+        let fd = self.backend.append(process, root, path, mode)?;
+        assert!(self.open.insert((process, fd)), "an append descriptor is new in its process");
+        Ok(fd)
+    }
+
     pub(crate) fn open(&mut self, process: B::Process, root: Fd, path: &[u8], how: OpenHow) -> Result<Fd, Error> {
         match self.call(process, Op::Open { root, path: Box::from(path), how }).result {
             Ok(Done::Fd(fd)) => Ok(fd),
@@ -570,6 +579,23 @@ impl<B: Backend> Run<'_, B> {
         Ok(shortness)
     }
 
+    pub(crate) fn append_all(&mut self, process: B::Process, fd: Fd, bytes: &[u8]) -> Result<Shortness, Error> {
+        let mut from = 0_u32;
+        let mut shortness = Shortness::default();
+        while usize_of(from) < bytes.len() {
+            let op = Op::append(fd, Box::from(bytes), from).expect("bytes left to append");
+            match self.call(process, op).result {
+                Ok(Done::Count(n)) => {
+                    shortness.saw(usize_of(n) < bytes.len().saturating_sub(usize_of(from)));
+                    from = from.checked_add(n).expect("no more than were left");
+                }
+                Err(error) => return Err(error),
+                other => unexpected("an Append answers with a count", &other),
+            }
+        }
+        Ok(shortness)
+    }
+
     pub(crate) fn sync(&mut self, process: B::Process, fd: Fd) -> Result<Done, Error> {
         self.call(process, Op::Sync { fd }).result
     }
@@ -597,7 +623,7 @@ impl<B: Backend> Run<'_, B> {
     }
 
     pub(crate) fn make_directory(&mut self, process: B::Process, dir: Fd, name: &[u8]) -> Result<Done, Error> {
-        self.call(process, Op::MakeDirectory { dir, name: Box::from(name) }).result
+        self.call(process, Op::MakeDirectory { dir, name: Box::from(name), mode: 0o777 }).result
     }
 
     /// One `List` of `fd` with room for `entries`, and `names` bytes: each
@@ -690,6 +716,7 @@ enum Summary {
     Open { root: Fd, path: usize, how: OpenHow },
     Read { fd: Fd, len: usize, at: u64 },
     Write { fd: Fd, len: usize, from: u32, at: u64 },
+    Append { fd: Fd, len: usize, from: u32 },
     Sync { fd: Fd },
     Stat { fd: Fd },
     Rename { from_dir: Fd, from: usize, to_dir: Fd, to: usize },
@@ -697,8 +724,9 @@ enum Summary {
     MakeDirectory { dir: Fd, name: usize },
     List { fd: Fd, entries: usize, names: usize },
     Spawn { root: Fd, program: usize, args: usize, env: usize, dir: usize, pipes: usize },
-    Wait { pidfd: Fd },
-    Signal { pidfd: Fd, signal: skein_io::kernel::Signal },
+    Wait { pidfd: Fd, reap: bool },
+    Signal { pidfd: Fd, signal: skein_io::kernel::Signal, to: skein_io::kernel::Target },
+    Usage,
     ReadSignal { fd: Fd },
     PipeRead { fd: Fd, len: usize },
     PipeWrite { fd: Fd, len: usize, from: u32 },
@@ -720,6 +748,7 @@ impl Summary {
             Op::Open { root, path, how } => Summary::Open { root: *root, path: path.len(), how: *how },
             Op::Read { fd, buf, at } => Summary::Read { fd: *fd, len: buf.len(), at: *at },
             Op::Write { fd, bytes, from, at } => Summary::Write { fd: *fd, len: bytes.len(), from: *from, at: *at },
+            Op::Append { fd, bytes, from } => Summary::Append { fd: *fd, len: bytes.len(), from: *from },
             Op::Sync { fd } => Summary::Sync { fd: *fd },
             Op::Stat { fd } => Summary::Stat { fd: *fd },
             Op::Rename { from_dir, from, to_dir, to } => {
@@ -728,7 +757,7 @@ impl Summary {
             Op::Remove { dir, name, directory } => {
                 Summary::Remove { dir: *dir, name: name.len(), directory: *directory }
             }
-            Op::MakeDirectory { dir, name } => Summary::MakeDirectory { dir: *dir, name: name.len() },
+            Op::MakeDirectory { dir, name, .. } => Summary::MakeDirectory { dir: *dir, name: name.len() },
             Op::List { fd, entries, names } => Summary::List { fd: *fd, entries: entries.len(), names: names.len() },
             Op::Spawn { spawn } => Summary::Spawn {
                 root: spawn.root,
@@ -738,11 +767,12 @@ impl Summary {
                 dir: spawn.dir.len(),
                 pipes: spawn.pipes.len(),
             },
-            Op::Wait { pidfd } => Summary::Wait { pidfd: *pidfd },
-            Op::Signal { pidfd, signal } => Summary::Signal { pidfd: *pidfd, signal: *signal },
+            Op::Wait { pidfd, reap } => Summary::Wait { pidfd: *pidfd, reap: *reap },
+            Op::Signal { pidfd, signal, to } => Summary::Signal { pidfd: *pidfd, signal: *signal, to: *to },
             Op::ReadSignal { fd } => Summary::ReadSignal { fd: *fd },
             Op::PipeRead { fd, buf } => Summary::PipeRead { fd: *fd, len: buf.len() },
             Op::PipeWrite { fd, bytes, from } => Summary::PipeWrite { fd: *fd, len: bytes.len(), from: *from },
+            Op::Usage => Summary::Usage,
             Op::Cancel { target } => Summary::Cancel { target: *target },
         }
     }
@@ -759,7 +789,9 @@ enum Retried {
 fn boxes_of(op: &Op) -> Vec<&[u8]> {
     match op {
         Op::Recv { buf, .. } | Op::Read { buf, .. } | Op::PipeRead { buf, .. } => vec![buf],
-        Op::Send { bytes, .. } | Op::Write { bytes, .. } | Op::PipeWrite { bytes, .. } => vec![bytes],
+        Op::Send { bytes, .. } | Op::Write { bytes, .. } | Op::Append { bytes, .. } | Op::PipeWrite { bytes, .. } => {
+            vec![bytes]
+        }
         Op::Spawn { spawn } => {
             let mut boxes = vec![&*spawn.program, &*spawn.dir];
             for arg in &spawn.args {
@@ -785,6 +817,7 @@ fn boxes_of(op: &Op) -> Vec<&[u8]> {
         | Op::Stat { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::Cancel { .. } => Vec::new(),
     }
@@ -806,6 +839,7 @@ fn entries_of(op: &Op) -> Option<&[Entry]> {
         | Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
@@ -814,6 +848,7 @@ fn entries_of(op: &Op) -> Option<&[Entry]> {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
@@ -836,6 +871,7 @@ fn handed_back<P>(flight: &Flight<P>, complete: &Complete) {
             | Done::Stat(_)
             | Done::Spawned { .. }
             | Done::Exit(_)
+            | Done::Usage(_)
             | Done::ServiceSignal(_),
         )
         | Err(_) => None,

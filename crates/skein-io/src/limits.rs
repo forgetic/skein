@@ -80,13 +80,14 @@ impl Limits {
 /// The most operations an entity has in flight at once: a socket's `Recv`,
 /// `Send`, and a `Cancel` of each. A pipe has at most one read or write and
 /// its cancel; a child has a wait and one signal (io.md, 3.4 and 6).
+/// Process usage has one independent slot, outside the entity slab.
 const PER_ENTITY: u32 = 4;
 
 /// The most operations io has in flight at once, cancels included, under
 /// `limits`: the size of the ring (kernel.md, 5), or `None` past a `u32`.
 #[must_use]
 pub fn operations(limits: &Limits) -> Option<u32> {
-    limits.sockets.checked_mul(PER_ENTITY)
+    limits.sockets.checked_mul(PER_ENTITY)?.checked_add(1)
 }
 
 /// The deadline table's room: a graceful close's and a retry's per entity.
@@ -159,7 +160,8 @@ pub const MAX_OUT_UP: MaxOut = MaxOut { events: 3, submissions: 2 };
 /// `fire`: the cancels of a closing stream's receive and send; or a stream's
 /// receive and send or half-close tried again, and whatever its demand is
 /// then answered with (`Bytes` or `Room`, and `End`), alongside one native
-/// output terminal; or a listener's accept.
+/// output terminal; or a listener's accept. An append deadline settles any
+/// pending output right, fails the open stream once, and cancels its write.
 pub const MAX_OUT_FIRE: MaxOut = MaxOut { events: 3, submissions: 2 };
 
 /// `down`: a bound socket's receive and its listener's next accept; a close's

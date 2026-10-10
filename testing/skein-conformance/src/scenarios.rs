@@ -94,6 +94,7 @@ fn sent(answer: Result<Done, Error>) -> bool {
             | Done::Stat(_)
             | Done::Spawned { .. }
             | Done::Exit(_)
+            | Done::Usage(_)
             | Done::ServiceSignal(_),
         )
         | Err(_) => false,
@@ -792,6 +793,8 @@ pub enum Target {
     Connect,
     /// A `Read` of a file.
     Read,
+    /// An `Append` to a file.
+    Append,
 }
 
 /// When a racing target's `Cancel` is submitted.
@@ -857,9 +860,9 @@ impl Cancelling {
     /// operation does when nothing stops it.
     fn own(&self) -> bool {
         match (self.of, &self.target) {
-            (Target::Recv | Target::Read, Ok(Done::Count(n))) => *n > 0,
+            (Target::Recv | Target::Read | Target::Append, Ok(Done::Count(n))) => *n > 0,
             (Target::Accept, Ok(Done::Accepted { .. })) | (Target::Connect, Ok(Done::Nothing)) => true,
-            (Target::Recv | Target::Accept | Target::Connect | Target::Read, _) => false,
+            (Target::Recv | Target::Accept | Target::Connect | Target::Read | Target::Append, _) => false,
         }
     }
 }

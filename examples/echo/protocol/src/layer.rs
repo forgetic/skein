@@ -1,6 +1,6 @@
 //! The protocol layer's state and its entry points (examples.md, 3.4): the
-//! listener, the slab of connections, their idle deadlines and the ready
-//! list; `resume`, `up`, `fire` and `down`, which the loop calls in that
+//! listener, the slab and live names of connections, their idle deadlines
+//! and the ready list; `resume`, `up`, `fire` and `down`, which the loop calls in that
 //! order within an iteration, and `Protocol::reclaim` at its end.
 
 use core::mem;
@@ -26,6 +26,8 @@ pub struct Protocol {
     conns: Slab<Conn>,
     tables: Tables,
     shutdown: Shutdown,
+    stopping: bool,
+    aborting: bool,
 }
 
 /// What the layer keeps beside its connections, which a connection's
@@ -34,8 +36,10 @@ pub struct Protocol {
 pub(crate) struct Tables {
     /// One idle deadline per connection, while it waits on its peer.
     pub(crate) deadlines: Deadlines<Id<Conn>>,
-    /// The connections that owe the domain a `Gone`, told by `resume`.
+    /// The connections owing `Gone` or an owner transition, applied by `resume`.
     ready: Set<Id<Conn>>,
+    /// Live connections to schedule when the owner ends.
+    active: Set<Id<Conn>>,
     /// Spreads the idle deadlines.
     rng: Rng,
 }
@@ -100,18 +104,34 @@ impl Protocol {
             tables: Tables {
                 deadlines: Deadlines::with_capacity(limits.conns),
                 ready: Set::with_capacity(limits.conns),
+                active: Set::with_capacity(limits.conns),
                 rng: Rng::new(seed),
             },
             shutdown: Shutdown::Running,
+            stopping: false,
+            aborting: false,
         }
     }
 
     /// Asks for the domain to be told `Shutdown`, from the ready list. Asked
-    /// again, it changes nothing.
+    /// again, it aborts connections still settling (shell.md, section 13).
     pub fn shutdown(&mut self) {
         match self.shutdown {
-            Shutdown::Running => self.shutdown = Shutdown::Asked,
-            Shutdown::Asked | Shutdown::Told => {}
+            Shutdown::Running => {
+                if self.stopping {
+                    self.shutdown = Shutdown::Told;
+                    self.aborting = true;
+                    schedule_stop(self, true);
+                } else {
+                    self.shutdown = Shutdown::Asked;
+                }
+            }
+            Shutdown::Asked | Shutdown::Told => {
+                if !self.aborting {
+                    self.aborting = true;
+                    schedule_stop(self, true);
+                }
+            }
         }
     }
 
@@ -225,6 +245,7 @@ impl Protocol {
             && self.conns.is_empty()
             && self.tables.deadlines.is_empty()
             && self.tables.ready.is_empty()
+            && self.tables.active.is_empty()
             && self.shutdown != Shutdown::Asked
     }
 
@@ -246,8 +267,8 @@ impl Tables {
 
 /// Takes one entry of the ready list, emitting at most
 /// [`MAX_OUT_RESUME`](crate::MAX_OUT_RESUME): the listener's `Listen`; or
-/// `Shutdown` told the domain; or a connection's `Gone`.
-pub fn resume(proto: &mut Protocol, _env: &Env<Limits>, up: &mut Queue<Call>, down: &mut Queue<Io>) {
+/// `Shutdown` told the domain; or a connection’s `Gone`, drain or abort.
+pub fn resume(proto: &mut Protocol, env: &Env<Limits>, up: &mut Queue<Call>, down: &mut Queue<Io>) {
     match proto.listener {
         Listener::Unopened => {
             proto.listener = listen(proto.addr, down);
@@ -269,7 +290,11 @@ pub fn resume(proto: &mut Protocol, _env: &Env<Limits>, up: &mut Queue<Call>, do
         return;
     };
     let conn = proto.conns.get_mut(id).expect("a connection on the ready list is retired only off it");
-    conn::resumed(conn, up);
+    conn::resumed(conn, up, down);
+    conn::follow(conn, id, env, &mut proto.tables, down);
+    if conn.owes() {
+        let _new: bool = proto.tables.ready.insert(id).expect("room for every connection");
+    }
     conclude(proto, id);
 }
 
@@ -293,7 +318,8 @@ pub fn up(proto: &mut Protocol, env: &Env<Limits>, event: Told, up: &mut Queue<C
         | Told::Connecting { .. }
         | Told::Connected { .. }
         | Told::Spawned { .. }
-        | Told::Exited { .. } => {
+        | Told::Exited { .. }
+        | Told::Usage { .. } => {
             unreachable!("the echo connects to no one and spawns no child")
         }
         Told::Shutdown { signal: _ } => proto.shutdown(),
@@ -382,6 +408,7 @@ fn accepted(proto: &mut Protocol, socket: Token, env: &Env<Limits>, down: &mut Q
     match proto.listener {
         Listener::Listening { .. } => match proto.conns.insert(conn::opened(socket)) {
             Ok(id) => {
+                let _new: bool = proto.tables.active.insert(id).expect("room for every connection");
                 down.push(Io::Bind { socket, owner: id.token() });
                 let Protocol { conns, tables, .. } = proto;
                 let conn = conns.get(id).expect("just made");
@@ -467,6 +494,8 @@ fn listener_closed(proto: &mut Protocol, env: &Env<Limits>) {
 
 /// The domain lets no one more in: the listener closes, once it can.
 fn stop(proto: &mut Protocol, down: &mut Queue<Io>) {
+    proto.stopping = true;
+    schedule_stop(proto, proto.aborting);
     let state = mem::replace(&mut proto.listener, CLOSED);
     proto.listener = match state {
         Listener::Unopened | Listener::Backoff { .. } => Listener::Closed { error: None },
@@ -480,6 +509,16 @@ fn stop(proto: &mut Protocol, down: &mut Queue<Io>) {
     };
 }
 
+/// Schedules one bounded owner transition for every connection.
+fn schedule_stop(proto: &mut Protocol, abort: bool) {
+    for id in &proto.tables.active {
+        let conn = proto.conns.get_mut(*id).expect("active connections are live");
+        conn.stop(abort);
+        proto.tables.deadlines.cancel(*id);
+        let _new: bool = proto.tables.ready.insert(*id).expect("room for every connection");
+    }
+}
+
 /// Retires `id` if nothing names it any more: it leaves the deadlines and the
 /// ready list.
 fn conclude(proto: &mut Protocol, id: Id<Conn>) {
@@ -491,6 +530,7 @@ fn conclude(proto: &mut Protocol, id: Id<Conn>) {
     }
     conn.retire();
     proto.conns.retire(id);
+    let _active: bool = proto.tables.active.remove(&id);
     proto.tables.deadlines.cancel(id);
     let _ready: bool = proto.tables.ready.remove(&id);
 }

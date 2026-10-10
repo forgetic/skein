@@ -104,6 +104,7 @@ impl Driver {
                 | Event::Stream { .. }
                 | Event::Spawned { .. }
                 | Event::Exited { .. }
+                | Event::Usage { .. }
                 | Event::Shutdown { .. }
                 | Event::Failed { .. }
                 | Event::Closed { .. }) => {
@@ -217,7 +218,9 @@ fn succeed(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
             buf.fill(7);
             Ok(Done::Count(u32::try_from(buf.len()).expect("a receive buffer's length")))
         }
-        Op::Send { bytes, from, .. } => Ok(Done::Count(u32::try_from(bytes.len()).expect("a send's length") - *from)),
+        Op::Send { bytes, from, .. } | Op::Append { bytes, from, .. } => {
+            Ok(Done::Count(u32::try_from(bytes.len()).expect("a send's length") - *from))
+        }
         Op::Bind { addr, .. } => Ok(Done::Bound(*addr)),
         Op::Listen { .. } | Op::Connect { .. } | Op::Shutdown { .. } | Op::Close { .. } | Op::Cancel { .. } => {
             Ok(Done::Nothing)
@@ -234,6 +237,7 @@ fn succeed(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. } => panic!("this memory world exercises only socket operations"),
@@ -243,7 +247,9 @@ fn succeed(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
 /// What a cancelled operation completes with: stopped, if it waits.
 fn stopped(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
     match op {
-        Op::Recv { .. } | Op::Send { .. } | Op::Connect { .. } | Op::Accept { .. } => Err(Error::Cancelled),
+        Op::Recv { .. } | Op::Send { .. } | Op::Append { .. } | Op::Connect { .. } | Op::Accept { .. } => {
+            Err(Error::Cancelled)
+        }
         Op::Socket { .. }
         | Op::Bind { .. }
         | Op::Listen { .. }
@@ -261,6 +267,7 @@ fn stopped(op: &mut Op, fd: &mut i32) -> Result<Done, Error> {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
@@ -535,4 +542,27 @@ fn native_output_fills_the_same_actual_payload_and_slot_maxima_with_pending_and_
             driver.bound
         );
     }
+}
+
+#[test]
+fn a_full_append_output_and_armed_deadline_stay_within_ios_worst_case() {
+    let limits = Limits { sockets: 1, output: 12_288, sends: 2, ..workloads()[0] };
+    let mut driver = Driver::new(limits);
+    driver.meter.start();
+    let stream = driver.io().adopt_append(Fd::new(40), Duration::from_millis(10)).expect("append slot");
+    driver.end("append adoption");
+    driver.next();
+    for _ in 0..3 {
+        driver.down(Request::Stream { stream, down: Down::Demand { read: Read::Nothing, room: 4096 } });
+        driver.next();
+        driver.down(Request::Stream { stream, down: Down::Send(vec![1; 4096].into_boxed_slice()) });
+    }
+    assert_eq!(driver.io().next_deadline(), Some(Time::ZERO.saturating_add(Duration::from_millis(10))));
+    assert_eq!(driver.flights.iter().filter(|submit| matches!(submit.kind, Op::Append { .. })).count(), 1);
+    driver.env.now = Time::ZERO.saturating_add(Duration::from_millis(10));
+    driver.meter.start();
+    skein_io::fire(driver.io.as_mut().expect("the append owner"), &driver.env, &mut driver.up, &mut driver.subs);
+    driver.end("append write deadline");
+    drain(&mut driver);
+    assert!(driver.most <= driver.bound);
 }

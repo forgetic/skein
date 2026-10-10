@@ -19,7 +19,9 @@ fn limits() -> Limits {
     Limits {
         endpoints: 1,
         connections: 1,
+        calls: 1,
         per_endpoint: 1,
+        memory: 16 * 1024 * 1024,
         idle_keep: Duration::from_secs(10),
         io: skein_io::Limits {
             sockets: 1,
@@ -34,7 +36,6 @@ fn limits() -> Limits {
             retry: Duration::from_millis(10),
         },
         tls: skein_tls::client::Limits { read: 4096, send: 4096, records: skein_tls::client::MAX_RECORD },
-        llm: skein_llm_world::limits(),
     }
 }
 
@@ -46,7 +47,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
         Provider::Anthropic => {
             call.endpoint = skein_llm::Endpoint::anthropic();
             call.credential = Credential::anthropic(b"fake-token".as_slice().into());
-            call.prompt.cache_key = None;
+            call.prompt.affinity = None;
         }
     }
     call.prompt.output_ceiling(dialect, 4096).expect("provider output ceiling");
@@ -61,7 +62,13 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
         Provider::Anthropic => documents::Provider::Anthropic,
     };
     let mut service = provider::Service::new(
-        provider::Config { provider: provider_kind, path: call.endpoint.target.clone(), headers: Box::new([]) },
+        provider::Config {
+            usage_fields: skein_fake_llm_protocol::documents::UsageFields::ALL,
+            echo: skein_llm::openai::Echo::NONE,
+            provider: provider_kind,
+            path: call.endpoint.target.clone(),
+            headers: Box::new([]),
+        },
         &peer_limits,
     )
     .expect("fake service");
@@ -82,6 +89,8 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
             address: Addr::from((Ipv4Addr::LOCALHOST, 443)),
             transport: skein_llm_connection::Transport::Plaintext,
             llm: call.endpoint,
+            limits: skein_llm_world::limits(),
+            credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
         })
         .expect("one endpoint");
     let mut component = Component::new(endpoints, &limits()).expect("component");
@@ -105,6 +114,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
     component.down(
         &env,
         Request::Start {
+            drop_reasoning: false,
             call: Token::new(7),
             endpoint: 0,
             prompt: call.prompt,
@@ -128,7 +138,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
                     assert!(!completion.content.is_empty());
                     completed += 1;
                 }
-                Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
+                Event::Closed | Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
                     panic!("unexpected component event: {event:?}");
                 }
             }
@@ -153,6 +163,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
                 | IoRequest::Reject { .. }
                 | IoRequest::Output { .. }
                 | IoRequest::Spawn { .. }
+                | IoRequest::Usage { .. }
                 | IoRequest::Signal { .. }) => panic!("unexpected io request: {other:?}"),
             }
         }
@@ -171,7 +182,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
         if let Some(event) = peer_up.pop() {
             match event {
                 provider::Event::Domain(input) => fake::step(&mut domain, &fake_env, input, &mut replies),
-                provider::Event::Close | provider::Event::Closed => {}
+                provider::Event::Head { .. } | provider::Event::Close | provider::Event::Closed => {}
             }
         }
         if let Some(reply) = replies.pop() {
@@ -231,8 +242,8 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
     assert_eq!(service.count(), 1, "the independent fake decoded the call");
     assert_eq!(completed, 1);
     assert!(fragments > 0);
-    let later = Env { now: Time::from_nanos(11_000_000_000), ..env };
-    component.fire(&later, &mut up, &mut io);
+    let later = env;
+    component.down(&later, Request::Close, &mut up, &mut io);
     match io.pop() {
         Some(IoRequest::Close { entity }) => {
             assert_eq!(entity, Token::new(100));
@@ -244,6 +255,7 @@ fn run(dialect: Provider, seed: u64) -> (Vec<String>, (u32, u32)) {
     provider::closed(&mut peer, &mut service, &peer_env, &mut peer_up, &mut peer_down);
     service.reclaim();
     domain.reclaim();
+    assert!(matches!(up.pop(), Some(Event::Closed)));
     assert!(up.is_empty() && io.is_empty() && !component.has_work());
     (wire.trace, (completed, fragments))
 }

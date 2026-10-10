@@ -346,7 +346,10 @@ fn events(limits: sse::Limits, stream: &[u8], close: Option<u32>) -> u64 {
     let mut most = meter.check(meter.end(), bound, &what);
     let mut demanded: Option<Read> = None;
     let mut over = false;
-    for steps in 0..100_000 {
+    for steps in 0..u32::try_from(stream.len().checked_mul(8).expect("a test stream budget"))
+        .expect("test budget fits u32")
+        .saturating_add(64)
+    {
         let closing = close == Some(steps) || over;
         // The delivery, made between steps to the reader's demand.
         let delivered = match (closing, demanded.take()) {
@@ -360,13 +363,24 @@ fn events(limits: sse::Limits, stream: &[u8], close: Option<u32>) -> u64 {
         match (closing, delivered) {
             (true, _) => sse::down(&mut reader, &env, sse::Request::Close, &mut above, &mut below),
             (false, Some(ev)) => sse::up(&mut reader, &env, ev, &mut above, &mut below),
-            (false, None) => sse::down(&mut reader, &env, sse::Request::Next, &mut above, &mut below),
+            (false, None) => {
+                let request = match reader.waiting() {
+                    sse::Waiting::Above => sse::Request::Data(Down::Demand { read: Read::Fill(limits.chunk), room: 0 }),
+                    sse::Waiting::Next => sse::Request::Next,
+                    other @ (sse::Waiting::Bytes | sse::Waiting::Close | sse::Waiting::Nothing) => {
+                        panic!("unexpected wait {other:?}")
+                    }
+                };
+                sse::down(&mut reader, &env, request, &mut above, &mut below);
+            }
         }
         let step = meter.end();
         let mut closed = false;
         while let Some(event) = above.pop() {
             match event {
-                sse::Event::Message(message) => drop(message),
+                sse::Event::Opened => {}
+                sse::Event::Data(data) => drop(data),
+                sse::Event::Dispatched(dispatch) => drop(dispatch),
                 sse::Event::Ended | sse::Event::Failed(_) => over = true,
                 sse::Event::Closed => closed = true,
             }
@@ -426,11 +440,23 @@ fn the_reader_holds_no_more_than_its_worst_case_at_its_limits() {
 }
 
 #[test]
-fn a_full_event_is_held_with_its_copy_and_a_delivery() {
+fn a_large_event_holds_only_its_intake_piece_and_delivery() {
     let limits = sse::Limits { line: 256, event: 256, field: 8, chunk: 64 };
     let mut stream = b"data: ".to_vec();
     stream.extend_from_slice(&[b'x'; 240]);
     stream.extend_from_slice(b"\n\n");
     let most = events(limits, &stream, None);
-    assert!(most > 240 + 64, "the data and the delivery at once: {most}");
+    assert!(most <= sse::worst_case(&limits).expect("valid limits"), "bounded pieces: {most}");
+    assert!(most < 240, "no full event buffer: {most}");
+}
+
+#[test]
+fn an_event_of_a_megabyte_costs_the_same_reader_memory_as_a_small_one() {
+    let limits = sse::Limits { line: 2 << 20, event: 2 << 20, field: 8, chunk: 4 };
+    let small = format!("event: 12345678\nid: 12345678\ndata: {}\n\n", "a".repeat(64));
+    let large = format!("event: 12345678\nid: 12345678\ndata: {}\n\n", "a".repeat(1 << 20));
+    let small = events(limits, small.as_bytes(), None);
+    let large = events(limits, large.as_bytes(), None);
+    assert_eq!(small, large, "the reader holds no event buffer");
+    assert_eq!(large, sse::worst_case(&limits).expect("valid limits"));
 }

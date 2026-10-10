@@ -7,9 +7,14 @@ Responses route and Anthropic's OAuth Messages route. It composes
 normally supplied by TLS.
 
 `Prompt` contains instructions, model, conversation messages and function
-tools. Ordered `Block` values describe text, refusals, tool calls/results and
+tools and `ToolChoice` (`Auto`, `None`, or distinct offered names in `Only`).
+Both dialects render `Only` as automatic selection; callers enforce tool policy.
+Ordered `Block` values describe text, refusals, tool calls/results and
 opaque reasoning. Responses expose text, reasoning and tool-argument deltas,
 completed blocks, and one final `Completion` with stop reason and usage.
+Arguments past the input cap arrive as `Oversize`; provider output cuts arrive
+as `Cut`. Both complete normally and are refused in history until the caller
+replaces them; only `ToolCall` represents an executable call.
 Completed blocks preserve provider replay metadata for the next turn.
 
 For Codex, the caller obtains and refreshes an OAuth access token, supplies the
@@ -43,10 +48,14 @@ To drive one call:
    only after it settles. Cancellation ends with `Cancelled`, then `Closed`.
 
 The caller schedules deadlines using `waiting()`, and reports them through
-`abort(..., Failure::TimedOut, ...)`. There are no automatic retries; failures
+`abort(..., Failure::TimedOut { phase }, ...)`. The phase names connect, handshake,
+head, idle or whole. There are no automatic retries; failures
 include structured classification and evidence of whether the request may
 have reached the provider. Limits remain fixed across all entry points and
-connection reuse.
+connection reuse. Admission `Error::Limit` and active `Failure::Limit` carry
+the exact `Cap` and its configured `bound`. Failure detail is derived from
+that evidence; `Evidence::Response { status }` preserves the HTTP status
+on every failure after a response head, including non-JSON error bodies.
 
 For Anthropic, use `Endpoint::anthropic()` and
 `Credential::anthropic(access_token)`. Sign-in, refresh and secure token storage
@@ -57,13 +66,19 @@ through `Endpoint::headers`. Credential and framing headers cannot be overridden
 
 Anthropic uses native ordered message blocks, tool schemas and tool-result
 error flags. `Prompt::max_output_tokens` sets its required `max_tokens`, defaulting
-to 4096; zero is invalid. Codex requires this setting to be `None`.
+to `Limits::declared_output_tokens`; zero is invalid. Codex requires this setting to be `None`.
 `reasoning_effort` accepts `off` or adaptive-thinking effort `low`, `medium`,
-`high`, `max`; model compatibility is the caller's choice. Anthropic rejects
-`cache_key`, which has no equivalent in this dialect. Completed thinking and
+`high`, `max`; model compatibility is the caller's choice. Anthropic accepts
+`Prompt::affinity` with no effect on its wire bytes. Completed thinking and
 redacted-thinking blocks retain signatures/data as Anthropic-tagged replay.
 Received tool arguments remain raw; resending requires valid JSON objects and
 native Anthropic identifiers. Provider replay cannot cross dialects.
+
+Codex renders `Affinity::key` as a lowercase UUID in `prompt_cache_key` and
+`session-id`. Its `thread-id` XORs the big-endian thread number into the key's
+last four bytes; thread zero equals the key. Without affinity all three are
+absent. Both header names are reserved, and request head limits price their
+fixed width alongside credentials and endpoint headers.
 
 The optional `anthropic::identity` module archives Tongs' Claude Code identity
 constants and static headers. A caller choosing that compatibility profile
@@ -121,3 +136,28 @@ temporary JSON and raw/envelope copies. `Prompt::output_ceiling` handles the
 configured dialect's supported wire option, while local output limits remain
 caller-owned. Shared independent scripts and HTTP/SSE peers are described in
 [fake-llm.md](../../docs/design/fake-llm.md).
+
+Owners may enable `client::Limits.drop_reasoning` to receive `Block::Dropped`
+for Codex reasoning beyond the opaque cap. Dropped blocks emit no history item;
+Anthropic thinking and other opaque Codex items retain typed limit failures.
+`Client::prepare_with_reasoning_drop` selects the policy explicitly for one
+call, overriding that default in either direction. Connection owners supply
+`Request::Start.drop_reasoning` from the selected model's policy. Calls with
+different policies can reuse the same endpoint and connection; the receiving
+bounds stay unchanged. `Component::admit_with_reasoning_drop` supports the same
+explicit policy when checking admission before submitting Start.
+
+Anthropic output uses `client::Limits.declared_output_tokens` when the prompt
+has no cap. A prompt cap above that declaration is refused as `Cap::Output`.
+Native Anthropic request encoding and measurement take the declaration explicitly.
+
+`Usage` exposes optional `input`, `cache_read`, `cache_write`, `output` and
+`reasoning` counts. `None` is unreported; `Some(0)` is a reported zero.
+Inconsistent accounting preserves the completion and leaves derived input absent.
+The fake protocol's `Config.usage_fields` selects the fields it writes.
+
+Anthropic requests encode system instructions as ordered text blocks, marking
+its last block and the final message's last text, tool call or result with
+`cache_control: {"type":"ephemeral"}`. Reasoning replay remains unchanged.
+`anthropic::decode_request` returns `Request { prompt, marks }`; the independent
+peer rejects excessive or invalid markers before dispatching a query.

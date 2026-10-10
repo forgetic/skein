@@ -545,6 +545,7 @@ impl End {
                 self.seen.requests.push(std::mem::take(&mut self.tokens));
                 self.tokenizer_down(json::Request::Close, work);
             }
+            json::Event::Long(_) | json::Event::Skipped(_) => unreachable!("only Next is demanded"),
             json::Event::Closed => {
                 self.tokenizer = None;
                 // What the tokenizer left of the body, if it stopped short of

@@ -19,6 +19,10 @@
 //!   next `Token`, or the document's outcome, `Done` or `Failed`, after
 //!   which no token follows. One `Next` at a time, and none after the
 //!   outcome or the close: the side above's bug otherwise, asserted.
+//! - **`Text(max)` keeps a string only when its decoded text fits `max`; a
+//!   longer string is checked through its end and answered with `Long`.
+//! - **`Skip` scans one value**, checking its grammar and text while keeping
+//!   neither. `Skipped` reports the bytes delivered for that value.
 //! - **`Close` ends the tokenizer in any state.** It withdraws what it
 //!   demanded below, drops a `Next` not yet answered, and answers with
 //!   `Closed`, its one terminal event. It does not close the stream below,
@@ -44,7 +48,7 @@ use skein_lib::{Env, List, Queue, Stack};
 
 use crate::Token;
 use crate::number::{After, Number};
-use crate::string::{self, Piece, Text};
+use crate::string::{self, Buffer, Piece, Retention, Text};
 
 /// The tokenizer's limits (programming-model.md, 7): the same for every
 /// step and for [`Tokenizer::new`], which allocates by them.
@@ -53,7 +57,7 @@ pub struct Limits {
     /// How deep objects and arrays may nest. A document nested deeper fails
     /// with [`Error::TooDeep`] at the first container past it.
     pub depth: u32,
-    /// The longest string or key, in bytes of UTF-8 once unescaped. A longer
+    /// The longest retained string or key, in bytes of UTF-8 once unescaped. A longer
     /// one fails with [`Error::StringTooLong`].
     pub string: u32,
     /// The longest number, in bytes of its text. A longer one fails with
@@ -122,6 +126,10 @@ pub enum Request {
     /// A demand for the next token. Exactly one [`Event`] answers it, a
     /// `Token`, `Done` or `Failed`, unless a `Close` comes first.
     Next,
+    /// A demand keeping the next string up to this decoded byte count; answered by a token or `Long`.
+    Text(u32),
+    /// A demand scanning one value without retaining it; answered by `Skipped` or an array end.
+    Skip,
     /// Closes the tokenizer, in any state. `Closed` answers it.
     Close,
 }
@@ -131,6 +139,10 @@ pub enum Request {
 pub enum Event {
     /// The next token, for a `Next`.
     Token(Token),
+    /// For `Text`: the complete decoded length of a string past its cap.
+    Long(u64),
+    /// For `Skip`: the bytes delivered for one checked value.
+    Skipped(u64),
     /// For a `Next`: the document is whole, and the stream ended after it
     /// with nothing but whitespace. Nothing follows but `Closed`.
     Done,
@@ -208,10 +220,58 @@ impl Tokenizer {
             document: Document {
                 expect: Expect::Value,
                 open: Stack::with_capacity(limits.depth),
-                text: List::with_capacity(text_capacity(limits)),
+                text: Buffer {
+                    bytes: List::with_capacity(text_capacity(limits)),
+                    length: 0,
+                    retention: Retention::Strict(limits.string),
+                },
+                mode: Mode::Next,
                 read: 0,
+                token_start: 0,
+                token_end: 0,
             },
         }
+    }
+
+    /// Starts a new stream after Done or Failed, retaining every capacity.
+    pub fn restart(&mut self) {
+        match self.state {
+            State::Over => self.reset(),
+            State::Idle(_) | State::Reading(_) | State::Closed => unreachable!("restart follows a document outcome"),
+        }
+    }
+
+    /// The last token's wire boundaries, excluding its leading separators and lookahead.
+    pub(crate) fn token_wire(&self) -> (u32, u32) {
+        (self.document.token_start, self.document.token_end)
+    }
+
+    /// Delivered bytes in the outstanding skip, excluding its leading separators.
+    pub(crate) fn skip_progress(&self) -> u64 {
+        match self.document.mode {
+            Mode::Skip { start: Some(start), .. } => {
+                u64::from(self.document.read.checked_sub(start).expect("the skip starts within delivered bytes"))
+            }
+            Mode::Skip { start: None, .. } | Mode::Next | Mode::Text(_) => 0,
+        }
+    }
+
+    /// The collector may also reset a tokenizer it stopped after its own count failure.
+    pub(crate) fn reset(&mut self) {
+        match self.state {
+            State::Idle(_) | State::Over | State::Closed => {}
+            State::Reading(_) => unreachable!("reset has no outstanding stream demand"),
+        }
+        for _ in 0..self.document.open.len() {
+            self.document.open.pop().expect("the current open container count");
+        }
+        self.document.text.reset(Retention::Discard);
+        self.document.expect = Expect::Value;
+        self.document.mode = Mode::Next;
+        self.document.read = 0;
+        self.document.token_start = 0;
+        self.document.token_end = 0;
+        self.state = State::Idle(Held::Nothing);
     }
 
     /// What it is waiting for: a function of its state alone.
@@ -273,8 +333,19 @@ pub fn down(
     let document = &mut tokenizer.document;
     let state = mem::replace(&mut tokenizer.state, State::Closed);
     tokenizer.state = match rq {
-        Request::Next => match state {
-            State::Idle(held) => next(document, limits, held, above),
+        Request::Next | Request::Text(_) | Request::Skip => match state {
+            State::Idle(held) => {
+                document.mode = match rq {
+                    Request::Next => Mode::Next,
+                    Request::Text(cap) => Mode::Text(cap.min(limits.string)),
+                    Request::Skip => {
+                        assert_skip(document);
+                        Mode::Skip { depth: document.open.len(), start: None }
+                    }
+                    Request::Close => unreachable!("a demand"),
+                };
+                next(document, limits, held, above)
+            }
             State::Reading(_) => unreachable!("a Next before the last one was answered"),
             State::Over => unreachable!("a Next after the document's outcome"),
             State::Closed => unreachable!("a Next after Closed"),
@@ -368,9 +439,31 @@ struct Document {
     /// The objects and arrays open, the innermost on top.
     open: Stack<Container>,
     /// The text of the string or number being read: empty between tokens.
-    text: List<u8>,
+    text: Buffer,
+    mode: Mode,
     /// The bytes delivered so far, at most [`Limits::length`].
     read: u32,
+    token_start: u32,
+    token_end: u32,
+}
+
+/// Retention and framing of the demand outstanding above.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Mode {
+    Next,
+    Text(u32),
+    Skip { depth: u32, start: Option<u32> },
+}
+
+fn assert_skip(document: &Document) {
+    match document.expect {
+        Expect::Value | Expect::FirstElement | Expect::Colon | Expect::Trailing => {}
+        Expect::CommaOrEnd => match document.open.top() {
+            Some(Container::Array) => {}
+            Some(Container::Object) | None => unreachable!("Skip where a key comes"),
+        },
+        Expect::FirstKey | Expect::Key => unreachable!("Skip where a key comes"),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -405,6 +498,7 @@ enum Expect {
 enum Step {
     /// A token for the side above, and what the tokenizer holds after it.
     Token(Token, Held),
+    Long(u64),
     /// More is needed: the tokenizer reads on.
     Read(Reading),
     /// The document failed.
@@ -448,9 +542,11 @@ fn next(document: &mut Document, limits: &Limits, held: Held, above: &mut Queue<
             settle(document, step, above)
         }
         Held::ByteThenEnd(byte) => match significant(document, limits, byte) {
-            Step::Token(token, held) => {
-                above.push(Event::Token(token));
-                State::Idle(held_end(held))
+            Step::Token(token, held) => complete_token(document, token, held_end(held), above),
+            Step::Long(length) => {
+                document.token_end = document.read;
+                above.push(Event::Long(length));
+                State::Idle(Held::End)
             }
             Step::Read(reading) => ended(document, reading, above),
             Step::Fail(error) => fail(document, error, above),
@@ -467,7 +563,7 @@ fn close(document: &mut Document, state: State, above: &mut Queue<Event>) -> Sta
         State::Idle(_) | State::Reading(_) | State::Over => {}
         State::Closed => unreachable!("a Close after Closed"),
     }
-    document.text.clear();
+    document.text.bytes.clear();
     above.push(Event::Closed);
     State::Closed
 }
@@ -495,17 +591,60 @@ fn held_failed(held: Held, fault: Fault) -> Held {
 /// The state a step leaves the tokenizer in, once what it made is emitted.
 fn settle(document: &mut Document, step: Step, above: &mut Queue<Event>) -> State {
     match step {
-        Step::Token(token, held) => {
-            above.push(Event::Token(token));
-            State::Idle(held)
+        Step::Token(token, held) => complete_token(document, token, held, above),
+        Step::Long(length) => {
+            document.token_end = document.read;
+            above.push(Event::Long(length));
+            State::Idle(Held::Nothing)
         }
         Step::Read(reading) => State::Reading(reading),
         Step::Fail(error) => fail(document, error, above),
     }
 }
 
+fn complete_token(document: &mut Document, token: Token, held: Held, above: &mut Queue<Event>) -> State {
+    let lookahead = match held {
+        Held::Byte(_) | Held::ByteThenEnd(_) => 1,
+        Held::Nothing => match token {
+            Token::Number(_) => 1,
+            Token::ObjectStart
+            | Token::ObjectEnd
+            | Token::ArrayStart
+            | Token::ArrayEnd
+            | Token::Key(_)
+            | Token::String(_)
+            | Token::True
+            | Token::False
+            | Token::Null => 0,
+        },
+        Held::End | Held::Failed(_) => 0,
+    };
+    document.token_end = document.read.checked_sub(lookahead).expect("the token preceded its lookahead");
+    match document.mode {
+        Mode::Next | Mode::Text(_) | Mode::Skip { depth: _, start: None } => above.push(Event::Token(token)),
+        Mode::Skip { depth, start: Some(start) } => {
+            if document.open.len() > depth {
+                assert!(held == Held::Nothing, "a skipped inner number consumes its delimiter");
+                return State::Reading(Reading::Byte);
+            }
+            let lookahead = match held {
+                Held::Byte(_) | Held::ByteThenEnd(_) => 1,
+                Held::Nothing | Held::End | Held::Failed(_) => 0,
+            };
+            let length = document
+                .read
+                .checked_sub(start)
+                .expect("the value starts within the bytes delivered")
+                .checked_sub(lookahead)
+                .expect("the value was delivered");
+            above.push(Event::Skipped(u64::from(length)));
+        }
+    }
+    State::Idle(held)
+}
+
 fn fail(document: &mut Document, error: Error, above: &mut Queue<Event>) -> State {
-    document.text.clear();
+    document.text.bytes.clear();
     above.push(Event::Failed(error));
     State::Over
 }
@@ -535,8 +674,7 @@ fn ended(document: &mut Document, reading: Reading, above: &mut Queue<Event>) ->
                 return fail(document, Error::Number, above);
             }
             let token = number_token(document);
-            above.push(Event::Token(token));
-            State::Idle(Held::End)
+            complete_token(document, token, Held::End, above)
         }
         Reading::Literal(_) | Reading::String { .. } => fail(document, Error::Truncated, above),
     }
@@ -569,7 +707,7 @@ fn delivered(document: &mut Document, limits: &Limits, reading: Reading, bytes: 
                 bytes.len() <= chunk && (bytes.last() == Some(&b'"') || bytes.len() == chunk),
                 "a scan delivers through its quote or its maximum"
             );
-            match string::decode(text, bytes, &mut document.text, limits.string) {
+            match string::decode(text, bytes, &mut document.text) {
                 Ok(Piece::More(text)) => Step::Read(Reading::String { key, text }),
                 Ok(Piece::Closed) => string_token(document, key),
                 Err(error) => Step::Fail(error),
@@ -598,12 +736,12 @@ fn significant(document: &mut Document, limits: &Limits, byte: u8) -> Step {
             _ => value(document, limits, byte),
         },
         Expect::FirstKey => match byte {
-            b'"' => key(),
+            b'"' => begin_string(document, limits, true),
             b'}' => end(document, Container::Object),
             _ => Step::Fail(Error::Unexpected),
         },
         Expect::Key => match byte {
-            b'"' => key(),
+            b'"' => begin_string(document, limits, true),
             _ => Step::Fail(Error::Unexpected),
         },
         Expect::Colon => match byte {
@@ -625,22 +763,43 @@ fn significant(document: &mut Document, limits: &Limits, byte: u8) -> Step {
 
 /// The first byte of a value.
 fn value(document: &mut Document, limits: &Limits, byte: u8) -> Step {
+    document.token_start = document.read.checked_sub(1).expect("the value opener was delivered");
+    match &mut document.mode {
+        Mode::Skip { start, .. } => {
+            if start.is_none() {
+                *start = Some(document.read.checked_sub(1).expect("the first byte was delivered"));
+            }
+        }
+        Mode::Next | Mode::Text(_) => {}
+    }
     match byte {
         b'{' => start(document, Container::Object),
         b'[' => start(document, Container::Array),
-        b'"' => Step::Read(Reading::String { key: false, text: Text::Plain }),
+        b'"' => begin_string(document, limits, false),
         b't' => Step::Read(Reading::Literal(Literal::True)),
         b'f' => Step::Read(Reading::Literal(Literal::False)),
         b'n' => Step::Read(Reading::Literal(Literal::Null)),
         _ => match Number::start(byte) {
-            Some(number) => number_more(document, limits, number, byte),
+            Some(number) => {
+                document.text.reset(Retention::Discard);
+                number_more(document, limits, number, byte)
+            }
             None => Step::Fail(Error::Unexpected),
         },
     }
 }
 
-fn key() -> Step {
-    Step::Read(Reading::String { key: true, text: Text::Plain })
+fn begin_string(document: &mut Document, limits: &Limits, key: bool) -> Step {
+    if key {
+        document.token_start = document.read.checked_sub(1).expect("the key quote was delivered");
+    }
+    let retention = match document.mode {
+        Mode::Next => Retention::Strict(limits.string),
+        Mode::Text(cap) => Retention::Capped(cap),
+        Mode::Skip { .. } => Retention::Discard,
+    };
+    document.text.reset(retention);
+    Step::Read(Reading::String { key, text: Text::Plain })
 }
 
 /// The start of an object or an array, refused past the depth.
@@ -658,6 +817,7 @@ fn start(document: &mut Document, container: Container) -> Step {
 
 /// The end of an object or an array, which must be the innermost open.
 fn end(document: &mut Document, container: Container) -> Step {
+    document.token_start = document.read.checked_sub(1).expect("the closer was delivered");
     // A document that fails is over, so a pop that does not match is not
     // undone.
     match document.open.pop() {
@@ -693,7 +853,21 @@ fn number_byte(document: &mut Document, limits: &Limits, number: Number, byte: u
             let token = number_token(document);
             // The byte that ended the number is the grammar's: held for the
             // next `Next`, unless it is whitespace, which it would skip.
-            let held = if is_whitespace(byte) { Held::Nothing } else { Held::Byte(byte) };
+            let held = match document.mode {
+                Mode::Skip { depth, .. } => {
+                    if document.open.len() > depth {
+                        return significant(document, limits, byte);
+                    }
+                    Held::Byte(byte)
+                }
+                Mode::Next | Mode::Text(_) => {
+                    if is_whitespace(byte) {
+                        Held::Nothing
+                    } else {
+                        Held::Byte(byte)
+                    }
+                }
+            };
             Step::Token(token, held)
         }
     }
@@ -701,31 +875,43 @@ fn number_byte(document: &mut Document, limits: &Limits, number: Number, byte: u
 
 /// A byte that continues a number, refused past the number limit.
 fn number_more(document: &mut Document, limits: &Limits, number: Number, byte: u8) -> Step {
-    if document.text.len() >= limits.number {
+    if document.text.length >= u64::from(limits.number) {
         return Step::Fail(Error::NumberTooLong);
     }
-    document.text.push(byte).expect("the text holds the longest number");
+    document.text.length = document.text.length.checked_add(1).expect("under the number limit");
+    match document.mode {
+        Mode::Skip { .. } => {}
+        Mode::Next | Mode::Text(_) => {
+            document.text.bytes.push(byte).expect("the text holds the longest number");
+        }
+    }
     Step::Read(Reading::Number(number))
 }
 
 /// The number read, as a token, the text emptied for the next.
 fn number_token(document: &mut Document) -> Token {
-    let text = document.text.to_boxed();
-    document.text.clear();
+    let text = document.text.bytes.to_boxed();
+    document.text.reset(Retention::Discard);
     after_value(document);
     Token::Number(text)
 }
 
 /// The string or key read, as a token, the text emptied for the next.
 fn string_token(document: &mut Document, key: bool) -> Step {
-    let text = document.text.to_boxed();
-    document.text.clear();
+    let text = document.text.bytes.to_boxed();
+    document.text.bytes.clear();
     if key {
         document.expect = Expect::Colon;
-        return Step::Token(Token::Key(text), Held::Nothing);
+        return match document.mode {
+            Mode::Text(cap) if document.text.length > u64::from(cap) => Step::Long(document.text.length),
+            Mode::Next | Mode::Text(_) | Mode::Skip { .. } => Step::Token(Token::Key(text), Held::Nothing),
+        };
     }
     after_value(document);
-    Step::Token(Token::String(text), Held::Nothing)
+    match document.mode {
+        Mode::Text(cap) if document.text.length > u64::from(cap) => Step::Long(document.text.length),
+        Mode::Next | Mode::Text(_) | Mode::Skip { .. } => Step::Token(Token::String(text), Held::Nothing),
+    }
 }
 
 /// Where the grammar is after a value: within its container, or at the

@@ -81,9 +81,11 @@ fn the_side_above_closes_in_every_state() {
         let run = sse_world::check(bytes, &settings, at);
         seen.insert(format!("{:?}", run.closed_while));
     }
-    let every: BTreeSet<String> =
-        [Waiting::Next, Waiting::Bytes, Waiting::Close].iter().map(|waiting| format!("{waiting:?}")).collect();
-    assert_eq!(seen, every, "closed while waiting for a Next, for bytes, and for the close");
+    let every: BTreeSet<String> = [Waiting::Next, Waiting::Above, Waiting::Bytes, Waiting::Close]
+        .iter()
+        .map(|waiting| format!("{waiting:?}"))
+        .collect();
+    assert_eq!(seen, every, "closed while waiting for Next, data demand, bytes, and close");
 }
 
 #[test]

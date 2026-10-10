@@ -179,7 +179,16 @@ pub fn run(stream: &[u8], settings: &Settings, seed: u64) -> Run {
             withdrawn: None,
             after_cr: false,
         },
-        above: Above { pending: false, events: Vec::new(), outcome: None, closing: None, closed: false },
+        above: Above {
+            pending: false,
+            open: false,
+            data_pending: false,
+            data: Vec::new(),
+            events: Vec::new(),
+            outcome: None,
+            closing: None,
+            closed: false,
+        },
         fell: Fell::default(),
         iteration: 0,
         held_back: 0,
@@ -298,8 +307,12 @@ enum Life {
     Over,
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "the harness tracks independent reader and data-face demands")]
 struct Above {
     pending: bool,
+    open: bool,
+    data_pending: bool,
+    data: Vec<u8>,
     events: Vec<reference::Event>,
     outcome: Option<Ending>,
     closing: Option<Waiting>,
@@ -415,7 +428,12 @@ impl World<'_> {
             self.down(Request::Close);
             return;
         }
-        if above.outcome.is_none() && !above.pending && self.rng.chance(self.settings.eagerness) {
+        if above.open && !above.data_pending && self.rng.chance(self.settings.eagerness) {
+            above.data_pending = true;
+            self.down(Request::Data(Down::Demand { read: Read::Fill(1), room: 0 }));
+            return;
+        }
+        if above.outcome.is_none() && !above.open && !above.pending && self.rng.chance(self.settings.eagerness) {
             above.pending = true;
             self.down(Request::Next);
         }
@@ -450,8 +468,10 @@ impl World<'_> {
             Waiting::Nothing
         } else if self.above.outcome.is_some() {
             Waiting::Close
-        } else if self.above.pending {
+        } else if self.above.pending || self.above.data_pending {
             Waiting::Bytes
+        } else if self.above.open {
+            Waiting::Above
         } else {
             Waiting::Next
         };
@@ -468,13 +488,37 @@ impl Above {
     fn receive(&mut self, event: Event) {
         assert!(!self.closed, "nothing follows Closed: {event:?}");
         match event {
-            Event::Message(message) => {
-                assert!(self.pending, "an event answers a Next");
+            Event::Opened => {
+                assert!(self.pending && !self.open, "Opened answers Next");
                 self.pending = false;
+                self.open = true;
+                self.data.clear();
+            }
+            Event::Data(data) => match data {
+                Up::Bytes(bytes) => {
+                    assert!(self.data_pending);
+                    self.data_pending = false;
+                    self.data.extend_from_slice(&bytes);
+                }
+                Up::End => {
+                    assert!(self.open);
+                    self.data_pending = false;
+                }
+                Up::Failed(_) => {
+                    assert!(self.open);
+                    self.data_pending = false;
+                    self.open = false;
+                    self.data.clear();
+                }
+                Up::Room => panic!("event data is read only"),
+            },
+            Event::Dispatched(dispatch) => {
+                assert!(self.open, "a dispatch follows data End");
+                self.open = false;
                 self.events.push(reference::Event {
-                    name: message.name.to_vec(),
-                    data: message.data.to_vec(),
-                    id: message.id.to_vec(),
+                    name: dispatch.name.to_vec(),
+                    data: std::mem::take(&mut self.data),
+                    id: dispatch.id.to_vec(),
                 });
             }
             Event::Ended | Event::Failed(_) => {
@@ -483,7 +527,9 @@ impl Above {
                 self.pending = false;
                 self.outcome = Some(match event {
                     Event::Failed(error) => Ending::Failed(error),
-                    Event::Ended | Event::Message(_) | Event::Closed => Ending::Ended,
+                    Event::Ended | Event::Opened | Event::Data(_) | Event::Dispatched(_) | Event::Closed => {
+                        Ending::Ended
+                    }
                 });
             }
             Event::Closed => {

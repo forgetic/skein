@@ -131,7 +131,8 @@ impl Peer {
         &self.observations
     }
 
-    /// Stops admission and closes connections without forgetting accepted issuer work.
+    /// Ends a peer whose clients have settled, retaining accepted work’s terminals.
+    /// A caller ending it earlier names its scenario about peer hang-up.
     pub fn shutdown(&mut self) {
         self.face.shutdown();
     }
@@ -224,6 +225,7 @@ impl Peer {
             | io::Event::Connected { .. }
             | io::Event::Spawned { .. }
             | io::Event::Exited { .. }
+            | io::Event::Usage { .. }
             | io::Event::Shutdown { .. } => {
                 panic!("issuer only listens and serves classic byte streams");
             }
@@ -537,6 +539,11 @@ impl Host for Peer {
     fn next_deadline(&self) -> Option<Time> {
         [self.face.io.next_deadline(), self.issuer.next_deadline()].into_iter().flatten().min()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.issuer.next_deadline()
+    }
+
     fn is_empty(&self) -> bool {
         self.face.is_empty()
             && self.connections.is_empty()

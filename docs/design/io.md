@@ -1,11 +1,11 @@
 # io
 
-Provisional, 2026-10-03. The design of `skein-io`'s step layer: the
-lowest step layer of every service. It owns sockets, pipes, files and
-child processes, the operations in flight on them, and the receive and
-send queues, and it is the only layer that sees a descriptor or a kernel
-error. Below it is the kernel boundary (kernel.md); above it, a service's
-protocol layer.
+Provisional, 2026-10-03, revised 2026-10-09. The design of `skein-io`'s
+step layer: the lowest step layer of every service. It owns sockets,
+pipes, files and child processes, the operations in flight on them, and
+the receive and send queues, and it is the only layer that sees a
+descriptor or a kernel error. Below it is the kernel boundary
+(kernel.md); above it, a service's protocol layer.
 
 ## 1. In one page
 
@@ -21,7 +21,12 @@ protocol layer.
   intake has room, a send only for queued output under its cap, and an
   accept only while the listener's owner has room.
 - **Paths stay beneath a root,** spawned children are pidfds from the
-  start, and termination signals arrive as events.
+  start, each in a process group of its own, and termination signals
+  arrive as events.
+- **Files are replaced whole, or appended to.** A record is replaced
+  durably, privately when it is a secret (5.2, 5.3); a trace or a log is
+  a write stream on a file opened to append, with a write deadline for a
+  filesystem that stalls (5.1).
 - **Addresses, never names.** io connects to an address; names are
   resolved before it.
 
@@ -44,7 +49,9 @@ pub enum Request {
     Stream  { stream: Token, down: stream::Down },    // sockets and pipes alike
     Output  { stream: Token, down: stream::OutputDown }, // independent output reservation
     Spawn   { owner: Token, spawn: Spawn },
-    Signal  { child: Token, signal: Signal },
+    Signal  { child: Token, signal: Signal, to: Target }, // the child, or its group (section 6)
+    Usage   { owner: Token },                         // the process's resource usage (6.1)
+    // File { owner, root, op }; Window { owner, stream } (section 7)
     Close   { entity: Token },                        // graceful (section 3); one Closed follows
     Abort   { entity: Token },
 }
@@ -58,7 +65,9 @@ pub enum Event {
     Output     { owner: Token, up: stream::OutputUp },
     Spawned   { owner: Token, child: Token, pipes: Box<[Token]> },
     Exited    { owner: Token, exit: Exit },
+    Usage     { owner: Token, usage: Measured },      // for a Usage: its one terminal
     Shutdown  { signal: ServiceSignal },              // section 7
+    // File { owner, result }; Resized, Window { owner, size } (section 7)
     Failed     { owner: Token, error: Error },
     Closed     { owner: Token },                      // terminal
 }
@@ -102,7 +111,9 @@ hands the kernel.
 - **io has no connect timeout.** That is policy above
   (programming-model.md, 4): the connection's deadline lives in the
   protocol layer, which aborts the connect. io keeps only the mechanics'
-  deadlines: a graceful close's, and a retry's.
+  deadlines: a graceful close's, and a retry's; and, on files, the
+  deadline an owner states for an operation a stalled filesystem may hold
+  (5, 5.1).
 - **What found the kernel out of buffers or descriptors is retried after
   `Limits::retry`,** not at once: a receive, a send, a half-close or an
   accept that failed for want of a buffer, an accept that failed with an
@@ -400,7 +411,7 @@ ready lists, and two in the deadlines. An entity has at most four
 operations in flight (a `Recv`, a `Send` and a cancel of each). A pipe
 has at most one read or write and its cancel; a child waits and may have
 one signal in flight. Thus `operations(limits)` is four per entity slot,
-the ring's size (kernel.md, 5);
+and one for a `Usage` (6.1), the ring's size (kernel.md, 5);
 the operation table holds twice that, as an operation retired in an
 iteration keeps its slot until the reclaim point. `worst_case` adds up
 what the containers report (programming-model.md, 6.3), including a
@@ -430,7 +441,9 @@ pub enum Request {
     // whole files, beneath a root's token
     Load  { owner, root: Token, path, max: u32, no_follow },                       // Loaded, TooLarge
     Scan  { owner, root: Token, path, max: u32, max_bytes: u64, no_follow },       // Scanned
-    Store { owner, root: Token, path, bytes, expected: Option<Digest>, no_follow }, // Stored, Conflict
+    Store { owner, root: Token, path, bytes, expected: Expect, no_follow }, // Stored, Conflict
+    MakeDirectory { owner, root: Token, path, mode },                            // Made
+    OpenPrivate { owner, root: Token, path },                                    // Opened, Refused
     // open files, at offsets
     Create, CreateNoFollow { owner, root: Fd, name, mode },                        // Opened
     OpenRead, OpenReadNoFollow { owner, root: Fd, name },                          // Opened
@@ -470,28 +483,25 @@ pub enum Request {
   `SyncDirectory` a directory's entries. These are what kv.md's log
   segments need (kv.md, section 8).
 - **What the records allow** (kernel.md, 6.1). Only an `Open` resolves a
-  path beneath a root, so `Rename`, `Remove` and `List` name one entry of
-  a directory already open, and a store opens the target's parent first.
-  A listing comes 32 entries at a time, and its bounds are checked as
-  they come.
-- **A store, in order:** open the parent beneath the root; open the old
-  file, `Stat` it for its permission bits, and close it; `Create` the
-  temporary beside it with those bits; `Write` it all, `Sync` it, close
-  it; read the target again and digest it; `Rename` the temporary over
-  the target; `Sync` the directory; close the parent. `Stored` carries
-  the new content's digest. A reader sees the old file or the new, never
-  part of either, and after the last `Sync` the new one survives a crash
-  (kernel.md, 6.1).
-  - **The recheck is the condition.** `expected` is the SHA-256 digest of
-    the content the owner last saw, or none for a file that must not
-    exist yet. A target holding anything else just before the rename
-    refuses the store as `Conflict`, with the digest of what is there, if
-    anything, and the temporary is removed. A recheck is not a lock: the
-    directory is the service's, and a writer outside it could still come
-    between the recheck and the rename.
-  - The temporary is named from the target and a suffix drawn from the
-    driver's seeded randomness; a name already taken draws another, eight
-    times at most.
+  path beneath a root, so io opens the directory a name lies in, beneath
+  the root, before it renames or removes that name or makes a directory
+  there, and it stats what it has opened: a stat needs the file readable,
+  but for the path-only open that names why a private open was denied
+  (5.3). Reads and writes may be short,
+  and io continues them; a listing comes an entry count at a time, and
+  io's stated count is a limit it checks as the entries come.
+- **Replacing a file, in order:** `Stat` the old file, opened to read, for
+  its permission bits; `Create` the temporary, beside the target in its
+  directory, with those bits; `Write` it all; `Sync` it; `Close` it;
+  `Rename` it over the target; `Sync` the directory. A reader sees the old
+  file or the new, never part of either, and after the last `Sync` the
+  new one survives a crash (kernel.md, 6.1). Before the rename, io
+  rechecks the target against the stated expectation (5.2); a recheck is
+  not a lock, so an outside writer could still race with the rename.
+  `Stored` carries the new content's digest.
+  - The temporary is named from the target's name and a suffix drawn
+    from io's seeded randomness; a `Create` that finds the name taken
+    (`Exists`) draws another.
   - The old file's permission bits are kept. A target that does not
     exist, or cannot be opened to read, is made with `0o666` less the
     umask.
@@ -504,14 +514,167 @@ pub enum Request {
   descriptor the request opened is closed, it sends the one terminal:
   `Failed` with `TimedOut`, or `Cancelled`, if the stop won, and the
   request's own if the operation finished first. A store gives up only
-  before its rename: once the new file is in place, it runs to `Stored`.
+  before its rename: once the new file is in place, it runs to the commit
+  terminal described in section 5.2.
 - **Memory:** `FileIo::worst_case` counts the open files' table, the
   driver's own buffers, and an admitted `Load`, `Scan` or `Store` at its
   bounds. The buffers an owner hands in, `WriteAt`'s bytes and paths,
   are the owner's.
-- **File streams come later,** when a user needs to read a file by
-  demand, as a stream (lib.md, 7); positioned reads serve one that reads
-  by offset.
+- **Beyond whole files:** a file appended to as a stream (5.1); the
+  durable replace that services keep their records with (5.2); and
+  private files, for secrets (5.3). A file read as a stream, by demand,
+  comes when a user needs to read one too large to hold.
+
+### 5.1 Append streams
+
+A file written as the service goes, a trace or a log, is a stream like a
+write pipe's: lib's stream vocabulary (lib.md, 7), output only, driven by
+the ring like any stream. It replaces a shell thread that writes the
+file beside the loop (programming-model.md, 2.1).
+
+- **Made by adoption.** The shell opens the file at startup, beneath one
+  of its roots (shell.md, 6), to write at its end, creating it with the
+  mode configuration gives if it is absent, and io adopts the descriptor
+  as a write stream, as it adopts an inherited pipe. A standard output
+  that is a regular file, as when a person redirects it, is adopted the
+  same way. Opening one beneath a root while the service runs, as a file
+  request, comes when a user needs it.
+- **Writes go at the end,** one in flight, in order, each an `Append`
+  (kernel.md, 6.1), from the output queue under its cap, as for a pipe:
+  room, a `Send` within it, `Finish`. A short write continues from its
+  offset in the same box. Each write
+  lands at the file's end, so another process appending to the same file
+  may land between two pieces of one `Send` cut short: a file has one
+  appending writer, or its writers accept that.
+- **The kernel's copy, not the disk's.** A write is done once the kernel
+  took its bytes, which then outlive the process but not a crash of the
+  machine. The stream does not sync; what must survive a crash is
+  replaced whole (5.2).
+- **A write deadline gives up on a stalled filesystem.** A regular file
+  has no peer to stop reading, but its filesystem may stall (kernel.md,
+  6.1), and a write that never completes would hold the stream's owner,
+  and every step that waits on its room, for good. So the owner states,
+  when it adopts the stream, the most one write may stay in flight. io
+  arms that deadline with each write and, at it, cancels the write, keeps
+  the stream settling until the write's completion arrives, drops what
+  is queued, and tells the owner the stream failed (`Failed`), once. The
+  owner decides what an abandoned stream means: a trace's sink records
+  it where it still can. As for a whole-file operation (section 5), the
+  deadline is the owner's policy and io's mechanism.
+- **Close flushes.** `Close` writes what is queued, then closes the
+  descriptor: there is no half-close, and nothing to drain. While the
+  stream closes, its close deadline (section 3) replaces the write
+  deadline, as a function of its state, so a filesystem that stalls at
+  the end costs the stream its last bytes, never the process its end
+  (programming-model.md, 5.2). `Abort` drops what is queued and cancels
+  the write in flight.
+- **Backpressure is the owner's choice.** An owner that must lose
+  nothing asks for room before it encodes (programming-model.md, 7), so a
+  slow disk holds its queue, and through it the step that fills it. One
+  that may lose drops and counts when the room does not come
+  (programming-model.md, section 3).
+
+### 5.2 Durable replace
+
+Replacing a file whole, in the order above, is how a service keeps a
+record it must neither lose nor tear: a store's file, a configuration it
+writes, a token record. It is the idiom of kernel.md, 6.1 (`Create`,
+`Write`, `Sync`, `Rename`, then `Sync` of the directory) as one request,
+run by io.
+
+- **One request, one terminal,** answered `Stored` only after the
+  directory's `Sync`: the new content then survives a crash. A reader
+  sees the old file or the new, never part of either.
+- **The rename is the commit.**
+  - Before it, a failure, a deadline, a cancel or a `Conflict` found at
+    the recheck removes the temporary before the one terminal, and the
+    old file is as it was. If the
+    temporary cannot be removed, as on a file system that has turned
+    read-only, the terminal says so and names it, and nothing waits on
+    it. The old file is still as it was, the next replace of the target
+    does not depend on the temporary, and a scan may remove it.
+  - After it, the new file is in place. A failure of the directory's
+    `Sync`, or its deadline, answers `Failed` saying that the replace
+    committed: the new content is what a reader sees, and its durability
+    is unknown. Nothing is rolled back, and the same replace done again
+    makes it durable.
+  - A cancel after the rename is not honoured: the request runs to its
+    terminal.
+  - Rolling back would need a second copy of the old file, and would
+    still leave a window a crash could fall in, so none is kept.
+- **What a crash leaves:** the old file or the new, whole, and at most a
+  temporary beside the target, named from it. The next replace of the
+  target does not depend on it, and a scan may remove it.
+- **What the request expects of the target,** one of three, always
+  stated:
+  - `Any`: replace whatever is there, or nothing. No read of the old file
+    is needed, so a target io cannot read is replaced all the same;
+  - `Absent`: there must be no target. One that exists, readable or not,
+    is answered `Conflict`;
+  - `Digest`: the target must hold exactly the content with this digest.
+
+  io checks it once more, just before the rename. A target that changed,
+  or one io cannot read for `Digest`, is answered with nothing replaced:
+  `Conflict` or the read's fault. So two writers of one file do not lose
+  each other's updates in silence.
+- **The mode** is the old file's, or `0o600` for a private file (5.3).
+- **Its deadline** is the owner's, as for every whole-file operation. A
+  replace that fails or times out before its rename removes its
+  temporary before its one terminal, and leaves the old file as it was.
+  After its rename, it answers as the commit says.
+- **Not here:** updating part of a file, or a set of records larger than
+  one write. Those are skein-kv's (kv.md).
+
+### 5.3 Private files
+
+A secret a service keeps between runs, such as a token record or a key,
+lives in a private directory, readable by the service's user alone. io's
+part is the modes and the checks; what the files hold, and their names,
+are the owner's (oauth.md, 6).
+
+- **A private root.** The directory is made `0o700` if it is absent
+  (`MakeDirectory` takes a mode, as `Create` does; kernel.md, 6.1), and
+  opened beneath its root as a root of its own, without following a link
+  at its name. io stats what it opened and refuses it unless it is a
+  directory with no group or other permission bits and the expected
+  owner, saying what it found unsafe (a link, a non-directory, group or
+  other bits, another owner), so an owner tells a planted file from a
+  failed read.
+- **Private files are made `0o600`,** less the umask, which only takes
+  bits away, and are replaced whole with that mode (5.2), never with the
+  old file's: a file found with group or other bits is not copied
+  forward.
+- **Reading one checks what was opened:** a regular file, reached
+  without following a link, with no group or other permission bits, one
+  link, and the directory's owner. Anything else is refused unread. It is
+  read whole within a stated maximum (section 5).
+- **What io does not do:** encrypt, lock, or keep a secret out of memory.
+  A secret's bytes are its owner's, which keeps them out of logs, traces
+  and `Debug` (oauth.md, 4).
+
+The checks of owner and links need the kernel's `Stat` to answer both
+(kernel.md, 6.1). The owner they expect is the process's own effective
+user: the shell reads it once at startup (shell.md, 6) and gives it to
+io's file configuration, never inferred from a path or its parents. A
+private root or file owned by anyone else is refused, saying so.
+
+- **A denied open is still named.** A private root or file of another
+  user is usually unreadable to this one (`0o700`, `0o600`), so its open
+  fails with `Permission` before there is anything to stat. io then opens
+  the same path again, beneath the same root, for its path only
+  (`OpenHow::PathNoFollow`, kernel.md, 6.1), which needs no permission on
+  the entry itself, stats that, closes it, and answers the refusal it
+  found: another owner, a link, a non-directory, group or other bits, in
+  the order the checks above take. Only when that stat finds nothing
+  unsafe (a `0o000` directory of this user, say), or the path-only open
+  fails too, is the answer the first open's `Failed`, unchanged.
+- **The path-only descriptor decides nothing.** It is never read and
+  never makes a file acceptable: every check that admits a root or a
+  file is made on the descriptor that will be read. It only names a
+  refusal, so a swap between the two opens can change which refusal is
+  told, never let an unsafe file be read. This is why a user who once ran
+  the service as root hears that the directory is root's, not that
+  permission was denied.
 
 ## 6. Processes
 
@@ -528,18 +691,74 @@ pub enum Request {
   - A requested pipe has a chosen child descriptor and direction. Its
     parent end is a one-way stream token in the `Spawned` event, in request
     order. Each pipe consumes one entity slot alongside the child.
-- **Exit** is a wait on the pidfd, through the ring (`waitid`).
-- **Signals** go through `pidfd_send_signal`.
+- **Exit** is a wait on the pidfd, through the ring (`waitid`). It
+  observes the exit without reaping the child (`WNOWAIT`): the child
+  stays unreaped, holding its PID, until io closes it.
+- **Signals** go to the child alone, or to its process group: `Signal`
+  names which (`Target::Child` or `Target::Group`). Both go through the
+  child's pidfd, `pidfd_send_signal`, the group's with the kernel's
+  process-group scope, which reaches the group the child leads from its
+  spawn (kernel.md, 6.2). The group's ID is the child's PID, which the
+  kernel cannot give another process while the child is unreaped. A
+  signal to the group therefore reaches the child and whatever it started
+  that stayed in its group, and never a stranger, even once the child
+  itself has exited.
 - **A child is *closed*** once it has exited and its pipes and pidfd are
   closed. It has one terminal event, which comes after all of those.
-  Closing a running child sends `Kill`; the exit and pipe closures still
-  settle before its `Closed` event.
+  Closing a child sends `Kill` to its group, whether or not the child
+  itself has exited, then reaps it: what it started in its group ends
+  with it. The exit and pipe closures still settle before its `Closed`
+  event.
+- **A timeout is the owner's** (programming-model.md, 4). An owner that
+  gives a child a deadline signals its group when it passes, then closes
+  it. Whatever the child started that holds its pipes then ends too, and
+  the pipes with it, so a command that timed out is answered within its
+  deadline and io's close deadline, not when the last of its descendants
+  chooses to exit.
+- **The group is an interim, before contained trees.** A descendant that
+  leaves the group (`setsid`, `setpgid`) escapes its signals and outlives
+  its child, and nothing bounds or counts what a group may use: a
+  descendant reparented away from the child is in no one's resource
+  usage (6.1). Contained trees (draft/process.md) replace it later: a
+  cgroup per tree, proved empty, with per-tree limits and accounting and
+  a view of the file system. They are not designed into io yet.
+
+### 6.1 Resource usage
+
+A service may report what it used, at its end: CPU time and peak
+resident size, its own and its children's. io reads them from the kernel
+for it.
+
+- **One request, one terminal.** `Usage` answers `Usage`, or that the
+  kernel would not read it (`Unread`, with its error), with two parts:
+  the process's own, and its reaped children's. Each holds user and
+  system CPU time, and the peak resident size in bytes. The children's
+  CPU is the sum over the children reaped so far, and their peak is the
+  largest one of them reached, as the kernel counts them.
+- **It holds no entity.** The kernel reads it at submit (kernel.md, 6.3).
+  One may be in flight at a time, in an operation slot of its own; a
+  second while one is in flight is the layer above's bug, asserted.
+- **A child counts once io has reaped it,** at its close (section 6),
+  not when it exits: a service that wants every child in its report asks
+  after its last child's `Closed`. What a child started counts only if
+  the child itself reaped it: a descendant reparented away, as one the
+  group's `Kill` ends after the child exited, is not counted (section 6).
+- **When to ask is the service's.** A service that writes a report at its
+  end asks once its children have closed and before the stream it writes
+  the report to closes (shell.md, 13).
 
 ## 7. Signals to the service
 
 Termination signals are blocked at startup (shell.md, 6), read from a
 signalfd through the ring, and arrive as `Shutdown` events. The domain
 decides what shutting down means.
+
+A service at a terminal also blocks `SIGWINCH` at startup (shell.md,
+6.3). It is read from the same signalfd and arrives as `Resized`, after
+which the owner asks for the size: `Window { owner, stream }`, naming the
+stream that reads the terminal, answered `Window { owner, size }`, or
+`Gone` if the terminal has hung up, with rows
+and columns, its one terminal (kernel.md, 6.3).
 
 ## 8. Testing
 
@@ -604,6 +823,29 @@ Built, for sockets:
   the driver over the simulator, on a fake machine that crashes at every
   step of a commit and a snapshot (kv.md, section 9).
 
+To come with what section 9 builds:
+
+- **Process groups:** on the real kernel, a child that starts a
+  descendant holding its pipe and exits, then a signal to its group,
+  which ends the descendant and the pipe; a close of a child whose group
+  still runs; a signal to a group after its leader exited, before its
+  close. In the simulator, groups the minimal machine's programs make,
+  and the same cases.
+- **Append streams:** io worlds over the simulator with sends within the
+  room granted, short writes, a close that flushes, and the simulator's
+  hung `Write`, met by the write deadline while open and by the close
+  deadline while closing; the conformance suite, on the ring and the
+  simulator, for a write at the end of a file opened to append.
+- **Durable replace and private files:** every step of the replace
+  failed in turn, the temporary removed each time, and a conflict; a
+  private directory and file refused for each bit, link and kind; and,
+  once the simulator can cut a process at an operation (simulator.md,
+  3.3), a cut at each `Sync` and `Rename`, after which the target is old
+  or new and whole.
+- **Resource usage:** in the simulator, a usage asked before and after a
+  child's close, its part joining the children's only at the close; on
+  the real kernel, the conformance suite's (kernel.md, 8).
+
 ## 9. Remaining work
 
 Sockets, processes with pipes, files and signals to the service are
@@ -621,3 +863,13 @@ built. What remains:
 - **File streams and datagram sockets,** when a user needs them.
 - **Transition coverage** of the handlers (testing-strategy.md, 6), which
   waits for `cargo llvm-cov`.
+
+## 10. Open questions
+
+- **A stream's fault for a stall.** A write deadline fails an append
+  stream with lib's `Fault::Other`, as a full disk does. Whether `Fault`
+  should name a stall, so its owner can tell a filesystem that stopped
+  from one that refused.
+- **Operations the kernel cannot interrupt.** A cancelled write on a
+  filesystem in uninterruptible sleep keeps its stream settling, and its
+  process from ending (notes.md).

@@ -23,7 +23,15 @@ use crate::{Decoded, Outcome};
 /// What `document`, the whole of a stream, decodes to under `limits`.
 #[must_use]
 pub fn parse(document: &[u8], limits: &Limits) -> Decoded {
-    let mut parser = Parser { input: document, at: 0, limits: *limits, depth: 0, visible: 0, tokens: Vec::new() };
+    let mut parser = Parser {
+        input: document,
+        at: 0,
+        limits: *limits,
+        depth: 0,
+        visible: 0,
+        tokens: Vec::new(),
+        values: Vec::new(),
+    };
     let outcome = match parser.document() {
         Ok(()) => Outcome::Done,
         Err(error) => Outcome::Failed(error),
@@ -41,6 +49,7 @@ struct Parser<'a> {
     /// How far the scans of the string being read have reached.
     visible: usize,
     tokens: Vec<Token>,
+    values: Vec<ValueSpan>,
 }
 
 impl Parser<'_> {
@@ -79,7 +88,9 @@ impl Parser<'_> {
 
     /// A value, its first byte read.
     fn value(&mut self, first: u8) -> Result<(), Error> {
-        match first {
+        let token = self.tokens.len();
+        let start = self.at - 1;
+        let result = match first {
             b'{' => self.object(),
             b'[' => self.array(),
             b'"' => {
@@ -92,7 +103,11 @@ impl Parser<'_> {
             b'n' => self.literal(b"ull", Token::Null),
             b'-' | b'0'..=b'9' => self.number(),
             _ => Err(Error::Unexpected),
+        };
+        if result.is_ok() {
+            self.values.push(ValueSpan { token, end_token: self.tokens.len(), bytes: self.at - start });
         }
+        result
     }
 
     fn object(&mut self) -> Result<(), Error> {
@@ -363,4 +378,315 @@ pub fn is_number(text: &[u8]) -> bool {
         rest = &exponent[count..];
     }
     rest.is_empty()
+}
+
+/// A complete value's token interval and wire length, recorded by the recursive reference.
+struct ValueSpan {
+    token: usize,
+    end_token: usize,
+    bytes: usize,
+}
+
+/// Draws legal demands from a complete document's own value positions and independently
+/// computes their answers. The reference retains the original text; the tokenizer need not.
+#[must_use]
+pub fn demands(
+    document: &[u8],
+    limits: &Limits,
+    seed: u64,
+) -> (Vec<skein_json::tokenizer::Request>, Vec<skein_json::tokenizer::Event>) {
+    use skein_json::tokenizer::{Event, Request};
+    let mut parser = Parser {
+        input: document,
+        at: 0,
+        limits: *limits,
+        depth: 0,
+        visible: 0,
+        tokens: Vec::new(),
+        values: Vec::new(),
+    };
+    parser.document().expect("a complete bounded generated document");
+    let mut rng = skein_lib::Rng::new(seed);
+    let mut requests = Vec::new();
+    let mut events = Vec::new();
+    let mut at = 0;
+    while at < parser.tokens.len() {
+        if rng.chance(300)
+            && let Some(value) = parser.values.iter().find(|value| value.token == at)
+        {
+            requests.push(Request::Skip);
+            events.push(Event::Skipped(value.bytes as u64));
+            at = value.end_token;
+        } else {
+            let token = parser.tokens[at].clone();
+            if rng.chance(500) {
+                let cap = u32::try_from(rng.below(32)).expect("below 32");
+                requests.push(Request::Text(cap));
+                let long = match &token {
+                    Token::String(text) | Token::Key(text) => text.len() > cap as usize,
+                    Token::ObjectStart
+                    | Token::ObjectEnd
+                    | Token::ArrayStart
+                    | Token::ArrayEnd
+                    | Token::Number(_)
+                    | Token::True
+                    | Token::False
+                    | Token::Null => false,
+                };
+                if long {
+                    let length = match &token {
+                        Token::String(text) | Token::Key(text) => text.len(),
+                        Token::ObjectStart
+                        | Token::ObjectEnd
+                        | Token::ArrayStart
+                        | Token::ArrayEnd
+                        | Token::Number(_)
+                        | Token::True
+                        | Token::False
+                        | Token::Null => unreachable!("only text is long"),
+                    };
+                    events.push(Event::Long(length as u64));
+                } else {
+                    events.push(Event::Token(token));
+                }
+            } else {
+                requests.push(Request::Next);
+                events.push(Event::Token(token));
+            }
+            at += 1;
+        }
+    }
+    requests.push(Request::Next);
+    events.push(Event::Done);
+    (requests, events)
+}
+
+/// Prunes independently parsed value spans through a filter, including exact
+/// source byte counts for every removed value and decoded lengths for Long.
+#[must_use]
+pub fn prune(
+    document: &[u8],
+    filter: skein_json::collector::Filter,
+    limits: &skein_json::collector::Limits,
+) -> Option<(skein_json::collector::Event, u64, Vec<Token>)> {
+    use skein_json::collector::Event;
+    let mut parser = Parser {
+        input: document,
+        at: 0,
+        limits: Limits { string: u32::MAX, ..limits.tokenizer },
+        depth: 0,
+        visible: 0,
+        tokens: Vec::new(),
+        values: Vec::new(),
+    };
+    if parser.document().is_err() {
+        return None;
+    }
+    let mut result = Pruned {
+        parser: &parser,
+        tokens: Vec::new(),
+        text: Vec::new(),
+        skipped: 0,
+        skipped_values: Vec::new(),
+        limits,
+    };
+    let outcome = match result.value(0, filter.root) {
+        Ok(_) => Event::Collected(
+            skein_json::Document::from_parts(
+                result.text.into(),
+                result.tokens.into(),
+                &skein_json::document::Limits { tokens: limits.tokens, text: limits.text },
+            )
+            .expect("test value fits its admitted bounds"),
+        ),
+        Err(error) => Event::Failed(error),
+    };
+    Some((outcome, result.skipped, result.skipped_values))
+}
+struct Pruned<'a> {
+    parser: &'a Parser<'a>,
+    tokens: Vec<skein_json::Compact>,
+    text: Vec<u8>,
+    skipped: u64,
+    skipped_values: Vec<Token>,
+    limits: &'a skein_json::collector::Limits,
+}
+impl Pruned<'_> {
+    fn push(&mut self, token: &Token, long: bool) -> Result<(), skein_json::collector::Error> {
+        use skein_json::collector::Error;
+        use skein_json::{Compact, Kind};
+        if self.tokens.len() == self.limits.tokens as usize {
+            return Err(Error::TooManyTokens);
+        }
+        let (kind, bytes) = match token {
+            Token::ObjectStart => (Kind::ObjectStart, &[][..]),
+            Token::ObjectEnd => (Kind::ObjectEnd, &[][..]),
+            Token::ArrayStart => (Kind::ArrayStart, &[][..]),
+            Token::ArrayEnd => (Kind::ArrayEnd, &[][..]),
+            Token::Key(bytes) => (Kind::Key, bytes.as_ref()),
+            Token::String(bytes) => (if long { Kind::Long } else { Kind::String }, bytes.as_ref()),
+            Token::Number(bytes) => (Kind::Number, bytes.as_ref()),
+            Token::True => (Kind::True, &[][..]),
+            Token::False => (Kind::False, &[][..]),
+            Token::Null => (Kind::Null, &[][..]),
+        };
+        let mut start = 0;
+        if matches!(kind, Kind::Key | Kind::String | Kind::Number) {
+            if self.text.len() + bytes.len() > self.limits.text as usize {
+                return Err(Error::TooMuchText { cap: None });
+            }
+            start = u32::try_from(self.text.len()).expect("retained under u32 text");
+            self.text.extend_from_slice(bytes);
+        }
+        self.tokens.push(Compact { kind, start, len: u32::try_from(bytes.len()).expect("a generated bounded string") });
+        Ok(())
+    }
+    fn tag_variant(
+        &self,
+        at: usize,
+        end: usize,
+        tag: &'static skein_json::collector::Tagged,
+    ) -> Result<Option<&'static skein_json::collector::Variant>, skein_json::collector::Error> {
+        use skein_json::collector::Error;
+        let mut tag_value = None;
+        let mut child = at + 1;
+        while child < end - 1 {
+            let Token::Key(key) = &self.parser.tokens[child] else { unreachable!() };
+            if key.as_ref() == tag.tag {
+                if tag_value.is_some() {
+                    return Err(Error::Duplicate);
+                }
+                let Token::String(value) = &self.parser.tokens[child + 1] else {
+                    return Err(Error::NotTagged);
+                };
+                tag_value = Some(value.as_ref());
+            }
+            child = self
+                .parser
+                .values
+                .iter()
+                .find(|value| value.token == child + 1)
+                .expect("the independent parser recorded every value")
+                .end_token;
+        }
+        Ok(tag.known.iter().find(|variant| Some(variant.value) == tag_value))
+    }
+
+    fn unknown(
+        &mut self,
+        at: usize,
+        end: usize,
+        cap_name: skein_json::collector::Cap,
+    ) -> Result<usize, skein_json::collector::Error> {
+        use skein_json::collector::Error;
+        let cap = crate::COLLECTOR_CAPS[usize::from(cap_name.index())] as usize;
+        let mut text = 0;
+        for token in &self.parser.tokens[at..end] {
+            if self.tokens.len() == self.limits.tokens as usize {
+                return Err(Error::TooManyTokens);
+            }
+            if let Token::Key(bytes) | Token::String(bytes) | Token::Number(bytes) = token {
+                text += bytes.len();
+            }
+            if text > cap {
+                return Err(Error::TooMuchText { cap: Some(cap_name) });
+            }
+            self.push(token, false)?;
+        }
+        Ok(end)
+    }
+
+    fn value(&mut self, at: usize, keep: skein_json::collector::Keep) -> Result<usize, skein_json::collector::Error> {
+        use skein_json::collector::{Error, Keep, Key};
+        let span =
+            self.parser.values.iter().find(|span| span.token == at).expect("test value fits its admitted bounds");
+        let token = &self.parser.tokens[at];
+        if keep == Keep::Value {
+            for token in &self.parser.tokens[at..span.end_token] {
+                self.push(token, false)?;
+            }
+            return Ok(span.end_token);
+        }
+        match token {
+            Token::String(bytes) => {
+                self.push(
+                    token,
+                    matches!(keep,Keep::Text(cap) if bytes.len() > crate::COLLECTOR_CAPS[usize::from(cap.index())].min(self.limits.tokenizer.string) as usize),
+                )?;
+            }
+            Token::ObjectStart | Token::ArrayStart => {
+                if let Keep::Text(_) = keep {
+                    return self.value(at, Keep::Value);
+                }
+                let (nodes, tag_field) = match keep {
+                    Keep::Into(nodes) => (nodes, None),
+                    Keep::Tagged(tag) => {
+                        if !matches!(token, Token::ObjectStart) {
+                            return Err(Error::NotTagged);
+                        }
+                        let variant = self.tag_variant(at, span.end_token, tag)?;
+                        if let Some(variant) = variant {
+                            (variant.children, Some(tag.tag))
+                        } else {
+                            return self.unknown(at, span.end_token, tag.unknown);
+                        }
+                    }
+                    Keep::Value | Keep::Text(_) => unreachable!(),
+                };
+                self.push(token, false)?;
+                let object = matches!(token, Token::ObjectStart);
+                let mut child = at + 1;
+                let mut seen = std::collections::BTreeSet::new();
+                while child < span.end_token - 1 {
+                    let key = if object {
+                        let Token::Key(bytes) = &self.parser.tokens[child] else { unreachable!() };
+                        Some(bytes.as_ref())
+                    } else {
+                        None
+                    };
+                    let selected = nodes.iter().find(|node| match node.key {
+                        Key::Field(name) => key == Some(name),
+                        Key::Each => !object,
+                    });
+                    let value = child + usize::from(object);
+                    let selected_keep = if key == tag_field && tag_field.is_some() {
+                        Some(Keep::Value)
+                    } else {
+                        selected.map(|node| node.keep)
+                    };
+                    if let Some(keep) = selected_keep {
+                        if let Some(key) = key {
+                            if !seen.insert(key) {
+                                return Err(Error::Duplicate);
+                            }
+                            self.push(&self.parser.tokens[child], false)?;
+                        }
+                        child = self.value(value, keep)?;
+                    } else {
+                        let dropped = self
+                            .parser
+                            .values
+                            .iter()
+                            .find(|span| span.token == value)
+                            .expect("test value fits its admitted bounds");
+                        self.skipped_values.push(self.parser.tokens[value].clone());
+                        self.skipped += dropped.bytes as u64;
+                        if self.skipped > self.limits.skip {
+                            return Err(Error::SkippedTooLong);
+                        }
+                        child = dropped.end_token;
+                    }
+                }
+                self.push(&self.parser.tokens[span.end_token - 1], false)?;
+            }
+            Token::ObjectEnd
+            | Token::ArrayEnd
+            | Token::Key(_)
+            | Token::Number(_)
+            | Token::True
+            | Token::False
+            | Token::Null => self.push(token, false)?,
+        }
+        Ok(span.end_token)
+    }
 }

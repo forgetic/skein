@@ -1,8 +1,8 @@
 # Programming model (Rust)
 
-Provisional, 2026-10-03. How code is written in skein and in every
-service built on it. Read this first, before writing or reviewing any of
-it.
+Provisional, 2026-10-03, revised 2026-10-09. How code is written in skein
+and in every service built on it. Read this first, before writing or
+reviewing any of it.
 
 **How to read this.** Section 1 is the whole model in one page. The
 sections after it take each part in turn: the loop and step functions, the
@@ -53,7 +53,8 @@ is testing-strategy.md.
 - **One lifecycle everywhere.** Every entity is active, then closing, then
   closed. Close goes down, closed comes up, reclaiming is bottom-up, and
   every request gets exactly one terminal event. Nothing happens in a
-  destructor.
+  destructor. Components follow it too: an owner's close drains them, and
+  a process ends once everything it owns has reported closed (5.2).
 - **A small Rust.** Structs, enums, `match`, functions, references, moves
   and a short list of library types. No `async`, closures, trait objects,
   user-defined traits or generics, `Rc` or `RefCell`, `Drop` impls, or
@@ -135,10 +136,12 @@ Properties the rest of this document relies on:
 The shell is the only impure code: the service's loop above, and skein's
 kernel, clock and seed. The kernel is the ring adapter: the ring, and a
 small closed list of syscalls that are not ring operations (spawning a
-process, sending a signal, reading the clock, drawing the seed). Shell
+process, sending a signal, reading the clock, drawing the seed, reading
+the process's resource usage). Shell
 effects use the same request and event shapes as ring operations, so step
 code cannot tell them apart. Anything that can be a ring operation is one:
-accept, connect, read, write, open, close, waiting for a child.
+accept, connect, read, write, open, close, waiting for a child, appending
+to a file.
 
 - **Outside the TLS machine's crates, the ring adapter is the only
   `unsafe` code a service runs,** since it makes every kernel call: ring
@@ -157,6 +160,13 @@ accept, connect, read, write, open, close, waiting for a child.
   choose. A file descriptor is a plain `Fd(i32)` inside io, closed by a
   ring `close`. `std::process` is not used. The shell's `clippy.toml`
   bans them all.
+- **No threads, and no file written beside the ring.** The shell starts
+  no thread and writes no file on the service's behalf. A trace or a log
+  is an io stream on a file opened to append (io.md, 5.1); a record kept
+  between runs is replaced whole through io (io.md, 5.2); what the shell
+  reads off the service between iterations, it reads in the loop's hook
+  (shell.md, 12). Before the loop, startup reads its configuration and
+  certificates with the kit (shell.md, 6).
 - **Panics abort.** `panic = "abort"` in every profile: a panic anywhere is
   fail-stop, and a supervisor restarts the process.
 
@@ -216,8 +226,21 @@ What "pure" means, and what holds it:
   slice or a lib container, whose bound is a configured limit or the size
   of an input already validated. No scan over an unbounded structure, no
   recursion.
-- **Diagnostics are data too.** Trace records are enum values pushed into a
-  bounded queue the shell writes out.
+- **Diagnostics are data too.** Facts and trace records are enum values
+  in one of the step's output queues, with room reserved like any
+  request's (`MAX_OUT`, section 2). Emitting one cannot fail, and a full
+  queue holds the step, as any full output does: inside the process, a
+  fact is never lost. Facts leave through sinks downstream of the queue
+  (a trace written through an io stream, a projection to a peer), each
+  with a declared policy of its own:
+  - **backpressure** through its stream, which holds the queue, and
+    through it the step, until the stream takes more;
+  - or **drop and count,** which never holds the queue.
+
+  Each sink counts its own loss, and the process reports every count at
+  its end. A sink that drops keeps room for the records its contract
+  marks authoritative, which are never dropped. No step formats or
+  writes facts itself, and no shell thread does (2.1).
 
 **What rests on it.** The simulator can own the clock, the seeds and the
 kernel only because no step reads them itself; a recorded run replays,
@@ -470,6 +493,56 @@ inside them, and *settling* (5.3) is part of *closing*.
 - **Shutdown is an event.** A termination signal arrives from io as a
   `Shutdown` event, and the domain decides what shutting down means; from
   there, closing follows this lifecycle.
+- **Components follow the lifecycle too.** A step machine that keeps
+  entities beyond the requests that made them (a pool of connections, a
+  listener and what it accepted, a cache, a keep-alive) is itself an
+  entity of its owner's, and takes a close from it:
+  - from the close until its `Closed`, it refuses new work at its
+    entrance, with a refusal that says it is closed, never one that blames
+    the request. After `Closed` the component has ended, like any entity
+    after its terminal: its owner sends it nothing more, and a request
+    after `Closed` is the owner's bug, asserted, never answered;
+  - it closes what it keeps through the ordinary lifecycle;
+  - it reports `Closed` once everything below it has settled: its one
+    terminal, and the last thing it says. Close is permanent, and a second
+    one before `Closed` changes nothing;
+  - until `Closed` it is not done, but it has work only while it has a
+    step to take: waiting for io to settle what it closed is not work, so
+    it neither spins nor holds a deadline past due, and io's answers wake
+    it;
+  - it takes an abort as well: a close that does not wait, which ends each
+    request it holds as cancelled and aborts what it keeps. An abort after
+    a close turns what still closes gracefully into aborts; a close after
+    an abort changes nothing. `Closed` follows either.
+
+  Its keep and idle times are policy for a live service, never the way it
+  ends: no owner waits for one to pass.
+- **An owner's close drains.** What is idle closes at once; what is busy
+  closes when its work ends, and each request in it still gets its one
+  terminal. An owner that wants abort cancels its own work first, then
+  closes, or aborts the component: the owner decides, the component
+  carries it out (section 4). A component never cancels its owner's work
+  on a close. While closing, each entity's deadlines stay an exhaustive
+  function of its state (5.4): a closing entity has the deadlines its
+  closing state implies, and no component switches its deadlines off
+  wholesale.
+- **The end of a process.** A service's last word is the last thing it
+  owes a peer or its owner: its final answer, its last reply. After it,
+  the service closes everything it owns, components and entities, and
+  ends when each has reported closed and io is empty: its loop exits once
+  it holds nothing (shell.md, 13).
+  - Only io's deadlines bound this: its close deadlines, and for a file
+    the stall deadline its owner stated, which fires only on a stall. Its
+    retry deadlines pace it. Nothing waits for a keep, an idle or a grace
+    time to pass.
+  - A termination signal while closing turns the remaining graceful
+    closes into aborts: the service aborts its own entities, and sends
+    each component still closing its abort.
+  - A supervisor's grace and kill are a backstop for a process that does
+    not end, never the way it ends; a supervisor's grace exceeds the
+    service's teardown bound (shell.md, 13).
+
+  Every world checks this (testing-strategy.md, 6).
 
 ### 5.3 Races
 
@@ -702,8 +775,9 @@ one place arms and re-arms it (5.4), not every handler.
   recursion: the nesting depth is the peer's choice. JSON and friends will
   tempt recursive descent.
 - **Unknown opcode with valid lengths:** refuse it with a status and skip
-  the body, so an older server survives a newer client. Bad lengths are a
-  framing error and close the connection.
+  the body, so a request the service does not know costs its refusal, not
+  the connection. Bad lengths are a framing error and close the
+  connection.
 - **Refusals are small and fixed-size,** so a service under pressure can
   still say no.
 

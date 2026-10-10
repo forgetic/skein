@@ -46,7 +46,7 @@ fn record() -> SavedToken {
         key: 7,
         generation: 9,
         access_token: boxed(b"access-old"),
-        refresh_token: boxed(b"refresh-old"),
+        refresh_token: Some(boxed(b"refresh-old")),
         metadata: None,
         expires_at: wall(100),
     }
@@ -213,16 +213,61 @@ fn base64url_mutations_and_claim_shape_errors_are_refused_without_authentication
 }
 
 #[test]
+fn an_access_only_record_round_trips_without_refresh_state() {
+    let record = SavedToken {
+        key: 1,
+        generation: 2,
+        access_token: boxed(b"a"),
+        refresh_token: None,
+        metadata: None,
+        expires_at: Wall::from_nanos(3),
+    };
+    let golden = b"SKOT\x00\x02\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00\x01a\x00\x00\x00\x00\x00\x00\x00\x00";
+    assert_eq!(encode_record(&record, &limits()).expect("access-only encoding").as_ref(), golden);
+    let restored = decode_record(golden, &limits()).expect("access-only record");
+    assert!(restored == record);
+    assert!(record.refresh_state().is_none());
+    assert!(restored.refresh_state().is_none());
+    assert_eq!(restored.remaining(Wall::from_nanos(1)), Duration::from_nanos(2));
+    let mut old = boxed(golden);
+    *old.get_mut(5).expect("version byte") = 1;
+    assert!(decode_record(&old, &limits()) == Err(DecodeError::Version));
+}
+
+#[test]
+fn record_bounds_hold_with_and_without_a_refresh_token() {
+    for refresh_token in [None, Some(boxed(&[b'r'; 512]))] {
+        let mut record = SavedToken { access_token: boxed(&[b'a'; 512]), refresh_token, ..record() };
+        let encoded = encode_record(&record, &limits()).expect("token caps");
+        let mut exact = limits();
+        exact.record_bytes = u32::try_from(encoded.len()).expect("bounded length");
+        assert!(decode_record(&encoded, &exact).expect("exact record cap") == record);
+        assert_eq!(encode_record(&record, &exact).expect("exact record cap"), encoded);
+        exact.record_bytes = exact.record_bytes.checked_sub(1).expect("record is nonempty");
+        assert_eq!(encode_record(&record, &exact), Err(DecodeError::TooLarge));
+        assert!(decode_record(&encoded, &exact) == Err(DecodeError::TooLarge));
+        record.access_token = boxed(&[b'a'; 513]);
+        assert_eq!(encode_record(&record, &limits()), Err(DecodeError::TooLarge));
+    }
+    let mut record = record();
+    assert!(record.refresh_state().is_some());
+    record.refresh_token = Some(boxed(b""));
+    assert_eq!(encode_record(&record, &limits()), Err(DecodeError::Malformed));
+    record.refresh_token = Some(boxed(&[b'r'; 513]));
+    assert_eq!(encode_record(&record, &limits()), Err(DecodeError::TooLarge));
+}
+
+#[test]
 fn saved_record_has_an_independent_big_endian_versioned_golden_and_refuses_corruption() {
     let record = SavedToken {
         key: 1,
         generation: 2,
         access_token: boxed(b"a"),
-        refresh_token: boxed(b"r"),
+        refresh_token: Some(boxed(b"r")),
         metadata: None,
         expires_at: Wall::from_nanos(3),
     };
-    let golden = b"SKOT\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00\x01a\x00\x00\x00\x01r\x00\x00\x00\x00";
+    let golden = b"SKOT\x00\x02\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00\x01a\x00\x00\x00\x01r\x00\x00\x00\x00";
     assert_eq!(encode_record(&record, &limits()).expect("encode").as_ref(), golden);
     assert!(decode_record(golden, &limits()).expect("golden") == record);
     for len in 0..golden.len() {
@@ -231,7 +276,7 @@ fn saved_record_has_an_independent_big_endian_versioned_golden_and_refuses_corru
         assert!(refused, "every truncated record is refused");
     }
     let mut version = boxed(golden);
-    *version.get_mut(5).expect("version low byte") = 2;
+    *version.get_mut(5).expect("version low byte") = 1;
     assert!(decode_record(&version, &limits()) == Err(DecodeError::Version));
     let mut length = boxed(golden);
     *length.get_mut(26).expect("access length high byte") = 0xff;
@@ -249,15 +294,17 @@ fn refresh_only_startup_retains_or_rotates_refresh_and_resumes_saved_generation(
     answer.refresh_token = None;
     let first = rotate(&starting, &answer, None, wall(100), &limits()).expect("first refresh requires no access token");
     assert_eq!(first.generation, 1);
-    assert_eq!(first.refresh_token.as_ref(), b"refresh-old");
+    assert_eq!(first.refresh_token.as_deref().expect("refresh token"), b"refresh-old");
     assert_eq!(first.remaining(wall(100)), Duration::from_secs(30));
     assert_eq!(first.remaining(wall(112)), Duration::from_secs(18));
     assert_eq!(first.remaining(wall(140)), Duration::ZERO);
     let saved = encode_record(&first, &limits()).expect("candidate kept");
     let restarted = decode_record(&saved, &limits()).expect("restart");
-    let next = rotate(&restarted.refresh_state(), &response(), None, wall(115), &limits()).expect("after restart");
+    let next =
+        rotate(&restarted.refresh_state().expect("record has refresh state"), &response(), None, wall(115), &limits())
+            .expect("after restart");
     assert_eq!(next.generation, 2);
-    assert_eq!(next.refresh_token.as_ref(), b"refresh-new");
+    assert_eq!(next.refresh_token.as_deref().expect("refresh token"), b"refresh-new");
     assert_eq!(next.expires_at, wall(145));
     assert!(restarted == first, "a candidate does not mutate the kept generation");
 }
@@ -266,23 +313,34 @@ fn refresh_only_startup_retains_or_rotates_refresh_and_resumes_saved_generation(
 fn jwt_rotation_keeps_claims_and_expiry_but_checked_overflow_never_reuses_a_name() {
     let previous = record();
     let answer = TokenResponse { access_token: boxed(WITH_EXP), ..response() };
-    let candidate = rotate(&previous.refresh_state(), &answer, Some(&selector()), wall(100), &limits())
-        .expect("claims accompany access");
+    let candidate = rotate(
+        &previous.refresh_state().expect("record has refresh state"),
+        &answer,
+        Some(&selector()),
+        wall(100),
+        &limits(),
+    )
+    .expect("claims accompany access");
     assert_eq!(candidate.metadata, Some(boxed(b"acct-7")));
     assert_eq!(candidate.expires_at, wall(120), "JWT expiry and exchange validity both cap grants");
     assert!(
         decode_record(&encode_record(&candidate, &limits()).expect("kept"), &limits()).expect("restored") == candidate
     );
-    let mut full = previous.refresh_state();
+    let mut full = previous.refresh_state().expect("record has refresh state");
     full.generation = u64::MAX;
     assert!(rotate(&full, &answer, Some(&selector()), wall(100), &limits()) == Err(DecodeError::TooLarge));
     assert!(
-        rotate(&previous.refresh_state(), &response(), None, Wall::from_nanos(u64::MAX), &limits())
-            == Err(DecodeError::TooLarge)
+        rotate(
+            &previous.refresh_state().expect("record has refresh state"),
+            &response(),
+            None,
+            Wall::from_nanos(u64::MAX),
+            &limits()
+        ) == Err(DecodeError::TooLarge)
     );
     assert!(
         rotate(
-            &previous.refresh_state(),
+            &previous.refresh_state().expect("record has refresh state"),
             &TokenResponse { expires_in: u64::MAX, ..response() },
             None,
             wall(100),

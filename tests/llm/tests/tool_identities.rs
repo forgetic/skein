@@ -55,11 +55,11 @@ fn restored(block: &Block) -> Block {
     let envelope = replay
         .as_ref()
         .expect("actual item identity")
-        .to_bytes(&limits().dialect)
+        .to_bytes(&limits().native().document())
         .expect("admitted metadata fits durable envelope");
-    let replay = Replay::from_bytes(&envelope, &limits().dialect).expect("durable transcript restored");
+    let replay = Replay::from_bytes(&envelope, &(limits().native()).document()).expect("durable transcript restored");
     assert_eq!(
-        replay.value.to_bytes(&limits().dialect).expect("exact raw metadata").as_ref(),
+        replay.value.to_bytes(&(limits().native()).document()).expect("exact raw metadata").as_ref(),
         br#"{"item_id":"item|\"id\\tail"}"#
     );
     Block::ToolCall { id: id.clone(), name: name.clone(), arguments: arguments.clone(), replay: Some(replay) }
@@ -85,8 +85,9 @@ fn continuation(block: Block, result_id: &[u8]) -> openai::Request {
     world.assert_once();
     assert_eq!(world.machine.waiting(), client::Waiting::Idle);
     let at = world.sent.windows(4).position(|bytes| bytes == b"\r\n\r\n").expect("actual HTTP request head") + 4;
-    let json = skein_llm::Json::from_bytes(&world.sent[at..], &limits().dialect).expect("actual request document");
-    let request = openai::decode_request(&json, &limits().dialect).expect("actual native continuation");
+    let json = skein_llm::Json::from_bytes(&world.sent[at..], &(limits().native()).document())
+        .expect("actual request document");
+    let request = openai::decode_request(&json, &limits().native()).expect("actual native continuation");
     world.request(client::Request::Close);
     world.settle();
     world.assert_once();
@@ -150,7 +151,7 @@ fn pipe_and_escaped_ids_complete_restore_and_pair_exactly_on_actual_continuation
         arguments,
         replay: Some(Replay {
             provider: skein_llm::Provider::OpenAiCodex,
-            value: skein_llm::Json::from_bytes(br#"{"item_id":"changed|item"}"#, &limits().dialect)
+            value: skein_llm::Json::from_bytes(br#"{"item_id":"changed|item"}"#, &(limits().native()).document())
                 .expect("bounded corruption"),
         }),
     };
@@ -160,15 +161,15 @@ fn pipe_and_escaped_ids_complete_restore_and_pair_exactly_on_actual_continuation
 #[test]
 fn actual_both_maximum_id_payloads_and_new_wrapper_fit_counted_client_bound() {
     let mut bounds = limits();
-    bounds.dialect.document_bytes = 32768;
-    bounds.dialect.request_bytes = 32768;
-    bounds.dialect.answer_bytes = 32768;
-    bounds.dialect.opaque_bytes = 8192;
-    bounds.sse.line = 32768;
-    bounds.sse.event = 32768;
-    let bound = client::worst_case(&bounds).expect("checked enlarged wrapper and simultaneous payload bound");
+    bounds.strings = 4096; // Independent maximum identity cap in this memory story.
+    bounds.retained = 32768;
+    bounds.request = 32768;
+    bounds.answer = 32768;
+    bounds.metadata = 8192;
+    bounds.skip = 32768;
+    let bound = client::call_worst_case(&bounds).expect("checked enlarged wrapper and simultaneous payload bound");
     let meter = Meter::new();
-    let id = "|".repeat(usize::try_from(bounds.dialect.string_bytes).expect("bounded maximum ID"));
+    let id = "|".repeat(usize::try_from(bounds.strings).expect("bounded maximum ID"));
     let added = format!(
         r#"{{"type":"response.output_item.added","output_index":0,"item":{{"id":"{id}","type":"function_call"}}}}"#
     );
@@ -196,7 +197,7 @@ fn actual_both_maximum_id_payloads_and_new_wrapper_fit_counted_client_bound() {
             .as_ref()
             .expect("maximum item ID replay")
             .value
-            .to_bytes(&bounds.dialect)
+            .to_bytes(&bounds.native().document())
             .expect("bounded raw item ID")
             .len(),
         id.len() + 14
@@ -217,7 +218,7 @@ fn actual_escaped_item_identity_obeys_raw_metadata_cap_and_retains_lower_settlem
     let raw = br#"{"item_id":"item|\"id\\tail"}"#;
     for exact in [true, false] {
         let mut bounds = limits();
-        bounds.dialect.opaque_bytes = u32::try_from(raw.len() - usize::from(!exact)).expect("tiny metadata cap");
+        bounds.metadata = u32::try_from(raw.len() - usize::from(!exact)).expect("tiny metadata cap");
         let mut world = World::new(call(51), bounds, source(), 13);
         world.request(client::Request::Start);
         world.run();
@@ -229,7 +230,7 @@ fn actual_escaped_item_identity_obeys_raw_metadata_cap_and_retains_lower_settlem
             let envelope = replay
                 .as_ref()
                 .expect("exact item metadata")
-                .to_bytes(&bounds.dialect)
+                .to_bytes(&bounds.native().document())
                 .expect("exact raw cap plus envelope header");
             assert_eq!(
                 envelope.len(),
@@ -250,7 +251,7 @@ fn actual_escaped_item_identity_obeys_raw_metadata_cap_and_retains_lower_settlem
                     )
                 })
                 .collect();
-            let [client::Event::Failed { failure: Failure::Limit, .. }] = terminals.as_slice() else {
+            let [client::Event::Failed { failure: Failure::Limit { .. }, .. }] = terminals.as_slice() else {
                 panic!("one-over item metadata fails before completion");
             };
             assert!(!world.seen.iter().any(|event| matches!(event, client::Event::Block { .. })));

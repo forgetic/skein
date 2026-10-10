@@ -6,7 +6,7 @@
 //!   once; an LF right after it is the CR's pair, and ends nothing. A line
 //!   scan stops at the CR, so the pair comes alone, in the next delivery.
 //! - **A field's value goes where it belongs as it comes:** `data` into the
-//!   event's data, `event` into its type, `id` into a value held until its
+//!   data face, `event` into its type, `id` into a value held until its
 //!   line ends (one with a NUL is ignored), `retry` into a number. A line
 //!   that begins with a colon is a comment, and one whose name is no
 //!   field's is ignored.
@@ -19,7 +19,7 @@
 
 use skein_lib::{List, bytes};
 
-use super::{Error, Limits, Message};
+use super::{Dispatch, Error, Limits};
 
 /// What a stream's lines so far have built: the event being read, and the
 /// stream's own state across events.
@@ -37,8 +37,8 @@ pub(super) struct Lines {
     after_cr: bool,
     /// The bytes read since the last blank line, endings included.
     size: u32,
-    /// The event's data: each `data` value and an LF after it.
-    data: List<u8>,
+    /// Whether this event has begun its first data line.
+    data: bool,
     /// The event's type, set by its last `event` field.
     name: List<u8>,
     /// An `id` field's value, until its line ends.
@@ -56,8 +56,13 @@ pub(super) struct Lines {
 pub(super) enum Step {
     /// Nothing yet: the reader reads on.
     More,
-    /// A blank line dispatched an event.
-    Message(Message),
+    /// The first data line opened an event.
+    Opened,
+    /// One decoded data byte, with joined lines separated by LF.
+    Data(u8),
+    /// A blank line completed the event and its metadata.
+    Dispatched(Dispatch),
+    /// A wire or field bound was passed.
     Fail(Error),
 }
 
@@ -114,7 +119,7 @@ impl Lines {
             length: 0,
             after_cr: false,
             size: 0,
-            data: List::with_capacity(limits.event),
+            data: false,
             name: List::with_capacity(limits.field),
             id_value: List::with_capacity(limits.field),
             id: List::with_capacity(limits.field),
@@ -134,33 +139,14 @@ impl Lines {
     /// Lets go of the event being read: the stream ended or failed, or the
     /// reader was closed.
     pub(super) fn clear(&mut self) {
-        self.data.clear();
+        self.data = false;
         self.name.clear();
         self.id_value.clear();
     }
 
-    /// Reads `delivery`, a line scan's (lib.md, 7), until a limit is
-    /// passed or it runs out: what it came to. Its one line end, if it has
-    /// one, is its last byte, so an event it dispatches is the last thing in
-    /// it.
-    pub(super) fn read(&mut self, limits: &Limits, delivery: &[u8]) -> Step {
-        // Bounded by the delivery, at most a chunk.
-        for (at, &byte) in delivery.iter().enumerate() {
-            match self.byte(limits, byte) {
-                Step::More => {}
-                Step::Fail(error) => return Step::Fail(error),
-                Step::Message(message) => {
-                    assert!(at.checked_add(1) == Some(delivery.len()), "a line scan's one line end is its last byte");
-                    return Step::Message(message);
-                }
-            }
-        }
-        Step::More
-    }
-
     /// A byte from the stream: the byte order mark first, if it begins
     /// with one.
-    fn byte(&mut self, limits: &Limits, byte: u8) -> Step {
+    pub(super) fn byte(&mut self, limits: &Limits, byte: u8) -> Step {
         let matched = match self.bom {
             Bom::Over => return self.stream_byte(limits, byte),
             Bom::Matching(matched) => matched,
@@ -177,7 +163,9 @@ impl Lines {
             match self.stream_byte(limits, earlier) {
                 Step::More => {}
                 Step::Fail(error) => return Step::Fail(error),
-                Step::Message(_) => unreachable!("a byte order mark's bytes end no line"),
+                Step::Opened | Step::Data(_) | Step::Dispatched(_) => {
+                    unreachable!("a byte order mark begins no data line")
+                }
             }
         }
         self.stream_byte(limits, byte)
@@ -187,7 +175,10 @@ impl Lines {
     fn stream_byte(&mut self, limits: &Limits, byte: u8) -> Step {
         let paired = self.after_cr && byte == b'\n';
         self.after_cr = false;
-        self.size = self.size.saturating_add(1);
+        self.size = match self.size.checked_add(1) {
+            Some(size) => size,
+            None => return Step::Fail(Error::EventTooLong),
+        };
         if self.size > limits.event {
             return Step::Fail(Error::EventTooLong);
         }
@@ -201,7 +192,10 @@ impl Lines {
             }
             b'\n' => self.end(),
             _ => {
-                self.length = self.length.saturating_add(1);
+                self.length = match self.length.checked_add(1) {
+                    Some(length) => length,
+                    None => return Step::Fail(Error::LineTooLong),
+                };
                 if self.length > limits.line {
                     return Step::Fail(Error::LineTooLong);
                 }
@@ -210,13 +204,16 @@ impl Lines {
         }
     }
 
-    /// A byte of a line's content.
+    /// A byte of a line's content; data goes to the reader's intake.
     fn content(&mut self, limits: &Limits, byte: u8) -> Step {
         self.line = match self.line {
             Line::Start if byte == b':' => Line::Ignored,
             Line::Start => Line::Name { bytes: [byte, 0, 0, 0, 0], len: 1 },
             Line::Name { bytes, len } if byte == b':' => match field(name(&bytes, len)) {
-                Some(field) => self.colon(field),
+                Some(field) => {
+                    self.line = Line::Colon(field);
+                    return self.begin(field);
+                }
                 None => Line::Ignored,
             },
             Line::Name { mut bytes, len } => match bytes.get_mut(usize::from(len)) {
@@ -224,38 +221,45 @@ impl Lines {
                     *slot = byte;
                     Line::Name { bytes, len: len.saturating_add(1) }
                 }
-                // Longer than any field's name.
                 None => Line::Ignored,
             },
             Line::Ignored => Line::Ignored,
             Line::Colon(field) if byte == b' ' => Line::Value(field),
-            Line::Colon(field) | Line::Value(field) => match self.value(limits, field, byte) {
-                Ok(field) => Line::Value(field),
-                Err(error) => return Step::Fail(error),
+            Line::Colon(field) | Line::Value(field) => match field {
+                Field::Data => {
+                    self.line = Line::Value(field);
+                    return Step::Data(byte);
+                }
+                Field::Event | Field::Id | Field::Retry(_) => match self.value(limits, field, byte) {
+                    Ok(field) => Line::Value(field),
+                    Err(error) => return Step::Fail(error),
+                },
             },
         };
         Step::More
     }
 
-    /// The colon after `field`'s name: its value begins.
-    fn colon(&mut self, field: Field) -> Line {
-        self.begin(field);
-        Line::Colon(field)
-    }
-
-    /// `field`'s value begins: one that replaces what it sets is emptied.
-    fn begin(&mut self, field: Field) {
+    /// A field begins: data starts its face or joins the next line with LF.
+    fn begin(&mut self, field: Field) -> Step {
         match field {
             Field::Event => self.name.clear(),
             Field::Id => self.id_value.clear(),
-            Field::Data | Field::Retry(_) => {}
+            Field::Data => {
+                if self.data {
+                    return Step::Data(b'\n');
+                }
+                self.data = true;
+                return Step::Opened;
+            }
+            Field::Retry(_) => {}
         }
+        Step::More
     }
 
     /// A byte of `field`'s value.
     fn value(&mut self, limits: &Limits, field: Field, byte: u8) -> Result<Field, Error> {
         match field {
-            Field::Data => self.data.push(byte).expect("an event's data within its size"),
+            Field::Data => unreachable!("data bytes go to the reader's intake"),
             Field::Event => {
                 if self.name.len() >= limits.field {
                     return Err(Error::FieldTooLong);
@@ -285,8 +289,9 @@ impl Lines {
             // A name with no colon: the field, with an empty value.
             Line::Name { bytes, len } => {
                 if let Some(field) = field(name(&bytes, len)) {
-                    self.begin(field);
+                    let action = self.begin(field);
                     self.apply(field);
+                    return action;
                 }
             }
             Line::Colon(field) | Line::Value(field) => self.apply(field),
@@ -297,9 +302,8 @@ impl Lines {
     /// A field whose line ended takes effect.
     fn apply(&mut self, field: Field) {
         match field {
-            Field::Data => self.data.push(b'\n').expect("an event's data within its size"),
-            // Its value went into the type as it came.
-            Field::Event => {}
+            // Values were streamed as data or kept as the type.
+            Field::Data | Field::Event => {}
             Field::Id => {
                 if self.id_value.as_slice().contains(&0) {
                     return;
@@ -318,17 +322,15 @@ impl Lines {
     fn dispatch(&mut self) -> Step {
         self.size = 0;
         copy(&self.id, &mut self.last_id);
-        if self.data.is_empty() {
+        if !self.data {
             self.name.clear();
             return Step::More;
         }
-        let data = self.data.as_slice();
-        let data = bytes::copy_of(data.get(..data.len().saturating_sub(1)).expect("an LF ends the data"));
         let name = if self.name.is_empty() { bytes::copy_of(b"message") } else { self.name.to_boxed() };
         let id = self.last_id.to_boxed();
-        self.data.clear();
+        self.data = false;
         self.name.clear();
-        Step::Message(Message { name, data, id })
+        Step::Dispatched(Dispatch { name, id })
     }
 }
 

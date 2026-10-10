@@ -8,13 +8,14 @@
     reason = "rustls takes its configuration in an Arc that every connection shares, its time from a provider behind one, and its protocols in Vecs (tls.md, 4)"
 )]
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
 use rustls::client::Resumption;
 use rustls::crypto::{CryptoProvider, ring};
-use rustls::pki_types::{ServerName, UnixTime};
+use rustls::pki_types::{CertificateDer, ServerName, TrustAnchor, UnixTime};
 use rustls::time_provider::TimeProvider;
 use rustls::{ClientConfig, RootCertStore};
 use skein_lib::Wall;
@@ -40,7 +41,7 @@ pub struct Config {
     client: Arc<ClientConfig>,
 }
 
-/// What [`Config::new`] refuses.
+/// What startup's [`Config::new`] and [`Config::from_der`] refuse.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Refusal {
     /// No root is trusted: every handshake would fail.
@@ -52,7 +53,53 @@ pub enum Refusal {
     Provider,
 }
 
+/// What startup's [`Config::from_der`] took and skipped from its DER roots.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Parsed {
+    pub taken: u32,
+    pub skipped: u32,
+}
+
+/// The shared configuration's heap from at most `count` roots of `each`
+/// bytes (tls.md, 3.4 and 5), counted once by its service. Includes its
+/// fixed construction peak and longest ALPN, owned anchor bytes and the root
+/// vector's growth; excludes the caller's DER input. `None` on overflow.
+#[must_use]
+pub fn roots_worst_case(count: u32, each: u32) -> Option<u64> {
+    let anchor = u64::try_from(size_of::<TrustAnchor<'static>>()).ok()?;
+    // A growing root vector can hold its old capacity beside twice that
+    // capacity; the owned byte fields are at most the input certificate.
+    let per = u64::from(each).checked_add(anchor)?.checked_mul(3)?;
+    // The counting allocator measures a 19 KB construction peak with one
+    // root and the maximum ALPN element count; 24 KB bounds that fixed work.
+    u64::from(count).checked_mul(per)?.checked_add(24 * 1_024)
+}
+
 impl Config {
+    /// Trusts the DER roots rustls parses with supported key algorithms,
+    /// offering `alpn`; counts the rest as skipped (tls.md, 3.4).
+    /// Refuses `Roots` when none were taken, and keeps the ALPN refusals.
+    /// The shell bounds the input count to `u32`; a larger slice is a bug.
+    pub fn from_der(roots: &[Box<[u8]>], alpn: &[&[u8]]) -> Result<(Config, Parsed), Refusal> {
+        let count = u32::try_from(roots.len()).expect("startup roots have a u32 count bound");
+        let provider = ring::default_provider();
+        let mut store = RootCertStore::empty();
+        let mut taken: u32 = 0;
+        for certificate in roots {
+            if store.add(CertificateDer::from(certificate.as_ref())).is_ok() {
+                let anchor = store.roots.last().expect("add retained an anchor");
+                if supports_key(anchor.subject_public_key_info.as_ref(), &provider) {
+                    taken = taken.checked_add(1).expect("within input count");
+                } else {
+                    store.roots.pop();
+                }
+            }
+        }
+        let parsed = Parsed { taken, skipped: count.checked_sub(taken).expect("within input count") };
+        let config = Config::with_provider(store, alpn, provider)?;
+        Ok((config, parsed))
+    }
+
     /// The configuration that trusts `roots` and offers `alpn`, in order of
     /// preference, or none (RFC 7301).
     pub fn new(roots: RootCertStore, alpn: &[&[u8]]) -> Result<Config, Refusal> {
@@ -99,6 +146,26 @@ impl Config {
         client.time_provider = Arc::new(At(UnixTime::since_unix_epoch(Duration::from_secs(wall.as_secs()))));
         Arc::new(client)
     }
+}
+
+/// rustls has parsed the SPKI sequence's contents. Its first element is
+/// the key's `AlgorithmIdentifier`; compare that element with ring's actual
+/// verification algorithms, rather than accepting an unknown algorithm
+/// merely because the trust-anchor parser accepted its DER.
+fn supports_key(spki: &[u8], provider: &CryptoProvider) -> bool {
+    for algorithm in provider.signature_verification_algorithms.all {
+        let identifier = algorithm.public_key_alg_id();
+        let bytes = identifier.as_ref();
+        // The pinned ring provider's identifiers use DER's short length.
+        if bytes.len() < 128 {
+            let length = u8::try_from(bytes.len()).expect("short DER length");
+            let end = bytes.len().checked_add(2).expect("short identifier");
+            if spki.get(..2) == Some([0x30, length].as_slice()) && spki.get(2..end) == Some(bytes) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The name of the server a connection is for: a DNS name, which goes in the

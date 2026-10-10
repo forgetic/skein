@@ -17,6 +17,8 @@ pub struct Inherited {
     pub signal: Fd,
     /// Named directory descriptors, each owned by this child until close or exit.
     pub roots: Vec<(Box<[u8]>, Fd)>,
+    /// Named append files, each owned by this child until close or exit.
+    pub appends: Vec<(Box<[u8]>, Fd)>,
 }
 
 /// A program the scenario asks a harness to host, ending at the host's exit.
@@ -41,6 +43,38 @@ pub struct StartupRoot {
 /// Selects a child's startup directories from its exact launch configuration.
 pub type StartupRoots = fn(&Spawn) -> Vec<StartupRoot>;
 
+/// An append file opened beneath a startup root for each hosted launch.
+#[derive(Debug)]
+pub struct StartupAppend {
+    pub name: Box<[u8]>,
+    /// Filesystem path of the directory opened temporarily for this file.
+    pub root: Box<[u8]>,
+    /// The file's path beneath that directory.
+    pub path: Box<[u8]>,
+    /// Creation permissions; an existing file retains its mode and contents.
+    pub mode: u32,
+}
+
+/// Selects a child's startup append files from its exact launch configuration.
+pub type StartupAppends = fn(&Spawn) -> Vec<StartupAppend>;
+
+#[derive(Debug)]
+pub(crate) struct Startup {
+    pub(crate) roots: StartupRoots,
+    pub(crate) appends: StartupAppends,
+}
+
+pub(crate) fn no_appends(_spawn: &Spawn) -> Vec<StartupAppend> {
+    Vec::new()
+}
+
+pub(crate) fn check_appends(appends: &[StartupAppend]) {
+    for (index, append) in appends.iter().enumerate() {
+        assert!(!append.name.is_empty(), "startup append files have names");
+        assert!(!appends.iter().take(index).any(|other| other.name == append.name), "startup append names are unique");
+    }
+}
+
 pub(crate) fn no_roots(_spawn: &Spawn) -> Vec<StartupRoot> {
     Vec::new()
 }
@@ -54,6 +88,12 @@ pub(crate) fn check_roots(roots: &[StartupRoot]) {
 
 /// Machine calls a simulated world forwards when no hosted program matches.
 pub trait Machine {
+    /// Settles the cut's handles; power loss applies the machine's seeded
+    /// crash model (simulator.md, 3.3). A cutting world implements this.
+    fn cut(&mut self, _cut: crate::Cut, _held: &[skein_sim::Handle], _seed: u64) {
+        crate::fail("a world with cuts implements its machine's cut settlement");
+    }
+
     /// Opens a fresh independently owned directory handle for a startup path.
     /// A machine with no startup directories refuses by default.
     fn open_root(&mut self, _path: &[u8]) -> Result<skein_sim::Handle, skein_io::kernel::Error> {
@@ -64,6 +104,22 @@ pub trait Machine {
     /// Machines that implement `open_root` must also implement this rollback.
     fn close_root(&mut self, _root: skein_sim::Handle) {
         crate::fail("a machine that opens startup roots implements their rollback");
+    }
+
+    /// Opens an append file beneath a startup root, without admitting a child.
+    fn open_append(
+        &mut self,
+        _root: skein_sim::Handle,
+        _path: &[u8],
+        _mode: u32,
+    ) -> Result<skein_sim::Handle, skein_io::kernel::Error> {
+        Err(skein_io::kernel::Error::NotFound)
+    }
+
+    /// Rolls back a file opened for a launch that failed before admission.
+    /// The default uses the same handle release as startup roots.
+    fn close_append(&mut self, file: skein_sim::Handle) {
+        self.close_root(file);
     }
 
     fn step(&mut self, call: skein_sim::Call, answers: &mut skein_lib::Queue<skein_sim::Answer>);

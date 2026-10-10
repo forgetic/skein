@@ -7,9 +7,9 @@ use std::collections::BTreeSet;
 use skein_conformance::{
     Cancelling, Check, Pairing, Race, Shortness, accept_past_the_descriptor_limit, address_in_use, backpressure,
     cancel_accept, cancel_connect, cancel_connect_established_while_away, cancel_read, cancel_recv,
-    closed_before_accept, escapes, file_lifecycle, full_accept_queue, graceful_close, ipv6_only, lifecycle, list,
-    listener_close_resets_waiting, make_directory, nested_roots, open_past_the_descriptor_limit, permissions, refused,
-    remove, rename, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
+    closed_before_accept, escapes, file_lifecycle, file_metadata, full_accept_queue, graceful_close, ipv6_only,
+    lifecycle, list, listener_close_resets_waiting, make_directory, nested_roots, open_past_the_descriptor_limit,
+    permissions, refused, remove, rename, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
     unread_close_meets_send, wrong_state,
 };
 use skein_conformance_sim::{
@@ -268,4 +268,31 @@ fn a_cancel_of_a_read_of_a_file_meets_each_pairing_over_the_seeds() {
     }
     let expected = BTreeSet::from([Pairing::Stopped, Pairing::Interrupted, Pairing::Completed, Pairing::RanOn]);
     assert_eq!(seen, expected, "the pairings of a cancelled Read of a file");
+}
+
+#[test]
+fn groups_and_usage_under_chaos() {
+    chaos(|world| skein_conformance::groups(world, b"process_fixture"));
+    chaos(|world| skein_conformance::usage(world, b"process_fixture"));
+}
+
+#[test]
+fn appends_continue_short_counts_and_cancel_meets_every_pairing() {
+    let mut shorts = Shortness::default();
+    let mut pairings = BTreeSet::new();
+    for seed in 0..CHAOS {
+        let seen = skein_conformance::appending(&mut Simulated::new(seed, loopback_chaos()));
+        seen.check();
+        shorts = shorts.and(seen.counts);
+        let cancel = skein_conformance::cancel_append(&mut Simulated::new(seed, file_cancel_chaos()));
+        cancel.check();
+        pairings.insert(cancel.pairing());
+    }
+    assert_eq!(shorts, Shortness { short: true, full: true });
+    assert_eq!(pairings, BTreeSet::from([Pairing::Stopped, Pairing::Interrupted, Pairing::Completed, Pairing::RanOn]));
+}
+
+#[test]
+fn stat_keeps_the_owner_and_counts_hard_links_through_removal() {
+    chaos(file_metadata);
 }

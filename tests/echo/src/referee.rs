@@ -9,7 +9,7 @@ use std::fmt;
 
 use skein_io::kernel::Addr;
 use skein_lib::{Duration, Time};
-use skein_world::{Expectation, Expectations, Referee};
+use skein_world::{Controls, Expectation, Expectations, Referee};
 
 use crate::proc::Proc;
 
@@ -149,12 +149,22 @@ pub enum Shutdown {
     WhenDone,
     /// At this time, whatever the clients are doing.
     At(Time),
+    /// A graceful shutdown followed by an abort of remaining closes.
+    Twice { first: Time, second: Time },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Sent {
+    None,
+    Shutdown,
+    Abort,
 }
 
 /// The echo's referee: the expectations, and the two things it injects.
 #[derive(Debug)]
 pub struct EchoReferee {
     expectations: Expectations<Proc, Expect>,
+    controls: Controls,
     shutdown: Shutdown,
     /// The echo's address, once seen, and whether the clients were told it.
     listening: Option<Addr>,
@@ -162,31 +172,33 @@ pub struct EchoReferee {
     /// Every client done, as last seen.
     done: bool,
     /// The echo shut down.
-    shut: bool,
+    sent: Sent,
     /// When it last observed.
     now: Time,
 }
 
 impl EchoReferee {
     #[must_use]
-    pub fn new(seed: u64, expectations: Vec<Expect>, shutdown: Shutdown) -> EchoReferee {
+    pub fn new(seed: u64, expectations: Vec<Expect>, shutdown: Shutdown, controls: Controls) -> EchoReferee {
         EchoReferee {
             expectations: Expectations::new(seed, expectations),
+            controls,
             shutdown,
             listening: None,
             told: false,
             done: false,
-            shut: false,
+            sent: Sent::None,
             now: Time::ZERO,
         }
     }
 
     /// Whether it should shut the echo down at `now`.
     fn shuts(&self, now: Time) -> bool {
-        !self.shut
+        self.sent == Sent::None
             && match self.shutdown {
                 Shutdown::WhenDone => self.done,
                 Shutdown::At(at) => now >= at,
+                Shutdown::Twice { first, .. } => now >= first,
             }
     }
 }
@@ -198,6 +210,11 @@ impl Referee<Proc> for EchoReferee {
             Some(_) | None => None,
         };
         let shut = self.shuts(now);
+        let abort = self.sent == Sent::Shutdown
+            && match self.shutdown {
+                Shutdown::Twice { second, .. } => now >= second,
+                Shutdown::At(_) | Shutdown::WhenDone => false,
+            };
         for proc in procs {
             match proc {
                 Proc::Client { client, .. } => {
@@ -205,15 +222,20 @@ impl Referee<Proc> for EchoReferee {
                         client.dial(addr);
                     }
                 }
-                Proc::Echo { svc, .. } => {
-                    if shut {
-                        svc.shutdown();
+                Proc::Echo { .. } => {
+                    if shut || abort {
+                        self.controls.signal(0, skein_io::kernel::ServiceSignal::Terminate);
                     }
                 }
             }
         }
         self.told |= tell.is_some();
-        self.shut |= shut;
+        if shut {
+            self.sent = Sent::Shutdown;
+        }
+        if abort {
+            self.sent = Sent::Abort;
+        }
     }
 
     fn observe(&mut self, now: Time, procs: &[Proc]) {
@@ -224,7 +246,7 @@ impl Referee<Proc> for EchoReferee {
             match proc {
                 Proc::Echo { svc, .. } => {
                     if self.listening.is_none() {
-                        self.listening = svc.listening();
+                        self.listening = svc.svc.listening();
                     }
                 }
                 Proc::Client { client, .. } => done &= client.done(),
@@ -239,8 +261,10 @@ impl Referee<Proc> for EchoReferee {
             Some(self.now)
         } else {
             match self.shutdown {
-                Shutdown::At(at) if !self.shut => Some(at),
-                Shutdown::WhenDone | Shutdown::At(_) => None,
+                Shutdown::At(at) if self.sent == Sent::None => Some(at),
+                Shutdown::Twice { first, .. } if self.sent == Sent::None => Some(first),
+                Shutdown::Twice { second, .. } if self.sent != Sent::Abort => Some(second),
+                Shutdown::WhenDone | Shutdown::At(_) | Shutdown::Twice { .. } => None,
             }
         };
         let expect = self.expectations.next_deadline();

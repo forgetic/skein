@@ -7,14 +7,14 @@
 //! while `spawn_signalfd` and `spawn_signals` supply roots' signal sources.
 //! `run` blocks only when every process and the control queue are idle,
 //! and returns once exits, operations and descriptor closures settle. It
-//! does not replay. Checked constructors meter each process separately; their
+//! checks policy deadlines kept before each wait after the referee's last
+//! word, before hosts can clear them (testing-strategy.md, 6). It does not
+//! replay. Checked constructors meter each process separately; their
 //! outcome verifies exact release on drop (testing-strategy.md, section 6).
 
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::format;
-use alloc::rc::Rc;
 use alloc::vec::Vec;
-use core::cell::RefCell;
 use core::ops::{Deref, DerefMut};
 
 use skein_heap::Span;
@@ -22,10 +22,12 @@ use skein_io::kernel::{Complete, Done, Error, Exit, Fd, Op, ServiceSignal, Signa
 use skein_lib::{Duration, Queue, Time, Token};
 use skein_shell::{Clock, Config, Kernel, Now, Wait};
 
+use crate::Host;
 use crate::heap::Heap;
-use crate::host::Host;
+use crate::program::Startup;
+pub use crate::referee::Controls;
 use crate::referee::Referee;
-use crate::{HostedProgram, Inherited, StartupRoots};
+use crate::{HostedProgram, Inherited, StartupAppends, StartupRoots};
 use std::os::unix::ffi::OsStrExt;
 
 /// What a real run left.
@@ -120,20 +122,6 @@ pub struct Killed {
     pub heap: Option<(u64, u64)>,
 }
 
-/// Signal requests the referee injects between iterations, addressed by stable host id.
-#[derive(Clone, Debug)]
-pub struct Controls {
-    signals: Rc<RefCell<Queue<(usize, ServiceSignal)>>>,
-}
-
-impl Controls {
-    /// Delivers a signal to the named root or hosted child in the next turn.
-    /// Root ids come from `spawn`; hosted ids follow them in admission order.
-    pub fn signal(&self, host: usize, signal: ServiceSignal) {
-        self.signals.borrow_mut().push((host, signal));
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 enum SignalSource {
     Pipe(Fd),
@@ -146,7 +134,7 @@ pub struct World<P, R> {
     procs: Vec<P>,
     referee: R,
     programs: Vec<HostedProgram<P>>,
-    startup: Vec<StartupRoots>,
+    startup: Vec<Startup>,
     inherited: Vec<Vec<Fd>>,
     controls: Controls,
     signals: BTreeMap<usize, SignalSource>,
@@ -164,7 +152,7 @@ impl<P: Host, R: Referee<P>> World<P, R> {
     /// Constructs a referee with a handle for injecting signals into this world.
     #[must_use]
     pub fn new_controlled<F: FnOnce(Controls) -> R>(make_referee: F) -> Self {
-        let controls = Controls { signals: Rc::new(RefCell::new(Queue::with_capacity(256))) };
+        let controls = Controls::new();
         let referee = make_referee(controls.clone());
         Self {
             procs: Vec::new(),
@@ -221,10 +209,15 @@ impl<P: Host, R: Referee<P>> World<P, R> {
     /// Registers independently opened startup directories selected from each
     /// spawn, shared with simulated scenarios (testing-strategy.md, section 2.8).
     pub fn host_roots(&mut self, program: HostedProgram<P>, roots: StartupRoots) {
+        self.host_startup(program, roots, crate::program::no_appends);
+    }
+
+    /// Registers independently opened roots and append files for each launch.
+    pub fn host_startup(&mut self, program: HostedProgram<P>, roots: StartupRoots, appends: StartupAppends) {
         assert!(program.instances > 0 && program.operations > 0, "a hosted program has room to run");
         assert!(!self.programs.iter().any(|entry| entry.program == program.program), "one factory per program");
         self.programs.push(program);
-        self.startup.push(roots);
+        self.startup.push(Startup { roots, appends });
     }
 
     /// Adds a root host; descriptors opened at startup may be declared with `spawn_with_fds`.
@@ -314,6 +307,7 @@ impl Process {
                 | Done::Bound(_)
                 | Done::Stat(_)
                 | Done::Exit(_)
+                | Done::Usage(_)
                 | Done::ServiceSignal(_),
             )
             | Err(_) => {}
@@ -355,9 +349,12 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
         let start = clock.now().now;
         let deadline = start.saturating_add(patience);
         let mut iterations: u32 = 0;
+        let mut last_word = None;
+        let mut policy_wake: Vec<(usize, Time)> = Vec::new();
         loop {
             iterations = iterations.checked_add(1).expect("fewer than 2^32 iterations");
             let Now { now, wall } = clock.now();
+            check_policy_wake(&mut policy_wake, now);
             assert!(now < deadline, "the real loop settles within {} ms", patience.as_nanos().div_euclid(1_000_000));
             self.world.referee.act(now, &mut self.world.procs);
             self.signals();
@@ -369,8 +366,14 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                     let proc = self.world.procs.get_mut(at).expect("a process per host");
                     self.ring.deliver(host, proc.completions());
                     match &mut self.world.heap {
-                        Some(heap) => heap.around(at, || proc.iterate(now, wall)),
-                        None => proc.iterate(now, wall),
+                        Some(heap) => heap.around(at, || {
+                            proc.iterate(now, wall);
+                            proc.drain();
+                        }),
+                        None => {
+                            proc.iterate(now, wall);
+                            proc.drain();
+                        }
                     }
                     let mut submits = Queue::with_capacity(proc.submissions().len());
                     while let Some(record) = proc.submissions().pop() {
@@ -398,6 +401,9 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                     at = at.checked_add(1).expect("bounded host count");
                 }
                 self.world.referee.observe(now, &self.world.procs);
+            }
+            if last_word.is_none() && self.world.referee.passed() {
+                last_word = Some(self.world.referee.last_word().at(now));
             }
             self.settle_children();
             self.settle_root_signals();
@@ -435,14 +441,35 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                     now.saturating_since(start).as_nanos().div_euclid(1_000_000)
                 ));
             }
-            let mut until = deadline;
-            for at in
-                self.world.procs.iter().map(Host::next_deadline).chain([self.world.referee.next_deadline()]).flatten()
-            {
-                until = until.min(at);
-            }
+            let until = self.wait_until(deadline);
+            policy_wake = self.policy_wake(last_word);
             self.ring.enter(Wait::Until(until));
         }
+    }
+
+    fn wait_until(&self, patience: Time) -> Time {
+        self.world
+            .procs
+            .iter()
+            .map(Host::next_deadline)
+            .chain([self.world.referee.next_deadline()])
+            .flatten()
+            .fold(patience, Time::min)
+    }
+
+    fn policy_wake(&self, last_word: Option<Time>) -> Vec<(usize, Time)> {
+        let mut deadlines = Vec::new();
+        if let Some(last_word) = last_word {
+            for (at, proc) in self.world.procs.iter().enumerate() {
+                if !proc.is_empty()
+                    && let Some(deadline) = proc.next_policy_deadline()
+                    && deadline > last_word
+                {
+                    deadlines.push((*self.ids.get(at).expect("an id per process"), deadline));
+                }
+            }
+        }
+        deadlines
     }
 
     fn signals(&mut self) {
@@ -514,7 +541,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                     return;
                 }
             }
-            Op::Wait { pidfd } => {
+            Op::Wait { pidfd, .. } => {
                 if let Some(child) = self.placeholders.get(pidfd).copied().and_then(|host| self.children.get_mut(&host))
                 {
                     match child.exit {
@@ -524,7 +551,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                     return;
                 }
             }
-            Op::Signal { pidfd, signal } => {
+            Op::Signal { pidfd, signal, .. } => {
                 if let Some(child) = self.placeholders.get(pidfd).and_then(|host| self.children.get(host)) {
                     let child_host = child.host;
                     let writer = child.signal_writer;
@@ -579,12 +606,14 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
             | Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }
             | Op::Remove { .. }
             | Op::MakeDirectory { .. }
             | Op::List { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. } => {}
@@ -601,7 +630,10 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
         );
         let make = entry.make;
         let operations = entry.operations;
-        let declarations = self.world.startup.get(program).expect("startup selector per program")(spawn);
+        let startup = self.world.startup.get(program).expect("startup selector per program");
+        let declarations = (startup.roots)(spawn);
+        let append_declarations = (startup.appends)(spawn);
+        crate::program::check_appends(&append_declarations);
         crate::program::check_roots(&declarations);
         let mut roots = Vec::new();
         for declaration in declarations {
@@ -623,9 +655,21 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                 }
             }
         }
+        let mut appends = Vec::new();
+        for declaration in append_declarations {
+            match open_startup_append(&declaration) {
+                Ok(fd) => appends.push((declaration.name, fd)),
+                Err(error) => {
+                    for (_, fd) in roots.into_iter().chain(appends) {
+                        self.cleanup.push_back((parent, Op::Close { fd }));
+                    }
+                    return Err(error);
+                }
+            }
+        }
         match skein_shell::hosted_pipes(spawn) {
             Ok(pipes) => {
-                let inherited = Inherited { pipes: pipes.pipes, roots, signal: pipes.signal };
+                let inherited = Inherited { pipes: pipes.pipes, roots, appends, signal: pipes.signal };
                 let proc = match &mut self.world.heap {
                     Some(heap) => heap.admit(|| make(spawn, &inherited), P::worst_case),
                     None => make(spawn, &inherited),
@@ -642,6 +686,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                             .iter()
                             .map(|(_, fd)| *fd)
                             .chain(inherited.roots.iter().map(|(_, fd)| *fd))
+                            .chain(inherited.appends.iter().map(|(_, fd)| *fd))
                             .chain([inherited.signal])
                             .collect(),
                         exit: None,
@@ -665,7 +710,7 @@ impl<P: Host, R: Referee<P>> Running<P, R> {
                 Ok(Done::Spawned { pidfd: pipes.pidfd })
             }
             Err(error) => {
-                for (_, fd) in roots {
+                for (_, fd) in roots.into_iter().chain(appends) {
                     self.cleanup.push_back((parent, Op::Close { fd }));
                 }
                 Err(error)
@@ -890,6 +935,33 @@ impl Ring {
 
     fn is_empty(&self) -> bool {
         self.kernel.in_flight() == 0 && !self.has_ready()
+    }
+}
+
+fn open_startup_append(declaration: &crate::StartupAppend) -> Result<Fd, Error> {
+    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(&declaration.root));
+    let root = skein_shell::open_root(path).map_err(|errno| match errno {
+        2_i32 => Error::NotFound,
+        13_i32 => Error::Permission,
+        20_i32 => Error::NotADirectory,
+        22_i32 => Error::InvalidArgument,
+        24_i32 => Error::TooManyOpenFiles,
+        _ => Error::Other(errno),
+    })?;
+    let opened = skein_shell::open_append(root, &declaration.path, declaration.mode);
+    skein_shell::close_keeper_fd(root);
+    opened
+}
+
+/// Checks deadlines kept before the wait, before a host can fire and clear them.
+fn check_policy_wake(deadlines: &mut Vec<(usize, Time)>, now: Time) {
+    for (process, deadline) in deadlines.drain(..) {
+        if now >= deadline {
+            crate::fail(&format!(
+                "process {process} woke for policy deadline {} ns after the last word",
+                deadline.as_nanos()
+            ));
+        }
     }
 }
 

@@ -7,7 +7,7 @@ fn anthropic_call() -> skein_llm::Call {
     let mut input = call(1);
     input.endpoint = Endpoint::anthropic();
     input.credential = Credential::anthropic(b"test-token".to_vec().into());
-    input.prompt.cache_key = None;
+    input.prompt.affinity = None;
     input
 }
 fn header(name: &[u8], value: &[u8]) -> Header {
@@ -24,7 +24,14 @@ fn credentials_and_reserved_headers_cannot_cross_auth_modes() {
     let mut input = anthropic_call();
     input.credential.account_id = b"unexpected-account".to_vec().into();
     assert_eq!(rejection(input, &limits()), Error::Invalid);
-    for name in [b"Authorization".as_slice(), b"x-api-key", b"CHATGPT-ACCOUNT-ID", b"Content-Length"] {
+    for name in [
+        b"Authorization".as_slice(),
+        b"x-api-key",
+        b"CHATGPT-ACCOUNT-ID",
+        b"Content-Length",
+        b"SESSION-ID",
+        b"Thread-Id",
+    ] {
         let mut input = anthropic_call();
         input.endpoint.headers = Box::new([header(name, b"override")]);
         assert_eq!(rejection(input, &limits()), Error::Invalid);
@@ -80,14 +87,17 @@ fn measured_http_head_accepts_exact_cap_and_rejects_one_byte_less() {
         if profile {
             input.endpoint.headers = anthropic::identity::claude_code_headers();
         }
-        assert_eq!(rejection(input, &bounds), Error::Limit);
+        assert_eq!(
+            rejection(input, &bounds),
+            Error::Limit { which: skein_llm::Cap::RequestHead, bound: u64::from(bounds.http.request) }
+        );
     }
 }
 #[test]
 fn fixed_header_count_is_validated_before_encoding() {
     let mut bounds = limits();
     bounds.http.headers = 6;
-    assert_eq!(rejection(anthropic_call(), &bounds), Error::Limit);
+    assert_eq!(rejection(anthropic_call(), &bounds), Error::Limit { which: skein_llm::Cap::ResponseFields, bound: 6 });
     bounds.http.headers = 7;
     assert!(client::Client::prepare(anthropic_call(), &bounds).is_ok());
 }

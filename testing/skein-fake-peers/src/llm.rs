@@ -23,6 +23,8 @@ use crate::{Error, Limits, Transport};
 pub enum Observation {
     /// The peer accepted this connection from a client.
     Accepted { connection: Token },
+    /// Actual HTTP field names and values received before a query on this connection.
+    Head { connection: Token, headers: Box<[skein_http::Header]> },
     /// The byte peer decoded this complete call before the script domain received it.
     Query { connection: Token, query: api::Query },
     /// The real script domain emitted this terminal, even after the connection closed.
@@ -56,6 +58,7 @@ pub struct Peer {
     observations: Vec<Observation>,
     observed_bytes: u64,
     bound: u64,
+    ignore_half_close: bool,
 }
 
 impl Peer {
@@ -92,6 +95,7 @@ impl Peer {
             observations: Vec::with_capacity(usize::try_from(limits.observations).expect("u32 fits")),
             observed_bytes: 0,
             bound,
+            ignore_half_close: false,
         })
     }
 
@@ -107,9 +111,15 @@ impl Peer {
         &self.observations
     }
 
-    /// Stops admitting and closes every connection, keeping delayed terminals until due.
+    /// Ends a peer whose clients have settled, retaining accepted work’s terminals.
+    /// A caller ending it earlier names its scenario about peer hang-up.
     pub fn shutdown(&mut self) {
         self.face.shutdown();
+    }
+
+    /// Keep the byte peer live when the client finishes its write side.
+    pub fn ignore_half_close(&mut self) {
+        self.ignore_half_close = true;
     }
 
     fn reserve_observation(&self, bytes: u64) {
@@ -210,6 +220,7 @@ impl Peer {
             | io::Event::Connected { .. }
             | io::Event::Spawned { .. }
             | io::Event::Exited { .. }
+            | io::Event::Usage { .. }
             | io::Event::Shutdown { .. } => {
                 panic!("the fake peer only listens and serves classic byte streams");
             }
@@ -237,6 +248,9 @@ impl Peer {
             }
             if connection.above.room() >= provider::MAX_UP && connection.below.room() >= provider::MAX_DOWN {
                 if let Some(up) = connection.plain.pop() {
+                    if self.ignore_half_close && up == Up::End {
+                        continue;
+                    }
                     provider::up(
                         &mut connection.server,
                         &mut self.service,
@@ -267,6 +281,12 @@ impl Peer {
                 && let Some(event) = connection.above.pop()
             {
                 match event {
+                    provider::Event::Head { headers } => {
+                        let connection = connection.owner;
+                        let bytes = provider::head_bytes(&headers).expect("bounded actual head");
+                        self.reserve_observation(bytes);
+                        self.observe(Observation::Head { connection, headers }, bytes);
+                    }
                     provider::Event::Domain(domain::Event::Call { reply_to, query }) => {
                         let connection = connection.owner;
                         let bytes = query_bytes(&query).expect("bounded decoded query");
@@ -367,6 +387,11 @@ impl Host for Peer {
     fn next_deadline(&self) -> Option<Time> {
         [self.face.io.next_deadline(), self.domain.next_deadline()].into_iter().flatten().min()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.domain.next_deadline()
+    }
+
     fn is_empty(&self) -> bool {
         self.face.is_empty()
             && self.connections.is_empty()
@@ -399,6 +424,7 @@ pub fn worst_case(
         .checked_add(transport::worst_case(limits, transport)?)?
         .checked_add(u64::try_from(size_of::<Connection>()).ok()?)?
         .checked_add(Queue::<provider::Event>::worst_case(limits.queue)?)?
+        .checked_add(u64::from(limits.queue).checked_mul(provider::head_worst_case(peer)?)?)?
         .checked_add(Queue::<Down>::worst_case(limits.queue)?)?
         .checked_add(Queue::<Up>::worst_case(limits.queue)?)?
         .checked_add(
@@ -424,6 +450,18 @@ fn query_bytes(query: &api::Query) -> Option<u64> {
     bytes = bytes
         .checked_add(u64::try_from(query.messages.len().checked_mul(size_of::<api::Message>())?).ok()?)?
         .checked_add(u64::try_from(query.tools.len().checked_mul(size_of::<api::ToolSpec>())?).ok()?)?;
+    match &query.choice {
+        api::ToolChoice::Auto | api::ToolChoice::None => {}
+        api::ToolChoice::Only(names) => {
+            bytes = bytes.checked_add(u64::try_from(names.len().checked_mul(size_of::<Box<[u8]>>())?).ok()?)?;
+            for name in names {
+                bytes = bytes.checked_add(u64::try_from(name.len()).ok()?)?;
+            }
+        }
+    }
+    if let api::Caching::Marks(marks) = &query.caching {
+        bytes = bytes.checked_add(u64::try_from(marks.len().checked_mul(size_of::<api::Mark>())?).ok()?)?;
+    }
     for tool in &query.tools {
         bytes = bytes.checked_add(
             u64::try_from(tool.name.len().checked_add(tool.description.len())?.checked_add(tool.parameters.len())?)

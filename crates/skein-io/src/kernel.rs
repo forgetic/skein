@@ -129,6 +129,11 @@
 //!   written from `bytes[from..]` to the file at `at`: at least one, and no
 //!   more than were left. io continues a short one from `from + n` at
 //!   `at + n`. Writing past the end leaves zeros in the gap.
+//! - **`Append` writes at the descriptor's position**, selecting the current
+//!   end for a startup file opened with `O_APPEND`. On an ordinary writable
+//!   file it advances the position after each write. Counts are positive;
+//!   a short append continues from `from + n`. Only one is in flight on a
+//!   descriptor opened to write (kernel.md, 6.1 and 7).
 //! - **`Sync`** flushes the file, or a directory's entries, to storage:
 //!   once it completes, what was written or renamed before it survives a
 //!   crash.
@@ -182,8 +187,11 @@
 //!   child reads; `Way::Out` means it writes.
 //! - `PipeRead` and `PipeWrite` have the same count rules as `Recv` and
 //!   `Send`, with EOF at a zero read count. A pipe is closed by `Close`.
-//! - `Wait` reaps a child through its pidfd and answers with `Exit`; `Signal`
-//!   targets the pidfd so a reused numeric PID cannot be signalled.
+//! - `Wait` observes an exit without reaping, or reaps after that observation;
+//!   both answer `Exit`. The zombie retains the group's leader until its reap.
+//! - `Signal` names the child or its group through the pidfd, never a numeric PID.
+//! - `Usage` is synchronous: own and reaped children's CPU and resident peaks
+//!   (kernel.md, sections 6.2 and 6.3). It cannot be cancelled.
 //!
 //! The errors each operation names, beyond `NoBufferSpace`,
 //! `InvalidArgument` and `Other`, which any operation but `Cancel` may
@@ -196,13 +204,14 @@
 //! | the socket operations, and `Close` | any, but `TooLate` and the files' errors below |
 //! | `Open` | `NotFound`, `Exists`, `NotADirectory`, `IsADirectory`, `Permission`, `NoSpace`, `ReadOnly`, `TooManyLinks`, `NameTooLong`, `Escape`, `NotAFile`, `TooManyOpenFiles` |
 //! | `Read` | `IsADirectory` |
-//! | `Write` | `NoSpace`, `ReadOnly` |
+//! | `Write`, `Append` | `NoSpace`, `ReadOnly` |
 //! | `Sync` | `NoSpace` |
 //! | `Stat` | none |
 //! | `Rename` | `NotFound`, `NotADirectory`, `IsADirectory`, `NotEmpty`, `Permission`, `NoSpace`, `ReadOnly`, `TooManyLinks`, `NameTooLong` |
 //! | `Remove` | `NotFound`, `NotADirectory`, `IsADirectory`, `NotEmpty`, `Permission`, `ReadOnly`, `NameTooLong` |
 //! | `MakeDirectory` | `NotFound`, `Exists`, `NotADirectory`, `Permission`, `NoSpace`, `ReadOnly`, `TooManyLinks`, `NameTooLong` |
 //! | `List` | `NotFound`, `NotADirectory`, `NameTooLong` |
+//! | `Usage` | only `Other` |
 //! | `Cancel` | only `TooLate`, `InvalidArgument` or `Other` |
 //!
 //! Broken invariants, which io never commits and backends may assume never
@@ -212,7 +221,9 @@
 //! - a record that is not [`Op::is_valid`];
 //! - a token already in flight;
 //! - a `Cancel` whose target is a `Cancel`, a `Stat`, a `Rename`, a
-//!   `Remove`, a `MakeDirectory` or a `List`;
+//!   `Remove`, a `MakeDirectory`, a `List`, a `Spawn`, a `Signal` or a `Usage`;
+//! - a `Wait` beside another on its pidfd, or a reap before a reported exit;
+//! - any operation on a pidfd after its reap, except its `Close`;
 //! - an operation on files ([`Op::is_file`]) on a socket's descriptor, or
 //!   an operation on sockets on a file's;
 //! - a `Read` on a descriptor not opened with [`OpenHow::Read`], a `Write`
@@ -250,7 +261,7 @@
 use alloc::boxed::Box;
 use core::net::SocketAddr;
 
-use skein_lib::Token;
+use skein_lib::{Duration, Token};
 
 /// A descriptor, in whatever backend issued it: a file descriptor on the
 /// ring, a table slot in the simulator. Only io and its backend ever see one,
@@ -326,13 +337,14 @@ pub struct Complete {
 /// | `Send` | `Done::Count`, bytes sent from `from`, at least 1 |
 /// | `Open` | `Done::Fd`, the file or directory opened |
 /// | `Read` | `Done::Count`, bytes read into `buf[..n]`, 0 at the end of the file |
-/// | `Write` | `Done::Count`, bytes written from `from`, at least 1 |
+/// | `Write`, `Append` | `Done::Count`, bytes written from `from`, at least 1 |
 /// | `Sync`, `Rename`, `Remove`, `MakeDirectory` | `Done::Nothing` |
 /// | `Stat` | `Done::Stat`, the kind and size of what is open |
 /// | `List` | `Done::Count`, entries listed into `entries[..n]`, 0 at the end |
 /// | `Spawn` | `Done::Spawned`, pidfd; parent ends written into the returned `Spawn` pipe slots |
 /// | `Wait` | `Done::Exit`, exit code or signal |
-/// | `Signal` | `Done::Nothing` |
+/// | `Signal` | `Done::Nothing`, child or group through its pidfd |
+/// | `Usage` | `Done::Usage`, own and reaped children resources |
 /// | `ReadSignal` | `Done::ServiceSignal`, one blocked termination signal |
 /// | `PipeRead`, `PipeWrite` | `Done::Count`, bytes read or written |
 /// | `Cancel` | `Done::Nothing`, the target was found in flight |
@@ -404,6 +416,12 @@ pub enum Op {
         from: u32,
         at: u64,
     },
+    /// A stream write at the descriptor's position, at the end when opened with append.
+    Append {
+        fd: Fd,
+        bytes: Box<[u8]>,
+        from: u32,
+    },
     /// Flushes what was written to the file, or to the directory's entries.
     Sync {
         fd: Fd,
@@ -427,10 +445,11 @@ pub enum Op {
         name: Box<[u8]>,
         directory: bool,
     },
-    /// Makes a directory, `name`, in the one open on `dir`.
+    /// Makes a directory, `name`, in the one open on `dir`, with `mode` less the umask.
     MakeDirectory {
         dir: Fd,
         name: Box<[u8]>,
+        mode: u32,
     },
     /// The next entries of the directory open on `fd`, into `entries`,
     /// never empty, with their names in `names`, which holds at least
@@ -445,15 +464,19 @@ pub enum Op {
     Spawn {
         spawn: Box<Spawn>,
     },
-    /// Reaps the child named by its pidfd. A pidfd remains open until Close.
+    /// Observes a child exit, or reaps it after observation (kernel.md, section 6.2).
     Wait {
         pidfd: Fd,
+        reap: bool,
     },
     /// Sends a signal to a child by pidfd, so a reused PID cannot be hit.
     Signal {
         pidfd: Fd,
         signal: Signal,
+        to: Target,
     },
+    /// Reads the process and reaped children resource usage (kernel.md, section 6.3).
+    Usage,
     /// Reads one termination signal from the signalfd opened at startup
     /// (io.md, section 7; shell.md, section 6).
     ReadSignal {
@@ -505,9 +528,44 @@ pub enum Way {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// A termination signal requested by a child owner.
 pub enum Signal {
+    /// Ask the recipient to terminate.
     Terminate,
+    /// End the recipient without allowing it to handle the signal.
     Kill,
+}
+
+/// A signal's recipient, selected by the pidfd's owner (kernel.md, section 6.2).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Target {
+    /// The child alone.
+    Child,
+    /// Every member of the group the child leads.
+    Group,
+}
+
+/// The process's own and reaped children's resources, returned by the backend.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Usage {
+    pub own: Resources,
+    pub children: Resources,
+}
+
+impl Usage {
+    pub const ZERO: Usage = Usage { own: Resources::ZERO, children: Resources::ZERO };
+}
+
+/// CPU time and the largest resident size, returned in one usage part.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Resources {
+    pub user: Duration,
+    pub system: Duration,
+    pub peak_rss_bytes: u64,
+}
+
+impl Resources {
+    pub const ZERO: Resources = Resources { user: Duration::ZERO, system: Duration::ZERO, peak_rss_bytes: 0 };
 }
 
 /// A termination signal delivered to the service by its signalfd.
@@ -520,14 +578,19 @@ pub enum ServiceSignal {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// A child exit, reported by both observing and reaping waits.
 pub enum Exit {
+    /// The program's ordinary exit status.
     Code(u8),
+    /// The signal that ended the program.
     Signal(u32),
 }
 
 /// How an [`Op::Open`] opens what its path names.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum OpenHow {
+    /// An entry itself, links refused in its parents, for Stat and Close only (kernel.md, 6.1).
+    PathNoFollow,
     /// An existing file or directory, to `Read` or `Stat` (`O_RDONLY`).
     Read,
     /// An existing file to read, refusing a symbolic link in any path part.
@@ -551,10 +614,9 @@ pub enum OpenHow {
 pub enum Kind {
     File,
     Directory,
-    /// Seen by `List` only: an `Open` follows a symbolic link.
+    /// A directory entry or a path-only descriptor naming a symbolic link.
     Symlink,
-    /// Anything else: a FIFO, a socket, a device. Seen by `List` only: an
-    /// `Open` of one fails with `NotAFile`.
+    /// A FIFO, socket or device, from List or path-only Stat; ordinary Open refuses it.
     Other,
 }
 
@@ -567,6 +629,9 @@ pub struct Stat {
     pub size: u64,
     /// Its permission bits (`0o777` at most).
     pub mode: u32,
+    /// The filesystem user ID that owns it.
+    pub owner: u32,
+    pub links: u32,
 }
 
 /// The permission bits a mode may hold: an `OpenHow::Create`'s, a `Stat`'s.
@@ -644,6 +709,8 @@ pub enum Done {
     Exit(Exit),
     /// One service termination signal read from a signalfd.
     ServiceSignal(ServiceSignal),
+    /// The process and its reaped children, at submission.
+    Usage(Usage),
 }
 
 /// The kinds of [`Done`], by which an operation's success value is checked
@@ -659,6 +726,8 @@ pub enum Shape {
     Spawned,
     Exit,
     ServiceSignal,
+    /// Resource usage.
+    Usage,
 }
 
 /// The errors io handles by name. Each backend maps its kernel's error numbers
@@ -839,9 +908,17 @@ impl Op {
         Ok(Op::Write { fd, bytes, from, at })
     }
 
+    /// An `Append` of `bytes[from..]`, or the bytes returned when no valid count remains.
+    pub fn append(fd: Fd, bytes: Box<[u8]>, from: u32) -> Result<Op, Box<[u8]>> {
+        if u32::try_from(bytes.len()).is_err() || left(&bytes, from).is_none() {
+            return Err(bytes);
+        }
+        Ok(Op::Append { fd, bytes, from })
+    }
+
     /// Whether the record is one the kernel can be handed: a `Recv`, `Send`,
-    /// `Read` or `Write` that [`Op::recv`], [`Op::send`], [`Op::read`] and
-    /// [`Op::write`] would build; an `Open` whose path has no NUL byte, and
+    /// `Read`, `Write` or `Append` that [`Op::recv`], [`Op::send`], [`Op::read`],
+    /// [`Op::write`] and [`Op::append`] would build; an `Open` whose path has no NUL byte, and
     /// whose mode, to create, holds only [`PERMISSIONS`]; a
     /// `Rename`, `Remove` or `MakeDirectory` of names that are each an
     /// [`is_name`]; a `List` with room for an entry, `names` of at least
@@ -851,7 +928,7 @@ impl Op {
     pub fn is_valid(&self) -> bool {
         match self {
             Op::Recv { buf, .. } | Op::PipeRead { buf, .. } => !buf.is_empty() && u32::try_from(buf.len()).is_ok(),
-            Op::Send { bytes, from, .. } | Op::PipeWrite { bytes, from, .. } => {
+            Op::Send { bytes, from, .. } | Op::PipeWrite { bytes, from, .. } | Op::Append { bytes, from, .. } => {
                 u32::try_from(bytes.len()).is_ok() && left(bytes, *from).is_some()
             }
             Op::Open { path, how, .. } => {
@@ -862,6 +939,7 @@ impl Op {
                     OpenHow::Create { mode: None }
                     | OpenHow::CreateNoFollow { mode: None }
                     | OpenHow::Read
+                    | OpenHow::PathNoFollow
                     | OpenHow::ReadNoFollow
                     | OpenHow::Directory
                     | OpenHow::DirectoryNoFollow => true,
@@ -871,7 +949,8 @@ impl Op {
             Op::Read { buf, at, .. } => reads(buf, *at),
             Op::Write { bytes, from, at, .. } => writes(bytes, *from, *at),
             Op::Rename { from, to, .. } => is_name(from) && is_name(to),
-            Op::Remove { name, .. } | Op::MakeDirectory { name, .. } => is_name(name),
+            Op::Remove { name, .. } => is_name(name),
+            Op::MakeDirectory { name, mode, .. } => is_name(name) && *mode & !PERMISSIONS == 0,
             Op::List { entries, names, .. } => {
                 !entries.is_empty()
                     && u32::try_from(entries.len()).is_ok()
@@ -890,6 +969,7 @@ impl Op {
             | Op::Stat { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::Cancel { .. } => true,
         }
@@ -912,6 +992,7 @@ impl Op {
             | Op::Send { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::List { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. } => Shape::Count,
@@ -920,6 +1001,7 @@ impl Op {
             Op::Spawn { .. } => Shape::Spawned,
             Op::Wait { .. } => Shape::Exit,
             Op::ReadSignal { .. } => Shape::ServiceSignal,
+            Op::Usage => Shape::Usage,
             Op::Listen { .. }
             | Op::Connect { .. }
             | Op::Shutdown { .. }
@@ -938,7 +1020,7 @@ impl Op {
         match self {
             Op::Open { .. } => Some(Files::Open),
             Op::Read { .. } => Some(Files::Read),
-            Op::Write { .. } => Some(Files::Write),
+            Op::Write { .. } | Op::Append { .. } => Some(Files::Write),
             Op::Sync { .. } => Some(Files::Sync),
             Op::Stat { .. } => Some(Files::Stat),
             Op::Rename { .. } => Some(Files::Rename),
@@ -957,6 +1039,7 @@ impl Op {
             | Op::Spawn { .. }
             | Op::Wait { .. }
             | Op::Signal { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
@@ -1008,6 +1091,7 @@ impl Done {
             Done::Spawned { .. } => Shape::Spawned,
             Done::Exit(_) => Shape::Exit,
             Done::ServiceSignal(_) => Shape::ServiceSignal,
+            Done::Usage(_) => Shape::Usage,
         }
     }
 }
@@ -1030,6 +1114,9 @@ impl Complete {
 
 /// Whether `error` may answer `op`.
 fn may_fail(op: &Op, error: Error) -> bool {
+    if op.shape() == Shape::Usage {
+        return only_other(error);
+    }
     if let Op::Cancel { .. } = op {
         return fails_a_cancel(error);
     }
@@ -1241,6 +1328,7 @@ fn fits(op: &Op, done: &Done) -> bool {
             | Op::Open { .. }
             | Op::Read { .. }
             | Op::Write { .. }
+            | Op::Append { .. }
             | Op::Sync { .. }
             | Op::Stat { .. }
             | Op::Rename { .. }
@@ -1251,10 +1339,16 @@ fn fits(op: &Op, done: &Done) -> bool {
             | Op::Signal { .. }
             | Op::PipeRead { .. }
             | Op::PipeWrite { .. }
+            | Op::Usage
             | Op::ReadSignal { .. }
             | Op::Cancel { .. } => false,
         },
-        Done::Nothing | Done::Fd(_) | Done::Accepted { .. } | Done::Exit(_) | Done::ServiceSignal(_) => true,
+        Done::Nothing
+        | Done::Fd(_)
+        | Done::Accepted { .. }
+        | Done::Exit(_)
+        | Done::ServiceSignal(_)
+        | Done::Usage(_) => true,
     }
 }
 
@@ -1280,6 +1374,7 @@ fn binds(op: &Op, bound: &Addr) -> bool {
         | Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
@@ -1289,6 +1384,7 @@ fn binds(op: &Op, bound: &Addr) -> bool {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
@@ -1301,12 +1397,13 @@ fn binds(op: &Op, bound: &Addr) -> bool {
 fn counts(op: &Op, n: usize) -> bool {
     match op {
         Op::Recv { buf, .. } | Op::Read { buf, .. } | Op::PipeRead { buf, .. } => n <= buf.len(),
-        Op::Send { bytes, from, .. } | Op::Write { bytes, from, .. } | Op::PipeWrite { bytes, from, .. } => {
-            match left(bytes, *from) {
-                Some(left) => n >= 1 && n <= left,
-                None => false,
-            }
-        }
+        Op::Send { bytes, from, .. }
+        | Op::Write { bytes, from, .. }
+        | Op::Append { bytes, from, .. }
+        | Op::PipeWrite { bytes, from, .. } => match left(bytes, *from) {
+            Some(left) => n >= 1 && n <= left,
+            None => false,
+        },
         Op::List { entries, names, .. } => match entries.get(..n) {
             Some(listed) => lists(listed, names),
             None => false,
@@ -1327,6 +1424,7 @@ fn counts(op: &Op, n: usize) -> bool {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::Cancel { .. } => false,
     }
@@ -1352,4 +1450,35 @@ fn lists(listed: &[Entry], names: &[u8]) -> bool {
         end = next;
     }
     true
+}
+
+fn only_other(error: Error) -> bool {
+    match error {
+        Error::Other(_) => true,
+        Error::Refused
+        | Error::Reset
+        | Error::BrokenPipe
+        | Error::NotConnected
+        | Error::AddressInUse
+        | Error::AddressNotAvailable
+        | Error::Unreachable
+        | Error::TimedOut
+        | Error::TooManyOpenFiles
+        | Error::NoBufferSpace
+        | Error::Cancelled
+        | Error::TooLate
+        | Error::NotFound
+        | Error::Exists
+        | Error::NotADirectory
+        | Error::IsADirectory
+        | Error::NotEmpty
+        | Error::Permission
+        | Error::NoSpace
+        | Error::ReadOnly
+        | Error::TooManyLinks
+        | Error::NameTooLong
+        | Error::Escape
+        | Error::NotAFile
+        | Error::InvalidArgument => false,
+    }
 }

@@ -12,7 +12,7 @@ static HEAP: Counting = Counting;
 fn preparation_and_streaming_stay_within_the_declared_bound() {
     for chunked in [false, true] {
         let bounds = limits();
-        let bound = client::worst_case(&bounds).unwrap();
+        let bound = client::call_worst_case(&bounds).unwrap();
         let input = call(1);
         let span = Span::start();
         let prepared = client::Client::prepare(input, &bounds).ok().unwrap();
@@ -52,7 +52,7 @@ fn preparation_and_streaming_stay_within_the_declared_bound() {
 fn cancellation_releases_owned_buffers() {
     for stage in 0..3 {
         let bounds = limits();
-        let bound = client::worst_case(&bounds).unwrap();
+        let bound = client::call_worst_case(&bounds).unwrap();
         let meter = Meter::new();
         let mut world = World::new(call(1), bounds, text_response(true), 19);
         if stage > 0 {
@@ -74,7 +74,7 @@ fn cancellation_releases_owned_buffers() {
 #[test]
 fn bounded_error_body_and_protocol_failure_release_all_storage() {
     let bounds = limits();
-    let bound = client::worst_case(&bounds).unwrap();
+    let bound = client::call_worst_case(&bounds).unwrap();
     for body in [br#"{"error":{"code":"rate_limit_exceeded","message":"later"}}"#.as_slice(), b"not json".as_slice()] {
         let meter = Meter::new();
         let wire = skein_llm_world::response(429, "Content-Type: application/json\r\nRetry-After: 9\r\n", body, false);
@@ -100,9 +100,9 @@ fn bounded_error_body_and_protocol_failure_release_all_storage() {
 #[test]
 fn large_schema_request_reasoning_and_answer_fit_the_same_bound() {
     let mut bounds = limits();
-    bounds.dialect.parts = 4;
-    bounds.dialect.opaque_bytes = 4096;
-    let bound = client::worst_case(&bounds).unwrap();
+    bounds.output_items = 4;
+    bounds.reasoning = 4096;
+    let bound = client::call_worst_case(&bounds).unwrap();
     let meter = Meter::new();
     let mut request = call(1);
     // Request escaping nearly doubles these instructions; a large schema
@@ -113,7 +113,7 @@ fn large_schema_request_reasoning_and_answer_fit_the_same_bound() {
     request.prompt.tools = Box::new([skein_llm::Tool {
         name: b"large_tool".to_vec().into(),
         description: vec![b'd'; 128].into(),
-        schema: skein_llm::openai::Json::from_bytes(schema_wire.as_bytes(), &bounds.dialect).unwrap(),
+        schema: skein_llm::openai::Json::from_bytes(schema_wire.as_bytes(), &bounds.native().document()).unwrap(),
     }]);
     let reasoning = format!(
         r#"{{"type":"response.output_item.done","output_index":0,"item":{{"id":"rs_1","type":"reasoning","encrypted_content":"{}","summary":[]}}}}"#,
@@ -168,7 +168,7 @@ fn large_schema_request_reasoning_and_answer_fit_the_same_bound() {
 #[test]
 fn almost_full_error_buffer_and_partial_request_are_bounded() {
     let bounds = limits();
-    let bound = client::worst_case(&bounds).unwrap();
+    let bound = client::call_worst_case(&bounds).unwrap();
     let meter = Meter::new();
     let detail = "x".repeat(3800);
     let body = format!(r#"{{"error":{{"code":"rate_limit_exceeded","message":"{detail}"}}}}"#);
@@ -195,19 +195,19 @@ fn almost_full_error_buffer_and_partial_request_are_bounded() {
 }
 
 #[test]
-fn multiple_reasoning_items_with_many_empty_tokens_fit_the_bound() {
+fn multiple_unknown_items_with_many_empty_tokens_fit_the_bound() {
     let mut bounds = limits();
-    bounds.dialect.parts = 4;
-    bounds.dialect.opaque_bytes = 4096;
-    let bound = client::worst_case(&bounds).unwrap();
+    bounds.output_items = 4;
+    bounds.reasoning = 4096;
+    let bound = client::call_worst_case(&bounds).unwrap();
     let meter = Meter::new();
     // Near 1024 tokens per event and near 8192 bytes across the answer, while
-    // empty strings make owned token wrappers much larger than their bytes.
+    // Empty strings have no payload allocation; fixed records still cost bytes.
     let tiny_values = vec![r#""""#; 850].join(",");
     let mut documents = Vec::new();
     for index in 0..3 {
-        documents.push(format!(r#"{{"type":"response.output_item.added","output_index":{index},"item":{{"id":"rs_{index}","type":"reasoning"}}}}"#));
-        documents.push(format!(r#"{{"type":"response.output_item.done","output_index":{index},"item":{{"id":"rs_{index}","type":"reasoning","encrypted_content":"opaque","future":[{tiny_values}],"summary":[]}}}}"#));
+        documents.push(format!(r#"{{"type":"response.output_item.added","output_index":{index},"item":{{"id":"rs_{index}","type":"future_reasoning"}}}}"#));
+        documents.push(format!(r#"{{"type":"response.output_item.done","output_index":{index},"item":{{"id":"rs_{index}","type":"future_reasoning","encrypted_content":"opaque","future":[{tiny_values}],"summary":[]}}}}"#));
     }
     documents.push(skein_llm_world::TERMINAL.to_owned());
     let refs: Vec<_> = documents.iter().map(String::as_str).collect();
@@ -235,7 +235,7 @@ fn multiple_reasoning_items_with_many_empty_tokens_fit_the_bound() {
     assert_eq!(completed.content.len(), 3);
     for block in &completed.content {
         let skein_llm::Block::Reasoning { replay } = block else { panic!("fixture only contains reasoning") };
-        assert!(replay.value.as_tokens().len() > 850, "the small-token wrapper storage is exercised");
+        assert!(replay.value.document().len() > 850, "many fixed records exercise compact replay storage");
     }
     world.request(client::Request::Close);
     world.settle();
@@ -247,22 +247,22 @@ fn multiple_reasoning_items_with_many_empty_tokens_fit_the_bound() {
 }
 
 #[test]
-fn thirty_two_reasoning_arrays_exercise_the_token_wrapper_bound() {
+fn thirty_two_unknown_arrays_exercise_the_compact_record_bound() {
     let mut bounds = limits();
-    bounds.dialect.parts = 32;
-    bounds.dialect.tokens = 2048;
-    bounds.dialect.document_bytes = 4096;
-    bounds.dialect.opaque_bytes = 4096;
-    bounds.dialect.string_bytes = 64;
-    bounds.dialect.answer_bytes = 140_000;
-    bounds.dialect.request_bytes = 1024;
-    let bound = client::worst_case(&bounds).unwrap();
+    bounds.output_items = 32;
+    bounds.tokens = 2048;
+    bounds.retained = 4096;
+    bounds.reasoning = 4096;
+    bounds.strings = 64;
+    bounds.answer = 140_000;
+    bounds.request = 1024;
+    let bound = client::call_worst_case(&bounds).unwrap();
     let meter = Meter::new();
     let tiny_values = vec!["0"; 1900].join(",");
     let mut documents = Vec::new();
     for index in 0..32 {
-        documents.push(format!(r#"{{"type":"response.output_item.added","output_index":{index},"item":{{"id":"rs_{index}","type":"reasoning"}}}}"#));
-        documents.push(format!(r#"{{"type":"response.output_item.done","output_index":{index},"item":{{"id":"rs_{index}","type":"reasoning","encrypted_content":"opaque","future":[{tiny_values}],"summary":[]}}}}"#));
+        documents.push(format!(r#"{{"type":"response.output_item.added","output_index":{index},"item":{{"id":"rs_{index}","type":"future_reasoning"}}}}"#));
+        documents.push(format!(r#"{{"type":"response.output_item.done","output_index":{index},"item":{{"id":"rs_{index}","type":"future_reasoning","encrypted_content":"opaque","future":[{tiny_values}],"summary":[]}}}}"#));
     }
     documents.push(skein_llm_world::TERMINAL.to_owned());
     let refs: Vec<_> = documents.iter().map(String::as_str).collect();
@@ -291,9 +291,9 @@ fn thirty_two_reasoning_arrays_exercise_the_token_wrapper_bound() {
     assert_eq!(completed.content.len(), 32);
     for block in &completed.content {
         let skein_llm::Block::Reasoning { replay } = block else { panic!("fixture only contains reasoning") };
-        assert!(replay.value.as_tokens().len() > 1900);
+        assert!(replay.value.document().len() > 1900);
     }
-    assert!(most > 2_000_000, "many short values exercise substantial owned token storage: {most}");
+    assert!(most > 2_000_000, "many short values exercise substantial compact record storage: {most}");
     world.request(client::Request::Close);
     world.settle();
     drop(world);
@@ -310,9 +310,9 @@ fn anthropic_signed_thinking_tool_input_and_replay_fit_the_declared_bound() {
     for chunked in [false, true] {
         for fragment in [1, 251] {
             let mut bounds = limits();
-            bounds.dialect.parts = 4;
-            bounds.dialect.opaque_bytes = 4096;
-            let bound = client::worst_case(&bounds).unwrap();
+            bounds.output_items = 4;
+            bounds.reasoning = 4096;
+            let bound = client::call_worst_case(&bounds).unwrap();
             let input = memory_anthropic_call(1);
             let span = Span::start();
             let prepared = client::Client::prepare(input, &bounds).ok().unwrap();
@@ -422,7 +422,7 @@ fn memory_anthropic_call(owner: u64) -> skein_llm::Call {
     let mut input = call(owner);
     input.endpoint = skein_llm::Endpoint::anthropic();
     input.credential = skein_llm::Credential::anthropic(b"synthetic-oauth-token".to_vec().into());
-    input.prompt.cache_key = None;
+    input.prompt.affinity = None;
     input.prompt.max_output_tokens = Some(1024);
     input
 }
@@ -431,25 +431,25 @@ fn memory_anthropic_call(owner: u64) -> skein_llm::Call {
 fn opaque_envelope_and_extended_thinking_transit_fit_counted_bounds() {
     for bytes in [32_u32, 2048] {
         let mut bounds = limits();
-        bounds.dialect.opaque_bytes = bytes;
-        bounds.dialect.string_bytes = bytes.max(4096);
-        bounds.dialect.document_bytes = 8192;
+        bounds.reasoning = bytes;
+        bounds.strings = bytes.max(4096);
+        bounds.retained = 8192;
         let metadata = format!(
             r#"{{"type":"thinking","thinking":"{}","signature":"s","extension":{{"signed":true}}}}"#,
             "x".repeat(usize::try_from(bytes.saturating_sub(96)).expect("bounded payload"))
         );
         let replay = skein_llm::Replay {
             provider: skein_llm::Provider::Anthropic,
-            value: skein_llm::Json::from_bytes(metadata.as_bytes(), &bounds.dialect)
+            value: skein_llm::Json::from_bytes(metadata.as_bytes(), &bounds.native().document())
                 .expect("bounded extended opaque value"),
         };
-        let bound = skein_llm::replay_worst_case(&bounds.dialect).expect("checked replay transit bound");
+        let bound = skein_llm::replay_worst_case(&bounds.native().document()).expect("checked replay transit bound");
         let span = Span::start();
-        let encoded = replay.to_bytes(&bounds.dialect);
+        let encoded = replay.to_bytes(&bounds.native().document());
         match encoded {
             Ok(encoded) => {
-                let decoded =
-                    skein_llm::Replay::from_bytes(&encoded, &bounds.dialect).expect("complete envelope restores");
+                let decoded = skein_llm::Replay::from_bytes(&encoded, &bounds.native().document())
+                    .expect("complete envelope restores");
                 assert_eq!(decoded, replay, "counted transit preserves every extension");
                 let grown = span.end();
                 assert!(
@@ -460,7 +460,7 @@ fn opaque_envelope_and_extended_thinking_transit_fit_counted_bounds() {
                 drop(decoded);
                 drop(encoded);
             }
-            Err(skein_llm::Error::Limit) => {
+            Err(skein_llm::Error::Limit { .. }) => {
                 let grown = span.end();
                 assert!(
                     grown.peak <= i64::try_from(bound).expect("bounded signed comparison"),
@@ -477,12 +477,13 @@ fn opaque_envelope_and_extended_thinking_transit_fit_counted_bounds() {
 fn actual_scripted_byte_peer_and_client_fit_the_composed_heap_envelope() {
     use skein_fake_llm_domain::api::{Finish, Line, Script, Turn};
     let mut bounds = limits();
+    bounds.strings = 4096; // This story reaches the fake domain's scripted text cap.
     // A string at its 4096-byte cap is emitted inside a larger JSON event and
     // a `data: ` line. Admit the entire document plus its six framing bytes.
-    bounds.sse.line = bounds.dialect.document_bytes.checked_add(6).expect("bounded data-line framing");
+    bounds.skip = bounds.retained.checked_add(6).expect("bounded data-line framing");
     let peer = skein_llm_world::fake::limits(&bounds);
     let config = skein_llm_world::fake::config();
-    let core = client::worst_case(&bounds)
+    let core = client::call_worst_case(&bounds)
         .expect("client bound")
         .checked_add(skein_fake_llm_protocol::provider::worst_case(&peer).expect("peer bound"))
         .expect("composed peer bound")
@@ -490,14 +491,14 @@ fn actual_scripted_byte_peer_and_client_fit_the_composed_heap_envelope() {
         .expect("composed domain bound");
     // The independent world owns two 32-KiB intakes, exact wire tapes and
     // observation copies. They are separate from protocol-owned allocations.
-    let external = 4_u64 * 32768 + 8 * u64::from(bounds.dialect.document_bytes) + 64 * 1024;
+    let external = 4_u64 * 32768 + 8 * u64::from(bounds.retained) + 64 * 1024;
     let mut input = call(1);
     input.prompt.instructions = b"maximum-script".as_slice().into();
     let scripts = Box::new([Script {
         cue: b"maximum-script".as_slice().into(),
         turns: Box::new([Turn {
             lines: Box::new([Line::Text {
-                text: vec![b'x'; usize::try_from(bounds.dialect.string_bytes).expect("bounded maximum answer")].into(),
+                text: vec![b'x'; usize::try_from(bounds.strings).expect("bounded maximum answer")].into(),
             }]),
             finish: Finish::Stop,
             tokens: 1000,
@@ -540,6 +541,184 @@ fn actual_scripted_byte_peer_and_client_fit_the_composed_heap_envelope() {
     let [skein_llm::Block::Text { text, .. }] = &*completion.content else {
         panic!("whole maximum scripted text");
     };
-    assert_eq!(text.len(), usize::try_from(bounds.dialect.string_bytes).expect("same maximum text cap"));
+    assert_eq!(text.len(), usize::try_from(bounds.strings).expect("same maximum text cap"));
     assert!(text.iter().all(|byte| *byte == b'x'), "whole maximum payload was conveyed");
+}
+
+#[test]
+fn an_oversized_call_completes_within_the_declared_bound() {
+    use skein_llm::{Block, openai};
+    let mut bounds = limits();
+    bounds.input = 3;
+    let events = [
+        openai::Event::ToolAdded {
+            index: 0,
+            id: b"i".as_slice().into(),
+            call_id: b"c".as_slice().into(),
+            name: b"read".as_slice().into(),
+            arguments: Box::new([]),
+        },
+        openai::Event::ArgumentsDelta { index: 0, delta: vec![b'x'; 128].into() },
+        openai::Event::Done {
+            index: 0,
+            item: openai::Item::FunctionCall {
+                id: b"i".as_slice().into(),
+                call_id: b"c".as_slice().into(),
+                name: b"read".as_slice().into(),
+                arguments: vec![b'x'; 128].into(),
+            },
+        },
+        openai::Event::Completed { stop: openai::Stop::ToolUse, usage: openai::Usage::NONE },
+    ];
+    let meter = Meter::new();
+    let mut body = Vec::new();
+    for event in &events {
+        body.extend_from_slice(b"data: ");
+        body.extend_from_slice(&openai::encode_event(event, &bounds.native()).expect("bounded provider event"));
+        body.extend_from_slice(b"\n\n");
+    }
+    let wire = skein_llm_world::response(200, "Content-Type: text/event-stream\r\n", &body, false);
+    let bound = client::call_worst_case(&bounds).expect("checked receiving bound");
+    drop(body);
+    meter.start();
+    let mut world = World::new(call(1), bounds, wire, 3);
+    world.request(client::Request::Start);
+    let measured = meter.end();
+    meter.check(measured, bound, &"oversize preparation");
+    for _ in 0..100_000 {
+        meter.start();
+        let progress = world.tick(true);
+        let measured = meter.end();
+        meter.check(measured, bound, &"oversize actual fragmented event");
+        if !progress {
+            break;
+        }
+    }
+    world.assert_once();
+    assert!(world.seen.iter().any(|event| matches!(event, client::Event::Completed { completion, .. }
+        if matches!(completion.content.as_ref(), [Block::Oversize { bytes: 128, .. }]))));
+    world.request(client::Request::Close);
+    world.settle();
+    drop(world);
+    assert_eq!(meter.held(), 0, "oversize settlement releases owned buffers");
+}
+
+#[test]
+fn replay_at_its_cap_owns_only_shared_text_and_fixed_records() {
+    let raw =
+        format!("{{\"type\":\"reasoning\",\"summary\":[{}],\"encrypted_content\":\"x\"}}", vec!["\"\""; 512].join(","));
+    let mut bounded = limits().native();
+    bounded.retained = u32::try_from(raw.len()).unwrap();
+    bounded.reasoning = bounded.retained;
+    bounded.tokens = 1024;
+    let admitted = skein_llm::Replay {
+        provider: skein_llm::Provider::OpenAiCodex,
+        value: skein_llm::Json::from_bytes(raw.as_bytes(), &bounded.document()).unwrap(),
+    };
+    let wire = admitted.to_bytes(&bounded.document()).unwrap();
+    assert_eq!(wire.len(), raw.len() + usize::try_from(skein_llm::REPLAY_HEADER_BYTES).unwrap());
+    drop(admitted);
+    let meter = Meter::new();
+    let replay = skein_llm::Replay::from_bytes(&wire, &bounded.document()).unwrap();
+    let document = replay.value.document();
+    let owned = u64::from(document.text_len())
+        + u64::from(document.len()) * u64::try_from(size_of::<skein_json::Compact>()).unwrap();
+    assert_eq!(meter.held(), owned, "one shared text allocation and one fixed-record allocation");
+    let cloned = replay.clone();
+    assert_eq!(meter.held(), owned * 2, "clone has the same compact storage");
+    drop(cloned);
+    drop(replay);
+    assert_eq!(meter.held(), 0, "compact replay allocations release together");
+}
+
+fn selective_peak(size: usize, call_arguments: bool) -> u64 {
+    // One MiB across the four independently ignored echo paths keeps this
+    // focused memory world within its serial one-second budget.
+    let text = "x".repeat(if call_arguments { size } else { size / 4 });
+    let documents = if call_arguments {
+        vec![
+            r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"i","call_id":"c","name":"read","type":"function_call","arguments":""}}"#.to_owned(),
+            format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{{"arguments":"{text}","id":"i","call_id":"c","name":"read","type":"function_call"}}}}"#),
+            skein_llm_world::TERMINAL.to_owned(),
+        ]
+    } else {
+        vec![format!(
+            r#"{{"type":"response.completed","response":{{"output":["{text}"],"instructions":"{text}","tools":[{{"description":"{text}"}}],"status":"completed","usage":{{"input_tokens":1,"output_tokens":1,"attribution":{{"echo":"{text}"}}}}}}}}"#
+        )]
+    };
+    let refs: Vec<_> = documents.iter().map(String::as_str).collect();
+    let wire =
+        skein_llm_world::response(200, "Content-Type: text/event-stream\r\n", &skein_llm_world::events(&refs), false);
+    drop(refs);
+    drop(documents);
+    drop(text);
+    let mut bounds = limits();
+    bounds.tokens = 64;
+    bounds.retained = 512;
+    bounds.strings = 64;
+    bounds.input = 3;
+    bounds.reasoning = 128;
+    bounds.skip = 8_000_000;
+    let bound = client::call_worst_case(&bounds).expect("checked selective receiving bound");
+    // The wire tape is world-owned and allocated before the meter's base.
+    // Its unchanged allocation stays alive throughout every measured step.
+    let meter = Meter::new();
+    meter.start();
+    let mut world = World::new(call(1), bounds, wire, 77);
+    world.fragmentation(256, 31);
+    world.request(client::Request::Start);
+    let initial = meter.end();
+    let mut peak = meter.check(initial, bound, &"selective preparation");
+    for _ in 0..200_000 {
+        meter.start();
+        let progress = world.tick(true);
+        let measured = meter.end();
+        peak = peak.max(meter.check(measured, bound, &"selective receive"));
+        if !progress {
+            break;
+        }
+    }
+    world.assert_once();
+    assert!(world.seen.iter().any(|event| matches!(event, client::Event::Completed { .. })), "{:?}", world.seen);
+    if call_arguments {
+        assert!(world.seen.iter().any(|event| matches!(event, client::Event::Block { block: skein_llm::Block::Oversize { bytes, .. }, .. } if *bytes == u64::try_from(size).expect("fixture size fits u64"))));
+    }
+    world.request(client::Request::Close);
+    world.settle();
+    peak
+}
+
+#[test]
+fn selective_echo_high_water_is_independent_of_the_echo_size() {
+    let short = selective_peak(64, false);
+    let long = selective_peak(1_048_576, false);
+    assert_eq!(short, long, "discarded echoes never become an event buffer");
+}
+
+#[test]
+fn selective_oversize_call_high_water_is_independent_of_the_argument_size() {
+    let short = selective_peak(64, true);
+    let long = selective_peak(1_048_576, true);
+    assert_eq!(short, long, "discarded arguments retain only their length");
+}
+
+#[test]
+fn measurement_refuses_large_starts_without_copying_their_owned_bytes() {
+    for anthropic in [false, true] {
+        let mut input = call(1);
+        if anthropic {
+            input.endpoint = skein_llm::Endpoint::anthropic();
+            input.credential = skein_llm::Credential::anthropic(b"synthetic-token".as_slice().into());
+        }
+        input.prompt.instructions = vec![b'x'; 1024 * 1024].into();
+        let bounds = limits();
+        let span = Span::start();
+        let result = client::measure(&input.prompt, &input.credential, &input.endpoint, &bounds);
+        let measured = span.end();
+        assert!(result.is_err());
+        assert!(
+            measured.peak < i64::try_from(input.prompt.instructions.len()).unwrap(),
+            "only bounded filter-planning scratch is allocated; the oversized prompt is never copied or encoded"
+        );
+    }
 }

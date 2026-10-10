@@ -14,7 +14,9 @@ fn limits() -> Limits {
     Limits {
         endpoints: 1,
         connections: 1,
+        calls: 1,
         per_endpoint: 1,
+        memory: 16 * 1024 * 1024,
         idle_keep: Duration::from_secs(10),
         io: skein_io::Limits {
             sockets: 1,
@@ -29,7 +31,6 @@ fn limits() -> Limits {
             retry: Duration::from_millis(10),
         },
         tls: skein_tls::client::Limits { read: 4096, send: 4096, records: skein_tls::client::MAX_RECORD },
-        llm: skein_llm_world::limits(),
     }
 }
 
@@ -68,6 +69,8 @@ fn run(seed: u64) -> (Vec<String>, (u32, u32, bool)) {
             address: Addr::from((Ipv4Addr::LOCALHOST, 443)),
             transport: skein_llm_connection::Transport::Plaintext,
             llm: call.endpoint,
+            limits: skein_llm_world::limits(),
+            credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
         })
         .expect("one endpoint");
     let mut component = Component::new(endpoints, &limits()).expect("valid component");
@@ -77,6 +80,7 @@ fn run(seed: u64) -> (Vec<String>, (u32, u32, bool)) {
     component.down(
         &env,
         Request::Start {
+            drop_reasoning: false,
             call: Token::new(7),
             endpoint: 0,
             prompt: call.prompt,
@@ -108,7 +112,7 @@ fn run(seed: u64) -> (Vec<String>, (u32, u32, bool)) {
                     assert!(!completion.content.is_empty());
                     completed += 1;
                 }
-                Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
+                Event::Closed | Event::Refused { .. } | Event::Failed { .. } | Event::Cancelled { .. } => {
                     panic!("unexpected terminal: {event:?}");
                 }
             }
@@ -133,6 +137,7 @@ fn run(seed: u64) -> (Vec<String>, (u32, u32, bool)) {
                 | IoRequest::Reject { .. }
                 | IoRequest::Output { .. }
                 | IoRequest::Spawn { .. }
+                | IoRequest::Usage { .. }
                 | IoRequest::Signal { .. }) => panic!("unexpected io request: {other:?}"),
             }
         }
@@ -157,6 +162,7 @@ fn run(seed: u64) -> (Vec<String>, (u32, u32, bool)) {
             component.down(
                 &env,
                 Request::Start {
+                    drop_reasoning: false,
                     call: Token::new(8),
                     endpoint: 0,
                     prompt: second.prompt,
@@ -200,6 +206,7 @@ fn run(seed: u64) -> (Vec<String>, (u32, u32, bool)) {
                 | IoRequest::Reject { .. }
                 | IoRequest::Output { .. }
                 | IoRequest::Spawn { .. }
+                | IoRequest::Usage { .. }
                 | IoRequest::Signal { .. }
                 | IoRequest::Abort { .. }) => panic!("unexpected idle close request: {other:?}"),
             }
@@ -223,4 +230,143 @@ fn run(seed: u64) -> (Vec<String>, (u32, u32, bool)) {
 #[test]
 fn codex_calls_complete_reuse_and_replay_one_plaintext_connection() {
     assert_replays(7, 8, run);
+}
+
+#[expect(clippy::too_many_lines, reason = "the story drives three model policies through one actual connection")]
+fn per_call_reasoning_policy(endpoint_default: bool) {
+    let mut client_limits = skein_llm_world::limits();
+    client_limits.drop_reasoning = endpoint_default;
+    client_limits.reasoning = 5;
+    let mut endpoints = List::with_capacity(1);
+    endpoints
+        .push(Endpoint {
+            address: Addr::from((Ipv4Addr::LOCALHOST, 443)),
+            transport: skein_llm_connection::Transport::Plaintext,
+            llm: skein_llm::Endpoint::codex(),
+            limits: client_limits,
+            credential: skein_llm::client::CredentialLimits { access_token: 2048, account_id: 128 },
+        })
+        .expect("one shared endpoint");
+    let mut component = Component::new(endpoints, &limits()).expect("configured endpoint");
+    let env = Env { now: Time::ZERO, wall: Wall::EPOCH, limits: limits() };
+    let mut up = Queue::with_capacity(MAX_OUT.above);
+    let mut io = Queue::with_capacity(MAX_OUT.below);
+    let mut wire = Wire::new(37);
+    let documents = [
+        r#"{"type":"response.output_item.added","output_index":0,"item":{"id":"r","type":"reasoning"}}"#,
+        r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"r","type":"reasoning","encrypted_content":"signed","summary":[]}}"#,
+        r#"{"type":"response.completed","response":{"status":"completed","usage":{}}}"#,
+    ];
+    let response = skein_llm_world::response(
+        200,
+        "Content-Type: text/event-stream\r\n",
+        &skein_llm_world::events(&documents),
+        false,
+    );
+    let mut started = 0_u64;
+    let mut completed = 0_u32;
+    let mut failed = 0_u32;
+    let mut dropped = 0_u32;
+    let mut connected = 0_u32;
+    let mut responded = 0_usize;
+    let mut owner = None;
+    let mut closing = false;
+    let mut closed = false;
+    for _ in 0..40_000 {
+        if started < 3 && started == u64::from(completed + failed) {
+            let mut input = skein_llm_world::call(started + 7);
+            input.prompt.model = format!("model-{started}").into_bytes().into_boxed_slice();
+            component.down(
+                &env,
+                Request::Start {
+                    call: input.owner,
+                    endpoint: 0,
+                    prompt: input.prompt,
+                    credential: input.credential,
+                    deadlines: Deadlines::none(),
+                    drop_reasoning: started < 2,
+                },
+                &mut up,
+                &mut io,
+            );
+            component.down(&env, Request::Next { call: input.owner }, &mut up, &mut io);
+            started += 1;
+        }
+        if let Some(event) = up.pop() {
+            match event {
+                Event::Delta { call, .. } => component.down(&env, Request::Next { call }, &mut up, &mut io),
+                Event::Block { call, block } => {
+                    assert!(matches!(block, skein_llm::Block::Dropped { bytes: 6 }));
+                    dropped += 1;
+                    component.down(&env, Request::Next { call }, &mut up, &mut io);
+                }
+                Event::Completed { completion, .. } => {
+                    assert!(matches!(completion.content.as_ref(), [skein_llm::Block::Dropped { .. }]));
+                    completed += 1;
+                }
+                Event::Failed { call, failure, .. } => {
+                    assert_eq!(call, Token::new(9));
+                    assert_eq!(failure, skein_llm::Failure::Limit { which: skein_llm::Cap::Reasoning, bound: 5 });
+                    failed += 1;
+                }
+                Event::Closed => closed = true,
+                Event::Refused { .. } | Event::Cancelled { .. } => panic!("unexpected policy admission/terminal"),
+            }
+        }
+        if let Some(request) = io.pop() {
+            match request {
+                IoRequest::Connect { owner: token, .. } => {
+                    assert!(owner.replace(token).is_none(), "all model policies reuse one connection");
+                    connected += 1;
+                    component.up(&env, IoEvent::Connecting { owner: token, socket: Token::new(100) }, &mut up, &mut io);
+                    component.up(&env, IoEvent::Connected { owner: token }, &mut up, &mut io);
+                }
+                IoRequest::Stream { down, .. } => wire.take(down),
+                IoRequest::Close { .. } | IoRequest::Abort { .. } => {
+                    component.up(&env, IoEvent::Closed { owner: owner.expect("connected owner") }, &mut up, &mut io);
+                    component.reclaim();
+                }
+                IoRequest::Listen { .. }
+                | IoRequest::Bind { .. }
+                | IoRequest::Reject { .. }
+                | IoRequest::Output { .. }
+                | IoRequest::Spawn { .. }
+                | IoRequest::Usage { .. }
+                | IoRequest::Signal { .. } => panic!("unexpected IO"),
+            }
+        }
+        if complete_requests(&wire.received) > responded {
+            wire.write(&response);
+            responded += 1;
+        }
+        if let Some(answer) = wire.answer() {
+            component.up(
+                &env,
+                IoEvent::Stream { owner: owner.expect("connected owner"), up: answer },
+                &mut up,
+                &mut io,
+            );
+        }
+        if completed + failed == 3 && !closing {
+            component.down(&env, Request::Close, &mut up, &mut io);
+            closing = true;
+        }
+        if component.has_work() {
+            component.fire(&env, &mut up, &mut io);
+        }
+        if closed && up.is_empty() && io.is_empty() && !component.has_work() {
+            break;
+        }
+    }
+    assert_eq!((started, completed, failed, dropped, connected, responded, closed), (3, 2, 1, 2, 1, 3, true));
+    for model in [b"model-0", b"model-1", b"model-2"] {
+        assert!(wire.received.windows(model.len()).any(|bytes| bytes == model));
+    }
+}
+
+#[test]
+fn model_reasoning_policy_overrides_both_defaults_and_does_not_leak_on_reuse() {
+    for endpoint_default in [false, true] {
+        per_call_reasoning_policy(endpoint_default);
+    }
 }

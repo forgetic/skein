@@ -16,10 +16,18 @@ skein-sim.workspace = true
 rustls = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+skein-world.workspace = true
+skein-fake-peers.workspace = true
+skein-fake-llm-domain.workspace = true
+skein-fake-llm-protocol.workspace = true
+skein-llm.workspace = true
+skein-llm-world = { path = "../llm" }
 # The counting allocator, for classic and native heap test binaries.
 skein-heap.workspace = true
 # The HTTP client, stacked on the TLS client in tests/stack.rs.
 skein-http.workspace = true
+skein-shell.workspace = true
+skein-scratch.workspace = true
 
 # Ordinary Rust (programming-model.md, 10.2), so not the step crates' lints.
 # tests/clippy.toml bans what would make a run unrepeatable; what rustls draws

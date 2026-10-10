@@ -164,3 +164,28 @@ fn transcripts_cut_mutated_and_failed_read_as_the_reference_reads_them() {
     tally.assert_fell(&EVERY_FAULT);
     tally.assert_fell(&EVERY_NEIGHBOUR);
 }
+
+#[test]
+fn fuzzy_text_and_skip_demands_cover_each_disposition() {
+    use skein_json::tokenizer::{Event, Limits};
+    let limits = Limits { depth: 32, string: 4096, number: 128, chunk: 16, length: 1 << 20 };
+    let mut token_count = 0;
+    let mut longs = 0;
+    let mut skipped = 0;
+    for seed in 0..2_000 {
+        let mut rng = Rng::new(seed);
+        let tokens = generate::tokens(&mut rng, Shape { depth: 4, width: 4, string: 16 });
+        let document = generate::render(&mut rng, &tokens);
+        let settings = Settings::calm(&mut rng, limits);
+        for event in world::check_demands(&document, &settings, seed).answers {
+            match event {
+                Event::Token(_) => token_count += 1,
+                Event::Long(_) => longs += 1,
+                Event::Skipped(_) => skipped += 1,
+                Event::Done => {}
+                event @ (Event::Failed(_) | Event::Closed) => panic!("unexpected {event:?}"),
+            }
+        }
+    }
+    assert!(token_count > 0 && longs > 0 && skipped > 0);
+}

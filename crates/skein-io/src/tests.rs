@@ -6,11 +6,13 @@
 
 #![expect(clippy::disallowed_types, reason = "what a step emitted is collected in Vecs, for the test to look at")]
 
+mod append;
 mod file;
 mod kernel;
 mod layer;
 mod listener;
 mod output;
+mod private;
 mod process;
 mod signals;
 mod store;
@@ -66,6 +68,7 @@ pub(crate) fn buffer(op: &Op) -> (&[u8], u32) {
         | Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Stat { .. }
         | Op::Rename { .. }
@@ -75,6 +78,7 @@ pub(crate) fn buffer(op: &Op) -> (&[u8], u32) {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
@@ -98,9 +102,11 @@ pub(crate) enum Kind {
     Spawn,
     Wait,
     Signal,
+    Usage,
     ReadSignal,
     PipeRead,
     PipeWrite,
+    Append,
 }
 
 pub(crate) const fn kind(op: &Op) -> Kind {
@@ -118,9 +124,11 @@ pub(crate) const fn kind(op: &Op) -> Kind {
         Op::Spawn { .. } => Kind::Spawn,
         Op::Wait { .. } => Kind::Wait,
         Op::Signal { .. } => Kind::Signal,
+        Op::Usage => Kind::Usage,
         Op::ReadSignal { .. } => Kind::ReadSignal,
         Op::PipeRead { .. } => Kind::PipeRead,
         Op::PipeWrite { .. } => Kind::PipeWrite,
+        Op::Append { .. } => Kind::Append,
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }

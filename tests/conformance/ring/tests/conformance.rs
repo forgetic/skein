@@ -14,10 +14,10 @@
 use skein_conformance::{
     Cancelling, Check, Pairing, Race, Shortness, address_in_use, backpressure, cancel_accept,
     cancel_accept_racing_a_connect, cancel_connect, cancel_connect_established_while_away, cancel_read, cancel_recv,
-    cancel_recv_racing_bytes, closed_before_accept, escapes, file_lifecycle, full_accept_queue, graceful_close,
-    ipv6_only, lifecycle, list, listener_close_resets_waiting, make_directory, nested_roots, permissions, processes,
-    refused, remove, rename, reset_after_end_of_stream, send_after_peer_closed, unread_close_meets_recv,
-    unread_close_meets_send, wrong_state,
+    cancel_recv_racing_bytes, closed_before_accept, escapes, file_lifecycle, file_metadata, full_accept_queue,
+    graceful_close, ipv6_only, lifecycle, list, listener_close_resets_waiting, make_directory, nested_roots,
+    permissions, processes, refused, remove, rename, reset_after_end_of_stream, send_after_peer_closed,
+    unread_close_meets_recv, unread_close_meets_send, wrong_state,
 };
 use skein_conformance_ring::Ring;
 use skein_io::kernel::Family;
@@ -213,4 +213,49 @@ fn a_cancel_of_a_read_of_a_file_stops_it_or_is_too_late() {
     seen.check();
     let drawn = [Pairing::Stopped, Pairing::Interrupted, Pairing::Completed];
     assert!(drawn.contains(&seen.pairing()), "a pairing the simulator draws: {seen:?}");
+}
+
+#[test]
+fn the_group_is_signalled_after_its_leader_exits() {
+    skein_conformance::groups(&mut Ring::new(), env!("CARGO_BIN_EXE_process_fixture").as_bytes()).check();
+}
+
+#[test]
+fn usage_counts_the_child_only_after_reaping() {
+    skein_conformance::usage(&mut Ring::new(), env!("CARGO_BIN_EXE_process_fixture").as_bytes()).check();
+}
+
+#[test]
+fn appends_preserve_the_prefix_and_follow_the_other_descriptors_bytes() {
+    on_the_ring(skein_conformance::appending);
+}
+
+#[test]
+fn a_cancel_of_an_append_stops_it_or_comes_too_late() {
+    on_the_ring(skein_conformance::cancel_append);
+}
+
+#[test]
+fn stat_keeps_the_owner_and_counts_hard_links_through_removal() {
+    use std::os::unix::fs::MetadataExt;
+
+    let seen = file_metadata(&mut Ring::new());
+    seen.check();
+    let process = std::fs::metadata("/proc/self").expect("the running user's process directory");
+    assert_eq!(seen.root.owner, process.uid(), "statx retains the actual user ID");
+}
+
+#[test]
+fn path_only_metadata_needs_no_permission_on_its_entry() {
+    let status = std::fs::read_to_string("/proc/self/status").expect("Linux capability status");
+    let capabilities =
+        status.lines().find_map(|line| line.strip_prefix("CapEff:")).expect("effective capabilities").trim();
+    let capabilities = u64::from_str_radix(capabilities, 16).expect("hexadecimal effective capabilities");
+    let denial_expected = capabilities & (1_u64 << 1_u32) == 0;
+    if !denial_expected {
+        eprintln!(
+            "CAP_DAC_OVERRIDE bypasses mode 000: skipping only the Read-denial assertions; path-only Stat and Close are checked"
+        );
+    }
+    skein_conformance::path_metadata(&mut Ring::new(), denial_expected).check();
 }

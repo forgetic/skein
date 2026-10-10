@@ -64,6 +64,10 @@ impl RecordingParent {
 }
 
 impl Host for RecordingParent {
+    fn drain(&mut self) {
+        self.script.drain();
+    }
+
     fn iterate(&mut self, now: Time, wall: Wall) {
         let mut arrived = Vec::new();
         while let Some(complete) = self.script.completions().pop() {
@@ -96,6 +100,11 @@ impl Host for RecordingParent {
     fn next_deadline(&self) -> Option<Time> {
         self.script.next_deadline()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.script.next_policy_deadline()
+    }
+
     fn is_empty(&self) -> bool {
         self.script.is_empty()
     }
@@ -133,6 +142,11 @@ impl Host for OpeningChild {
     fn next_deadline(&self) -> Option<Time> {
         None
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        None
+    }
+
     fn is_empty(&self) -> bool {
         false
     }
@@ -169,6 +183,10 @@ impl Proc {
 }
 
 impl Host for Proc {
+    fn drain(&mut self) {
+        self.host_mut().drain();
+    }
+
     fn iterate(&mut self, now: Time, wall: Wall) {
         self.host_mut().iterate(now, wall);
     }
@@ -184,6 +202,11 @@ impl Host for Proc {
     fn next_deadline(&self) -> Option<Time> {
         self.host().next_deadline()
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        self.host().next_policy_deadline()
+    }
+
     fn is_empty(&self) -> bool {
         self.host().is_empty()
     }
@@ -318,6 +341,11 @@ impl Host for CancelReader {
     fn next_deadline(&self) -> Option<Time> {
         None
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        None
+    }
+
     fn is_empty(&self) -> bool {
         self.answers.len() == 4
     }
@@ -371,6 +399,11 @@ impl Host for Overflow {
     fn next_deadline(&self) -> Option<Time> {
         None
     }
+
+    fn next_policy_deadline(&self) -> Option<Time> {
+        None
+    }
+
     fn is_empty(&self) -> bool {
         false
     }

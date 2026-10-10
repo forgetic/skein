@@ -260,12 +260,29 @@ fn upload_next(machine: &mut Machine, left: usize, wanted: &mut u32) -> (Vec<Eve
     machine.down(Request::Upload(Down::Demand { read: Read::Nothing, room: *wanted }))
 }
 
-/// A reader and its two queues, with room for what one call emits.
+/// Whole-data observations made by a test owner, outside the reader.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum Gathered {
+    Message(Message),
+    Ended,
+    Failed(events::Error),
+    Closed,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct Message {
+    name: Box<[u8]>,
+    data: Box<[u8]>,
+    id: Box<[u8]>,
+}
+
+/// A reader and a test owner which gathers its face one byte at a time.
 struct Events {
     reader: Reader,
     env: Env<events::Limits>,
     above: Queue<events::Event>,
     below: Queue<Down>,
+    data: Vec<u8>,
 }
 
 impl Events {
@@ -273,36 +290,92 @@ impl Events {
         Events {
             reader: Reader::new(&limits),
             env: env(limits),
-            above: Queue::with_capacity(events::UP_MAX_OUT.above.max(events::DOWN_MAX_OUT.above)),
-            below: Queue::with_capacity(events::UP_MAX_OUT.below.max(events::DOWN_MAX_OUT.below)),
+            above: Queue::with_capacity(events::UP_MAX_OUT.above),
+            below: Queue::with_capacity(1),
+            data: Vec::new(),
         }
     }
 
-    fn down(&mut self, rq: events::Request) -> (Option<events::Event>, Option<Down>) {
+    fn down(&mut self, rq: events::Request) -> (Option<Gathered>, Option<Down>) {
+        self.call(rq);
+        self.take()
+    }
+
+    fn call(&mut self, rq: events::Request) {
         events::down(&mut self.reader, &self.env, rq, &mut self.above, &mut self.below);
-        self.take()
+        assert!(
+            self.above.len() <= events::DOWN_MAX_OUT.above && self.below.len() <= events::DOWN_MAX_OUT.below,
+            "reader DOWN_MAX_OUT"
+        );
     }
 
-    fn up(&mut self, ev: Up) -> (Option<events::Event>, Option<Down>) {
+    fn up(&mut self, ev: Up) -> (Option<Gathered>, Option<Down>) {
         events::up(&mut self.reader, &self.env, ev, &mut self.above, &mut self.below);
+        assert!(
+            self.above.len() <= events::UP_MAX_OUT.above && self.below.len() <= events::UP_MAX_OUT.below,
+            "reader UP_MAX_OUT"
+        );
         self.take()
     }
 
-    fn bytes(&mut self, bytes: &[u8]) -> (Option<events::Event>, Option<Down>) {
+    fn bytes(&mut self, bytes: &[u8]) -> (Option<Gathered>, Option<Down>) {
         self.up(Up::Bytes(boxed(bytes)))
     }
 
-    fn take(&mut self) -> (Option<events::Event>, Option<Down>) {
-        let taken = (self.above.pop(), self.below.pop());
-        assert!(self.above.is_empty() && self.below.is_empty(), "one of each at most");
-        taken
+    fn take(&mut self) -> (Option<Gathered>, Option<Down>) {
+        let mut answer = None;
+        for _ in 0..self.env.limits.chunk.checked_add(8).unwrap() {
+            let Some(event) = self.above.pop() else { break };
+            match event {
+                events::Event::Opened => {
+                    self.data.clear();
+                    self.call(events::Request::Data(Down::Demand { read: Read::Fill(1), room: 0 }));
+                }
+                events::Event::Data(data) => match data {
+                    Up::Bytes(bytes) => {
+                        self.data.extend_from_slice(&bytes);
+                        self.call(events::Request::Data(Down::Demand { read: Read::Fill(1), room: 0 }));
+                    }
+                    Up::End => {}
+                    Up::Failed(_) => {
+                        self.data.clear();
+                        self.call(events::Request::Next);
+                    }
+                    Up::Room => unreachable!("event data is read only"),
+                },
+                events::Event::Dispatched(dispatch) => {
+                    answer = Some(Gathered::Message(Message {
+                        name: dispatch.name,
+                        data: boxed(&self.data),
+                        id: dispatch.id,
+                    }));
+                    break;
+                }
+                events::Event::Ended => {
+                    answer = Some(Gathered::Ended);
+                    break;
+                }
+                events::Event::Failed(error) => {
+                    answer = Some(Gathered::Failed(error));
+                    break;
+                }
+                events::Event::Closed => {
+                    answer = Some(Gathered::Closed);
+                    self.data.clear();
+                    break;
+                }
+            }
+        }
+        let request = self.below.pop();
+        assert!(self.above.is_empty() && self.below.is_empty(), "the test owner drains each reader step");
+        (answer, request)
     }
 }
 
 /// What an event stream comes to, read to its outcome through a stream that
 /// holds all of it and meets each demand from it: the events, the last its
 /// outcome.
-fn stream(bytes: &[u8], limits: events::Limits) -> Vec<events::Event> {
+fn stream(bytes: &[u8], limits: events::Limits) -> Vec<Gathered> {
     let mut machine = Events::new(limits);
     let mut intake = Intake::with_capacity(u32::try_from(bytes.len()).unwrap().max(events::largest_demand(&limits)));
     intake.append(bytes).unwrap();
@@ -324,9 +397,9 @@ fn stream(bytes: &[u8], limits: events::Limits) -> Vec<events::Event> {
         let Some(event) = event else { continue };
         assert!(demanded.is_none(), "an answer leaves nothing demanded");
         let over = match &event {
-            events::Event::Message(_) => false,
-            events::Event::Ended | events::Event::Failed(_) => true,
-            events::Event::Closed => panic!("closed unasked"),
+            Gathered::Message(_) => false,
+            Gathered::Ended | Gathered::Failed(_) => true,
+            Gathered::Closed => panic!("closed unasked"),
         };
         out.push(event);
         if over {

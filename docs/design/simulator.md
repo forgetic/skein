@@ -1,10 +1,11 @@
 # The simulator
 
-Provisional, 2026-10-03. The design of `skein-sim`: the simulated kernel
-that every world from io worlds up runs on (testing-strategy.md, 2). It
-is a backend of the kernel boundary (kernel.md), for every process of one
-world, with every choice drawn from one seed. Its module documentation
-states each choice it makes where the contract leaves one.
+Provisional, 2026-10-03, revised 2026-10-09. The design of `skein-sim`:
+the simulated kernel that every world from io worlds up runs on
+(testing-strategy.md, 2). It is a backend of the kernel boundary
+(kernel.md), for every process of one world, with every choice drawn from
+one seed. Its module documentation states each choice it makes where the
+contract leaves one.
 
 ## 1. In one page
 
@@ -92,9 +93,67 @@ processes and the simulator.
 - **Roots.** The shell opens the first roots at startup; in a world, the
   world asks its machine for a root and gives the handle to a process
   (`Sim::root`), which then holds it as a descriptor.
+- **Files appended to.** The shell opens a file to append at startup
+  (shell.md, 6); in a world, the world asks its machine for the file,
+  made if it is absent, and gives the handle to a process as a descriptor
+  open to append, as it gives a root. An `Append` goes to the machine as a
+  write at the file's end at the moment the simulator delivers it, so
+  appends from two descriptors interleave whole, as the kernel's do. It
+  meets the faults of a `Write` (section 4), `hung` among them.
+- **`Stat`** answers the owner and the links the machine keeps for what is
+  open: every file of the minimal machine has one owner, and a second
+  name made in a scenario's tree gives a file two links (kernel.md, 6.1).
 - **The machine's shape is a step machine's:** its state, one call in, one
   answer out. It is ordinary Rust, a test's; a service's fake machine can
   be the same step machine its other tiers host.
+
+### 3.2 Processes and groups
+
+A spawn goes to the machine as a call naming the program, its arguments
+and its pipes; the machine runs the program, or the world starts the
+service it names and hosts it (section 3). The simulator keeps what is
+the kernel's: each child's pidfd, its pipes, its exit and its group.
+
+- **Groups.** Each child leads a group of its own from its spawn. A
+  program the machine runs may start a child of its own, which joins its
+  group unless the program leaves it; the minimal machine's program that
+  does so stands in for a command that leaves a descendant behind. A
+  signal to the group reaches every member, a hosted service included,
+  as a termination signal on its signal source.
+- **Observed, then reaped.** A `Wait` that does not reap completes at
+  the exit and leaves the child the simulator's zombie: still in its
+  group, its usage not yet its parent's. The reaping `Wait` releases it.
+  A descendant whose parent exits first is reparented away, and never
+  counted in anyone's usage.
+- **Usage.** Each process's own usage is what the world sets for it,
+  zero unless set, so a world replays; the children's part takes a
+  child's own at its reap, summed for CPU and the largest for the peak,
+  as the kernel's does (kernel.md, 6.3).
+
+### 3.3 Cuts at an operation
+
+A world may cut a process at any operation, as a power loss or a kill
+would: to show that what a service keeps durably survives (io.md, 5.2).
+
+- **The cut** is at a chosen point in the process's submissions: the
+  process is dropped with what it has in flight, which never completes,
+  and its descriptors go with it.
+- **A kill cuts one process; a power loss cuts the machine:** every
+  process on it is dropped at the same point, and each restarts over
+  what the machine kept.
+- **What the machine keeps** depends on the cut. After a kill, every
+  operation that completed stands, as the kernel's cache keeps it. After
+  a power loss, what a crash keeps: what was synced; unsynced writes
+  landed or not, in any order, the last one torn at any byte; a
+  directory's entries changed by a rename or a create only once the
+  directory was synced, and a rename whole or not at all (kv.md, 8). The
+  choices are drawn from the seed.
+- **After the cut** the world starts the process again over what the
+  machine kept, with the roots it had, and the referee checks what it
+  recovers: for a durable replace, the old content or the new, whole.
+- **A cut at every operation.** A scenario cuts at each operation of a
+  sequence in turn, over a few seeds each, so every point between two
+  syncs is met.
 
 ## 4. Faults
 
@@ -114,8 +173,9 @@ accept queues, descriptors, connect timeouts) and each fault's chance:
 - a disk beyond a healthy one: no space, a filesystem gone read-only, an
   I/O error, and the kernel out of memory, each failing an operation on
   files before the machine is asked; and a filesystem that hangs an
-  `Open`, `Read`, `Write` or `Sync` until a `Cancel` stops it, the
-  machine never asked.
+  `Open`, `Read`, `Write`, `Append` or `Sync` until a `Cancel` stops it,
+  the machine never asked: an append stream's write deadline, and its
+  close deadline while it closes, meet it there (io.md, 5.1).
 
 A calm configuration has no faults and roomy buffers; a chaotic one turns
 every fault on, often enough that a few hundred seeds meet each one, with
@@ -160,6 +220,12 @@ was metered as its own, which also finds a leak.
   each fault of files, and a replay; and, in the fuzzy suite
   (testing-strategy.md, 8), the exchange and a workload of files under
   chaos over a few hundred seeds, asserting that every fault fell.
+  Processes, groups, appends and cuts add theirs: a signal to a group
+  reaching a member the leader started, before and after the leader's
+  exit; a zombie's usage joining its parent's children's only at the
+  reap; two descriptors appending to one file, each piece whole at the
+  end; a hung `Append` stopped by its `Cancel`; and a cut at each
+  operation of a durable replace, the file then old or new and whole.
 - **The conformance suite** (kernel.md, 8) is `testing/skein-conformance`,
   over a small backend interface the simulator implements in
   `tests/conformance/sim` and the ring in `tests/conformance/ring`. Where

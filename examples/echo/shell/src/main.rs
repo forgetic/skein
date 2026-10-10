@@ -15,9 +15,9 @@ use std::env;
 use std::net::SocketAddr;
 use std::process::ExitCode;
 
-use skein_echo_service::{self as service, Limits, Service};
-use skein_lib::Duration;
-use skein_shell::{Clock, Config, Kernel, Now, Wait};
+use skein_echo_service::{self as service, Limits};
+use skein_echo_shell::{Echo, limits};
+use skein_shell::{Clock, Config, Kernel, drive};
 
 #[cfg(test)]
 mod tests;
@@ -77,39 +77,6 @@ fn configure(mut args: impl Iterator<Item = String>) -> Result<Configuration, St
     Ok(Configuration { addr, memory, limits: limits() })
 }
 
-/// The limits of every layer: a thousand connections of lines up to 4 KiB,
-/// with fewer sessions than connections and fewer connections than
-/// sockets, so that each layer refuses at its own entrance first
-/// (programming-model.md, 7). io accepts only while a socket slot is free,
-/// so past the listener and the protocol layer's connections it keeps an
-/// accept batch of slots more: the sockets the protocol layer rejects, each
-/// holding its slot while io closes it.
-const fn limits() -> Limits {
-    Limits {
-        io: skein_io::Limits {
-            sockets: 1024 + 1 + 64 + 1,
-            refusals: 1,
-            intake: 4096,
-            receive: 4096,
-            output: 8192,
-            sends: 8,
-            accepts: 64,
-            backlog: 1024,
-            close_timeout: Duration::from_secs(5),
-            retry: Duration::from_millis(50),
-        },
-        protocol: service::protocol::Limits {
-            conns: 1024,
-            line: 4096,
-            idle: Duration::from_secs(60),
-            spread: Duration::from_secs(6),
-            retry: Duration::from_millis(100),
-        },
-        domain: service::domain::Limits { sessions: 1000 },
-        queue: 256,
-    }
-}
-
 /// Startup, then the loop, until a shutdown or listener failure settles.
 fn run(configuration: &Configuration) -> Result<(), String> {
     let worst = startup(configuration)?;
@@ -123,40 +90,11 @@ fn run(configuration: &Configuration) -> Result<(), String> {
     let operations = service::operations(limits).ok_or("the ring's size is past a u32")?;
     let mut kernel = Kernel::open(Config { operations }).map_err(|error| error.to_string())?;
     let clock = Clock::new();
-    let mut svc = Service::new(limits, configuration.addr, seed);
-    svc.adopt_signals(signals).map_err(|_| "the configured io has no slot for termination signals")?;
+    let mut host = Echo::new(*limits, configuration.addr, seed);
+    host.svc.adopt_signals(signals).map_err(|_| "the configured io has no slot for termination signals")?;
     eprintln!("skein-echo: at most {worst} bytes of {} configured", configuration.memory);
-    let mut told = false;
-    let mut short = false;
-    loop {
-        kernel.reap(svc.completions());
-        let Now { now, wall } = clock.now();
-        service::iterate(&mut svc, now, wall);
-        if svc.is_empty() {
-            break;
-        }
-        let wait = if svc.work_pending(now) {
-            Wait::No
-        } else {
-            match svc.next_deadline() {
-                Some(at) => Wait::Until(at),
-                None => Wait::Forever,
-            }
-        };
-        if !told && let Some(addr) = svc.listening() {
-            eprintln!("skein-echo: listening at {addr}");
-            told = true;
-        }
-        // A shortage the listener waits out is said once, not each retry.
-        if !short && let Some(error) = svc.retrying() {
-            eprintln!(
-                "skein-echo: the listen was refused for want of resources ({error:?}); trying again until it is not"
-            );
-        }
-        short = svc.retrying().is_some() || (short && !told);
-        kernel.submit(svc.submissions(), wait);
-    }
-    match svc.failure() {
+    drive(&mut kernel, &clock, &mut host);
+    match host.svc.failure() {
         Some(error) => Err(format!("the listener at {} failed: {error:?}", configuration.addr)),
         None => Ok(()),
     }

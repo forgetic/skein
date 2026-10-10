@@ -13,7 +13,7 @@ use crate::kernel::{
 
 const FD: Fd = Fd::new(3);
 const NEW: Fd = Fd::new(4);
-const STAT: Stat = Stat { kind: Kind::File, size: 5, mode: 0o644 };
+const STAT: Stat = Stat { kind: Kind::File, size: 5, mode: 0o644, owner: 1000, links: 1 };
 
 fn v4() -> Addr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 8080))
@@ -37,7 +37,7 @@ fn complete(kind: Op, result: Result<Done, Error>) -> Complete {
 
 /// One of every operation, valid. A new operation makes the match in
 /// `documented` fail to build until it is added there, and here.
-fn every_op() -> [Op; 20] {
+fn every_op() -> [Op; 26] {
     [
         Op::Socket { family: Family::Ipv4 },
         Op::Bind { fd: FD, addr: v4() },
@@ -51,12 +51,18 @@ fn every_op() -> [Op; 20] {
         Op::Open { root: FD, path: name(b"a/b"), how: OpenHow::Read },
         Op::Read { fd: FD, buf: bytes(4), at: 9 },
         Op::Write { fd: FD, bytes: bytes(4), from: 1, at: 9 },
+        Op::Append { fd: FD, bytes: bytes(4), from: 1 },
         Op::Sync { fd: FD },
         Op::Stat { fd: FD },
         Op::Rename { from_dir: FD, from: name(b"a"), to_dir: NEW, to: name(b"b") },
         Op::Remove { dir: FD, name: name(b"a"), directory: false },
-        Op::MakeDirectory { dir: FD, name: name(b"a") },
+        Op::MakeDirectory { dir: FD, name: name(b"a"), mode: 0o777 },
         list(2),
+        Op::Wait { pidfd: FD, reap: false },
+        Op::Wait { pidfd: FD, reap: true },
+        Op::Signal { pidfd: FD, signal: crate::kernel::Signal::Kill, to: crate::kernel::Target::Child },
+        Op::Signal { pidfd: FD, signal: crate::kernel::Signal::Kill, to: crate::kernel::Target::Group },
+        Op::Usage,
         Op::ReadSignal { fd: FD },
         Op::Cancel { target: Token::new(2) },
     ]
@@ -72,6 +78,7 @@ fn documented(op: &Op) -> Done {
         | Op::Send { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. } => Done::Count(1),
         Op::List { .. } => Done::Count(0),
@@ -79,6 +86,7 @@ fn documented(op: &Op) -> Done {
         Op::Stat { .. } => Done::Stat(STAT),
         Op::Spawn { .. } => Done::Spawned { pidfd: NEW },
         Op::Wait { .. } => Done::Exit(crate::kernel::Exit::Code(0)),
+        Op::Usage => Done::Usage(crate::kernel::Usage::ZERO),
         Op::ReadSignal { .. } => Done::ServiceSignal(crate::kernel::ServiceSignal::Terminate),
         Op::Listen { .. }
         | Op::Connect { .. }
@@ -102,6 +110,8 @@ fn every_operation_succeeds_with_its_documented_shape_and_no_other() {
         Done::Accepted { fd: NEW, peer: v4() },
         Done::Bound(v4()),
         Done::Stat(STAT),
+        Done::Usage(crate::kernel::Usage::ZERO),
+        Done::Exit(crate::kernel::Exit::Code(0)),
         Done::ServiceSignal(crate::kernel::ServiceSignal::Terminate),
     ];
     for op in every_op() {
@@ -136,12 +146,18 @@ fn the_shapes_are_as_the_table_on_op_says() {
         open,
         read,
         write,
+        append,
         sync,
         stat,
         rename,
         remove,
         make_directory,
         list,
+        observing,
+        reaping,
+        child_signal,
+        group_signal,
+        usage,
         read_signal,
         cancel,
     ] = every_op();
@@ -150,7 +166,12 @@ fn the_shapes_are_as_the_table_on_op_says() {
     assert_eq!(bind.shape(), Shape::Bound);
     assert_eq!(stat.shape(), Shape::Stat);
     assert_eq!(read_signal.shape(), Shape::ServiceSignal);
-    for op in [recv, send, read, write, list] {
+    assert_eq!(observing.shape(), Shape::Exit);
+    assert_eq!(reaping.shape(), Shape::Exit);
+    assert_eq!(usage.shape(), Shape::Usage);
+    assert_eq!(child_signal.shape(), Shape::Nothing);
+    assert_eq!(group_signal.shape(), Shape::Nothing);
+    for op in [recv, send, read, write, append, list] {
         assert_eq!(op.shape(), Shape::Count);
     }
     for op in [listen, connect, shutdown, close, sync, rename, remove, make_directory, cancel] {
@@ -273,7 +294,7 @@ fn named(op: &Op) -> &'static [Error] {
             Error::TooManyOpenFiles,
         ],
         Op::Read { .. } => &[Error::IsADirectory],
-        Op::Write { .. } => &[Error::NoSpace, Error::ReadOnly],
+        Op::Write { .. } | Op::Append { .. } => &[Error::NoSpace, Error::ReadOnly],
         Op::Sync { .. } => &[Error::NoSpace],
         Op::Rename { .. } => &[
             Error::NotFound,
@@ -319,6 +340,7 @@ fn named(op: &Op) -> &'static [Error] {
         | Op::Spawn { .. }
         | Op::Wait { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::PipeRead { .. }
         | Op::PipeWrite { .. }
@@ -347,11 +369,13 @@ fn cancellable(op: &Op) -> bool {
         | Op::List { .. }
         | Op::Spawn { .. }
         | Op::Signal { .. }
+        | Op::Usage
         | Op::ReadSignal { .. }
         | Op::Cancel { .. } => false,
         Op::Open { .. }
         | Op::Read { .. }
         | Op::Write { .. }
+        | Op::Append { .. }
         | Op::Sync { .. }
         | Op::Socket { .. }
         | Op::Bind { .. }
@@ -429,10 +453,11 @@ fn an_operation_on_sockets_never_answers_a_files_error() {
 
 #[test]
 fn the_operations_on_files_are_those_on_names_beneath_a_root() {
-    let files: [bool; 19] = [
+    let files = [
         false, false, false, false, false, false, false, false, false, true, true, true, true, true, true, true, true,
-        true, false,
+        true, true, false, false, false, false, false, false, false,
     ];
+    assert_eq!(every_op().len(), files.len(), "the classification table covers every fixture");
     for (op, file) in every_op().into_iter().zip(files) {
         assert_eq!(op.is_file(), file, "{op:?}");
     }
@@ -446,7 +471,7 @@ fn a_name_is_one_entry_of_a_directory_and_nothing_more() {
     for bad in [&b""[..], b".", b"..", b"a/b", b"/", b"a/", b"nul\0"] {
         assert!(!is_name(bad), "{bad:?}");
     }
-    let op = |name: &[u8]| Op::MakeDirectory { dir: FD, name: Box::from(name) };
+    let op = |name: &[u8]| Op::MakeDirectory { dir: FD, name: Box::from(name), mode: 0o777 };
     assert!(op(b"fine").is_valid());
     assert!(!op(b"../out").is_valid(), "no lookup beyond the entry");
     assert!(!Op::Remove { dir: FD, name: name(b".."), directory: true }.is_valid());
@@ -555,9 +580,13 @@ fn an_entry_names_its_bytes_of_names() {
 #[test]
 fn a_stat_answers_any_kind_and_size() {
     for kind in [Kind::File, Kind::Directory, Kind::Symlink, Kind::Other] {
-        let answer = complete(Op::Stat { fd: FD }, Ok(Done::Stat(Stat { kind, size: u64::MAX, mode: 0o777 })));
+        let answer = complete(
+            Op::Stat { fd: FD },
+            Ok(Done::Stat(Stat { kind, size: u64::MAX, mode: 0o777, owner: u32::MAX, links: u32::MAX })),
+        );
         assert!(answer.is_valid(), "{answer:?}");
-        let answer = complete(Op::Stat { fd: FD }, Ok(Done::Stat(Stat { kind, size: 0, mode: 0o4755 })));
+        let answer =
+            complete(Op::Stat { fd: FD }, Ok(Done::Stat(Stat { kind, size: 0, mode: 0o4755, owner: 1000, links: 1 })));
         assert!(!answer.is_valid(), "permission bits only: {answer:?}");
     }
 }
@@ -625,4 +654,18 @@ fn spawn_parent_slots_are_empty_until_a_successful_completion() {
     spawn.pipes[0].parent = None;
     complete.kind = kind;
     assert!(complete.is_valid(), "a failed spawn returns empty parent slots");
+}
+
+#[test]
+fn an_append_validates_remaining_bytes_and_counts() {
+    assert_eq!(Op::append(FD, bytes(3), 1), Ok(Op::Append { fd: FD, bytes: bytes(3), from: 1 }));
+    for from in [3, 4, u32::MAX] {
+        assert_eq!(Op::append(FD, bytes(3), from), Err(bytes(3)));
+        assert!(!Op::Append { fd: FD, bytes: bytes(3), from }.is_valid());
+    }
+    assert_eq!(Op::append(FD, bytes(0), 0), Err(bytes(0)));
+    for (n, valid) in [(0, false), (1, true), (3, true), (4, false)] {
+        let answer = complete(Op::Append { fd: FD, bytes: bytes(4), from: 1 }, Ok(Done::Count(n)));
+        assert_eq!(answer.is_valid(), valid, "append count {n}");
+    }
 }

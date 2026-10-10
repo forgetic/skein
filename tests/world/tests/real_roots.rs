@@ -75,3 +75,62 @@ fn assert_scratch_closed(scratch: &Scratch) {
         }
     }
 }
+
+#[test]
+fn child_append_files_preserve_existing_bytes_and_close_after_parent_root_close() {
+    use skein_world_tests::roots::{append_child, appends};
+    let scratch = Scratch::new("hosted-appends");
+    std::fs::write(scratch.path().join("trace"), b"prefix:").expect("existing trace");
+    let root = open_root(scratch.path()).expect("parent root");
+    let mut world = real::World::new(Judge);
+    world.host_startup(
+        HostedProgram { program: Box::from(&b"hosted"[..]), make: append_child, instances: 1, operations: 8 },
+        roots,
+        appends,
+    );
+    world.spawn_with_fds(vec![root], || parent(root, scratch.path().as_os_str().as_bytes(), false));
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    assert_eq!(outcome.procs[0].received, b"ready");
+    assert_eq!(std::fs::read(scratch.path().join("trace")).expect("trace"), b"prefix:onetwo");
+    assert_eq!(std::fs::read(scratch.path().join("side")).expect("side file"), b"side");
+    assert_scratch_closed(&scratch);
+}
+
+#[test]
+fn a_real_later_append_open_failure_rolls_back_every_file_and_root() {
+    use skein_world_tests::roots::{append_child, missing_appends};
+    let scratch = Scratch::new("failed-hosted-appends");
+    let root = open_root(scratch.path()).expect("parent root");
+    let mut world = real::World::new(Judge);
+    world.host_startup(
+        HostedProgram { program: Box::from(&b"hosted"[..]), make: append_child, instances: 1, operations: 8 },
+        roots,
+        missing_appends,
+    );
+    world.spawn_with_fds(vec![root], || {
+        let mut script = Script::parent(root, &[Act::Spawn]);
+        script.args = Box::new([Box::from(scratch.path().as_os_str().as_bytes())]);
+        script
+    });
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    assert_eq!(outcome.procs.len(), 1);
+    assert!(outcome.procs[0].results.contains(&Err(Error::NotFound)));
+    assert_scratch_closed(&scratch);
+}
+
+#[test]
+fn a_killed_real_host_releases_its_startup_append_descriptors() {
+    use skein_world_tests::roots::appends;
+    let scratch = Scratch::new("killed-hosted-appends");
+    let root = open_root(scratch.path()).expect("parent root");
+    let mut world = real::World::new(Judge);
+    world.host_startup(
+        HostedProgram { program: Box::from(&b"hosted"[..]), make: waiting_child, instances: 1, operations: 8 },
+        roots,
+        appends,
+    );
+    world.spawn_with_fds(vec![root], || parent(root, scratch.path().as_os_str().as_bytes(), true));
+    let outcome = world.run(&Clock::new(), Duration::from_secs(1));
+    assert_eq!(outcome.killed.len(), 1);
+    assert_scratch_closed(&scratch);
+}
